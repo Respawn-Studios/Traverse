@@ -2,6 +2,19 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.1.1",
+      "build": 94,
+      "state": "published",
+      "date": "2026-11-15",
+      "title": "A clearer first launch",
+      "summary": "A small follow-up to the first public release, with clearer update results and the optional support invitation.",
+      "changes": [
+        "Checking for updates keeps the correct up-to-date or compatibility result after Sparkle's normal no-update alert closes. A completed check no longer becomes a misleading failure in Help or App Logs.",
+        "About uses release-neutral wording beneath the exact version and build. The first public 0.1.0 remains available unchanged.",
+        "The optional Support Traverse invitation now uses the existing direct-shipping edition identity. It waits until the second launch, stays out of setup and active work, remembers each released update and respects the reminder preference. Support remains available in Help; every feature stays free."
+      ]
+    },
+    {
       "version": "0.1.0",
       "build": 93,
       "state": "published",

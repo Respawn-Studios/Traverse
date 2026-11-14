@@ -1,4 +1,5 @@
 import Foundation
+import ExplorerCore
 
 /// Release-owned links. Never substitute a paid pass for voluntary support.
 enum CommunitySupportLinks {
@@ -12,9 +13,9 @@ enum CommunitySupportLinks {
     }
     static let discord = URL(string: "https://discord.gg/UdKp2uQBQy")
     static var isPublicLaunch: Bool {
-        Bundle.main.bundleIdentifier == "com.respawnstudios.traverse"
-            && [.publicRelease, .directPublic].contains(AppFeatureAvailability.policy.edition)
-            && Bundle.main.object(forInfoDictionaryKey: "TraverseCommunityRelease") as? Bool == true
+        AppFeatureAvailability.policy.edition == .directPublic
+            && DirectPublicEditionIdentity.isShipping(identifier: Bundle.main.bundleIdentifier,
+                                                       info: Bundle.main.infoDictionary ?? [:])
             && funding != nil && source != nil
     }
 

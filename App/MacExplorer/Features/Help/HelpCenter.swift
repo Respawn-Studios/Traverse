@@ -424,10 +424,8 @@ private struct TraverseHelpView: View {
             } else if Bundle.main.object(forInfoDictionaryKey: "MacExplorerDistributionChannel") as? String == "development" {
                 Text("Development build · separate from your installed beta").interfaceFont(.callout).foregroundStyle(.secondary)
             }
-            if Bundle.main.object(forInfoDictionaryKey: "TraverseCommunityRelease") as? Bool != true {
-                Text("Your feedback helps us make Traverse more reliable. What’s New describes this build’s features and limits.")
-                    .interfaceFont(.callout).foregroundStyle(.secondary)
-            }
+            Text("Your feedback helps us make Traverse more reliable. What’s New describes this build’s features and limits.")
+                .interfaceFont(.callout).foregroundStyle(.secondary)
             Button("Visit Traverse ↗") { owner.open("") }
             Spacer()
         }

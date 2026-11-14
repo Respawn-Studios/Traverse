@@ -10,6 +10,13 @@ public enum DirectPublicEditionIdentity {
     public static let feedURL = "https://respawn-studios.com/products/traverse/direct-updates/appcast.xml"
     public static let updatePublicKey = "MG4sBFr76ad6D4nGo+i2VuZ4hxVMEQZToBUjYyui3IA="
 
+    /// Product presentation can distinguish a shipping app from the otherwise
+    /// matching local qualification edition. This grants no file permissions.
+    public static func isShipping(identifier: String?, info: [String: Any]) -> Bool {
+        matches(identifier: identifier, info: info)
+            && info["MacExplorerReleasePurpose"] as? String == "direct-shipping-v1"
+    }
+
     public static func matches(identifier: String?, info: [String: Any]) -> Bool {
         guard identifier == bundleIdentifier,
               info["MacExplorerDistributionChannel"] as? String == "developer-id",

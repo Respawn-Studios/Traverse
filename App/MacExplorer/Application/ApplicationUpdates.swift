@@ -402,10 +402,15 @@ extension ApplicationUpdates: SPUUpdaterDelegate {
     func userDidCancelDownload(_ updater: SPUUpdater) { notice = "Update download cancelled. Your installed app is unchanged."; ApplicationDiagnostics.shared.event(.updates,.cancelled,trace:trace) }
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         installationAdmitted = false
+        let failure = error as NSError
+        // Sparkle aborts after acknowledging its normal no-update alert. Keep
+        // the reason-specific successful result set by updaterDidNotFindUpdate.
+        if failure.domain == SUSparkleErrorDomain,
+           failure.code == Int(SUError.noUpdateError.rawValue) { return }
         notice = requiresInvitation
             ? "The update couldn't finish. Check your connection or beta access and try again. If Traverse cannot restart, use the latest manual installer."
             : "The update couldn't finish. Check your connection and try again. If Traverse cannot restart, use the latest manual installer."
-        ApplicationDiagnostics.shared.event(.updates,.failed,trace:trace,error:.init(domain:.updater,code:Int64((error as NSError).code)))
+        ApplicationDiagnostics.shared.event(.updates,.failed,trace:trace,error:.init(domain:.updater,code:Int64(failure.code)))
     }
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
         recordCheck()

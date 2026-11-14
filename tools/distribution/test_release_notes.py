@@ -10,7 +10,7 @@ class ReleaseHistoryTests(unittest.TestCase):
     def test_first_public_version_preserves_prior_beta_history(self):
         notes.verify_bundled()
         newest = self.catalog['releases'][0]
-        self.assertEqual((newest['version'], newest['build']), ('0.1.0', 93))
+        self.assertEqual((newest['version'], newest['build']), ('0.1.1', 94))
         self.assertEqual(newest['state'], 'published')
         published = notes.release_for_build(self.catalog, '0.1.4', '69')
         self.assertEqual(published['build'], 69)

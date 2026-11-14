@@ -24,6 +24,16 @@ struct DirectPublicEditionIdentityTests {
             "SUEnableJavaScript": false,
         ]
         #expect(DirectPublicEditionIdentity.matches(identifier: DirectPublicEditionIdentity.bundleIdentifier, info: info))
+        #expect(!DirectPublicEditionIdentity.isShipping(identifier: DirectPublicEditionIdentity.bundleIdentifier, info: info))
+        var shipping = info
+        shipping["MacExplorerReleasePurpose"] = "direct-shipping-v1"
+        #expect(DirectPublicEditionIdentity.isShipping(identifier: DirectPublicEditionIdentity.bundleIdentifier, info: shipping))
+        #expect(!DirectPublicEditionIdentity.isShipping(identifier: "local.macexplorer.preview", info: shipping))
+        for purpose in ["", "qualification", "direct-shipping-v2"] {
+            var changed = shipping
+            changed["MacExplorerReleasePurpose"] = purpose
+            #expect(!DirectPublicEditionIdentity.isShipping(identifier: DirectPublicEditionIdentity.bundleIdentifier, info: changed))
+        }
         var withService = info
         withService["TraverseDriveHealthServiceVersion"] = 1
         #expect(DirectPublicEditionIdentity.matches(identifier: DirectPublicEditionIdentity.bundleIdentifier,
@@ -55,6 +65,9 @@ struct DirectPublicEditionIdentityTests {
             changed[key] = value
             #expect(!DirectPublicEditionIdentity.matches(identifier: DirectPublicEditionIdentity.bundleIdentifier,
                                                          info: changed), "\(key) must refuse")
+            changed["MacExplorerReleasePurpose"] = "direct-shipping-v1"
+            #expect(!DirectPublicEditionIdentity.isShipping(identifier: DirectPublicEditionIdentity.bundleIdentifier,
+                                                            info: changed), "\(key) cannot select shipping presentation")
         }
     }
 }
