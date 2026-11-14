@@ -1,0 +1,34 @@
+# Kind, revision-2 ID, revision-3 ID, generated filename/layout. No filesystem reads.
+f	0	15	Assets.car
+f	0	15	Main.NIB
+f	0	15	Legacy.rsrc
+f	0	2	Info.plist
+f	0	2	Localizable.strings
+f	0	2	Localizable.stringsdict
+f	0	2	App.entitlements
+f	0	2	Debug.xcconfig
+f	0	2	Main.xib
+f	0	2	Main.storyboard
+f	0	5	App.icns
+f	0	0	data.bin
+f	0	0	game.DAT
+f	0	0	README
+f	0	0	.car
+f	0	0	data.car-backup
+f	0	0	data.car.
+f	2	2	data.car.txt
+f	8	8	game.vpk
+f	13	13	state.sqlite3-wal
+d	0	5	Users/sample/Library/Containers/com.example
+d	0	5	Users/sample/Library/Group Containers/group.example
+d	5	5	Users/sample/Library/Application Support/sample
+d	0	0	Users/sample/Library/Containers-old/com.example
+d	0	0	Users/sample/Containers/com.example
+d	0	10	Users/sample/Library/Developer/Xcode/DerivedData/Build
+d	0	0	Users/sample/Library/Developer/Xcode/DerivedData-old/Build
+d	0	0	Users/sample/Developer/Xcode/DerivedData/Build
+d	0	0	Users/sample/Library/Xcode/DerivedData/Build
+d	11	11	Applications/Example.app/Contents/Resources
+d	11	11	Applications/Example.app/Contents/Library/Developer/Xcode/DerivedData/Build
+d	3	3	.cache/Library/Developer/Xcode/DerivedData/Build
+d	11	11	Applications/Example.app/Contents/Library/Containers/com.example

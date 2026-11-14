@@ -1,0 +1,55 @@
+# type, standard excluded, application-data excluded, canonical absolute path
+d	1	0	/Users/u/Library/Containers
+d	1	0	/Users/u/Library/Group Containers
+d	1	0	/Users/u/Library/Containers/com.example.Editor/Data/Library/Caches
+d	1	0	/Users/u/Library/Group Containers/TEAM.example.app/Library/Application Support
+f	1	0	/Users/u/Library/Containers/com.example.Editor/Data/Library/Caches/cache.db
+d	1	0	/USERS/U/LIBRARY/CONTAINERS/com.example.Editor
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/.ssh
+f	1	1	/Users/u/Library/Containers/com.example.Editor/Data/.netrc
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/credentials
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Keychains
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/CloudStorage
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Mobile Documents
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Images.photoslibrary
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Mail
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Messages
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Safari/History
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Calendars
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Contacts
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Reminders
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/PersonalizationPortrait
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Autosave Information
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Application Support/com.apple.TCC
+d	1	1	/Users/u/Library/Group Containers/TEAM.example.app/Library/Application Support/AddressBook
+d	1	1	/Users/u/Library/Group Containers/TEAM.example.app/Library/Application Support/CallHistoryDB
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Metadata/CoreSpotlight
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/Library/Containers/com.example.Other
+d	1	1	/Users/u/Library/Containers/com.apple.mail
+d	1	1	/Users/u/Library/Group Containers/group.com.apple.mail
+d	1	1	/Users/u/Library/Containers/com.apple.Safari/Data
+d	1	1	/Users/u/Library/Containers/com.apple.Safari.SandboxBroker
+d	1	1	/Users/u/Library/Containers/com.apple.iChat
+d	1	1	/Users/u/Library/Containers/com.apple.MobileSMS
+d	1	1	/Users/u/Library/Containers/com.apple.CalendarAgent
+d	1	1	/Users/u/Library/Containers/com.apple.iCal
+d	1	1	/Users/u/Library/Containers/com.apple.AddressBook
+d	1	1	/Users/u/Library/Containers/com.apple.contacts
+d	1	1	/Users/u/Library/Group Containers/group.com.apple.reminders
+d	1	1	/Users/u/Library/Containers/com.apple.Passwords
+d	1	1	/Users/u/Library/Containers/com.apple.KeychainAccess
+d	1	1	/Users/u/Library/Containers/com.apple.TCC
+d	1	0	/Users/u/Library/Containers/com.apple.mailbox
+d	1	0	/Users/u/Library/Containers/com.example.mail
+d	1	0	/Users/u/Library/Containers/com.example.Editor/Data/Library/Mailbox
+d	1	0	/Users/u/Library/Containers/com.example.Editor/Data/Library/Metadata/CoreSpotlightOther
+d	1	0	/Users/u/Library/Containers/com.example.Editor/Data/Library/Application Support/AddressBookOther
+d	1	1	/Users/u/Library/Mail
+d	1	1	/Users/u/Library/Messages
+d	1	1	/Users/u/Library/Safari
+d	1	1	/Users/u/Library/Containers/com.example.Editor/Data/.aws
+d	1	1	/Users/u/Library/Group Containers/TEAM.example.app/secrets
+d	0	0	/Users/u/Projects/Containers/com.apple.mail
+d	0	0	/Volumes/Test/Library/Containers/com.apple.mail
+d	0	0	/Users/u/Library/ContainersOther
+d	0	0	/Users/u/Library/Group ContainersOther

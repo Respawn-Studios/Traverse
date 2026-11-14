@@ -1,0 +1,49 @@
+Copyright/SPDX headers retained from the checksum-verified published archive.
+
+russh-0.64.1/src/auth.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/cipher/chacha20poly1305.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/cipher/clear.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/cipher/gcm.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/cipher/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/client/encrypted.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/client/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/kex/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/keys/key.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/lib.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/msg.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/negotiation.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/server/encrypted.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/server/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/session.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.64.1/src/sshbuffer.rs
+// Copyright 2016 Pierre-Étienne Meunier

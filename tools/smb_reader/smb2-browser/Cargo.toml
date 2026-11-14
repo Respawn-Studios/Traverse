@@ -1,0 +1,26 @@
+[package]
+name = "macexplorer-smb-browser-qualification"
+version = "0.0.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[workspace]
+
+[features]
+b12-action-qualification = ["smb2/b12-action-qualification"]
+
+[dependencies]
+smb2 = { path = "../../../Vendor/smb2", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "sync", "macros"] }
+async-trait = "0.1"
+sha2 = "0.11"
+
+[profile.release]
+debug = false
+strip = false
+incremental = false
+
+[profile.release.package.smb2]
+opt-level = 3
+codegen-units = 32

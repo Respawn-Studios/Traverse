@@ -1,0 +1,5 @@
+#include "Traverse.xcconfig"
+// Same sandbox, bundle identity and user-access policy as the TestFlight beta.
+// Export re-signs the parent and all helpers with Developer ID for Gatekeeper.
+MAC_EXPLORER_TRAVERSE_BUILD = developer-id-v1
+MAC_EXPLORER_DISTRIBUTION_CHANNEL = developer-id

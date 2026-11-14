@@ -1,0 +1,25 @@
+PRAGMA page_size=4096;
+PRAGMA journal_mode=DELETE;
+PRAGMA synchronous=FULL;
+PRAGMA foreign_keys=ON;
+PRAGMA cache_size=-1024;
+PRAGMA temp_store=MEMORY;
+PRAGMA user_version=1;
+BEGIN IMMEDIATE;
+CREATE TABLE profile(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(revision IN(1,2)),session BLOB NOT NULL CHECK(length(session)=36),transaction_rows INTEGER NOT NULL CHECK(transaction_rows=1024)) STRICT;
+CREATE TABLE scan_state(id INTEGER PRIMARY KEY CHECK(id=1),state INTEGER NOT NULL CHECK(state IN(0,1,2)),entries INTEGER NOT NULL CHECK(entries>=0),projected INTEGER NOT NULL CHECK(projected IN(0,1))) STRICT;
+INSERT INTO scan_state VALUES(1,0,0,0);
+CREATE TABLE nodes(id INTEGER PRIMARY KEY CHECK(id>=0),parent INTEGER REFERENCES nodes(id),name BLOB NOT NULL CHECK(length(name)<=255 AND instr(name,x'00')=0 AND instr(name,x'2f')=0),kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 4),identity BLOB CHECK(identity IS NULL OR length(identity)=16),links BLOB CHECK(links IS NULL OR length(links)=8),flags BLOB CHECK(flags IS NULL OR length(flags)=4),payload BLOB NOT NULL CHECK(length(payload)=52),CHECK((id=0 AND parent IS NULL AND length(name)=0 AND kind=1) OR (id>0 AND parent IS NOT NULL AND parent<id AND length(name)>0 AND name<>x'2e' AND name<>x'2e2e')),UNIQUE(parent,name)) STRICT;
+CREATE INDEX node_page ON nodes(parent,id);
+CREATE INDEX directory_page ON nodes(id,parent) WHERE kind=1;
+CREATE TRIGGER parent_directory BEFORE INSERT ON nodes WHEN NEW.id>0 BEGIN
+ SELECT CASE WHEN (SELECT kind FROM nodes WHERE id=NEW.parent)<>1 THEN RAISE(ABORT,'parent_kind') END;
+END;
+INSERT INTO nodes VALUES(0,NULL,x'',1,NULL,NULL,NULL,zeroblob(52));
+CREATE TABLE rollups(node INTEGER PRIMARY KEY REFERENCES nodes(id),value BLOB NOT NULL CHECK(length(value)=140)) STRICT;
+CREATE TABLE direct_files(node INTEGER PRIMARY KEY REFERENCES nodes(id),value BLOB NOT NULL CHECK(length(value)=140)) STRICT;
+CREATE TABLE markers(node INTEGER PRIMARY KEY REFERENCES nodes(id),marker INTEGER NOT NULL CHECK(marker BETWEEN 0 AND 6)) STRICT;
+CREATE TABLE contexts(node INTEGER PRIMARY KEY REFERENCES nodes(id),role INTEGER NOT NULL CHECK(role BETWEEN 0 AND 12),project INTEGER NOT NULL CHECK(project>=0)) STRICT;
+CREATE TABLE groups(kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 2),key INTEGER NOT NULL CHECK(key>=0),value BLOB NOT NULL CHECK(length(value)=140),PRIMARY KEY(kind,key)) WITHOUT ROWID,STRICT;
+CREATE TABLE classification_rules(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(revision=2)) STRICT;
+INSERT INTO classification_rules VALUES(1,2);

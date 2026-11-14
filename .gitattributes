@@ -1,0 +1,23 @@
+* text=auto
+*.md text eol=lf
+*.swift text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.zip binary
+Vendor/smb2/**/*.bin binary
+Vendor/smb2/DOWNSTREAM.patch -whitespace
+# Patch context preserves the exact upstream indentation and blank lines.
+Distribution/SourcePatches/*.patch -whitespace
+# Generated legal text retains upstream license formatting.
+Distribution/ThirdPartyNotices.txt -whitespace
+# Preserve checksum-bound upstream originals; the combined display uses LF.
+Distribution/LicenseSupplements/** -text
+# The pinned crash-engine tree is checked byte-for-byte against its provenance.
+# Preserve upstream line endings and whitespace rather than normalizing a copy.
+Vendor/PLCrashReporter/** -text -whitespace

@@ -1,0 +1,99 @@
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Stable checkout-local outputs; source now lives in App/, Packages/ and tools/.
+.build/
+build/
+Build/
+DerivedData/
+.cache/
+# Rust's default output can also appear beside a worker/package manifest.
+**/target/
+# Keep .cargo/config.toml and dependency locks; ignore only downloaded/tool data.
+**/.cargo/registry/
+**/.cargo/git/
+**/.cargo/bin/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+artifacts/
+*.app/
+*.xcarchive/
+*.dSYM/
+*.dSYM.zip
+*.xcresult/
+*.dmg
+*.ipa
+# Editor/patch backups are not source or distributable resources. Keep any
+# deliberately retained backup under .build/retained-evidence/ instead.
+*.orig
+*.rej
+*.bak
+*~
+
+# Per-user IDE state; keep projects and shared schemes in Git
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+**/.swiftpm/cache/
+**/.swiftpm/xcode/xcuserdata/
+**/.swiftpm/workspace-state.json
+**/.swiftpm/security/
+# Coverage products are generated evidence, not source fixtures.
+*.profraw
+*.profdata
+.coverage
+.coverage.*
+.idea/
+.vscode/
+
+# Local agent instructions, chat state, and private working notes
+.local/
+.codex*
+.agents/
+/skills-lock.json
+AGENTS.md
+CODEX.md
+*.local
+*.local.*
+
+# Credentials and private signing material
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+secrets/
+credentials/
+.ssh/
+.netrc
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+
+# Runtime logs; generated test data must live under an ignored build root
+logs/
+*.log
+# Native reports can contain private process paths and machine context. Keep
+# generated/consented captures under .build; only the pinned upstream corpus is
+# intentional source and is checked by its exact provenance manifest.
+*.plcrash
+*.ips
+*.crash
+*.hang
+!/Vendor/PLCrashReporter/Resources/fuzz_report.plcrash
+
+# Keep Swift dependency locks, source projects, shared schemes, and small
+# intentional test fixtures (including ZIP archives) versioned.
+# App/MacExplorer/Development/Checks and reusable tools are source, not outputs.

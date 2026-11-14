@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleName</key>
+	<string>Traverse</string>
+	<key>CFBundleDisplayName</key>
+	<string>Traverse</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>$(MAC_EXPLORER_DISTRIBUTION_COPYRIGHT)</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>TraverseApplication</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+	<key>MacExplorerStorageMode</key>
+	<string>portable</string>
+	<key>MacExplorerDistributionChannel</key>
+	<string>$(MAC_EXPLORER_DISTRIBUTION_CHANNEL)</string>
+	<key>MacExplorerAccessPolicy</key>
+	<string>$(MAC_EXPLORER_ACCESS_POLICY)</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Browse and manage Desktop folders you choose.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Browse and manage Documents folders you choose.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Browse and manage Downloads folders you choose.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Browse network folders you choose.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Browse and manage removable storage you choose.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connect to the SMB and SFTP servers you choose on your local network. Traverse does not scan for nearby devices automatically.</string>
+</dict>
+</plist>

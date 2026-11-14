@@ -1,0 +1,25 @@
+--- upstream/Sparkle.xcodeproj/project.pbxproj
++++ offline/Sparkle.xcodeproj/project.pbxproj
+@@ -4707,16 +4707,12 @@
+ 		};
+ /* End XCConfigurationList section */
+ 
+-/* Begin XCRemoteSwiftPackageReference section */
+-		727DBAE326B5BBFD00111F0C /* XCRemoteSwiftPackageReference "swift-argument-parser" */ = {
+-			isa = XCRemoteSwiftPackageReference;
+-			repositoryURL = "https://github.com/apple/swift-argument-parser.git";
+-			requirement = {
+-				kind = upToNextMajorVersion;
+-				minimumVersion = 0.4.3;
+-			};
+-		};
+-/* End XCRemoteSwiftPackageReference section */
++/* Begin XCLocalSwiftPackageReference section */
++		727DBAE326B5BBFD00111F0C /* XCLocalSwiftPackageReference "swift-argument-parser" */ = {
++			isa = XCLocalSwiftPackageReference;
++			relativePath = "../swift-argument-parser-83b23d940471b313427da226196661856f6ba3e0";
++		};
++/* End XCLocalSwiftPackageReference section */
+ 
+ /* Begin XCSwiftPackageProductDependency section */
+ 		725C2EAB2782EF3C007CB7B5 /* ArgumentParser */ = {

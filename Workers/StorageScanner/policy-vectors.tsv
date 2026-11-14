@@ -1,0 +1,53 @@
+# type (directory/file), excluded (1/0), absolute path; ASCII case folding only
+d	1	/Users/u/.ssh
+d	1	/Users/u/.SSH/nested
+d	1	/Users/u/.gnupg
+d	1	/Users/u/.aws
+d	1	/Users/u/.azure
+d	1	/Users/u/.kube
+f	1	/Users/u/.netrc
+f	1	/Users/u/.npmrc
+f	1	/Users/u/.pypirc
+d	1	/Volumes/Test/Keychains
+d	1	/Volumes/Test/credentials/nested
+d	1	/Volumes/Test/Secrets
+d	1	/Volumes/Test/.Trash
+d	1	/Volumes/Test/.Trashes/501
+d	1	/Volumes/Test/CloudStorage
+d	1	/Volumes/Test/Mobile Documents
+d	1	/Volumes/Test/Images.PHOTOSLIBRARY
+f	0	/Volumes/Test/Images.photoslibrary
+f	1	/Volumes/Test/Images.photoslibrary/database
+d	1	/Users/u/Library/Mail
+d	1	/Users/u/Library/Messages/child
+d	1	/Users/u/Library/Safari
+d	1	/Users/u/Library/Calendars
+d	1	/Users/u/Library/Contacts
+d	1	/Users/u/Library/Reminders
+d	1	/Users/u/Library/PersonalizationPortrait
+d	1	/Users/u/Library/Autosave Information
+d	1	/Users/u/Library/Containers
+d	1	/Users/u/Library/Group Containers
+d	1	/Users/u/Library/Application Support/com.apple.TCC
+d	1	/Users/u/Library/Application Support/AddressBook/child
+d	1	/Users/u/Library/Application Support/CallHistoryDB
+d	1	/Users/u/Library/Metadata/CoreSpotlight
+d	1	/Library/Application Support/com.apple.TCC/child
+d	1	/Network/share
+d	1	/net/share
+d	1	/.vol/123
+d	0	/Volumes/Workspace/generated/Mail
+d	0	/Users/u/Documents/Mail
+d	0	/Users/u/Library/Mailbox
+d	0	/Users/u/Library/Application Support/AddressBookOther
+d	0	/Users/u/Library/Metadata/CoreSpotlightOther
+d	0	/Library/Application Support/Other
+d	0	/Volumes/Network
+d	0	/Users/u/Documents
+d	0	/Volumes/Test/public-secrets
+d	1	/System/Volumes/Data/Users/X/Library/Mail
+d	0	/System/Volumes/Data/Users/X/Projects/Mail
+d	0	/System/Volumes/Data2/Users/X/Library/Mail
+d	1	/System/Volumes/Data/Library/Application Support/com.apple.TCC
+d	1	/System/Volumes/Data/Network/share
+d	0	/System/Volumes/Data

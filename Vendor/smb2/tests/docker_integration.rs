@@ -1,0 +1,7388 @@
+//! Integration tests against Docker Samba containers.
+//!
+//! Requires containers running (see tests/docker/start.sh).
+//! All tests are `#[ignore]` so `cargo test` doesn't fail without Docker.
+//!
+//! Run with:
+//!   just test-docker                      # starts containers, runs, stops
+//!   cargo test -p smb2 --test docker_integration -- --ignored   # if containers are already running
+
+use std::collections::HashMap;
+use std::ops::ControlFlow;
+use std::time::Duration;
+
+use smb2::client::{list_shares, ClientConfig, Connection, Session, SmbClient, Tree};
+
+const GUEST_ADDR: &str = "127.0.0.1:10445";
+const AUTH_ADDR: &str = "127.0.0.1:10446";
+const SIGNING_ADDR: &str = "127.0.0.1:10447";
+const READONLY_ADDR: &str = "127.0.0.1:10448";
+const ANCIENT_ADDR: &str = "127.0.0.1:10449";
+const FLAKY_ADDR: &str = "127.0.0.1:10450";
+const SLOW_ADDR: &str = "127.0.0.1:10451";
+const ENCRYPTION_ADDR: &str = "127.0.0.1:10452";
+const SHARES50_ADDR: &str = "127.0.0.1:10453";
+const MANYSHARES_ADDR: &str = "127.0.0.1:10458";
+const MAXREAD_ADDR: &str = "127.0.0.1:10454";
+const ENCRYPTION_AES128_ADDR: &str = "127.0.0.1:10455";
+const WEIRDNAMES_ADDR: &str = "127.0.0.1:10459";
+const DFS_ROOT_ADDR: &str = "127.0.0.1:10456";
+const DFS_TARGET_ADDR: &str = "127.0.0.1:10457";
+const DFS_NAMESPACE_ADDR: &str = "127.0.0.1:10460";
+const DFS_FAILOVER_ADDR: &str = "127.0.0.1:10461";
+const SMALLCREDITS_ADDR: &str = "127.0.0.1:10462";
+const SAMBA415_ADDR: &str = "127.0.0.1:10463";
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// Connect, negotiate, and authenticate as guest to smb-guest.
+async fn connect_guest() -> (Connection, Tree) {
+    let mut conn = Connection::connect(GUEST_ADDR, TIMEOUT)
+        .await
+        .expect("failed to connect to smb-guest");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("guest session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect to 'public' failed");
+    (conn, tree)
+}
+
+/// Create an SmbClient connected as guest to smb-guest.
+async fn guest_client() -> SmbClient {
+    SmbClient::connect(ClientConfig {
+        addr: GUEST_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("SmbClient::connect to smb-guest failed")
+}
+
+/// The config `auth_client` connects with.
+fn auth_config() -> ClientConfig {
+    ClientConfig {
+        addr: AUTH_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    }
+}
+
+/// Create an SmbClient connected with credentials to smb-auth.
+async fn auth_client() -> SmbClient {
+    SmbClient::connect(auth_config())
+        .await
+        .expect("SmbClient::connect to smb-auth failed")
+}
+
+// ── Basic operations (smb-guest) ─────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_connect_negotiate_list_directory() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let params = conn.params().unwrap();
+    // Any SMB2+ dialect is fine — just verify we negotiated successfully.
+    assert!(
+        params.dialect as u16 >= 0x0202,
+        "expected SMB2+ dialect, got {}",
+        params.dialect
+    );
+
+    let entries = tree
+        .list_directory(&mut conn, "")
+        .await
+        .expect("list directory failed");
+
+    // Empty directory is fine — we just need it to not error.
+    // The directory exists and is listable.
+    drop(entries);
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_write_read_delete() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_write_read.tmp";
+    let test_data = b"Hello from Docker integration test!";
+
+    // Write.
+    let written = tree
+        .write_file(&mut conn, test_path, test_data)
+        .await
+        .expect("write_file failed");
+    assert_eq!(written, test_data.len() as u64);
+
+    // Read back.
+    let data = tree
+        .read_file(&mut conn, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data, test_data);
+
+    // Delete.
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+/// `SMB2_LEASE_READ_CACHING | SMB2_LEASE_HANDLE_CACHING` (MS-SMB2 § 2.2.13.2.8).
+const LEASE_READ_HANDLE: u32 = 0x01 | 0x02;
+
+/// Open `path` for reading the way the macOS SMB client does after any app
+/// reads a file through the mount: sharing everything, and, with `lease`, under
+/// a read + handle-caching lease, which is what lets macOS keep the file open
+/// for about a minute after the app closed it.
+async fn hold_open(conn: &Connection, tree: &Tree, path: &str, lease: bool) -> smb2::types::FileId {
+    use smb2::msg::create::{
+        CreateDisposition, CreateRequest, CreateResponse, ImpersonationLevel, ShareAccess,
+    };
+    use smb2::msg::create_context::{find, pack_contexts, parse_contexts, CreateContext};
+    use smb2::pack::{ReadCursor, Unpack};
+    use smb2::types::flags::FileAccessMask;
+    use smb2::types::status::NtStatus;
+    use smb2::types::{Command, OplockLevel};
+
+    // SMB2_CREATE_REQUEST_LEASE_V2 (MS-SMB2 § 2.2.13.2.10): LeaseKey,
+    // LeaseState, Flags, LeaseDuration, ParentLeaseKey, Epoch, Reserved.
+    let mut lease_v2 = vec![0u8; 52];
+    lease_v2[..16].copy_from_slice(b"cmdr-i307-holder");
+    lease_v2[16..20].copy_from_slice(&LEASE_READ_HANDLE.to_le_bytes());
+    let req = CreateRequest {
+        requested_oplock_level: if lease {
+            OplockLevel::Lease
+        } else {
+            OplockLevel::None
+        },
+        impersonation_level: ImpersonationLevel::Impersonation,
+        desired_access: FileAccessMask::new(
+            FileAccessMask::FILE_READ_DATA
+                | FileAccessMask::FILE_READ_ATTRIBUTES
+                | FileAccessMask::SYNCHRONIZE,
+        ),
+        file_attributes: 0,
+        share_access: ShareAccess(
+            ShareAccess::FILE_SHARE_READ
+                | ShareAccess::FILE_SHARE_WRITE
+                | ShareAccess::FILE_SHARE_DELETE,
+        ),
+        create_disposition: CreateDisposition::FileOpen,
+        create_options: 0x40, // FILE_NON_DIRECTORY_FILE
+        name: path.to_string(),
+        create_contexts: if lease {
+            pack_contexts(&[CreateContext::new(b"RqLs", lease_v2)])
+        } else {
+            vec![]
+        },
+    };
+    let frame = conn
+        .execute(Command::Create, &req, Some(tree.tree_id))
+        .await
+        .expect("holder CREATE");
+    assert_eq!(
+        frame.header.status,
+        NtStatus::SUCCESS,
+        "holder CREATE status"
+    );
+    let resp = CreateResponse::unpack(&mut ReadCursor::new(&frame.body)).expect("CreateResponse");
+    if lease {
+        // The test means nothing unless the server really granted the handle
+        // lease: that's what it asks the holder to give back.
+        assert_eq!(resp.oplock_level, OplockLevel::Lease, "lease not granted");
+        let contexts = parse_contexts(&resp.create_contexts).expect("response contexts");
+        let granted = find(&contexts, b"RqLs").expect("lease context in response");
+        let state = u32::from_le_bytes(granted.data[16..20].try_into().unwrap());
+        assert_eq!(
+            state & LEASE_READ_HANDLE,
+            LEASE_READ_HANDLE,
+            "lease state {state:#x}"
+        );
+    }
+    resp.file_id
+}
+
+/// After any app reads a file through the macOS mount, macOS keeps the file
+/// open under a handle lease for about a minute. A delete that lets that open
+/// stand leaves the file `DELETE_PENDING` the whole time, so writing the same
+/// name again (the next step of an overwrite) fails. Opening for delete
+/// without sharing read or write makes the server ask the holder to give its
+/// handle back first, as macOS does at once, so the name is free right after
+/// the delete returns. Regression test for vdavid/cmdr#307.
+#[tokio::test]
+#[ignore]
+async fn a_delete_asks_a_lingering_lease_holder_to_let_go() {
+    let _ = env_logger::try_init();
+    let path = "i307_lingering_lease.txt";
+
+    let (mut conn, tree) = connect_guest().await;
+    let (mut holder_conn, holder_tree) = connect_guest().await;
+    let _ = tree.delete_file(&mut conn, path).await;
+    tree.write_file(&mut conn, path, b"read through the mount")
+        .await
+        .expect("seed the file");
+    let held = hold_open(&holder_conn, &holder_tree, path, true).await;
+
+    // The holder behaves like macOS: it closes its cached handle when the
+    // server breaks the lease. `done` stops it once the delete has finished
+    // either way, so a missing break can't hang the test.
+    let done = std::sync::Arc::new(tokio::sync::Notify::new());
+    let holder = {
+        let done = done.clone();
+        let conn = holder_conn.clone();
+        let tree = holder_tree.clone();
+        tokio::spawn(async move {
+            let broke = async {
+                while conn
+                    .diagnostics()
+                    .metrics
+                    .unsolicited_notifications_received
+                    == 0
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            let saw_break = tokio::select! {
+                () = broke => true,
+                () = done.notified() => false,
+            };
+            let mut conn = conn;
+            let _ = tree.close_handle(&mut conn, held).await;
+            saw_break
+        })
+    };
+
+    let deleted = tokio::time::timeout(Duration::from_secs(10), tree.delete_file(&mut conn, path))
+        .await
+        .expect("the delete waits on the holder for at most a moment");
+    let rewrite = tree.write_file(&mut conn, path, b"the new file").await;
+    done.notify_one();
+    let saw_break = holder.await.unwrap();
+
+    let _ = tree.delete_file(&mut conn, path).await;
+    let _ = holder_tree.disconnect(&mut holder_conn).await;
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+
+    deleted.expect("delete_file");
+    rewrite.expect("the deleted name is free right away, not DELETE_PENDING");
+    assert!(saw_break, "the server never asked the holder to let go");
+}
+
+/// When another client genuinely has the file open, the exclusive open is
+/// refused with a sharing violation and the delete falls back to sharing
+/// everything: it succeeds exactly as before, and the file goes once the
+/// other client closes it.
+#[tokio::test]
+#[ignore]
+async fn a_delete_still_succeeds_while_another_client_has_the_file_open() {
+    let _ = env_logger::try_init();
+    let path = "i307_genuinely_open.txt";
+
+    let (mut conn, tree) = connect_guest().await;
+    let (mut holder_conn, holder_tree) = connect_guest().await;
+    let _ = tree.delete_file(&mut conn, path).await;
+    tree.write_file(&mut conn, path, b"in use")
+        .await
+        .expect("seed the file");
+    let held = hold_open(&holder_conn, &holder_tree, path, false).await;
+
+    let deleted = tree.delete_file(&mut conn, path).await;
+    holder_tree
+        .close_handle(&mut holder_conn, held)
+        .await
+        .expect("holder close");
+    let after = tree.stat(&mut conn, path).await;
+
+    let _ = holder_tree.disconnect(&mut holder_conn).await;
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+
+    deleted.expect("delete_file falls back to a shared open");
+    assert_eq!(
+        after.unwrap_err().status(),
+        Some(smb2::types::status::NtStatus::OBJECT_NAME_NOT_FOUND),
+        "the file goes once the other client closes it"
+    );
+}
+
+/// What a replacement client finds when it names the session it replaces
+/// while that session's writer still holds a file open.
+struct Replaced {
+    /// A delete from a client that doesn't name the old session.
+    stranger_delete: smb2::Result<()>,
+    /// The same delete from the client that names it.
+    replacement_delete: smb2::Result<()>,
+    /// The old session's next request, after the replacement logged in.
+    old_session_after: smb2::Result<smb2::client::FsInfo>,
+}
+
+async fn replace_a_session_holding_a_file(config: ClientConfig, share: &str) -> Replaced {
+    let path = "previous_session_held.tmp";
+
+    let mut old = SmbClient::connect(config.clone())
+        .await
+        .expect("old client");
+    let old_tree = old.connect_share(share).await.expect("old connect_share");
+    let _ = old.delete_file(&old_tree, path).await;
+    let mut writer = old
+        .create_file_writer(&old_tree, path)
+        .await
+        .expect("old writer");
+    writer.write_chunk(b"half a copy").await.expect("write");
+
+    let mut stranger = SmbClient::connect(config.clone()).await.expect("stranger");
+    let stranger_tree = stranger.connect_share(share).await.expect("connect_share");
+    let stranger_delete = stranger.delete_file(&stranger_tree, path).await;
+
+    let mut replacement = SmbClient::connect(ClientConfig {
+        previous_session_id: Some(old.session_id()),
+        ..config
+    })
+    .await
+    .expect("replacement client");
+    let tree = replacement
+        .connect_share(share)
+        .await
+        .expect("connect_share");
+    let replacement_delete = replacement.delete_file(&tree, path).await;
+    let old_session_after = old_tree.fs_info(old.connection_mut()).await;
+
+    drop(writer);
+    let _ = replacement.delete_file(&tree, path).await;
+    Replaced {
+        stranger_delete,
+        replacement_delete,
+        old_session_after,
+    }
+}
+
+/// A client built to replace one whose connection dropped names the old
+/// session (`ClientConfig::previous_session_id`), and the server ends it
+/// before answering the login, so the file the old session was writing is
+/// free at once. Without it, the server keeps the old session's write handle
+/// open until it notices the dead connection by itself, and a delete meets
+/// `STATUS_SHARING_VIOLATION` (vdavid/cmdr#581). The old connection stays up
+/// here, which is the hard case: the server has no reason of its own to let go.
+#[tokio::test]
+#[ignore]
+async fn a_replacement_client_frees_the_old_sessions_handles() {
+    use smb2::types::status::NtStatus;
+    let _ = env_logger::try_init();
+
+    let replaced = replace_a_session_holding_a_file(auth_config(), "private").await;
+
+    assert_eq!(
+        replaced.stranger_delete.unwrap_err().status(),
+        Some(NtStatus::SHARING_VIOLATION),
+        "a client that doesn't name the old session meets its write handle"
+    );
+    replaced
+        .replacement_delete
+        .expect("the replacement deletes the file the old session held");
+    // Samba answers the ended session with `STATUS_USER_SESSION_DELETED`,
+    // unsigned (it has no key left to sign with), and an unsigned answer on a
+    // signed session is discarded (MS-SMB2 § 3.2.5.1.3).
+    let ended = replaced
+        .old_session_after
+        .expect_err("the old session is over");
+    assert_eq!(
+        ended.kind(),
+        smb2::ErrorKind::SignatureInvalid,
+        "got: {ended}"
+    );
+}
+
+/// Samba doesn't end a guest session for `PreviousSessionId`: it skips the
+/// lookup when the new login isn't an authenticated user (`/* TODO */` in
+/// `smb2srv_session_close_previous_send`, Samba master on 2026-10-20). Pinned
+/// so the docs' "named accounts only, on Samba" stays true; if this starts
+/// failing because the delete succeeds, Samba has implemented it.
+#[tokio::test]
+#[ignore]
+async fn samba_keeps_a_replaced_guest_sessions_handles() {
+    use smb2::types::status::NtStatus;
+    let _ = env_logger::try_init();
+    let config = ClientConfig {
+        addr: GUEST_ADDR.to_string(),
+        timeout: TIMEOUT,
+        compression: false,
+        ..Default::default()
+    };
+
+    let replaced = replace_a_session_holding_a_file(config, "public").await;
+
+    assert_eq!(
+        replaced.replacement_delete.unwrap_err().status(),
+        Some(NtStatus::SHARING_VIOLATION)
+    );
+    replaced
+        .old_session_after
+        .expect("the old guest session lives on");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_stat_file() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_stat.tmp";
+    let test_data = b"stat test content";
+    tree.write_file(&mut conn, test_path, test_data)
+        .await
+        .expect("write_file failed");
+
+    let info = tree.stat(&mut conn, test_path).await.expect("stat failed");
+    assert_eq!(info.size, test_data.len() as u64);
+    assert!(!info.is_directory);
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── Timestamps (smb-guest) ──────────────────────────────────────────
+
+/// A whole-second `FileTime`, `unix_secs` after 1970, so no server rounds it.
+fn filetime(unix_secs: u64) -> smb2::pack::FileTime {
+    smb2::pack::FileTime::from_system_time(std::time::UNIX_EPOCH + Duration::from_secs(unix_secs))
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_set_times_sets_only_the_times_asked_for() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let path = "docker_test_set_times.tmp";
+    tree.write_file(&mut conn, path, b"dated")
+        .await
+        .expect("write_file");
+    let before = tree.stat(&mut conn, path).await.expect("stat");
+
+    let modified = filetime(1_500_000_000);
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_modified(modified),
+    )
+    .await
+    .expect("set_times(modified)");
+    let after = tree.stat(&mut conn, path).await.expect("stat");
+    assert_eq!(after.modified, modified);
+    assert_eq!(after.created, before.created, "creation time left alone");
+
+    let created = filetime(1_400_000_000);
+    tree.set_times(&mut conn, path, smb2::FileTimes::new().set_created(created))
+        .await
+        .expect("set_times(created)");
+    let after = tree.stat(&mut conn, path).await.expect("stat");
+    assert_eq!(after.created, created);
+    assert_eq!(after.modified, modified, "modification time left alone");
+
+    tree.delete_file(&mut conn, path)
+        .await
+        .expect("delete_file");
+    tree.disconnect(&mut conn).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_set_times_on_a_directory() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let path = "docker_test_set_times_dir";
+    let _ = tree.delete_directory(&mut conn, path).await;
+    tree.create_directory(&mut conn, path)
+        .await
+        .expect("create_directory");
+
+    let modified = filetime(1_300_000_000);
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_modified(modified),
+    )
+    .await
+    .expect("set_times on a directory");
+    let info = tree.stat(&mut conn, path).await.expect("stat");
+    assert!(info.is_directory);
+    assert_eq!(info.modified, modified);
+
+    tree.delete_directory(&mut conn, path)
+        .await
+        .expect("delete_directory");
+}
+
+/// Every read path hands out the date the server's CREATE response carried,
+/// and it's the date `stat` reports.
+#[tokio::test]
+#[ignore]
+async fn guest_reads_hand_out_the_files_dates() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let path = "docker_test_read_dates.tmp";
+    tree.write_file(&mut conn, path, b"twelve bytes")
+        .await
+        .expect("write_file");
+    let modified = filetime(1_600_000_000);
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_modified(modified),
+    )
+    .await
+    .expect("set_times");
+    let stat = tree.stat(&mut conn, path).await.expect("stat");
+
+    let (data, info) = tree
+        .read_file_compound_with_info(&mut conn, path)
+        .await
+        .expect("read_file_compound_with_info");
+    assert_eq!(data, b"twelve bytes");
+    assert_eq!(
+        (info.size, info.modified, info.created),
+        (12, modified, stat.created)
+    );
+
+    let download = tree.download(&mut conn, path).await.expect("download");
+    let info = download
+        .info()
+        .expect("a download the crate opened knows")
+        .clone();
+    assert_eq!(drain(download).await, b"twelve bytes");
+    assert_eq!((info.size, info.modified), (12, modified));
+
+    let reader = std::sync::Arc::new(tree.clone())
+        .open_file_reader(conn.clone(), path)
+        .await
+        .expect("open_file_reader");
+    assert_eq!((reader.info().size, reader.info().modified), (12, modified));
+    reader.close().await.expect("close");
+
+    tree.delete_file(&mut conn, path)
+        .await
+        .expect("delete_file");
+}
+
+/// A writer that stamps its own handle keeps the stamp through its close,
+/// including writes that come after the stamp (Samba's sticky write time).
+#[tokio::test]
+#[ignore]
+async fn guest_a_writer_keeps_the_times_set_on_its_handle() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let tree = std::sync::Arc::new(tree);
+    let modified = filetime(1_200_000_000);
+
+    let last = "docker_test_writer_stamp_last.tmp";
+    let mut writer = tree
+        .create_file_writer(conn.clone(), last)
+        .await
+        .expect("writer");
+    writer.write_chunk(b"contents").await.expect("write_chunk");
+    writer
+        .set_times(smb2::FileTimes::new().set_modified(modified))
+        .await
+        .expect("set_times");
+    writer.finish().await.expect("finish");
+    assert_eq!(
+        tree.stat(&mut conn, last).await.expect("stat").modified,
+        modified
+    );
+
+    let first = "docker_test_writer_stamp_first.tmp";
+    let mut writer = tree
+        .create_file_writer(conn.clone(), first)
+        .await
+        .expect("writer");
+    writer
+        .set_times(smb2::FileTimes::new().set_modified(modified))
+        .await
+        .expect("set_times");
+    writer
+        .write_chunk(b"written after the stamp")
+        .await
+        .expect("write_chunk");
+    writer.finish().await.expect("finish");
+    assert_eq!(
+        tree.stat(&mut conn, first).await.expect("stat").modified,
+        modified
+    );
+
+    for path in [last, first] {
+        tree.delete_file(&mut conn, path)
+            .await
+            .expect("delete_file");
+    }
+}
+
+/// The ordering `Tree::set_times` documents: a stamp by path while a writer
+/// still holds the file open loses to that writer's close.
+#[tokio::test]
+#[ignore]
+async fn guest_a_stamp_by_path_loses_to_an_open_writers_close() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let tree = std::sync::Arc::new(tree);
+    let path = "docker_test_stamp_under_writer.tmp";
+    let modified = filetime(1_100_000_000);
+
+    let mut writer = tree
+        .create_file_writer(conn.clone(), path)
+        .await
+        .expect("writer");
+    writer.write_chunk(b"contents").await.expect("write_chunk");
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_modified(modified),
+    )
+    .await
+    .expect("set_times by path");
+    writer.finish().await.expect("finish");
+
+    let info = tree.stat(&mut conn, path).await.expect("stat");
+    assert_ne!(info.modified, modified, "the close restamped the file");
+    tree.delete_file(&mut conn, path)
+        .await
+        .expect("delete_file");
+}
+
+/// The incident shape against a real Samba: a copy gives up, drops its writer
+/// with WRITEs still in flight, and deletes the partial file straight away.
+/// While the writer is open the delete is refused, so a dropped writer that
+/// kept its handle would fail the delete; the CLOSE queued by the drop has to
+/// reach the server first.
+#[tokio::test]
+#[ignore]
+async fn guest_a_dropped_writer_lets_go_of_the_file_before_the_next_request() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let tree = std::sync::Arc::new(tree);
+    let path = "docker_test_dropped_writer.tmp";
+
+    let mut writer = tree
+        .create_file_writer(conn.clone(), path)
+        .await
+        .expect("writer");
+    writer
+        .write_chunk(&vec![0x5a; 4 * 1024 * 1024])
+        .await
+        .expect("write_chunk");
+    let refused = tree
+        .delete_file(&mut conn, path)
+        .await
+        .expect_err("an open writer keeps the file from being deleted");
+    assert_eq!(
+        refused.kind(),
+        smb2::ErrorKind::SharingViolation,
+        "{refused}"
+    );
+
+    drop(writer);
+    tree.delete_file(&mut conn, path)
+        .await
+        .expect("the drop closed the handle before the delete got there");
+}
+
+// ── Attributes (smb-guest) ──────────────────────────────────────────
+
+fn attrs(bits: u32) -> smb2::FileAttributes {
+    smb2::FileAttributes::new(bits)
+}
+
+/// The attributes `name` has in a listing of the share's root.
+async fn listed_attributes(conn: &mut Connection, tree: &Tree, name: &str) -> smb2::FileAttributes {
+    let entries = tree.list_directory(conn, "").await.expect("list_directory");
+    entries
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("{name} is listed"))
+        .attributes
+}
+
+/// Hidden rides a writer's own SET_INFO beside its date, and every read path
+/// reports it: `stat`, the listing, and a download's CREATE.
+#[tokio::test]
+#[ignore]
+async fn guest_a_writer_sets_hidden_beside_its_date_and_every_read_reports_it() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let tree = std::sync::Arc::new(tree);
+    let path = "docker_test_attrs_hidden.tmp";
+    let modified = filetime(1_250_000_000);
+
+    let mut writer = tree
+        .create_file_writer(conn.clone(), path)
+        .await
+        .expect("writer");
+    writer.write_chunk(b"contents").await.expect("write_chunk");
+    writer
+        .set_times(
+            smb2::FileTimes::new()
+                .set_modified(modified)
+                .set_attributes(attrs(smb2::FileAttributes::HIDDEN)),
+        )
+        .await
+        .expect("set_times");
+    writer.finish().await.expect("finish");
+
+    let stat = tree.stat(&mut conn, path).await.expect("stat");
+    assert!(stat.attributes.is_hidden(), "stat: {:?}", stat.attributes);
+    assert!(!stat.attributes.is_readonly());
+    assert_eq!(stat.modified, modified, "the date rode the same frame");
+    assert!(listed_attributes(&mut conn, &tree, path).await.is_hidden());
+    let download = tree.download(&mut conn, path).await.expect("download");
+    let info = download.info().expect("opened by the crate").clone();
+    drain(download).await;
+    assert!(
+        info.attributes.is_hidden(),
+        "download: {:?}",
+        info.attributes
+    );
+
+    // Clearing: empty attributes, never 0 ("don't change").
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_attributes(attrs(0)),
+    )
+    .await
+    .expect("clear");
+    let stat = tree.stat(&mut conn, path).await.expect("stat");
+    assert!(
+        !stat.attributes.is_hidden(),
+        "cleared: {:?}",
+        stat.attributes
+    );
+    assert_eq!(stat.modified, modified, "clearing left the date alone");
+
+    tree.delete_file(&mut conn, path)
+        .await
+        .expect("delete_file");
+}
+
+/// Read-only refuses a delete until it's cleared, which is the order a
+/// cleanup that removes a Read-only copy has to follow.
+#[tokio::test]
+#[ignore]
+async fn guest_a_readonly_file_refuses_deletion_until_cleared() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let path = "docker_test_attrs_readonly.tmp";
+    tree.write_file(&mut conn, path, b"locked")
+        .await
+        .expect("write_file");
+
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_attributes(attrs(
+            smb2::FileAttributes::READONLY | smb2::FileAttributes::HIDDEN,
+        )),
+    )
+    .await
+    .expect("set read-only and hidden");
+    let stat = tree.stat(&mut conn, path).await.expect("stat");
+    assert!(stat.attributes.is_readonly(), "stat: {:?}", stat.attributes);
+    assert!(stat.attributes.is_hidden(), "stat: {:?}", stat.attributes);
+    let listed = listed_attributes(&mut conn, &tree, path).await;
+    assert!(
+        listed.is_readonly() && listed.is_hidden(),
+        "listed: {listed:?}"
+    );
+
+    let refused = tree
+        .delete_file(&mut conn, path)
+        .await
+        .expect_err("a read-only file refuses deletion");
+    assert_eq!(
+        refused.status(),
+        Some(smb2::types::status::NtStatus::CANNOT_DELETE)
+    );
+
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_attributes(attrs(0)),
+    )
+    .await
+    .expect("clear read-only");
+    let stat = tree.stat(&mut conn, path).await.expect("stat");
+    assert!(!stat.attributes.is_readonly() && !stat.attributes.is_hidden());
+    tree.delete_file(&mut conn, path)
+        .await
+        .expect("delete once cleared");
+}
+
+/// A directory takes Hidden by path, and reports it with Directory still set.
+#[tokio::test]
+#[ignore]
+async fn guest_a_directory_takes_hidden_by_path() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let path = "docker_test_attrs_dir";
+    let _ = tree.delete_directory(&mut conn, path).await;
+    tree.create_directory(&mut conn, path)
+        .await
+        .expect("create_directory");
+
+    tree.set_times(
+        &mut conn,
+        path,
+        smb2::FileTimes::new().set_attributes(attrs(smb2::FileAttributes::HIDDEN)),
+    )
+    .await
+    .expect("hide the directory");
+    let stat = tree.stat(&mut conn, path).await.expect("stat");
+    assert!(stat.is_directory && stat.attributes.is_directory());
+    assert!(stat.attributes.is_hidden(), "stat: {:?}", stat.attributes);
+    let listed = listed_attributes(&mut conn, &tree, path).await;
+    assert!(
+        listed.is_directory() && listed.is_hidden(),
+        "listed: {listed:?}"
+    );
+
+    tree.delete_directory(&mut conn, path)
+        .await
+        .expect("delete_directory");
+}
+
+/// The 8.3 alias Samba hands out for `path` (`FileAlternateNameInformation`,
+/// class 21). Samba's aliases are hash-mangled, so a test asks rather than
+/// guesses.
+async fn short_name(conn: &Connection, tree: &Tree, path: &str) -> String {
+    use smb2::client::CompoundOp;
+    use smb2::msg::close::CloseRequest;
+    use smb2::msg::create::{CreateDisposition, CreateRequest, ImpersonationLevel, ShareAccess};
+    use smb2::msg::query_info::{InfoType, QueryInfoRequest, QueryInfoResponse};
+    use smb2::pack::{ReadCursor, Unpack};
+    use smb2::types::flags::FileAccessMask;
+    use smb2::types::{Command, CreditCharge, FileId, OplockLevel};
+
+    let create = CreateRequest {
+        requested_oplock_level: OplockLevel::None,
+        impersonation_level: ImpersonationLevel::Impersonation,
+        desired_access: FileAccessMask::new(
+            FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE,
+        ),
+        file_attributes: 0,
+        share_access: ShareAccess(ShareAccess::FILE_SHARE_READ | ShareAccess::FILE_SHARE_WRITE),
+        create_disposition: CreateDisposition::FileOpen,
+        create_options: 0,
+        name: path.replace('/', "\\"),
+        create_contexts: vec![],
+    };
+    let query = QueryInfoRequest {
+        info_type: InfoType::File,
+        file_info_class: 21,
+        output_buffer_length: 4096,
+        additional_information: 0,
+        flags: 0,
+        file_id: FileId::SENTINEL,
+        input_buffer: vec![],
+    };
+    let close = CloseRequest {
+        flags: 0,
+        file_id: FileId::SENTINEL,
+    };
+    let op = |command, body| CompoundOp {
+        command,
+        body,
+        tree_id: Some(tree.tree_id),
+        credit_charge: CreditCharge(1),
+    };
+    let frames = conn
+        .execute_compound(&[
+            op(Command::Create, &create),
+            op(Command::QueryInfo, &query),
+            op(Command::Close, &close),
+        ])
+        .await
+        .expect("short-name compound failed");
+    let answer = frames[1].as_ref().expect("no QUERY_INFO answer");
+    assert!(
+        answer.header.status.is_success(),
+        "class 21 refused: {:?}",
+        answer.header.status
+    );
+    let buf = QueryInfoResponse::unpack(&mut ReadCursor::new(&answer.body))
+        .unwrap()
+        .output_buffer;
+    let len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+    let units: Vec<u16> = buf[4..4 + len]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16(&units).unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_resolve_names_the_file_the_server_opened() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+
+    let dir = "resolve-Dir";
+    let stored = "resolve-Dir/MixedCase Name.txt";
+    let _ = tree.create_directory(&mut conn, dir).await;
+    tree.write_file(&mut conn, stored, b"resolve me")
+        .await
+        .expect("write_file failed");
+
+    // Case folding: the server opens the stored file and says so.
+    let resolved = tree
+        .resolve(&mut conn, "RESOLVE-DIR/mixedcase name.TXT")
+        .await
+        .expect("resolve failed");
+    assert_eq!(resolved.path, stored);
+    assert_eq!(resolved.info.size, 10);
+    assert!(!resolved.info.is_directory);
+    let identity = resolved.identity.expect("Samba identifies files");
+
+    // An 8.3 alias resolves to the long name, and to the same file.
+    let alias = short_name(&conn, &tree, stored).await;
+    assert_ne!(alias, "MixedCase Name.txt", "expected a mangled alias");
+    let via_alias = tree
+        .resolve(&mut conn, &format!("{dir}/{alias}"))
+        .await
+        .expect("resolve via the 8.3 alias failed");
+    assert_eq!(via_alias.path, stored);
+    assert_eq!(via_alias.identity, Some(identity));
+
+    // A directory resolves too.
+    let resolved_dir = tree
+        .resolve(&mut conn, "RESOLVE-dir")
+        .await
+        .expect("resolve dir failed");
+    assert_eq!(resolved_dir.path, dir);
+    assert!(resolved_dir.info.is_directory);
+
+    // A name that needs the private-use mapping comes back in caller form.
+    let mapped = "resolve-Dir/Who Asked?.txt";
+    tree.write_file(&mut conn, mapped, b"?")
+        .await
+        .expect("write_file (mapped name) failed");
+    let resolved_mapped = tree
+        .resolve(&mut conn, "resolve-dir/WHO ASKED?.TXT")
+        .await
+        .expect("resolve (mapped name) failed");
+    assert_eq!(resolved_mapped.path, mapped);
+
+    let missing = tree
+        .resolve(&mut conn, "resolve-Dir/nope.txt")
+        .await
+        .expect_err("a missing file must not resolve");
+    assert_eq!(missing.kind(), smb2::ErrorKind::NotFound);
+
+    tree.delete_file(&mut conn, mapped).await.unwrap();
+    tree.delete_file(&mut conn, stored).await.unwrap();
+    tree.delete_directory(&mut conn, dir).await.unwrap();
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_handles_record_the_name_the_server_opened() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let tree = std::sync::Arc::new(tree);
+
+    let stored = "Handle-Name.bin";
+    let mut writer = tree
+        .create_file_writer(conn.clone(), "handle-name.bin")
+        .await
+        .expect("create_file_writer failed");
+    // A new file is stored under the name it was created with.
+    assert_eq!(writer.resolved_path(), Some("handle-name.bin"));
+    writer.write_chunk(b"abc").await.unwrap();
+    writer.finish().await.unwrap();
+    tree.rename(&mut conn, "handle-name.bin", stored)
+        .await
+        .expect("rename failed");
+
+    let reader = tree
+        .open_file_reader(conn.clone(), "HANDLE-NAME.BIN")
+        .await
+        .expect("open_file_reader failed");
+    assert_eq!(reader.resolved_path(), Some(stored));
+    assert_eq!(reader.read_at(0, 3).await.unwrap(), b"abc");
+    reader.close().await.unwrap();
+
+    let writer = tree
+        .create_file_writer_at(conn.clone(), "handle-NAME.bin", 3)
+        .await
+        .expect("create_file_writer_at failed");
+    assert_eq!(writer.resolved_path(), Some(stored));
+    writer.abort().await.unwrap();
+
+    tree.delete_file(&mut conn, stored).await.unwrap();
+}
+
+/// A fresh directory for one test, emptied of whatever an earlier run left.
+async fn fresh_dir(conn: &mut Connection, tree: &Tree, dir: &str) {
+    if let Ok(entries) = tree.list_directory(conn, dir).await {
+        for entry in entries.iter().filter(|e| e.name != "." && e.name != "..") {
+            let path = format!("{dir}/{}", entry.name);
+            if entry.is_directory {
+                let _ = tree.delete_directory(conn, &path).await;
+            } else {
+                let _ = tree.delete_file(conn, &path).await;
+            }
+        }
+    } else {
+        tree.create_directory(conn, dir)
+            .await
+            .expect("create test dir");
+    }
+}
+
+/// A folder too big for one QUERY_DIRECTORY answer comes back in several
+/// batches that add up to exactly what `list_directory` returns, even when
+/// every batch's first call is dropped mid-flight.
+#[tokio::test]
+#[ignore]
+async fn guest_a_directory_reader_lists_a_big_folder_batch_by_batch() {
+    let (mut conn, tree) = connect_guest().await;
+    let dir = "dir-reader-batches";
+    fresh_dir(&mut conn, &tree, dir).await;
+    // ~336 bytes an entry at this name length, so ~195 fit one 64 KiB answer.
+    let files: Vec<String> = (0..450)
+        .map(|i| format!("{i:04}-{}", "x".repeat(115)))
+        .collect();
+    for name in &files {
+        tree.write_file(&mut conn, &format!("{dir}/{name}"), b"x")
+            .await
+            .expect("write a file into the folder");
+    }
+
+    let listed: Vec<String> = tree
+        .list_directory(&mut conn, dir)
+        .await
+        .expect("list_directory")
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(listed.len(), files.len() + 2, "the files plus . and ..");
+
+    let mut reader = tree
+        .open_directory_reader(conn.clone(), dir)
+        .await
+        .expect("open_directory_reader");
+    let mut batches: Vec<Vec<String>> = Vec::new();
+    let mut drops = 0;
+    loop {
+        // A `select!` arm losing: one poll hands the query to the connection,
+        // then the call is dropped, and the answer lands while nobody waits.
+        // The next call must return that answer.
+        let batch = match futures_util::FutureExt::now_or_never(reader.next_batch()) {
+            Some(done) => done,
+            None => {
+                drops += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                reader.next_batch().await
+            }
+        };
+        match batch.expect("next_batch") {
+            Some(batch) => batches.push(batch.into_iter().map(|e| e.name).collect()),
+            None => break,
+        }
+    }
+    assert!(
+        batches.len() >= 2,
+        "the folder should need several QUERY_DIRECTORY answers, got {}",
+        batches.len()
+    );
+    assert_eq!(batches.concat(), listed, "nothing skipped, nothing twice");
+    assert_eq!(
+        drops,
+        batches.len() + 1,
+        "every call, the last one included, was dropped first"
+    );
+
+    // Stopping early closes the handle, so the folder can be removed after.
+    let mut reader = tree
+        .open_directory_reader(conn.clone(), dir)
+        .await
+        .expect("open_directory_reader");
+    assert!(reader.next_batch().await.expect("first batch").is_some());
+    reader.close().await.expect("close part-way");
+}
+
+/// Without the option a rename refuses a taken name and touches neither file;
+/// with it the source's contents take the destination's name in one step.
+#[tokio::test]
+#[ignore]
+async fn guest_rename_replaces_an_existing_destination_only_when_asked() {
+    use smb2::{ErrorKind, RenameOptions};
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let dir = "rename_replace";
+    fresh_dir(&mut conn, &tree, dir).await;
+    let (tmp, file) = (format!("{dir}/notes.txt.tmp"), format!("{dir}/notes.txt"));
+    tree.write_file(&mut conn, &file, b"old").await.unwrap();
+    tree.write_file(&mut conn, &tmp, b"new").await.unwrap();
+
+    let refused = tree.rename(&mut conn, &tmp, &file).await.unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::AlreadyExists, "{refused:?}");
+    let default = tree
+        .rename_with(&mut conn, &tmp, &file, RenameOptions::new())
+        .await
+        .unwrap_err();
+    assert_eq!(default.kind(), ErrorKind::AlreadyExists, "{default:?}");
+    assert_eq!(tree.read_file(&mut conn, &file).await.unwrap(), b"old");
+    assert_eq!(tree.read_file(&mut conn, &tmp).await.unwrap(), b"new");
+
+    tree.rename_with(
+        &mut conn,
+        &tmp,
+        &file,
+        RenameOptions::new().replace_if_exists(true),
+    )
+    .await
+    .expect("replacing rename");
+    assert_eq!(tree.read_file(&mut conn, &file).await.unwrap(), b"new");
+    let gone = tree.stat(&mut conn, &tmp).await.unwrap_err();
+    assert_eq!(gone.kind(), ErrorKind::NotFound, "{gone:?}");
+
+    tree.delete_file(&mut conn, &file).await.unwrap();
+    tree.disconnect(&mut conn).await.unwrap();
+}
+
+/// A replacing rename moves the source's own file under the taken name: the
+/// server renames over the destination rather than writing into it, so
+/// afterwards the name points at the very file that was the temp (same index
+/// number, its inode here). On a POSIX server that's one `rename(2)`, which is
+/// what makes "write a temp, then rename it over" atomic. That the client
+/// sends it as one SET_INFO and never deletes first is the mock's job
+/// (`rename_replaces_an_existing_destination_only_when_asked`).
+///
+/// No concurrent reader checks that the name never goes missing, because
+/// Samba 4.20's own open path misses a file swapped mid-open now and then
+/// (`client/CLAUDE.md` § Compound requests), more often under load.
+#[tokio::test]
+#[ignore]
+async fn guest_a_replacing_rename_moves_the_source_file_under_the_taken_name() {
+    use smb2::RenameOptions;
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let dir = "rename_replace_identity";
+    fresh_dir(&mut conn, &tree, dir).await;
+    let (tmp, file) = (format!("{dir}/doc.tmp"), format!("{dir}/doc"));
+    tree.write_file(&mut conn, &file, b"old").await.unwrap();
+    tree.write_file(&mut conn, &tmp, b"new").await.unwrap();
+    let identity = |r: smb2::Resolved| r.identity.expect("Samba reports file identity");
+    let source = identity(tree.resolve(&mut conn, &tmp).await.unwrap());
+    let replaced = identity(tree.resolve(&mut conn, &file).await.unwrap());
+    assert_ne!(source, replaced);
+
+    tree.rename_with(
+        &mut conn,
+        &tmp,
+        &file,
+        RenameOptions::new().replace_if_exists(true),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        identity(tree.resolve(&mut conn, &file).await.unwrap()),
+        source,
+        "the destination name now points at the source's own file"
+    );
+    assert_eq!(tree.read_file(&mut conn, &file).await.unwrap(), b"new");
+    tree.delete_file(&mut conn, &file).await.unwrap();
+    tree.disconnect(&mut conn).await.unwrap();
+}
+
+/// The edges of a replacing rename, as Samba 4.20 answers them: a directory
+/// in either position is refused with OBJECT_NAME_COLLISION and nothing
+/// moves (Windows answers ACCESS_DENIED, MS-FSA § 2.1.5.15.12), and a rename
+/// onto itself or one that only changes case still succeeds.
+#[tokio::test]
+#[ignore]
+async fn guest_a_replacing_rename_refuses_directories_and_allows_case_changes() {
+    use smb2::{ErrorKind, RenameOptions};
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_guest().await;
+    let dir = "rename_replace_edges";
+    fresh_dir(&mut conn, &tree, dir).await;
+    let replace = RenameOptions::new().replace_if_exists(true);
+    let (file, sub) = (format!("{dir}/Report.txt"), format!("{dir}/sub"));
+    tree.write_file(&mut conn, &file, b"keep").await.unwrap();
+    tree.create_directory(&mut conn, &sub).await.unwrap();
+
+    let onto_dir = tree
+        .rename_with(&mut conn, &file, &sub, replace)
+        .await
+        .unwrap_err();
+    assert_eq!(onto_dir.kind(), ErrorKind::AlreadyExists, "{onto_dir:?}");
+    let dir_onto_file = tree
+        .rename_with(&mut conn, &sub, &file, replace)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        dir_onto_file.kind(),
+        ErrorKind::AlreadyExists,
+        "{dir_onto_file:?}"
+    );
+    assert!(tree.stat(&mut conn, &sub).await.unwrap().is_directory);
+    assert_eq!(tree.read_file(&mut conn, &file).await.unwrap(), b"keep");
+
+    tree.rename_with(&mut conn, &file, &file, replace)
+        .await
+        .expect("onto itself");
+    let lower = format!("{dir}/report.txt");
+    tree.rename_with(&mut conn, &file, &lower, replace)
+        .await
+        .expect("case only");
+    let names: Vec<String> = tree
+        .list_directory(&mut conn, dir)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "report.txt"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "Report.txt"), "{names:?}");
+    assert_eq!(tree.read_file(&mut conn, &lower).await.unwrap(), b"keep");
+
+    tree.delete_file(&mut conn, &lower).await.unwrap();
+    tree.delete_directory(&mut conn, &sub).await.unwrap();
+    tree.disconnect(&mut conn).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_create_delete_directory() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let dir_path = "docker_test_dir_tmp";
+
+    tree.create_directory(&mut conn, dir_path)
+        .await
+        .expect("create_directory failed");
+
+    let info = tree.stat(&mut conn, dir_path).await.expect("stat failed");
+    assert!(info.is_directory);
+
+    tree.delete_directory(&mut conn, dir_path)
+        .await
+        .expect("delete_directory failed");
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── Compound operations (smb-guest) ──────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_compound_read() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_compound_read.tmp";
+    let test_data = b"compound read test data 1234567890";
+    tree.write_file(&mut conn, test_path, test_data)
+        .await
+        .expect("write_file failed");
+
+    let data = tree
+        .read_file_compound(&mut conn, test_path)
+        .await
+        .expect("read_file_compound failed");
+    assert_eq!(data, test_data);
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_compound_write() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_compound_write.tmp";
+    let test_data = b"compound write test data 1234567890";
+
+    let written = tree
+        .write_file_compound(&mut conn, test_path, test_data)
+        .await
+        .expect("write_file_compound failed");
+    assert_eq!(written, test_data.len() as u64);
+
+    // Read back to verify.
+    let data = tree
+        .read_file(&mut conn, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data, test_data);
+
+    // Empty file via compound.
+    let empty_path = "docker_test_compound_empty.tmp";
+    let empty_written = tree
+        .write_file_compound(&mut conn, empty_path, b"")
+        .await
+        .expect("write_file_compound (empty) failed");
+    assert_eq!(empty_written, 0);
+
+    let empty_data = tree
+        .read_file(&mut conn, empty_path)
+        .await
+        .expect("read empty file failed");
+    assert!(empty_data.is_empty());
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.delete_file(&mut conn, empty_path)
+        .await
+        .expect("delete empty file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── Pipelined I/O (smb-guest) ────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_pipelined_read() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_pipelined_read.tmp";
+    let test_data: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+
+    tree.write_file(&mut conn, test_path, &test_data)
+        .await
+        .expect("write_file failed");
+
+    let data = tree
+        .read_file_pipelined(&mut conn, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_pipelined_write() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_pipelined_write.tmp";
+    let test_data: Vec<u8> = (0..1_048_576).map(|i| (i % 199) as u8).collect();
+
+    let written = tree
+        .write_file_pipelined(&mut conn, test_path, &test_data)
+        .await
+        .expect("write_file_pipelined failed");
+    assert_eq!(written, test_data.len() as u64);
+
+    let data = tree
+        .read_file(&mut conn, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── Random-access reads (smb-guest) ──────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_reader_positioned_reads() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+    let tree = std::sync::Arc::new(tree);
+
+    let test_path = "docker_test_read_at.tmp";
+    // A non-repeating-per-window byte pattern so an offset mistake shows up as a
+    // content mismatch rather than passing by luck.
+    let test_data: Vec<u8> = (0..100_000u32).map(|i| (i % 256) as u8).collect();
+    tree.write_file(&mut conn, test_path, &test_data)
+        .await
+        .expect("write_file failed");
+
+    // One open handle serves every read below, then one close — proving the
+    // primitive's open -> N positioned reads -> close lifecycle end to end.
+    let reader = tree
+        .open_file_reader(conn.clone(), test_path)
+        .await
+        .expect("open_file_reader failed");
+    assert_eq!(reader.size(), test_data.len() as u64);
+
+    // Out-of-order positioned reads: head, mid, tail.
+    let head = reader.read_at(0, 16).await.expect("head read failed");
+    assert_eq!(head, &test_data[0..16], "head mismatch");
+
+    let mid = reader.read_at(50_000, 4096).await.expect("mid read failed");
+    assert_eq!(mid, &test_data[50_000..54_096], "mid mismatch");
+
+    let tail_off = test_data.len() as u64 - 10;
+    let tail = reader
+        .read_at(tail_off, 10)
+        .await
+        .expect("tail read failed");
+    assert_eq!(tail, &test_data[test_data.len() - 10..], "tail mismatch");
+
+    // A read wholly past EOF yields nothing.
+    assert!(
+        reader
+            .read_at(test_data.len() as u64, 100)
+            .await
+            .expect("past-eof read failed")
+            .is_empty(),
+        "read past EOF should be empty"
+    );
+
+    // A read straddling EOF is clamped to the bytes that exist.
+    let straddle = reader
+        .read_at(test_data.len() as u64 - 5, 100)
+        .await
+        .expect("straddle read failed");
+    assert_eq!(
+        straddle,
+        &test_data[test_data.len() - 5..],
+        "straddle-EOF read should clamp to 5 bytes"
+    );
+
+    // A full-file positioned read exercises reassembly across wire READs.
+    let whole = reader
+        .read_at(0, test_data.len() as u64)
+        .await
+        .expect("whole read failed");
+    assert_eq!(whole.len(), test_data.len(), "whole-file size mismatch");
+    assert_eq!(whole, test_data, "whole-file content mismatch");
+
+    reader.close().await.expect("close failed");
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── Share enumeration ────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_list_shares() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(GUEST_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+
+    let shares = list_shares(&mut conn).await.expect("list_shares failed");
+
+    assert!(
+        shares.iter().any(|s| s.name == "public"),
+        "expected 'public' share, got: {:?}",
+        shares.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn auth_list_shares() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(AUTH_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "testuser", "testpass", "")
+        .await
+        .expect("session setup failed");
+
+    let shares = list_shares(&mut conn).await.expect("list_shares failed");
+
+    assert!(
+        shares.iter().any(|s| s.name == "private"),
+        "expected 'private' share, got: {:?}",
+        shares.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+/// smb-guest runs `map to guest = Bad User`, so Samba answers an unknown
+/// account with a guest session rather than `STATUS_LOGON_FAILURE`. A login
+/// that named an account refuses it: taking it would mean an unsigned session
+/// the caller never asked for, which is also exactly what an on-path attacker
+/// setting `IS_GUEST` would produce.
+#[tokio::test]
+#[ignore]
+async fn a_named_login_mapped_to_guest_is_refused() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(GUEST_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let err = Session::setup(&mut conn, "nobody-by-this-name", "wrong", "")
+        .await
+        .expect_err("a guest session must not stand in for the account");
+
+    assert_eq!(
+        err.kind(),
+        smb2::ErrorKind::GuestSessionRefused,
+        "got: {err}"
+    );
+    assert!(
+        matches!(
+            err,
+            smb2::Error::GuestSessionRefused {
+                anonymous: false,
+                ..
+            }
+        ),
+        "got: {err:?}"
+    );
+}
+
+/// The named `Guest` login is a guest login on purpose, so Samba mapping it
+/// to guest is the success case, in any case spelling. Consumers have long
+/// connected to guest shares this way.
+#[tokio::test]
+#[ignore]
+async fn a_login_named_guest_mapped_to_guest_is_accepted() {
+    let _ = env_logger::try_init();
+
+    for name in ["Guest", "GUEST"] {
+        let mut conn = Connection::connect(GUEST_ADDR, TIMEOUT)
+            .await
+            .expect("connect failed");
+        conn.negotiate().await.expect("negotiate failed");
+        Session::setup(&mut conn, name, "", "")
+            .await
+            .unwrap_or_else(|e| panic!("a login as {name} must get its guest session: {e}"));
+    }
+}
+
+// ── SmbClient high-level API (smb-guest) ─────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn smb_client_guest_connect_and_list() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+
+    let params = client.params().unwrap();
+    assert!(params.dialect as u16 >= 0x0202);
+
+    let tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let entries = tree
+        .list_directory(client.connection_mut(), "")
+        .await
+        .expect("list_directory failed");
+    drop(entries);
+
+    tree.disconnect(client.connection_mut())
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn smb_client_guest_list_shares() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let shares = client.list_shares().await.expect("list_shares failed");
+
+    assert!(
+        shares.iter().any(|s| s.name == "public"),
+        "expected 'public' share"
+    );
+}
+
+// ── Authentication (smb-auth) ────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn auth_connect_and_operate() {
+    let _ = env_logger::try_init();
+
+    let mut client = auth_client().await;
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share failed");
+
+    // Write, read, delete.
+    let test_path = "docker_test_auth.tmp";
+    let test_data = b"authenticated write test";
+
+    client
+        .write_file(&tree, test_path, test_data)
+        .await
+        .expect("write_file failed");
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn auth_wrong_password_fails_cleanly() {
+    let _ = env_logger::try_init();
+
+    let result = SmbClient::connect(ClientConfig {
+        addr: AUTH_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: "testuser".to_string(),
+        password: "wrongpassword".to_string(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await;
+
+    assert!(result.is_err(), "expected auth failure, got Ok");
+}
+
+// ── Streaming (smb-guest) ────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_streaming_download() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "docker_test_stream_download.tmp";
+    let test_data: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+
+    client
+        .write_file(&tree, test_path, &test_data)
+        .await
+        .expect("write_file failed");
+
+    let mut download = client
+        .download(&tree, test_path)
+        .await
+        .expect("download failed");
+    assert_eq!(download.size(), test_data.len() as u64);
+
+    let mut received = Vec::new();
+    while let Some(chunk) = download.next_chunk().await {
+        let bytes = chunk.expect("next_chunk failed");
+        assert!(!bytes.is_empty());
+        received.extend_from_slice(&bytes);
+    }
+
+    assert!(
+        (download.progress().fraction() - 1.0).abs() < f64::EPSILON,
+        "expected progress 1.0, got {}",
+        download.progress().fraction()
+    );
+    assert_eq!(received, test_data);
+
+    drop(download);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+/// `Tree::download` (borrowed `&mut Connection`) mirrors
+/// `SmbClient::download` against a real Samba container. Same payload, same
+/// RTT shape — the only difference is the caller holds the `Connection`
+/// directly, which is what unlocks concurrent downloads on cloned
+/// connections.
+#[tokio::test]
+#[ignore]
+async fn guest_tree_download_streams_via_connection() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_tree_download.tmp";
+    let test_data: Vec<u8> = (0..524_288).map(|i| (i % 251) as u8).collect();
+
+    // Seed the file through the high-level client, then download it back
+    // via the low-level Tree::download API.
+    {
+        let mut client = guest_client().await;
+        let write_tree = client
+            .connect_share("public")
+            .await
+            .expect("connect_share failed");
+        client
+            .write_file(&write_tree, test_path, &test_data)
+            .await
+            .expect("write_file failed");
+        client
+            .disconnect_share(&write_tree)
+            .await
+            .expect("disconnect failed");
+    }
+
+    let mut download = tree
+        .download(&mut conn, test_path)
+        .await
+        .expect("Tree::download failed");
+    assert_eq!(download.size(), test_data.len() as u64);
+
+    let mut received = Vec::new();
+    while let Some(chunk) = download.next_chunk().await {
+        let bytes = chunk.expect("next_chunk failed");
+        assert!(!bytes.is_empty());
+        received.extend_from_slice(&bytes);
+    }
+    assert_eq!(received, test_data);
+
+    drop(download);
+
+    // Clean up via a fresh client (we already consumed `conn` for the
+    // download; reuse it for the delete to exercise the same connection
+    // end-to-end).
+    let mut client = guest_client().await;
+    let cleanup_tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    client
+        .delete_file(&cleanup_tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&cleanup_tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streaming_upload() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    // 2 MB to exceed MaxWriteSize and trigger chunked path.
+    let test_path = "docker_test_stream_upload.tmp";
+    let test_data: Vec<u8> = (0..2_097_152).map(|i| (i % 251) as u8).collect();
+
+    let mut upload = client
+        .upload(&tree, test_path, &test_data)
+        .await
+        .expect("upload failed");
+    assert_eq!(upload.total_bytes(), test_data.len() as u64);
+
+    while upload
+        .write_next_chunk()
+        .await
+        .expect("write_next_chunk failed")
+    {}
+
+    assert!(
+        (upload.progress().fraction() - 1.0).abs() < f64::EPSILON,
+        "expected progress 1.0, got {}",
+        upload.progress().fraction()
+    );
+
+    drop(upload);
+
+    let readback = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(readback, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── Write with progress and cancellation (smb-guest) ─────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_write_with_progress() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "docker_test_write_progress.tmp";
+    let test_data: Vec<u8> = (0..1_048_576).map(|i| (i % 199) as u8).collect();
+
+    let mut progress_updates = Vec::new();
+    let written = client
+        .write_file_with_progress(&tree, test_path, &test_data, |progress| {
+            progress_updates.push(progress.bytes_transferred);
+            ControlFlow::Continue(())
+        })
+        .await
+        .expect("write_file_with_progress failed");
+
+    assert_eq!(written, test_data.len() as u64);
+    assert!(!progress_updates.is_empty());
+
+    let readback = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(readback, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_write_cancel_midway() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let cancel_path = "docker_test_write_cancel.tmp";
+    let test_data: Vec<u8> = (0..1_048_576).map(|i| (i % 199) as u8).collect();
+    let half = test_data.len() as u64 / 2;
+
+    let result = client
+        .write_file_with_progress(&tree, cancel_path, &test_data, |progress| {
+            if progress.bytes_transferred >= half {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .await;
+
+    match result {
+        Err(smb2::Error::Cancelled) => {}
+        other => panic!("expected Error::Cancelled, got {:?}", other),
+    }
+
+    // Best-effort cleanup.
+    let _ = client.delete_file(&tree, cancel_path).await;
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+/// A `FileWriter` against a real Samba writes 512 KiB WRITEs by default,
+/// leaves the upload rate it measured on the connection, and
+/// `quick_write_limit` follows it within `compound_write_limit`.
+#[tokio::test]
+#[ignore]
+async fn guest_a_writer_paces_and_leaves_an_upload_rate() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    assert_eq!(client.connection().upload_rate_hint(), None);
+    let cold_limit = client.connection().quick_write_limit();
+    assert!(cold_limit <= client.connection().compound_write_limit());
+
+    let test_path = "docker_test_paced_upload.tmp";
+    let test_data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 241) as u8).collect();
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+    assert_eq!(writer.write_behind(), smb2::WriteBehind::Adaptive);
+    assert_eq!(
+        writer.chunk_size(),
+        smb2::UPLOAD_CHUNK_SIZE.min(client.params().unwrap().max_write_size)
+    );
+    for piece in test_data.chunks(1024 * 1024) {
+        writer.write_chunk(piece).await.expect("write_chunk failed");
+    }
+    assert!(writer.peak_in_flight_bytes() <= 4 * 1024 * 1024);
+    let written = writer.finish().await.expect("finish failed");
+    assert_eq!(written, test_data.len() as u64);
+
+    let conn = client.connection();
+    assert!(
+        conn.upload_rate_hint().is_some(),
+        "16 WRITEs measure a rate"
+    );
+    assert_eq!(
+        conn.download_rate_hint(),
+        None,
+        "an upload measures one direction"
+    );
+    assert!(conn.quick_write_limit() >= cold_limit.min(u64::from(smb2::UPLOAD_CHUNK_SIZE)));
+    assert!(conn.quick_write_limit() <= conn.compound_write_limit());
+
+    let readback = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(readback, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── fs_info (smb-guest) ──────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_fs_info() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let info = client.fs_info(&mut tree).await.expect("fs_info failed");
+
+    assert!(info.total_bytes > 0);
+    assert!(info.free_bytes <= info.total_bytes);
+    assert!(info.bytes_per_sector > 0);
+    assert!(info.sectors_per_unit > 0);
+
+    let _ = client.disconnect_share(&tree).await;
+}
+
+// ── Reconnect (smb-guest) ────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_reconnect() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+
+    // Verify it works.
+    let tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    let entries = tree
+        .list_directory(client.connection_mut(), "")
+        .await
+        .expect("list_directory failed");
+    drop(entries);
+    tree.disconnect(client.connection_mut())
+        .await
+        .expect("disconnect failed");
+
+    // Reconnect.
+    client.reconnect().await.expect("reconnect failed");
+
+    // Verify it works again.
+    let tree2 = client
+        .connect_share("public")
+        .await
+        .expect("connect_share after reconnect failed");
+    let entries2 = tree2
+        .list_directory(client.connection_mut(), "")
+        .await
+        .expect("list_directory after reconnect failed");
+    drop(entries2);
+    tree2
+        .disconnect(client.connection_mut())
+        .await
+        .expect("disconnect failed");
+}
+
+// ── File watching (smb-guest) ────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_watch_directory() {
+    use smb2::FileNotifyAction;
+
+    let _ = env_logger::try_init();
+
+    // File watching needs two connections on the same thread (SmbClient is !Send).
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut watcher_client = guest_client().await;
+            let watcher_share = watcher_client
+                .connect_share("public")
+                .await
+                .expect("tree connect failed (watcher)");
+
+            // Ensure a subdirectory to watch exists.
+            let _ = watcher_client
+                .create_directory(&watcher_share, "_test_watch")
+                .await;
+
+            let mut watcher = watcher_client
+                .watch(&watcher_share, "_test_watch/", false)
+                .await
+                .expect("watch failed");
+
+            // Spawn a writer on a second connection.
+            let test_file_path = "_test_watch/docker_watch_test.tmp";
+            let writer_task = tokio::task::spawn_local(async move {
+                let mut writer_client = guest_client().await;
+                let writer_share = writer_client
+                    .connect_share("public")
+                    .await
+                    .expect("tree connect failed (writer)");
+
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                writer_client
+                    .write_file(&writer_share, test_file_path, b"watch test")
+                    .await
+                    .expect("write_file failed");
+
+                (writer_client, writer_share)
+            });
+
+            let events = tokio::time::timeout(Duration::from_secs(10), watcher.next_events())
+                .await
+                .expect("timed out waiting for change notification")
+                .expect("next_events failed");
+
+            assert!(!events.is_empty());
+            let added = events.iter().find(|e| e.action == FileNotifyAction::Added);
+            assert!(added.is_some(), "expected an Added event");
+
+            watcher.close().await.expect("watcher close failed");
+
+            // Cleanup.
+            let (mut writer_client, writer_share) = writer_task.await.unwrap();
+            writer_client
+                .delete_file(&writer_share, test_file_path)
+                .await
+                .expect("delete_file failed");
+            let _ = writer_client.disconnect_share(&writer_share).await;
+
+            let _ = watcher_client
+                .delete_directory(&watcher_share, "_test_watch")
+                .await;
+        })
+        .await;
+}
+
+/// A Samba watch survives being cancelled and re-asked, repeatedly.
+///
+/// The QNAP is what motivated the refresh cycle and what proved it works on
+/// real hardware, but the cycle ships for every server, so the other major
+/// implementation has to tolerate it too. What is under test is the server's
+/// patience with CANCEL + re-issue on the same directory handle, over and over,
+/// with the watch still delivering afterwards.
+///
+/// Runs with the interval scaled down to 2 s so several cycles fit.
+#[tokio::test]
+#[ignore]
+async fn guest_watch_survives_repeated_refreshes() {
+    let _ = env_logger::try_init();
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut watcher_client = guest_client().await;
+            watcher_client
+                .connection_mut()
+                .set_long_poll_refresh(Some(Duration::from_secs(2)));
+            let watcher_share = watcher_client
+                .connect_share("public")
+                .await
+                .expect("tree connect failed (watcher)");
+
+            // Its own directory: a sibling test writing into a shared one would
+            // end this watch before a single refresh had happened.
+            let _ = watcher_client
+                .create_directory(&watcher_share, "_test_refresh")
+                .await;
+            let test_file_path = "_test_refresh/docker_refresh_test.tmp";
+            let _ = watcher_client
+                .delete_file(&watcher_share, test_file_path)
+                .await;
+
+            let mut watcher = watcher_client
+                .watch(&watcher_share, "_test_refresh/", false)
+                .await
+                .expect("watch failed");
+
+            let writer_task = tokio::task::spawn_local(async move {
+                let mut writer_client = guest_client().await;
+                let writer_share = writer_client
+                    .connect_share("public")
+                    .await
+                    .expect("tree connect failed (writer)");
+                // Long enough for several cycles to have come and gone first.
+                tokio::time::sleep(Duration::from_secs(7)).await;
+                writer_client
+                    .write_file(&writer_share, test_file_path, b"refresh test")
+                    .await
+                    .expect("write_file failed");
+                (writer_client, writer_share)
+            });
+
+            let events = tokio::time::timeout(Duration::from_secs(25), watcher.next_events())
+                .await
+                .expect("timed out: the watch did not survive its refresh cycles")
+                .expect("next_events failed after refreshing");
+
+            let refreshes = watcher_client
+                .connection_mut()
+                .diagnostics()
+                .metrics
+                .long_poll_refreshes;
+            assert!(
+                refreshes >= 2,
+                "the test is supposed to span several cycles, saw {refreshes}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.filename.contains("docker_refresh_test")),
+                "expected an event for the written file after {refreshes} refresh(es), got: {:?}",
+                events
+                    .iter()
+                    .map(|e| format!("{}: {}", e.action, e.filename))
+                    .collect::<Vec<_>>()
+            );
+
+            watcher.close().await.expect("watcher close failed");
+            let (mut writer_client, writer_share) = writer_task.await.unwrap();
+            writer_client
+                .delete_file(&writer_share, test_file_path)
+                .await
+                .expect("delete_file failed");
+            let _ = writer_client.disconnect_share(&writer_share).await;
+            let _ = watcher_client
+                .delete_directory(&watcher_share, "_test_refresh")
+                .await;
+        })
+        .await;
+}
+
+/// Contract test for the CHANGE_NOTIFY loss window between consecutive requests.
+///
+/// Today's `Watcher::next_events()` issues one CHANGE_NOTIFY, awaits the
+/// response, returns. Between response and the consumer's next call there
+/// is no outstanding request on the wire. Servers that drop events without
+/// an outstanding request (cmdr-on-naspi field repro: 9 files written, 4
+/// watcher events delivered) will silently lose them; servers that queue
+/// generously (Docker Samba with the parameters below) will not.
+///
+/// **Honest status**: this test **does not currently fail on Docker Samba**.
+/// Tuned to its threshold of pain it either still buffers everything OR
+/// flips to `STATUS_NOTIFY_ENUM_DIR` (server-side overflow signal,
+/// different code path). The test stays in as:
+///
+/// 1. A pin against regressions on less-forgiving servers (older Samba,
+///    Synology firmware, QNAP firmware — where naspi reproduced).
+/// 2. A behavioral contract: under realistic concurrent load, the watcher
+///    delivers every Added event for every file.
+///
+/// To get a Docker-side failing test for the loss window, see the
+/// follow-up `watcher_keeps_request_outstanding_between_responses` test
+/// (separate file, uses `MockTransport` to control wire timing precisely)
+/// — but that needs a small lib-side hook to expose request-send and
+/// response-receive instants, which we haven't added yet.
+#[tokio::test]
+#[ignore]
+async fn watcher_does_not_lose_events_during_consumer_processing_delay() {
+    use smb2::FileNotifyAction;
+
+    let _ = env_logger::try_init();
+
+    // Realistic concurrent load. Below the NOTIFY_ENUM_DIR overflow
+    // threshold on Docker Samba; calibrated against the cmdr-on-naspi
+    // field reproduction (9 files, ~1 file/sec, slow consumer-side stat).
+    const N: usize = 50;
+    const CONCURRENT_WRITERS: usize = 3;
+    const CONSUMER_PROCESSING: Duration = Duration::from_millis(250);
+    const OVERALL_DEADLINE: Duration = Duration::from_secs(30);
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            // Watcher and writer each on their own SmbClient. Today's
+            // API forces this: `Watcher` borrows `&mut Connection`.
+            let mut watcher_client = guest_client().await;
+            let watcher_share = watcher_client
+                .connect_share("public")
+                .await
+                .expect("tree connect failed (watcher)");
+
+            // Clean from any prior run. Deleting individual files first
+            // because delete_directory only works on empty dirs.
+            for i in 0..N {
+                let _ = watcher_client
+                    .delete_file(&watcher_share, &format!("_test_watch_loss/file_{i:03}.txt"))
+                    .await;
+            }
+            let _ = watcher_client
+                .delete_directory(&watcher_share, "_test_watch_loss")
+                .await;
+            watcher_client
+                .create_directory(&watcher_share, "_test_watch_loss")
+                .await
+                .expect("create _test_watch_loss");
+
+            let mut watcher = watcher_client
+                .watch(&watcher_share, "_test_watch_loss/", true)
+                .await
+                .expect("watch failed");
+
+            // Writers: CONCURRENT_WRITERS independent clients, each
+            // responsible for a slice of the N files. Concurrent connections
+            // hammer Samba harder than a single serial writer, increasing
+            // event arrival rate during the consumer's processing window.
+            let writers_done = std::rc::Rc::new(std::cell::Cell::new(0usize));
+            let writer_handles: Vec<_> = (0..CONCURRENT_WRITERS)
+                .map(|writer_idx| {
+                    let writers_done = writers_done.clone();
+                    tokio::task::spawn_local(async move {
+                        let mut writer_client = guest_client().await;
+                        let writer_share = writer_client
+                            .connect_share("public")
+                            .await
+                            .expect("tree connect failed (writer)");
+
+                        // Brief lead so the watcher is armed before the first write.
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+
+                        let per_writer = N / CONCURRENT_WRITERS;
+                        let start = writer_idx * per_writer;
+                        let end = if writer_idx == CONCURRENT_WRITERS - 1 {
+                            N
+                        } else {
+                            start + per_writer
+                        };
+                        for i in start..end {
+                            let path = format!("_test_watch_loss/file_{i:03}.txt");
+                            writer_client
+                                .write_file(&writer_share, &path, b"x")
+                                .await
+                                .unwrap_or_else(|e| panic!("write_file {path}: {e}"));
+                        }
+                        writers_done.set(writers_done.get() + 1);
+                        (writer_client, writer_share)
+                    })
+                })
+                .collect();
+
+            // Consumer: pull events with a deliberate processing delay
+            // between iterations. This delay is the loss window today.
+            let mut seen = std::collections::HashSet::new();
+            let mut got_notify_enum_dir = false;
+            let deadline = tokio::time::Instant::now() + OVERALL_DEADLINE;
+            while tokio::time::Instant::now() < deadline && seen.len() < N {
+                let res =
+                    tokio::time::timeout(Duration::from_millis(500), watcher.next_events()).await;
+                match res {
+                    Ok(Ok(events)) => {
+                        for e in events {
+                            if e.action == FileNotifyAction::Added
+                                && e.filename.starts_with("file_")
+                            {
+                                seen.insert(e.filename);
+                            }
+                        }
+                        // Realistic consumer work (stat each new entry, update
+                        // UI, etc). On servers with a real loss window, this
+                        // delay is where events get dropped.
+                        tokio::time::sleep(CONSUMER_PROCESSING).await;
+                    }
+                    Ok(Err(smb2::Error::Protocol { status, .. }))
+                        if status == smb2::types::status::NtStatus::NOTIFY_ENUM_DIR =>
+                    {
+                        // Server's per-handle event buffer overflowed: the
+                        // consumer is expected to re-scan the dir and resume
+                        // watching. This test isn't trying to assert the
+                        // overflow path; it's the cleaner loss window. Note
+                        // it and break — overflow means the parameters are
+                        // too aggressive for this server's buffer.
+                        got_notify_enum_dir = true;
+                        break;
+                    }
+                    Ok(Err(e)) => panic!("watcher error: {e}"),
+                    Err(_) => continue, // 500 ms wait elapsed; loop back
+                }
+            }
+
+            // Best-effort cleanup before assertion so a failed assert
+            // doesn't leave the dir behind.
+            watcher.close().await.expect("watcher close failed");
+            let mut cleanup_client_share: Option<(SmbClient, Tree)> = None;
+            for h in writer_handles {
+                let (c, s) = h.await.unwrap();
+                cleanup_client_share = Some((c, s));
+            }
+            if let Some((mut cleanup_client, cleanup_share)) = cleanup_client_share {
+                for i in 0..N {
+                    let _ = cleanup_client
+                        .delete_file(&cleanup_share, &format!("_test_watch_loss/file_{i:03}.txt"))
+                        .await;
+                }
+                let _ = cleanup_client
+                    .delete_directory(&cleanup_share, "_test_watch_loss")
+                    .await;
+                let _ = cleanup_client.disconnect_share(&cleanup_share).await;
+            }
+
+            assert!(
+                !got_notify_enum_dir,
+                "load too aggressive for this server's CHANGE_NOTIFY buffer: \
+                 got NOTIFY_ENUM_DIR. Reduce N or CONCURRENT_WRITERS — that path \
+                 is server-side overflow, not the consumer-side loss window."
+            );
+            assert_eq!(
+                seen.len(),
+                N,
+                "watcher lost events during consumer-side processing delay: saw {}/{N}. \
+                 Missing files: {:?}",
+                seen.len(),
+                (0..N)
+                    .map(|i| format!("file_{i:03}.txt"))
+                    .filter(|name| !seen.contains(name))
+                    .collect::<Vec<_>>()
+            );
+        })
+        .await;
+}
+
+// ── Mandatory signing (smb-signing) ──────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn signing_negotiated_as_required() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SIGNING_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+
+    let params = conn.params().unwrap();
+    assert!(
+        params.signing_required,
+        "expected signing_required=true from smb-signing server"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn signing_write_read_roundtrip() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SIGNING_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "testuser", "testpass", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "private")
+        .await
+        .expect("tree connect failed");
+
+    let test_path = "docker_test_signing.tmp";
+    let test_data = b"signed write test data 1234567890";
+
+    let written = tree
+        .write_file(&mut conn, test_path, test_data)
+        .await
+        .expect("write_file failed (signing)");
+    assert_eq!(written, test_data.len() as u64);
+
+    let data = tree
+        .read_file(&mut conn, test_path)
+        .await
+        .expect("read_file failed (signing)");
+    assert_eq!(data, test_data);
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn signing_compound_operations() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SIGNING_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "testuser", "testpass", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "private")
+        .await
+        .expect("tree connect failed");
+
+    let test_path = "docker_test_signing_compound.tmp";
+    let test_data = b"compound over signed transport";
+
+    tree.write_file_compound(&mut conn, test_path, test_data)
+        .await
+        .expect("write_file_compound failed (signing)");
+
+    let data = tree
+        .read_file_compound(&mut conn, test_path)
+        .await
+        .expect("read_file_compound failed (signing)");
+    assert_eq!(data, test_data);
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn signing_pipelined_large_file() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SIGNING_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "testuser", "testpass", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "private")
+        .await
+        .expect("tree connect failed");
+
+    let test_path = "docker_test_signing_pipelined.tmp";
+    let test_data: Vec<u8> = (0..524_288).map(|i| (i % 251) as u8).collect();
+
+    tree.write_file_pipelined(&mut conn, test_path, &test_data)
+        .await
+        .expect("write_file_pipelined failed (signing)");
+
+    let data = tree
+        .read_file_pipelined(&mut conn, test_path)
+        .await
+        .expect("read_file_pipelined failed (signing)");
+    assert_eq!(data, test_data);
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── Read-only share (smb-readonly) ───────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn readonly_list_and_read_succeed() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(READONLY_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "readonly")
+        .await
+        .expect("tree connect failed");
+
+    // List directory succeeds.
+    let entries = tree
+        .list_directory(&mut conn, "")
+        .await
+        .expect("list_directory failed");
+    assert!(
+        entries.iter().any(|e| e.name == "sample.txt"),
+        "expected sample.txt in readonly share"
+    );
+
+    // Read file succeeds.
+    let data = tree
+        .read_file(&mut conn, "sample.txt")
+        .await
+        .expect("read_file failed on readonly share");
+    assert!(!data.is_empty());
+
+    // Stat file succeeds.
+    let info = tree
+        .stat(&mut conn, "sample.txt")
+        .await
+        .expect("stat failed on readonly share");
+    assert!(!info.is_directory);
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn readonly_write_returns_error() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(READONLY_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "readonly")
+        .await
+        .expect("tree connect failed");
+
+    let result = tree.write_file(&mut conn, "should_fail.tmp", b"nope").await;
+
+    assert!(result.is_err(), "expected write to fail on readonly share");
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn readonly_delete_returns_error() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(READONLY_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "readonly")
+        .await
+        .expect("tree connect failed");
+
+    let result = tree.delete_file(&mut conn, "sample.txt").await;
+    assert!(result.is_err(), "expected delete to fail on readonly share");
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn readonly_create_directory_returns_error() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(READONLY_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "readonly")
+        .await
+        .expect("tree connect failed");
+
+    let result = tree.create_directory(&mut conn, "should_fail_dir").await;
+    assert!(
+        result.is_err(),
+        "expected create_directory to fail on readonly share"
+    );
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── SMB1-only server (smb-ancient) ───────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn ancient_smb1_rejected_cleanly() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(ANCIENT_ADDR, TIMEOUT)
+        .await
+        .expect("TCP connect should succeed even to SMB1 server");
+
+    // Negotiate should fail: server only speaks SMB1, we only speak SMB2+.
+    let result = conn.negotiate().await;
+    assert!(
+        result.is_err(),
+        "expected negotiate to fail against SMB1-only server"
+    );
+}
+
+// ── Mandatory encryption (smb-encryption, share-level, SMB 3.1.1) ────
+
+/// Helper: SmbClient connected to the encryption server.
+async fn encryption_client() -> SmbClient {
+    SmbClient::connect(ClientConfig {
+        addr: ENCRYPTION_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("SmbClient::connect to smb-encryption failed")
+}
+
+#[tokio::test]
+#[ignore]
+async fn encryption_required_connect_and_operate() {
+    let _ = env_logger::try_init();
+
+    let mut client = encryption_client().await;
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "docker_test_encrypted.tmp";
+    let test_data = b"encrypted write test data 1234567890";
+
+    client
+        .write_file(&tree, test_path, test_data)
+        .await
+        .expect("write_file failed (encrypted)");
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed (encrypted)");
+    assert_eq!(data, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn encryption_required_pipelined_large_file() {
+    let _ = env_logger::try_init();
+
+    let mut client = encryption_client().await;
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "docker_test_encrypted_pipelined.tmp";
+    let test_data: Vec<u8> = (0..524_288).map(|i| (i % 199) as u8).collect();
+
+    client
+        .write_file_pipelined(&tree, test_path, &test_data)
+        .await
+        .expect("write_file_pipelined failed (encrypted)");
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed (encrypted)");
+    assert_eq!(data, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn encryption_required_list_shares() {
+    let _ = env_logger::try_init();
+
+    let mut client = encryption_client().await;
+    let shares = client.list_shares().await.expect("list_shares failed");
+    assert!(
+        shares.iter().any(|s| s.name == "private"),
+        "expected 'private' share, got: {:?}",
+        shares.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+// ── AES-128-CCM encryption (smb-encryption-aes128, SMB 3.0.2) ───────
+
+#[tokio::test]
+#[ignore]
+async fn encryption_aes128_ccm_connect_and_operate() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: ENCRYPTION_AES128_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect failed");
+
+    let params = client.params().unwrap();
+    assert!(
+        params.dialect as u16 >= 0x0300 && params.dialect as u16 <= 0x0302,
+        "expected SMB 3.0-3.0.2, got {}",
+        params.dialect
+    );
+
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "docker_test_aes128.tmp";
+    let test_data = b"AES-128-CCM encrypted write test";
+
+    client
+        .write_file(&tree, test_path, test_data)
+        .await
+        .expect("write_file failed (AES-128-CCM)");
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed (AES-128-CCM)");
+    assert_eq!(data, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── Flaky server (smb-flaky, 5s up / 5s down) ───────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn flaky_connect_during_up_phase() {
+    let _ = env_logger::try_init();
+
+    // The flaky server cycles 5s up / 5s down. We retry the full
+    // connect+negotiate sequence for up to 15 seconds to catch an "up" window.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let (mut conn, tree) = loop {
+        let connect_result = async {
+            let mut c = Connection::connect(FLAKY_ADDR, Duration::from_secs(2)).await?;
+            c.negotiate().await?;
+            let _session = Session::setup(&mut c, "", "", "").await?;
+            let t = Tree::connect(&mut c, "public").await?;
+            Ok::<_, smb2::Error>((c, t))
+        }
+        .await;
+
+        match connect_result {
+            Ok(result) => break result,
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => panic!("could not connect to flaky server within 15s: {}", e),
+        }
+    };
+
+    // Verify basic operation works during the up phase.
+    let entries = tree
+        .list_directory(&mut conn, "")
+        .await
+        .expect("list_directory failed");
+    drop(entries);
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn flaky_error_is_clean_not_hang() {
+    let _ = env_logger::try_init();
+
+    // Connect during an up phase.
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    let mut client = loop {
+        match SmbClient::connect(ClientConfig {
+            addr: FLAKY_ADDR.to_string(),
+            timeout: Duration::from_secs(1),
+            username: String::new(),
+            password: String::new(),
+            domain: String::new(),
+            auto_reconnect: false,
+            compression: false,
+            dfs_enabled: true,
+            dfs_target_overrides: HashMap::new(),
+            connect_options: None,
+            ..Default::default()
+        })
+        .await
+        {
+            Ok(c) => break c,
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => panic!("could not connect to flaky server within 12s: {}", e),
+        }
+    };
+
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    // Wait for the server to cycle down (up to 10s).
+    // Keep trying operations — eventually one should fail with a clean error.
+    let mut got_error = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        match client.list_directory(&mut tree, "").await {
+            Ok(_) => continue,
+            Err(smb2::Error::Io(_) | smb2::Error::Disconnected) => {
+                got_error = true;
+                break;
+            }
+            Err(e) => {
+                // Any error is acceptable — the point is it didn't hang.
+                got_error = true;
+                eprintln!("flaky server error (acceptable): {}", e);
+                break;
+            }
+        }
+    }
+
+    assert!(got_error, "expected an error after server went down");
+}
+
+// ── Slow server (smb-slow, 200ms latency) ────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn slow_operations_still_work() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SLOW_ADDR, Duration::from_secs(10))
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect failed");
+
+    let test_path = "docker_test_slow.tmp";
+    let test_data = b"slow server test data";
+
+    tree.write_file(&mut conn, test_path, test_data)
+        .await
+        .expect("write_file failed (slow)");
+
+    let data = tree
+        .read_file(&mut conn, test_path)
+        .await
+        .expect("read_file failed (slow)");
+    assert_eq!(data, test_data);
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn slow_pipelined_large_file() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SLOW_ADDR, Duration::from_secs(10))
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect failed");
+
+    // 256 KB over a 200ms-latency link — pipelining matters here.
+    let test_path = "docker_test_slow_pipelined.tmp";
+    let test_data: Vec<u8> = (0..262_144).map(|i| (i % 199) as u8).collect();
+
+    tree.write_file_pipelined(&mut conn, test_path, &test_data)
+        .await
+        .expect("write_file_pipelined failed (slow)");
+
+    let data = tree
+        .read_file_pipelined(&mut conn, test_path)
+        .await
+        .expect("read_file_pipelined failed (slow)");
+    assert_eq!(data, test_data);
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+// ── 50-share server (smb-50shares) ───────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn shares50_list_all() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SHARES50_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+
+    let shares = list_shares(&mut conn).await.expect("list_shares failed");
+
+    // Filter out IPC$ and other admin shares.
+    let user_shares: Vec<_> = shares.iter().filter(|s| !s.name.ends_with('$')).collect();
+
+    assert_eq!(
+        user_shares.len(),
+        50,
+        "expected 50 user shares, got {} (total including admin: {})",
+        user_shares.len(),
+        shares.len()
+    );
+
+    // Verify naming pattern.
+    assert!(user_shares.iter().any(|s| s.name == "share_01"));
+    assert!(user_shares.iter().any(|s| s.name == "share_50"));
+}
+
+// ── Many-share server (smb-manyshares) ───────────────────────────────
+//
+// smb-manyshares serves 200 shares with long comments, so the srvsvc
+// NetShareEnum reply is ~90 KiB -- well past one 64 KiB pipe read. Getting all
+// 200 back proves the client reassembled a response that arrived as multiple
+// DCE/RPC fragments (or chunked STATUS_BUFFER_OVERFLOW reads). The old
+// single-read / single-fragment code fails this either way: it would parse only
+// the first ~4280-byte fragment (truncated) or error on the first overflow read.
+// smb-50shares can't catch this -- its reply fits in one fragment.
+
+#[tokio::test]
+#[ignore]
+async fn manyshares_list_all_spans_multiple_fragments() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(MANYSHARES_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+
+    let shares = list_shares(&mut conn).await.expect("list_shares failed");
+
+    let user_shares: Vec<_> = shares.iter().filter(|s| !s.name.ends_with('$')).collect();
+
+    assert_eq!(
+        user_shares.len(),
+        200,
+        "expected 200 user shares, got {} (total including admin: {})",
+        user_shares.len(),
+        shares.len()
+    );
+
+    // First and last shares present -> nothing dropped at the fragment seams.
+    assert!(user_shares.iter().any(|s| s.name == "share_001"));
+    assert!(user_shares.iter().any(|s| s.name == "share_200"));
+
+    // The long comment must survive reassembly intact (it straddles fragment
+    // boundaries), so a truncated/misjoined stub would corrupt or drop it.
+    let sample = user_shares
+        .iter()
+        .find(|s| s.name == "share_100")
+        .expect("share_100 missing");
+    assert!(
+        sample
+            .comment
+            .starts_with("This is a deliberately long share comment"),
+        "comment came back corrupted/truncated: {:?}",
+        sample.comment
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn shares50_connect_to_first_and_last() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SHARES50_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+
+    // Connect to first share.
+    let tree1 = Tree::connect(&mut conn, "share_01")
+        .await
+        .expect("tree connect to share_01 failed");
+    tree1
+        .disconnect(&mut conn)
+        .await
+        .expect("disconnect failed");
+
+    // Connect to last share.
+    let tree50 = Tree::connect(&mut conn, "share_50")
+        .await
+        .expect("tree connect to share_50 failed");
+    tree50
+        .disconnect(&mut conn)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── Tiny MaxReadSize (smb-maxreadsize) ───────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn maxread_negotiated_small() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(MAXREAD_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+
+    let params = conn.params().unwrap();
+    assert!(
+        params.max_read_size <= 65536,
+        "expected max_read_size <= 64KB, got {}",
+        params.max_read_size
+    );
+    assert!(
+        params.max_write_size <= 65536,
+        "expected max_write_size <= 64KB, got {}",
+        params.max_write_size
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn maxread_large_file_still_works() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(MAXREAD_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect failed");
+
+    // 512 KB file with 64 KB max read/write -> many chunks.
+    let test_path = "docker_test_maxread.tmp";
+    let test_data: Vec<u8> = (0..524_288).map(|i| (i % 199) as u8).collect();
+
+    tree.write_file_pipelined(&mut conn, test_path, &test_data)
+        .await
+        .expect("write_file_pipelined failed (maxreadsize)");
+
+    let data = tree
+        .read_file_pipelined(&mut conn, test_path)
+        .await
+        .expect("read_file_pipelined failed (maxreadsize)");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn maxread_read_file_errors_on_file_larger_than_single_read() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(MAXREAD_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect failed");
+
+    // The server negotiates a 64 KiB MaxReadSize; a 128 KiB file can't come
+    // back in a single READ. read_file must fail with a typed error, not a
+    // truncated 64 KiB buffer.
+    let test_path = "docker_test_maxread_toolarge.tmp";
+    let test_data: Vec<u8> = (0..128 * 1024_usize).map(|i| (i % 251) as u8).collect();
+    tree.write_file_pipelined(&mut conn, test_path, &test_data)
+        .await
+        .expect("write_file_pipelined failed");
+
+    let err = tree
+        .read_file(&mut conn, test_path)
+        .await
+        .expect_err("read_file must reject a file larger than MaxReadSize");
+    assert!(
+        matches!(err, smb2::Error::FileTooLargeForSingleRead { .. }),
+        "expected FileTooLargeForSingleRead, got {err:?}"
+    );
+
+    // The pipelined reader handles it fine — same file, whole content.
+    let data = tree
+        .read_file_pipelined(&mut conn, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data, test_data, "pipelined read returns the whole file");
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn maxread_streaming_download() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: MAXREAD_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect failed");
+
+    let tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "docker_test_maxread_stream.tmp";
+    let test_data: Vec<u8> = (0..262_144).map(|i| (i % 251) as u8).collect();
+
+    client
+        .write_file(&tree, test_path, &test_data)
+        .await
+        .expect("write_file failed");
+
+    let mut download = client
+        .download(&tree, test_path)
+        .await
+        .expect("download failed");
+
+    let mut received = Vec::new();
+    let mut chunk_count = 0u32;
+    while let Some(chunk) = download.next_chunk().await {
+        let bytes = chunk.expect("next_chunk failed");
+        received.extend_from_slice(&bytes);
+        chunk_count += 1;
+    }
+
+    assert_eq!(received, test_data);
+    // With 64KB max read and 256KB file, we should get at least 4 chunks.
+    assert!(
+        chunk_count >= 4,
+        "expected at least 4 chunks, got {}",
+        chunk_count
+    );
+
+    drop(download);
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── DFS tests (smb-dfs-root:10456 -> smb-dfs-target:10457) ─────────
+
+/// Helper: SmbClient connected to the DFS root server.
+///
+/// The DFS link in the root share points to `smb-dfs-target\files` (Docker
+/// internal hostname). Since the test runs on the host, we override
+/// `smb-dfs-target` to `127.0.0.1:10457` (the port-mapped address).
+async fn dfs_client() -> SmbClient {
+    let mut overrides = HashMap::new();
+    overrides.insert("smb-dfs-target".to_string(), DFS_TARGET_ADDR.to_string());
+    SmbClient::connect(ClientConfig {
+        addr: DFS_ROOT_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: overrides,
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("SmbClient::connect to smb-dfs-root failed")
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_tree_connect_reports_dfs_capability() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let tree = client
+        .connect_share("dfs")
+        .await
+        .expect("connect_share('dfs') failed");
+
+    assert!(tree.is_dfs, "expected DFS root share to report is_dfs=true");
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_read_file_through_link() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let mut tree = client
+        .connect_share("dfs")
+        .await
+        .expect("connect_share('dfs') failed");
+
+    // "data/hello.txt" goes through the DFS link to smb-dfs-target's "files" share.
+    let data = client
+        .read_file(&mut tree, "data/hello.txt")
+        .await
+        .expect("read_file through DFS link failed");
+
+    let text = String::from_utf8(data).expect("not UTF-8");
+    assert_eq!(text.trim(), "Hello from DFS target!");
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_resolve_is_relative_to_the_share_the_caller_holds() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let mut tree = client
+        .connect_share("dfs")
+        .await
+        .expect("connect_share('dfs') failed");
+    assert!(tree.is_dfs);
+
+    // A file in the DFS root share itself (seeded by the fixture): the
+    // CREATE carries `server\share\path`, and the answer must not.
+    let resolved = client
+        .resolve(&mut tree, "ROOT-FILE.TXT")
+        .await
+        .expect("resolve on the DFS root share failed");
+    assert_eq!(resolved.path, "Root-File.txt");
+
+    // Through a link: the tree stays on the root share, and the path comes
+    // back relative to it, link folder included, so it opens the same file.
+    let through_link = client
+        .resolve(&mut tree, "data/HELLO.TXT")
+        .await
+        .expect("resolve through the DFS link failed");
+    assert_eq!(through_link.path, "data/hello.txt");
+    assert_eq!(tree.share_name, "dfs");
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_list_directory_through_link() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let mut tree = client
+        .connect_share("dfs")
+        .await
+        .expect("connect_share('dfs') failed");
+
+    // List the "data/" directory, which is a DFS link to smb-dfs-target's "files" share.
+    let entries = client
+        .list_directory(&mut tree, "data")
+        .await
+        .expect("list_directory through DFS link failed");
+
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"hello.txt"),
+        "expected hello.txt in DFS-linked directory, got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"subdir"),
+        "expected subdir in DFS-linked directory, got: {:?}",
+        names
+    );
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_a_directory_reader_lists_through_a_link() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let mut tree = client
+        .connect_share("dfs")
+        .await
+        .expect("connect_share('dfs') failed");
+
+    let mut reader = client
+        .open_directory_reader(&mut tree, "data")
+        .await
+        .expect("open_directory_reader through the DFS link");
+    let mut names = Vec::new();
+    while let Some(batch) = reader.next_batch().await.expect("next_batch") {
+        names.extend(batch.into_iter().map(|e| e.name));
+    }
+    assert!(
+        names.iter().any(|n| n == "hello.txt") && names.iter().any(|n| n == "subdir"),
+        "expected the link target's entries, got {names:?}"
+    );
+    assert_eq!(
+        tree.share_name, "dfs",
+        "the caller's tree stays on its share"
+    );
+}
+
+/// Browsing into a link and back out on the same tree: the tree stays on the
+/// root share, so the root listing is the root's, not the target's.
+#[tokio::test]
+#[ignore]
+async fn dfs_listing_a_link_then_the_root_lists_the_root() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let mut tree = client
+        .connect_share("dfs")
+        .await
+        .expect("connect_share('dfs') failed");
+
+    let linked = client
+        .list_directory(&mut tree, "data")
+        .await
+        .expect("list_directory through the link");
+    assert!(
+        linked.iter().any(|e| e.name == "hello.txt"),
+        "expected the target's hello.txt, got {linked:?}"
+    );
+
+    let root = client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("list_directory of the root share");
+    let names: Vec<&str> = root.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"Root-File.txt") && names.contains(&"data"),
+        "expected the root share's own entries, got {names:?}"
+    );
+    assert_eq!(tree.share_name, "dfs");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_write_and_read_roundtrip() {
+    let _ = env_logger::try_init();
+
+    let test_path = "data/docker_dfs_roundtrip.tmp";
+    let test_data = b"DFS roundtrip test data 1234567890";
+
+    // Write through DFS link using a fresh client.
+    {
+        let mut client = dfs_client().await;
+        let tree = client
+            .connect_share("dfs")
+            .await
+            .expect("connect_share('dfs') failed");
+
+        client
+            .write_file(&tree, test_path, test_data)
+            .await
+            .expect("write_file through DFS link failed");
+
+        client
+            .disconnect_share(&tree)
+            .await
+            .expect("disconnect failed");
+    }
+
+    // Read back through DFS link using a fresh client (separate DFS resolution).
+    {
+        let mut client = dfs_client().await;
+        let mut tree = client
+            .connect_share("dfs")
+            .await
+            .expect("connect_share('dfs') failed");
+
+        let data = client
+            .read_file(&mut tree, test_path)
+            .await
+            .expect("read_file through DFS link failed");
+        assert_eq!(data, test_data);
+
+        // Clean up through the link: the tree stayed on the root share.
+        client
+            .delete_file(&tree, test_path)
+            .await
+            .expect("delete_file on target failed");
+
+        client
+            .disconnect_share(&tree)
+            .await
+            .expect("disconnect failed");
+    }
+}
+
+// ── DFS links in every call (smb-dfs-root `data` -> smb-dfs-target `files`) ──
+//
+// The streaming, handle, batch, and watch calls follow the link and leave the
+// caller's tree on the root share, so one tree keeps serving both the link and
+// the root share's own files.
+
+/// Read a whole download into memory.
+async fn drain(mut download: smb2::client::FileDownload<'_>) -> Vec<u8> {
+    let mut received = Vec::new();
+    while let Some(chunk) = download.next_chunk().await {
+        received.extend_from_slice(&chunk.expect("next_chunk failed"));
+    }
+    received
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_link_download_reads_the_target() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let tree = client.connect_share("dfs").await.expect("connect_share");
+
+    let hello = drain(
+        client
+            .download(&tree, "data/hello.txt")
+            .await
+            .expect("download through the link"),
+    )
+    .await;
+    assert_eq!(
+        String::from_utf8_lossy(&hello).trim(),
+        "Hello from DFS target!"
+    );
+
+    // Again, deeper: the second trip reuses the referral and the target share.
+    let nested = drain(
+        client
+            .download(&tree, "data/subdir/nested.txt")
+            .await
+            .expect("second download through the link"),
+    )
+    .await;
+    assert_eq!(String::from_utf8_lossy(&nested).trim(), "Nested file");
+
+    // The caller's tree never moved, so the root share's own file still opens.
+    assert_eq!(tree.share_name, "dfs");
+    let root = drain(
+        client
+            .download(&tree, "Root-File.txt")
+            .await
+            .expect("download from the root share itself"),
+    )
+    .await;
+    assert_eq!(String::from_utf8_lossy(&root).trim(), "root");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_link_set_times_reaches_the_target() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let mut tree = client.connect_share("dfs").await.expect("connect_share");
+    let path = "data/_dfs_link_set_times.tmp";
+    client
+        .write_file(&tree, path, b"dated")
+        .await
+        .expect("write_file");
+
+    let modified = filetime(1_000_000_000);
+    client
+        .set_times(&tree, path, smb2::FileTimes::new().set_modified(modified))
+        .await
+        .expect("set_times through the link");
+    assert_eq!(tree.share_name, "dfs", "the caller's tree stays put");
+
+    let info = client
+        .stat(&mut tree, path)
+        .await
+        .expect("stat through the link");
+    assert_eq!(info.modified, modified);
+    let (_, read) = client
+        .read_file_compound_with_info(&mut tree, path)
+        .await
+        .expect("read through the link");
+    assert_eq!(read.modified, modified);
+
+    client.delete_file(&tree, path).await.expect("delete_file");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_link_file_writer_and_reader_reach_the_target() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let tree = client.connect_share("dfs").await.expect("connect_share");
+    let path = "data/_dfs_link_writer.tmp";
+
+    let mut writer = client
+        .create_file_writer(&tree, path)
+        .await
+        .expect("create_file_writer through the link");
+    writer
+        .write_chunk(b"written through the link")
+        .await
+        .expect("write_chunk");
+    writer.finish().await.expect("finish");
+
+    let reader = client
+        .open_file_reader(&tree, path)
+        .await
+        .expect("open_file_reader through the link");
+    let back = reader.read_at(0, 64).await.expect("read_at");
+    reader.close().await.expect("reader close");
+    assert_eq!(back, b"written through the link");
+
+    let results = client.delete_files(&tree, &[path]).await;
+    assert!(results.iter().all(|r| r.is_ok()), "cleanup: {results:?}");
+    assert_eq!(tree.share_name, "dfs");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_link_batches_follow_the_link_item_by_item() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let tree = client.connect_share("dfs").await.expect("connect_share");
+    let (a, b) = ("data/_dfs_link_batch_a.tmp", "data/_dfs_link_batch_b.tmp");
+    for path in [a, b] {
+        let mut writer = client
+            .create_file_writer(&tree, path)
+            .await
+            .expect("writer");
+        writer.write_chunk(b"batch").await.expect("write_chunk");
+        writer.finish().await.expect("finish");
+    }
+
+    // Two items behind the link and one in the root share, in one batch.
+    let stats = client.stat_files(&tree, &[a, "Root-File.txt", b]).await;
+    let sizes: Vec<u64> = stats
+        .into_iter()
+        .map(|s| s.expect("stat_files item").size)
+        .collect();
+    assert_eq!(sizes, [5, 5, 5]);
+
+    let renamed = "data/_dfs_link_batch_renamed.tmp";
+    let results = client.rename_files(&tree, &[(a, renamed)]).await;
+    assert!(
+        results.iter().all(|r| r.is_ok()),
+        "rename_files: {results:?}"
+    );
+
+    let results = client.delete_files(&tree, &[renamed, b]).await;
+    assert!(
+        results.iter().all(|r| r.is_ok()),
+        "delete_files: {results:?}"
+    );
+    assert_eq!(
+        tree.share_name, "dfs",
+        "a batch leaves the caller's tree put"
+    );
+
+    let gone = client.stat_files(&tree, &[renamed, b]).await;
+    assert!(
+        gone.iter().all(|r| r
+            .as_ref()
+            .is_err_and(|e| e.kind() == smb2::ErrorKind::NotFound)),
+        "expected both deleted, got {gone:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn dfs_link_watch_sees_changes_on_the_target() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_client().await;
+    let tree = client.connect_share("dfs").await.expect("connect_share");
+    // Its own directory, so the other DFS tests writing into `data` stay quiet.
+    // `create_directory` moves the tree it's given, so it gets a copy.
+    let dir = "data/_dfs_link_watch";
+    let on_target = tree.clone();
+    let _ = client.create_directory(&on_target, dir).await;
+
+    let mut watcher = client
+        .watch(&tree, dir, false)
+        .await
+        .expect("watch through the link");
+    let watched = "data/_dfs_link_watch/_dfs_link_watched.tmp";
+    let (events, write) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(10), watcher.next_events()),
+        async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut writer = client.create_file_writer(&tree, watched).await?;
+            writer.write_chunk(b"watch me").await?;
+            writer.finish().await
+        }
+    );
+    write.expect("write into the watched directory");
+    let events = events
+        .expect("timed out waiting for a change notification")
+        .expect("next_events failed");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.action == smb2::FileNotifyAction::Added
+                && e.filename == "_dfs_link_watched.tmp"),
+        "expected the file to be reported as added, got {events:?}"
+    );
+    watcher.close().await.expect("watcher close");
+
+    let results = client.delete_files(&tree, &[watched]).await;
+    assert!(results.iter().all(|r| r.is_ok()), "cleanup: {results:?}");
+    client
+        .delete_directory(&tree, dir)
+        .await
+        .expect("delete_directory");
+}
+
+// ── Streamed write (smb-guest) ──────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_1mb.tmp";
+    let total_size = 1_048_576usize; // 1 MB
+    let chunk_size = 256 * 1024; // 256 KB
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 199) as u8).collect();
+
+    let mut offset = 0usize;
+    let data_ref = &test_data;
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if offset >= data_ref.len() {
+            return None;
+        }
+        let end = (offset + chunk_size).min(data_ref.len());
+        let chunk = data_ref[offset..end].to_vec();
+        offset = end;
+        Some(Ok(chunk))
+    };
+
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    assert_eq!(written, total_size as u64);
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_small_file() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_small.tmp";
+    let test_data: Vec<u8> = (0..100).map(|i| (i % 199) as u8).collect();
+
+    let mut called = false;
+    let data_clone = test_data.clone();
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if called {
+            return None;
+        }
+        called = true;
+        Some(Ok(data_clone.clone()))
+    };
+
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    assert_eq!(written, 100);
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data, test_data);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_large() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_10mb.tmp";
+    let total_size = 10 * 1024 * 1024usize; // 10 MB
+    let chunk_size = 256 * 1024;
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 199) as u8).collect();
+
+    let mut offset = 0usize;
+    let data_ref = &test_data;
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if offset >= data_ref.len() {
+            return None;
+        }
+        let end = (offset + chunk_size).min(data_ref.len());
+        let chunk = data_ref[offset..end].to_vec();
+        offset = end;
+        Some(Ok(chunk))
+    };
+
+    let start = std::time::Instant::now();
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    let elapsed = start.elapsed();
+    assert_eq!(written, total_size as u64);
+
+    println!(
+        "Streamed write: {} bytes in {:.2?} ({:.1} MB/s)",
+        written,
+        elapsed,
+        written as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64()
+    );
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_empty() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_empty.tmp";
+
+    let mut next_chunk = || -> Option<Result<Vec<u8>, std::io::Error>> { None };
+
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    assert_eq!(written, 0);
+
+    // Verify empty file was created.
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert!(data.is_empty(), "expected empty file");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn maxread_streamed_write() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(MAXREAD_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect failed");
+
+    let test_path = "smb2_test_streamed_maxread.tmp";
+    let total_size = 512 * 1024usize; // 512 KB
+    let chunk_size = 64 * 1024; // 64 KB (matches server max)
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 199) as u8).collect();
+
+    let mut offset = 0usize;
+    let data_ref = &test_data;
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if offset >= data_ref.len() {
+            return None;
+        }
+        let end = (offset + chunk_size).min(data_ref.len());
+        let chunk = data_ref[offset..end].to_vec();
+        offset = end;
+        Some(Ok(chunk))
+    };
+
+    let written = tree
+        .write_file_streamed(&mut conn, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed (maxreadsize)");
+    assert_eq!(written, total_size as u64);
+
+    let data = tree
+        .read_file_pipelined(&mut conn, test_path)
+        .await
+        .expect("read_file_pipelined failed (maxreadsize)");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn signing_streamed_write() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(SIGNING_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "testuser", "testpass", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "private")
+        .await
+        .expect("tree connect failed");
+
+    let test_path = "smb2_test_streamed_signing.tmp";
+    let total_size = 512 * 1024usize;
+    let chunk_size = 64 * 1024;
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 199) as u8).collect();
+
+    let mut offset = 0usize;
+    let data_ref = &test_data;
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if offset >= data_ref.len() {
+            return None;
+        }
+        let end = (offset + chunk_size).min(data_ref.len());
+        let chunk = data_ref[offset..end].to_vec();
+        offset = end;
+        Some(Ok(chunk))
+    };
+
+    let written = tree
+        .write_file_streamed(&mut conn, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed (signing)");
+    assert_eq!(written, total_size as u64);
+
+    let data = tree
+        .read_file_pipelined(&mut conn, test_path)
+        .await
+        .expect("read_file_pipelined failed (signing)");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn encryption_streamed_write() {
+    let _ = env_logger::try_init();
+
+    let mut client = encryption_client().await;
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_encryption.tmp";
+    let total_size = 512 * 1024usize;
+    let chunk_size = 64 * 1024;
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 199) as u8).collect();
+
+    let mut offset = 0usize;
+    let data_ref = &test_data;
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if offset >= data_ref.len() {
+            return None;
+        }
+        let end = (offset + chunk_size).min(data_ref.len());
+        let chunk = data_ref[offset..end].to_vec();
+        offset = end;
+        Some(Ok(chunk))
+    };
+
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed (encryption)");
+    assert_eq!(written, total_size as u64);
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed (encryption)");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn readonly_streamed_write_fails() {
+    let _ = env_logger::try_init();
+
+    let mut conn = Connection::connect(READONLY_ADDR, TIMEOUT)
+        .await
+        .expect("connect failed");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("session setup failed");
+    let tree = Tree::connect(&mut conn, "readonly")
+        .await
+        .expect("tree connect failed");
+
+    let mut next_chunk =
+        || -> Option<Result<Vec<u8>, std::io::Error>> { Some(Ok(vec![0x42; 100])) };
+
+    let result = tree
+        .write_file_streamed(
+            &mut conn,
+            "smb2_test_streamed_readonly.tmp",
+            &mut next_chunk,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "expected streamed write to fail on readonly share"
+    );
+
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_early_stop() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_early_stop.tmp";
+    let chunk_size = 1024usize;
+    let chunks_to_send = 2;
+
+    // Build deterministic data for 2 chunks.
+    let expected_data: Vec<u8> = (0..(chunk_size * chunks_to_send))
+        .map(|i| (i % 199) as u8)
+        .collect();
+
+    let mut call_count = 0usize;
+    let data_ref = &expected_data;
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if call_count >= chunks_to_send {
+            return None; // Stop early (a 10-chunk file would need 10 calls).
+        }
+        let start = call_count * chunk_size;
+        let end = start + chunk_size;
+        let chunk = data_ref[start..end].to_vec();
+        call_count += 1;
+        Some(Ok(chunk))
+    };
+
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    assert_eq!(written, (chunk_size * chunks_to_send) as u64);
+
+    // Verify partial file exists with correct content.
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data.len(), expected_data.len(), "size mismatch");
+    assert_eq!(data, expected_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── Streamed write stress tests ──────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_stress_100mb() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_stress_100mb.tmp";
+    let total_size = 100 * 1024 * 1024usize; // 100 MB
+    let chunk_size = 1024 * 1024; // 1 MB chunks
+
+    // Build deterministic data.
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 251) as u8).collect();
+
+    let mut offset = 0usize;
+    let data_ref = &test_data;
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if offset >= data_ref.len() {
+            return None;
+        }
+        let end = (offset + chunk_size).min(data_ref.len());
+        let chunk = data_ref[offset..end].to_vec();
+        offset = end;
+        Some(Ok(chunk))
+    };
+
+    let start = std::time::Instant::now();
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    let write_elapsed = start.elapsed();
+    assert_eq!(written, total_size as u64);
+
+    println!(
+        "Stress write: {} MB in {:.2?} ({:.1} MB/s)",
+        total_size / (1024 * 1024),
+        write_elapsed,
+        written as f64 / (1024.0 * 1024.0) / write_elapsed.as_secs_f64()
+    );
+
+    // Read back and verify integrity.
+    let read_data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(read_data.len(), test_data.len(), "size mismatch");
+    assert_eq!(
+        read_data, test_data,
+        "content mismatch in 100 MB stress test"
+    );
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_rapid_sequential_50_files() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let file_count = 50;
+    let file_size = 1024usize; // 1 KB each
+
+    for i in 0..file_count {
+        let test_path = format!("smb2_test_rapid_seq_{:03}.tmp", i);
+        let test_data: Vec<u8> = (0..file_size).map(|j| ((j + i * 7) % 251) as u8).collect();
+
+        let mut called = false;
+        let data_clone = test_data.clone();
+        let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+            if called {
+                return None;
+            }
+            called = true;
+            Some(Ok(data_clone.clone()))
+        };
+
+        let written = client
+            .write_file_streamed(&tree, &test_path, &mut next_chunk)
+            .await
+            .unwrap_or_else(|e| panic!("write_file_streamed failed on file {}: {}", i, e));
+        assert_eq!(written, file_size as u64, "wrong byte count for file {}", i);
+    }
+
+    // Read back all 50 files and verify.
+    for i in 0..file_count {
+        let test_path = format!("smb2_test_rapid_seq_{:03}.tmp", i);
+        let expected: Vec<u8> = (0..file_size).map(|j| ((j + i * 7) % 251) as u8).collect();
+
+        let data = client
+            .read_file(&mut tree, &test_path)
+            .await
+            .unwrap_or_else(|e| panic!("read_file failed on file {}: {}", i, e));
+        assert_eq!(data, expected, "content mismatch on file {}", i);
+    }
+
+    // Cleanup.
+    for i in 0..file_count {
+        let test_path = format!("smb2_test_rapid_seq_{:03}.tmp", i);
+        client
+            .delete_file(&tree, &test_path)
+            .await
+            .unwrap_or_else(|e| panic!("delete_file failed on file {}: {}", i, e));
+    }
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_large_single_chunk() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_large_chunk.tmp";
+    let total_size = 5 * 1024 * 1024usize; // 5 MB as a single chunk
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 251) as u8).collect();
+
+    // Deliver the entire 5 MB in one callback call. This forces the
+    // chunk-splitting logic to split against max_write_size.
+    let mut called = false;
+    let data_clone = test_data.clone();
+    let mut next_chunk = move || -> Option<Result<Vec<u8>, std::io::Error>> {
+        if called {
+            return None;
+        }
+        called = true;
+        Some(Ok(data_clone.clone()))
+    };
+
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    assert_eq!(written, total_size as u64);
+
+    let read_data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(read_data.len(), test_data.len(), "size mismatch");
+    assert_eq!(
+        read_data, test_data,
+        "content mismatch in large single-chunk test"
+    );
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_streamed_write_alternating_sizes() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_streamed_alternating.tmp";
+
+    // Build chunks alternating between 1 byte and 1 MB.
+    let small_size = 1usize;
+    let large_size = 1024 * 1024usize;
+    let num_pairs = 5; // 5 pairs of (1 byte, 1 MB)
+
+    let mut expected_data = Vec::new();
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    for pair in 0..num_pairs {
+        // Small chunk: 1 byte.
+        let small = vec![(pair * 2) as u8; small_size];
+        expected_data.extend_from_slice(&small);
+        chunks.push(small);
+
+        // Large chunk: 1 MB with deterministic pattern.
+        let large: Vec<u8> = (0..large_size)
+            .map(|j| ((j + pair * 13) % 251) as u8)
+            .collect();
+        expected_data.extend_from_slice(&large);
+        chunks.push(large);
+    }
+
+    let mut chunk_iter = chunks.into_iter();
+    let mut next_chunk =
+        move || -> Option<Result<Vec<u8>, std::io::Error>> { chunk_iter.next().map(Ok) };
+
+    let written = client
+        .write_file_streamed(&tree, test_path, &mut next_chunk)
+        .await
+        .expect("write_file_streamed failed");
+    assert_eq!(written, expected_data.len() as u64);
+
+    let read_data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(read_data.len(), expected_data.len(), "size mismatch");
+    assert_eq!(
+        read_data, expected_data,
+        "content mismatch in alternating sizes test"
+    );
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── FileWriter (push-based streaming writes) ──────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_basic() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_basic.bin";
+    let chunk1 = b"Hello, ";
+    let chunk2 = b"FileWriter ";
+    let chunk3 = b"world!";
+    let expected: Vec<u8> = [&chunk1[..], &chunk2[..], &chunk3[..]].concat();
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    writer
+        .write_chunk(chunk1)
+        .await
+        .expect("write_chunk 1 failed");
+    writer
+        .write_chunk(chunk2)
+        .await
+        .expect("write_chunk 2 failed");
+    writer
+        .write_chunk(chunk3)
+        .await
+        .expect("write_chunk 3 failed");
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, expected.len() as u64);
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data, expected, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_a_writer_checkpoint_names_the_file_it_flushed() {
+    // A write handle carries no FILE_READ_ATTRIBUTES, and the identity rides
+    // on its CREATE, so this is what proves Samba answers both identity
+    // classes on a handle like that.
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    let path = "smb2_test_writer_checkpoint.bin";
+
+    let mut writer = client
+        .create_file_writer(&tree, path)
+        .await
+        .expect("create_file_writer failed");
+    writer.write_chunk(b"durable-").await.unwrap();
+    let first = writer.flush_checkpoint().await.expect("checkpoint failed");
+    writer.write_chunk(b"prefix").await.unwrap();
+    let second = writer.flush_checkpoint().await.expect("checkpoint failed");
+    assert_eq!(writer.finish().await.unwrap(), 14);
+
+    assert_eq!((first.offset, second.offset), (8, 14));
+    let identity = first
+        .identity
+        .expect("Samba identifies a file on a write handle");
+    assert_eq!(second.identity, Some(identity));
+    let resolved = client
+        .resolve(&mut tree, path)
+        .await
+        .expect("resolve failed");
+    assert_eq!(
+        resolved.identity,
+        Some(identity),
+        "the writer's identity is the one any other open sees"
+    );
+    assert_eq!(
+        client.read_file(&mut tree, path).await.unwrap(),
+        b"durable-prefix"
+    );
+
+    client
+        .delete_file(&tree, path)
+        .await
+        .expect("cleanup failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_stat_with_identity_names_the_same_file_a_writer_checkpoint_does() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    let path = "smb2_test_stat_identity.bin";
+    let other = "smb2_test_stat_identity_other.bin";
+
+    let mut writer = client
+        .create_file_writer(&tree, path)
+        .await
+        .expect("create_file_writer failed");
+    writer.write_chunk(b"identity").await.unwrap();
+    let checkpoint = writer.flush_checkpoint().await.expect("checkpoint failed");
+    writer.finish().await.unwrap();
+    client.write_file(&tree, other, b"other").await.unwrap();
+
+    let (info, first) = client
+        .stat_with_identity(&mut tree, path)
+        .await
+        .expect("stat_with_identity failed");
+    let (_, second) = client.stat_with_identity(&mut tree, path).await.unwrap();
+    let (_, different) = client.stat_with_identity(&mut tree, other).await.unwrap();
+
+    assert_eq!(info.size, 8);
+    let first = first.expect("Samba identifies a file");
+    assert_eq!(second, Some(first), "the same file, asked twice");
+    assert_ne!(different, Some(first), "another file is another identity");
+    assert!(different.is_some());
+    assert_eq!(
+        checkpoint.identity,
+        Some(first),
+        "a stat and the writer that wrote the file agree on which file it is"
+    );
+
+    for p in [path, other] {
+        client.delete_file(&tree, p).await.expect("cleanup failed");
+    }
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+/// A listing that opts into index numbers reports, for each entry, the very
+/// number `stat_with_identity` gives for that path: the same file ID, read
+/// two ways. Without the option every entry's `index_number` stays `None`.
+#[tokio::test]
+#[ignore]
+async fn guest_a_listings_index_numbers_are_the_ones_stat_with_identity_reports() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    let dir = "smb2_test_listing_index";
+    let _ = client.delete_file(&tree, &format!("{dir}/a.txt")).await;
+    let _ = client.delete_file(&tree, &format!("{dir}/b.txt")).await;
+    let _ = client.delete_directory(&tree, &format!("{dir}/sub")).await;
+    let _ = client.delete_directory(&tree, dir).await;
+    client.create_directory(&tree, dir).await.unwrap();
+    client
+        .create_directory(&tree, &format!("{dir}/sub"))
+        .await
+        .unwrap();
+    for name in ["a.txt", "b.txt"] {
+        client
+            .write_file(&tree, &format!("{dir}/{name}"), name.as_bytes())
+            .await
+            .unwrap();
+    }
+
+    let options = smb2::ListOptions::new().index_numbers(true);
+    let listed = client
+        .list_directory_with(&mut tree, dir, options)
+        .await
+        .expect("list_directory_with failed");
+    let mut seen = Vec::new();
+    for entry in listed.iter().filter(|e| e.name != "." && e.name != "..") {
+        let (_, identity) = client
+            .stat_with_identity(&mut tree, &format!("{dir}/{}", entry.name))
+            .await
+            .unwrap();
+        let identity = identity.expect("Samba identifies a file");
+        assert_eq!(
+            entry.index_number,
+            Some(identity.index_number),
+            "{}: the listing and the stat disagree on which file it is",
+            entry.name
+        );
+        seen.push(entry.name.clone());
+    }
+    seen.sort();
+    assert_eq!(seen, ["a.txt", "b.txt", "sub"]);
+
+    // The reader the listing collects through reports the same.
+    let mut reader = client
+        .open_directory_reader_with(&mut tree, dir, options)
+        .await
+        .unwrap();
+    let mut from_reader = Vec::new();
+    while let Some(batch) = reader.next_batch().await.unwrap() {
+        from_reader.extend(batch.into_iter().map(|e| (e.name, e.index_number)));
+    }
+    let mut from_listing: Vec<_> = listed
+        .iter()
+        .map(|e| (e.name.clone(), e.index_number))
+        .collect();
+    from_reader.sort();
+    from_listing.sort();
+    assert_eq!(from_reader, from_listing);
+
+    let plain = client.list_directory(&mut tree, dir).await.unwrap();
+    assert!(plain.iter().all(|e| e.index_number.is_none()), "{plain:?}");
+
+    for name in ["a.txt", "b.txt"] {
+        client
+            .delete_file(&tree, &format!("{dir}/{name}"))
+            .await
+            .expect("cleanup failed");
+    }
+    client
+        .delete_directory(&tree, &format!("{dir}/sub"))
+        .await
+        .expect("cleanup failed");
+    client
+        .delete_directory(&tree, dir)
+        .await
+        .expect("cleanup failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+/// Resume `checkpoint` at `path`, waiting out the moment after a crash when
+/// the dead connection's open still holds the file (a writer shares nothing,
+/// so the server answers `STATUS_SHARING_VIOLATION` until it has noticed).
+async fn resume_after_crash(
+    client: &mut SmbClient,
+    tree: &Tree,
+    path: &str,
+    checkpoint: &smb2::WriteCheckpoint,
+) -> smb2::Result<smb2::FileWriter> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match client.resume_file_writer(tree, path, checkpoint).await {
+            Err(e)
+                if e.kind() == smb2::ErrorKind::SharingViolation
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_an_upload_resumes_from_its_checkpoint_after_a_crash() {
+    let _ = env_logger::try_init();
+    let path = "smb2_test_resume_after_crash.bin";
+
+    // Before the crash: a checkpoint at 8, then 12 more bytes that land but
+    // that the persisted checkpoint doesn't cover.
+    let saved = {
+        let mut client = guest_client().await;
+        let tree = client.connect_share("public").await.unwrap();
+        let mut writer = client.create_file_writer(&tree, path).await.unwrap();
+        writer.write_chunk(b"durable-").await.unwrap();
+        let saved = writer.flush_checkpoint().await.unwrap();
+        writer.write_chunk(b"left-behind!").await.unwrap();
+        assert_eq!(writer.flush_checkpoint().await.unwrap().offset, 20);
+        // The crash: neither finished nor aborted, and the whole client goes.
+        drop(writer);
+        drop(client);
+        saved
+    };
+    assert_eq!(saved.offset, 8);
+
+    let mut client = guest_client().await;
+    let mut tree = client.connect_share("public").await.unwrap();
+    let mut writer = resume_after_crash(&mut client, &tree, path, &saved)
+        .await
+        .expect("the same file, long enough, resumes");
+    assert_eq!(writer.durable_offset(), Some(8));
+    writer.write_chunk(b"prefix").await.unwrap();
+    assert_eq!(writer.finish().await.unwrap(), 6);
+
+    assert_eq!(
+        client.read_file(&mut tree, path).await.unwrap(),
+        b"durable-prefix",
+        "the checkpointed prefix, then what the resume wrote, and nothing the crash left past it"
+    );
+    client.delete_file(&tree, path).await.unwrap();
+    client.disconnect_share(&tree).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_a_resume_refuses_a_file_that_changed_under_it() {
+    use smb2::error::ResumeRefusal;
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client.connect_share("public").await.unwrap();
+    let path = "smb2_test_resume_refusals.bin";
+    let other = "smb2_test_resume_refusals.other";
+    let _ = client.delete_file(&tree, other).await;
+
+    let mut writer = client.create_file_writer(&tree, path).await.unwrap();
+    writer.write_chunk(b"0123456789").await.unwrap();
+    let saved = writer.flush_checkpoint().await.unwrap();
+    writer.finish().await.unwrap();
+    let reason = |result: smb2::Result<smb2::FileWriter>| match result {
+        Err(smb2::Error::ResumeRefused { reason, .. }) => reason,
+        Err(e) => panic!("expected ResumeRefused, got {e}"),
+        Ok(_) => panic!("the resume must be refused"),
+    };
+
+    // Truncated in place: the same file, so the same identity, but shorter.
+    client.write_file(&tree, path, b"0123").await.unwrap();
+    assert_eq!(
+        client.resolve(&mut tree, path).await.unwrap().identity,
+        saved.identity,
+        "an overwrite keeps the file"
+    );
+    assert_eq!(
+        reason(client.resume_file_writer(&tree, path, &saved).await),
+        ResumeRefusal::Truncated { length: 4 }
+    );
+
+    // Replaced: another file renamed over it, the same name and a longer
+    // length, so only the identity can tell.
+    client
+        .write_file(&tree, other, b"someone else's file")
+        .await
+        .unwrap();
+    client
+        .rename_with(
+            &tree,
+            other,
+            path,
+            smb2::RenameOptions::new().replace_if_exists(true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reason(client.resume_file_writer(&tree, path, &saved).await),
+        ResumeRefusal::Replaced
+    );
+    assert_eq!(
+        client.read_file(&mut tree, path).await.unwrap(),
+        b"someone else's file",
+        "nothing was written into it"
+    );
+
+    // Missing: the resume never creates it.
+    client.delete_file(&tree, path).await.unwrap();
+    assert_eq!(
+        reason(client.resume_file_writer(&tree, path, &saved).await),
+        ResumeRefusal::Missing
+    );
+    assert_eq!(
+        client.stat(&mut tree, path).await.unwrap_err().kind(),
+        smb2::ErrorKind::NotFound
+    );
+    client.disconnect_share(&tree).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_compound_write_exclusive_never_replaces_an_existing_file() {
+    // The one-frame write for a name that must be NEW: a file someone else put
+    // there is refused with `ErrorKind::AlreadyExists` and survives byte for
+    // byte, where `write_file_compound` would have replaced it.
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let test_path = "docker_test_compound_write_exclusive.tmp";
+    let _ = tree.delete_file(&mut conn, test_path).await;
+
+    let theirs = b"someone else's file";
+    let written = tree
+        .write_file_compound_exclusive(&mut conn, test_path, theirs)
+        .await
+        .expect("an exclusive compound write onto a free name must succeed");
+    assert_eq!(written, theirs.len() as u64);
+
+    let err = tree
+        .write_file_compound_exclusive(&mut conn, test_path, b"ours, which must not land")
+        .await
+        .expect_err("an exclusive compound write onto a taken name must be refused");
+    assert_eq!(
+        err.kind(),
+        smb2::ErrorKind::AlreadyExists,
+        "expected AlreadyExists, got: {err}"
+    );
+
+    let data = tree
+        .read_file(&mut conn, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(
+        data, theirs,
+        "the refused write must leave the existing file untouched"
+    );
+
+    // The connection is still good for the next request after the refusal.
+    tree.delete_file(&mut conn, test_path)
+        .await
+        .expect("delete_file failed");
+    tree.disconnect(&mut conn).await.expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_create_file_writer_exclusive_fails_on_existing() {
+    // Regression for the exclusive-create writer (`FileCreate` disposition):
+    // creating a name that already exists must error with
+    // `ErrorKind::AlreadyExists` instead of truncating the existing file.
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_exclusive.bin";
+    // Best-effort cleanup from a previous failed run.
+    let _ = client.delete_file(&tree, test_path).await;
+
+    // 1. First creation succeeds and writes "original" bytes.
+    let original = b"original payload";
+    let mut writer = client
+        .create_file_writer_exclusive(&tree, test_path)
+        .await
+        .expect("first exclusive-create must succeed");
+    writer
+        .write_chunk(original)
+        .await
+        .expect("write_chunk failed");
+    writer.finish().await.expect("finish failed");
+
+    // 2. Second exclusive-create against the same path must error.
+    match client.create_file_writer_exclusive(&tree, test_path).await {
+        Ok(_) => panic!("second exclusive-create on existing path must error, got Ok"),
+        Err(e) => assert_eq!(
+            e.kind(),
+            smb2::ErrorKind::AlreadyExists,
+            "expected AlreadyExists, got: {e}"
+        ),
+    }
+
+    // 3. The original bytes must survive untouched (no clobber).
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(
+        data, original,
+        "exclusive-create must not have truncated the existing file"
+    );
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_large() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_large.bin";
+    let chunk_size = 1024 * 1024; // 1 MB
+    let num_chunks = 5;
+    let total_size = chunk_size * num_chunks;
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 199) as u8).collect();
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    for chunk_idx in 0..num_chunks {
+        let start = chunk_idx * chunk_size;
+        let end = start + chunk_size;
+        writer
+            .write_chunk(&test_data[start..end])
+            .await
+            .expect("write_chunk failed");
+    }
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, total_size as u64);
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_empty_file() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_empty.bin";
+
+    let writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, 0);
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert!(data.is_empty(), "expected empty file");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_single_byte() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_single_byte.bin";
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    writer
+        .write_chunk(&[0x42])
+        .await
+        .expect("write_chunk failed");
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, 1);
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data, vec![0x42]);
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_overwrite() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_overwrite.bin";
+
+    // Write a 10 KB file first.
+    let big_data: Vec<u8> = (0..10240).map(|i| (i % 251) as u8).collect();
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed (first write)");
+    writer
+        .write_chunk(&big_data)
+        .await
+        .expect("write_chunk failed (first write)");
+    let written1 = writer.finish().await.expect("finish failed (first write)");
+    assert_eq!(written1, 10240);
+
+    // Overwrite with a 1 KB file.
+    let small_data: Vec<u8> = (0..1024).map(|i| (i % 173) as u8).collect();
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed (overwrite)");
+    writer
+        .write_chunk(&small_data)
+        .await
+        .expect("write_chunk failed (overwrite)");
+    let written2 = writer.finish().await.expect("finish failed (overwrite)");
+    assert_eq!(written2, 1024);
+
+    // Read back -- must be exactly 1 KB, no leftover from old file.
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data.len(), 1024, "expected 1 KB, got {} bytes", data.len());
+    assert_eq!(data, small_data, "content mismatch after overwrite");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_equivalence_with_pipelined() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_data: Vec<u8> = (0..512 * 1024).map(|i| (i % 199) as u8).collect();
+
+    // Write via write_file_pipelined.
+    let pipelined_path = "smb2_test_fw_equiv_pipelined.bin";
+    client
+        .write_file_pipelined(&tree, pipelined_path, &test_data)
+        .await
+        .expect("write_file_pipelined failed");
+
+    // Write via FileWriter.
+    let writer_path = "smb2_test_fw_equiv_writer.bin";
+    let chunk_size = 64 * 1024;
+    let mut writer = client
+        .create_file_writer(&tree, writer_path)
+        .await
+        .expect("create_file_writer failed");
+    for chunk in test_data.chunks(chunk_size) {
+        writer.write_chunk(chunk).await.expect("write_chunk failed");
+    }
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, test_data.len() as u64);
+
+    // Read both back and compare.
+    let pipelined_data = client
+        .read_file_pipelined(&mut tree, pipelined_path)
+        .await
+        .expect("read pipelined file failed");
+    let writer_data = client
+        .read_file_pipelined(&mut tree, writer_path)
+        .await
+        .expect("read writer file failed");
+
+    assert_eq!(pipelined_data.len(), writer_data.len(), "size mismatch");
+    assert_eq!(
+        pipelined_data, writer_data,
+        "FileWriter output differs from write_file_pipelined"
+    );
+
+    client
+        .delete_file(&tree, pipelined_path)
+        .await
+        .expect("delete pipelined file failed");
+    client
+        .delete_file(&tree, writer_path)
+        .await
+        .expect("delete writer file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_binary_data() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_binary.bin";
+
+    // Build data containing all 256 byte values, repeated for good measure.
+    let mut test_data = Vec::with_capacity(256 * 4);
+    for round in 0..4u8 {
+        for byte in 0..=255u8 {
+            test_data.push(byte.wrapping_add(round.wrapping_mul(37)));
+        }
+    }
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    // Write in two chunks to exercise boundary handling.
+    let mid = test_data.len() / 2;
+    writer
+        .write_chunk(&test_data[..mid])
+        .await
+        .expect("write_chunk 1 failed");
+    writer
+        .write_chunk(&test_data[mid..])
+        .await
+        .expect("write_chunk 2 failed");
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, test_data.len() as u64);
+
+    let data = client
+        .read_file(&mut tree, test_path)
+        .await
+        .expect("read_file failed");
+    assert_eq!(data, test_data, "binary data mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn maxread_file_writer() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: MAXREAD_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: false,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect failed");
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_maxread.bin";
+    let total_size = 200 * 1024usize; // 200 KB
+    let chunk_size = 50 * 1024; // 50 KB chunks
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 199) as u8).collect();
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    for chunk in test_data.chunks(chunk_size) {
+        writer.write_chunk(chunk).await.expect("write_chunk failed");
+    }
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, total_size as u64);
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data.len(), test_data.len(), "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn signing_file_writer() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: SIGNING_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: false,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect failed");
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_signing.bin";
+    let test_data: Vec<u8> = (0..128 * 1024).map(|i| (i % 199) as u8).collect();
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    for chunk in test_data.chunks(32 * 1024) {
+        writer.write_chunk(chunk).await.expect("write_chunk failed");
+    }
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, test_data.len() as u64);
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn encryption_file_writer() {
+    let _ = env_logger::try_init();
+
+    let mut client = encryption_client().await;
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_encryption.bin";
+    let test_data: Vec<u8> = (0..128 * 1024).map(|i| (i % 199) as u8).collect();
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    for chunk in test_data.chunks(32 * 1024) {
+        writer.write_chunk(chunk).await.expect("write_chunk failed");
+    }
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, test_data.len() as u64);
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn readonly_file_writer_error() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: READONLY_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: false,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect failed");
+    let tree = client
+        .connect_share("readonly")
+        .await
+        .expect("connect_share failed");
+
+    let is_err = client
+        .create_file_writer(&tree, "smb2_test_file_writer_readonly.bin")
+        .await
+        .is_err();
+
+    assert!(
+        is_err,
+        "expected create_file_writer to fail on readonly share"
+    );
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── FileWriter stress tests ──────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn guest_file_writer_stress_100mb() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_stress_100mb.bin";
+    let chunk_size = 1024 * 1024; // 1 MB
+    let num_chunks = 100;
+    let total_size = chunk_size * num_chunks;
+
+    // Build deterministic data
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 251) as u8).collect();
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    for chunk_idx in 0..num_chunks {
+        let start = chunk_idx * chunk_size;
+        let end = start + chunk_size;
+        writer
+            .write_chunk(&test_data[start..end])
+            .await
+            .expect("write_chunk failed");
+    }
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, total_size as u64);
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data.len(), total_size, "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn slow_file_writer_stress_100mb() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: SLOW_ADDR.to_string(),
+        timeout: Duration::from_secs(30),
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: false,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect failed");
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+
+    let test_path = "smb2_test_file_writer_slow_stress.bin";
+    let chunk_size = 512 * 1024; // 512 KB chunks to test more pipelining cycles
+    let num_chunks = 200; // 100 MB total
+    let total_size = chunk_size * num_chunks;
+
+    let test_data: Vec<u8> = (0..total_size).map(|i| (i % 173) as u8).collect();
+
+    let mut writer = client
+        .create_file_writer(&tree, test_path)
+        .await
+        .expect("create_file_writer failed");
+
+    for chunk_idx in 0..num_chunks {
+        let start = chunk_idx * chunk_size;
+        let end = start + chunk_size;
+        writer
+            .write_chunk(&test_data[start..end])
+            .await
+            .expect("write_chunk failed");
+    }
+
+    let bytes_written = writer.finish().await.expect("finish failed");
+    assert_eq!(bytes_written, total_size as u64);
+
+    let data = client
+        .read_file_pipelined(&mut tree, test_path)
+        .await
+        .expect("read_file_pipelined failed");
+    assert_eq!(data.len(), total_size, "size mismatch");
+    assert_eq!(data, test_data, "content mismatch");
+
+    client
+        .delete_file(&tree, test_path)
+        .await
+        .expect("delete_file failed");
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+// ── Diagnostics (M3) ──────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn diagnostics_basic_counters_against_smb_guest() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    let _entries = client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("list_directory failed");
+
+    let d = client.diagnostics();
+
+    // Negotiated parameters look real.
+    let n = d.primary.negotiated.expect("negotiated after connect");
+    assert!(
+        n.dialect as u16 >= 0x0210,
+        "expected SMB 2.1+, got {:?}",
+        n.dialect
+    );
+    assert!(n.max_read_size > 0);
+
+    // Counters reflect at least negotiate + session setup + tree connect + list.
+    assert!(d.primary.metrics.requests_sent >= 4);
+    assert!(d.primary.metrics.responses_routed_ok >= 4);
+    assert!(d.primary.metrics.wire_bytes_sent > 0);
+    assert!(d.primary.metrics.wire_bytes_received > 0);
+    assert_eq!(d.primary.metrics.requests_returned_err, 0);
+    assert_eq!(d.primary.metrics.responses_stray, 0);
+    assert_eq!(d.primary.metrics.responses_late_after_drop, 0);
+
+    // Session is populated.
+    let s = d.primary.session.expect("session after setup");
+    assert_ne!(s.session_id, smb2::types::SessionId::NONE);
+
+    // Server name matches the address.
+    assert!(
+        d.primary.server.starts_with("127.0.0.1"),
+        "server: {:?}",
+        d.primary.server
+    );
+
+    client
+        .disconnect_share(&tree)
+        .await
+        .expect("disconnect failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn diagnostics_counters_accumulate_across_a_reconnect() {
+    let _ = env_logger::try_init();
+
+    let mut client = guest_client().await;
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("connect_share failed");
+    let _ = client.list_directory(&mut tree, "").await;
+    let before = client.diagnostics();
+    assert_eq!(before.client.metrics.reconnects, 0);
+    assert_eq!(before.primary.metrics.reconnects_succeeded, 0);
+
+    client.reconnect().await.expect("reconnect failed");
+
+    // A reconnect revives the connection in place rather than replacing it,
+    // so its counters carry on rather than starting over. That is what makes
+    // `reconnects_succeeded` meaningful at all — a counter reset by the event
+    // it counts would always read zero — and it means the numbers describe the
+    // whole life of the client's link to this server, blips included.
+    let after = client.diagnostics();
+    assert_eq!(after.client.metrics.reconnects, 1);
+    assert_eq!(after.primary.metrics.reconnects_succeeded, 1);
+    assert!(
+        after.primary.metrics.responses_routed_ok > before.primary.metrics.responses_routed_ok,
+        "counters should carry across an in-place revival: before {} → after {}",
+        before.primary.metrics.responses_routed_ok,
+        after.primary.metrics.responses_routed_ok,
+    );
+}
+
+// ── Server-side copy (smb-guest) ─────────────────────────────────────
+//
+// Samba implements FSCTL_SRV_COPYCHUNK, so these exercise the real protocol
+// against a live server: the copy runs entirely server-side (verified via wire
+// counters), and byte ranges land where asked.
+
+#[tokio::test]
+#[ignore]
+async fn guest_server_side_copy_file_matches_and_stays_off_the_wire() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let src = "ssc_source.bin";
+    let dst = "ssc_dest.bin";
+    // 3 MiB — one conservative request (16 MiB budget), but big enough that a
+    // read-then-write copy would be obvious on the wire counters.
+    let data: Vec<u8> = (0..3 * 1024 * 1024_usize)
+        .map(|i| i.wrapping_mul(31).wrapping_add(7) as u8)
+        .collect();
+    tree.write_file(&mut conn, src, &data)
+        .await
+        .expect("write source");
+
+    // The copy must move far fewer bytes than the file size — the data never
+    // crosses the wire, only the small IOCTL control messages do.
+    let before = {
+        let m = conn.diagnostics().metrics;
+        m.wire_bytes_sent + m.wire_bytes_received
+    };
+    let copied = tree
+        .server_side_copy_file(&mut conn, src, dst)
+        .await
+        .expect("server-side copy");
+    let after = {
+        let m = conn.diagnostics().metrics;
+        m.wire_bytes_sent + m.wire_bytes_received
+    };
+    assert_eq!(copied, data.len() as u64, "reports every byte copied");
+
+    let wire = after - before;
+    assert!(
+        wire < data.len() as u64 / 10,
+        "server-side copy moved {wire} wire bytes for a {}-byte file; the data \
+         must not cross the wire",
+        data.len()
+    );
+
+    let got = tree.read_file(&mut conn, dst).await.expect("read dest");
+    assert_eq!(got, data, "destination must byte-match the source");
+
+    let _ = tree.delete_file(&mut conn, src).await;
+    let _ = tree.delete_file(&mut conn, dst).await;
+    tree.disconnect(&mut conn).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_server_side_copy_batches_large_file() {
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    let src = "ssc_big_source.bin";
+    let dst = "ssc_big_dest.bin";
+    // 20 MiB exceeds the 16 MiB conservative per-request budget, so the copy
+    // must span more than one FSCTL_SRV_COPYCHUNK request (batching path).
+    let data: Vec<u8> = (0..20 * 1024 * 1024_usize)
+        .map(|i| i.wrapping_mul(131).wrapping_add(17) as u8)
+        .collect();
+    tree.write_file(&mut conn, src, &data)
+        .await
+        .expect("write source");
+
+    let copied = tree
+        .server_side_copy_file(&mut conn, src, dst)
+        .await
+        .expect("server-side copy of large file");
+    assert_eq!(copied, data.len() as u64, "reports every byte copied");
+
+    // The destination is the full size on the server.
+    let dst_info = tree.stat(&mut conn, dst).await.expect("stat dest");
+    assert_eq!(
+        dst_info.size,
+        data.len() as u64,
+        "destination is fully sized"
+    );
+
+    // Read it all back (pipelined; read_file is for small files only) and
+    // byte-match — this proves the second batch (the 16..20 MiB request) landed
+    // at the right offset, not just that the totals add up.
+    let got = tree
+        .read_file_pipelined(&mut conn, dst)
+        .await
+        .expect("pipelined read dest");
+    assert_eq!(got.len(), data.len());
+    assert_eq!(
+        got.iter().zip(data.iter()).position(|(a, b)| a != b),
+        None,
+        "large destination must byte-match the source"
+    );
+
+    let _ = tree.delete_file(&mut conn, src).await;
+    let _ = tree.delete_file(&mut conn, dst).await;
+    tree.disconnect(&mut conn).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn guest_server_side_copy_range_then_positioned_append() {
+    use std::sync::Arc;
+
+    let _ = env_logger::try_init();
+
+    let (mut conn, tree) = connect_guest().await;
+
+    // The archive tail-rewrite shape: keep the head of a source, drop its tail,
+    // then append fresh data — the head moves server-side, only the new bytes
+    // cross the wire.
+    let head: Vec<u8> = std::iter::repeat_n(b'H', 2000).collect();
+    let tail: Vec<u8> = std::iter::repeat_n(b'T', 1000).collect();
+    let mut source = head.clone();
+    source.extend_from_slice(&tail);
+
+    let src = "ssc_range_src.bin";
+    let tmp = "ssc_range_tmp.bin";
+    tree.write_file(&mut conn, src, &source)
+        .await
+        .expect("write source");
+
+    // Server-side copy just the retained head into a fresh temp.
+    let copied = tree
+        .server_side_copy_file_range(&mut conn, src, 0, tmp, 0, head.len() as u64)
+        .await
+        .expect("server-side copy of head range");
+    assert_eq!(copied, head.len() as u64);
+
+    // Append new data right after the copied head with a positioned writer.
+    let appended = b"...freshly appended entries...";
+    let tree = Arc::new(tree);
+    let mut writer = tree
+        .create_file_writer_at(conn.clone(), tmp, head.len() as u64)
+        .await
+        .expect("open positioned writer");
+    writer.write_chunk(appended).await.expect("append chunk");
+    writer.finish().await.expect("finish append");
+
+    // The temp must be head + appended, with the source tail gone.
+    let got = tree.read_file(&mut conn, tmp).await.expect("read temp");
+    let mut expected = head.clone();
+    expected.extend_from_slice(appended);
+    assert_eq!(got, expected, "temp = retained head + appended tail");
+
+    let _ = tree.delete_file(&mut conn, src).await;
+    let _ = tree.delete_file(&mut conn, tmp).await;
+    tree.disconnect(&mut conn).await.expect("disconnect");
+}
+
+// ── ECHO keepalive against real servers ──────────────────────────────
+
+/// A real server answers the ECHO probe the keepalive sends.
+///
+/// Everything the keepalive does rests on this one fact, and no mock can
+/// establish it: the probe carries the session id, gets signed when the
+/// session signs and encrypted when the session encrypts, and names no tree.
+/// A server that ignored such a frame would leave every connection to it
+/// without liveness proof, so slow-but-healthy operations would fall back to
+/// the plain response deadline.
+///
+/// ⚠️ Deliberately not "every probe is answered". A real NAS drops them under
+/// write load, and a dropped probe is harmless by design: it withholds the
+/// deadline extension and nothing else.
+///
+/// Run against four session modes because the header rules are exactly what is
+/// in question: guest (unsigned), authenticated, mandatory signing, and
+/// mandatory encryption.
+///
+/// The connection is kept quiet-but-busy with a CHANGE_NOTIFY on a directory
+/// nothing touches, which is the shape the keepalive exists for: something
+/// outstanding, nothing coming back.
+#[tokio::test]
+#[ignore]
+async fn a_real_server_answers_the_echo_keepalive_probe() {
+    let _ = env_logger::try_init();
+
+    for (label, addr, user, pass, share) in [
+        ("guest", GUEST_ADDR, "", "", "public"),
+        (
+            "authenticated",
+            AUTH_ADDR,
+            "testuser",
+            "testpass",
+            "private",
+        ),
+        ("signed", SIGNING_ADDR, "testuser", "testpass", "private"),
+        (
+            "encrypted",
+            ENCRYPTION_ADDR,
+            "testuser",
+            "testpass",
+            "private",
+        ),
+    ] {
+        let mut conn = Connection::connect(addr, TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: connect failed: {e}"));
+        conn.negotiate()
+            .await
+            .unwrap_or_else(|e| panic!("{label}: negotiate failed: {e}"));
+        let _session = Session::setup(&mut conn, user, pass, "")
+            .await
+            .unwrap_or_else(|e| panic!("{label}: session setup failed: {e}"));
+        let tree = Tree::connect(&mut conn, share)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: tree connect failed: {e}"));
+
+        conn.set_keepalive(Some(Duration::from_millis(200)));
+
+        // Park a long-poll on the wire so the connection has work outstanding
+        // and nothing to say. A `Watcher` is exactly the shape a consumer
+        // produces, and the CHANGE_NOTIFY it holds open is exempt from the
+        // response deadline — so the keepalive is the only thing that can
+        // produce traffic here.
+        //
+        // Its own directory, not the share root: the rest of this suite
+        // writes to these shares, and a notify event from a neighbouring test
+        // is a frame on the wire, which is precisely what stops the keepalive
+        // from probing. Sharing the root made this test pass alone and fail
+        // in the suite.
+        let watched = format!("echo_probe_watch_{label}");
+        let _ = tree.delete_directory(&mut conn, &watched).await;
+        tree.create_directory(&mut conn, &watched)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: could not create {watched}: {e}"));
+        let mut watcher = tree
+            .watch(&mut conn, &watched, false)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: watch failed: {e}"));
+        let watching = tokio::spawn(async move { watcher.next_events().await });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let m = conn.diagnostics().metrics;
+            if m.keepalive_probes_sent - m.keepalive_failures >= 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{label}: the keepalive never got two probes answered \
+                 (sent {}, unanswered {}, skipped {}, {} request(s) outstanding)",
+                m.keepalive_probes_sent,
+                m.keepalive_failures,
+                m.keepalive_probes_skipped,
+                conn.diagnostics().outstanding.len(),
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            !conn.diagnostics().disconnected,
+            "{label}: probing the server cost us the connection — a dropped probe must \
+             never do more than withhold a deadline extension"
+        );
+
+        watching.abort();
+        let _ = tree.delete_directory(&mut conn, &watched).await;
+        let _ = tree.disconnect(&mut conn).await;
+    }
+}
+
+// ── Reconnect and durable handles (M3) ────────────────────────────────
+
+/// Real Samba, real socket: a connection torn down mid-session comes back and
+/// serves work again, with every `Connection` clone the caller was holding.
+///
+/// The unit tests prove this against a scripted server; this proves the same
+/// sequence survives a genuine negotiate + NTLM session setup on a fresh TCP
+/// connection, which is the part a mock cannot vouch for.
+#[tokio::test]
+#[ignore]
+async fn guest_reconnect_reestablishes_a_working_session() {
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: GUEST_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: true,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect to smb-guest");
+
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+    client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("listing before the reconnect");
+
+    let held = client.connection_mut().clone();
+    assert_eq!(held.generation(), 0);
+
+    client.reconnect().await.expect("reconnect against Samba");
+
+    assert_eq!(held.generation(), 1, "the clone must come back too");
+    assert!(!held.is_disconnected());
+    assert_eq!(
+        client.diagnostics().primary.metrics.reconnects_succeeded,
+        1,
+        "the counter is what makes a survived blip visible after the fact"
+    );
+
+    // Tree ids died with the session, so the share is re-connected. The
+    // listing is not compared against the earlier one: these tests share a
+    // container and run concurrently, so its contents legitimately move.
+    let mut tree = client
+        .connect_share("public")
+        .await
+        .expect("re-connect_share");
+    client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("listing after the reconnect");
+}
+
+/// What this Samba build actually does with a durable-handle request.
+///
+/// Deliberately adaptive rather than an assertion that a grant arrives: a
+/// durable handle needs `durable handles = yes`, kernel oplocks off, and the
+/// server willing to hand out a batch oplock, and the crate's contract is that
+/// **not** getting one is a normal outcome rather than an error. So the test
+/// pins the contract that holds either way (the open works, and a grant is
+/// always accompanied by an on-disk id) and prints which branch this container
+/// took, so a future change in the fixture is visible rather than silent.
+#[tokio::test]
+#[ignore]
+async fn guest_durable_open_is_either_granted_with_proof_or_declined_cleanly() {
+    let (mut conn, tree) = connect_guest().await;
+    let path = "durable_probe.bin";
+
+    let open = tree
+        .open_file_durable(&mut conn, path)
+        .await
+        .expect("a durable open must succeed whether or not durability is granted");
+
+    match open.durable {
+        Some(handle) => {
+            println!(
+                "smb-guest GRANTS durable handles: timeout={} ms, persistent={}, \
+                 identity volume={:#x} file={:#x}",
+                handle.grant.timeout_ms,
+                handle.grant.persistent,
+                handle.identity().volume_serial,
+                handle.identity().index_number,
+            );
+            assert!(
+                handle.is_current(&conn),
+                "a fresh handle belongs to the current session"
+            );
+        }
+        None => println!(
+            "smb-guest DECLINES durable handles; interrupted writes to it restart \
+             rather than resume, which is the crate's documented fallback"
+        ),
+    }
+
+    tree.close_handle(&mut conn, open.file_id)
+        .await
+        .expect("close");
+    tree.delete_file(&mut conn, path).await.ok();
+}
+
+/// A durable handle that Samba granted can be claimed back on a fresh
+/// connection, and the file it comes back as is the same one.
+///
+/// Skips itself when the container declines durability — see the test above
+/// for why that is a legitimate outcome rather than a failure.
+#[tokio::test]
+#[ignore]
+async fn guest_durable_handle_survives_a_reconnect_when_the_server_grants_one() {
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: GUEST_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: true,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect to smb-guest");
+    let tree = client.connect_share("public").await.expect("connect_share");
+    let path = "durable_resume.bin";
+
+    let open = {
+        let conn = client.connection_mut();
+        tree.open_file_durable(conn, path).await.expect("open")
+    };
+    let Some(handle) = open.durable else {
+        println!("smb-guest declines durable handles; nothing to reclaim");
+        let conn = client.connection_mut();
+        tree.close_handle(conn, open.file_id).await.ok();
+        tree.delete_file(conn, path).await.ok();
+        return;
+    };
+    let identity_at_open = handle.identity();
+
+    client.reconnect().await.expect("reconnect");
+    let tree = client
+        .connect_share("public")
+        .await
+        .expect("re-connect_share");
+
+    let conn = client.connection_mut();
+    match tree.reclaim_durable_handle(conn, &handle, path).await {
+        Ok(reclaimed) => {
+            assert_eq!(
+                reclaimed.identity(),
+                identity_at_open,
+                "a reclaim that changed which file it points at must never be \
+                 accepted -- if this ever fires, the guard is the only thing \
+                 between the user's bytes and the wrong file"
+            );
+            println!("smb-guest returned the durable handle across a reconnect");
+            tree.close_handle(conn, reclaimed.file_id).await.ok();
+        }
+        Err(e) => {
+            // Legitimate: Samba drops durable opens when the oplock is broken
+            // or the timeout is short. The contract is that it says so.
+            println!("smb-guest did not return the handle: {e}");
+        }
+    }
+    tree.delete_file(conn, path).await.ok();
+}
+
+/// A revival re-derives the signing keys, and the server proves it by
+/// accepting what we sign afterwards.
+///
+/// This is the sharpest edge of `install_transport` wiping the crypto state.
+/// Signing keys are derived per session from a preauth hash; carrying a dead
+/// session's keys, or a stale preauth hash, over a revival makes every frame
+/// after it fail verification. A server with mandatory signing rejects a badly
+/// signed frame outright, so a read that comes back correct on the far side of
+/// a reconnect is the server vouching for the keys.
+#[tokio::test]
+#[ignore]
+async fn a_reconnect_to_a_signing_required_server_re_derives_working_keys() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: SIGNING_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+        domain: String::new(),
+        auto_reconnect: true,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect to smb-signing");
+    assert!(client.params().unwrap().signing_required);
+
+    let tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share");
+    let path = "reconnect_signed.tmp";
+    let payload = b"signed on both sides of the blip";
+    client
+        .write_file(&tree, path, payload)
+        .await
+        .expect("write before the reconnect");
+
+    client.reconnect().await.expect("reconnect");
+
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("re-connect_share");
+    let read_back = client.read_file(&mut tree, path).await.expect(
+        "a signing-required server rejects badly signed frames, so this \
+                 succeeding IS the proof that the keys were re-derived",
+    );
+    assert_eq!(read_back, payload);
+    client.delete_file(&tree, path).await.ok();
+}
+
+/// The same round trip against the SMB 3.1.1 encryption-capable server.
+///
+/// ⚠️ **This does NOT prove an encrypted session survives a revival**, and it
+/// is documented here so nobody reads it as though it does. Both encryption
+/// fixtures run `smb encrypt = desired` rather than `required`, and Samba 4.20
+/// only sets `SMB2_SHAREFLAG_ENCRYPT_DATA` for `required` — so this client
+/// never activates encryption against them and the traffic is plaintext
+/// (verified 2026-08-02: `should_encrypt` and `tree.encrypt_data` are both
+/// false before any reconnect). What it does cover is the crypto posture being
+/// *preserved* across a revival on an SMB 3.1.1 session, and it will start
+/// covering the real thing the day a fixture demands encryption.
+///
+/// The encrypted-session revival itself rests on the unit tests, which assert
+/// the crypto state is wiped and re-derived.
+#[tokio::test]
+#[ignore]
+async fn a_reconnect_preserves_the_crypto_posture_on_an_smb311_session() {
+    let _ = env_logger::try_init();
+
+    let mut client = SmbClient::connect(ClientConfig {
+        addr: ENCRYPTION_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+        domain: String::new(),
+        auto_reconnect: true,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("connect to smb-encryption");
+
+    let tree = client
+        .connect_share("private")
+        .await
+        .expect("connect_share");
+    let posture_before = client.diagnostics().primary.encryption.active;
+    let path = "reconnect_encrypted.tmp";
+    let payload = b"the same posture on both sides of the blip";
+    client
+        .write_file(&tree, path, payload)
+        .await
+        .expect("write before the reconnect");
+
+    client.reconnect().await.expect("reconnect");
+
+    // `connect_share` is where share-level encryption is re-activated, from
+    // the session keys the client adopts off the revived connection. Getting
+    // that adoption wrong is silent: the old session's keys would encrypt
+    // frames this server has never seen a key for.
+    let mut tree = client
+        .connect_share("private")
+        .await
+        .expect("re-connect_share");
+    let read_back = client
+        .read_file(&mut tree, path)
+        .await
+        .expect("read after the reconnect");
+    assert_eq!(read_back, payload);
+    assert_eq!(
+        client.diagnostics().primary.encryption.active,
+        posture_before,
+        "a revival must re-establish the same crypto posture the session had, \
+         not quietly drop or add encryption"
+    );
+    client.delete_file(&tree, path).await.ok();
+}
+
+// ── Names SMB2 refuses to carry (smb-weirdnames) ─────────────────────
+//
+// The fixture's populate.sh writes its files with octal escapes, so the bytes
+// on disk in the container are exactly the bytes macOS smbfs put on a real
+// Samba share (read back over SSH on a QNAP TS-464, 2026-08-05). Real Finder
+// cannot run in Linux CI, so those pinned bytes are what stands in for it: a
+// listing that comes back with the plain characters proves this crate and
+// Finder agree about what the directory contains.
+
+/// Create an SmbClient connected as guest to smb-weirdnames.
+async fn weirdnames_client() -> SmbClient {
+    SmbClient::connect(ClientConfig {
+        addr: WEIRDNAMES_ADDR.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: HashMap::new(),
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .expect("SmbClient::connect to smb-weirdnames failed")
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_listing_decodes_every_character_in_the_table() {
+    let _ = env_logger::try_init();
+
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+    let entries = client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("list_directory");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+
+    for expected in [
+        "q\"uote",
+        "st*ar",
+        "co:lon",
+        "l<t",
+        "g>t",
+        "q?mark",
+        "back\\slash",
+        "pi|pe",
+        "ctrl\u{01}one",
+        "ctrl\u{1F}last",
+        "trailing-space ",
+        "trailing-period.",
+        "?leading",
+        "all\"*:<>?\\|chars",
+        "\"how_are_you_feeling?\"_emojis.json",
+        "su?bdir",
+        "dir-trailing-space ",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected:?} in {names:?}"
+        );
+    }
+
+    client.disconnect_share(&tree).await.expect("disconnect");
+}
+
+/// A listing with index numbers carries names in a different layout
+/// (`FileIdBothDirectoryInformation`), and they must map back exactly as the
+/// default listing's do, or the two would disagree about what the share holds
+/// (AGENTS.md pitfall 23).
+#[tokio::test]
+#[ignore]
+async fn weirdnames_a_listing_with_index_numbers_maps_names_the_same_way() {
+    let _ = env_logger::try_init();
+
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+    let mut plain: Vec<String> = client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("list_directory")
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    let with_index = client
+        .list_directory_with(&mut tree, "", smb2::ListOptions::new().index_numbers(true))
+        .await
+        .expect("list_directory_with");
+    assert!(
+        with_index
+            .iter()
+            .filter(|e| e.name != "..")
+            .all(|e| e.index_number.is_some()),
+        "Samba sends a file ID for every entry: {with_index:?}"
+    );
+    let mut indexed: Vec<String> = with_index.into_iter().map(|e| e.name).collect();
+    plain.sort();
+    indexed.sort();
+    assert_eq!(indexed, plain);
+    assert!(indexed.iter().any(|n| n == "all\"*:<>?\\|chars"));
+
+    client.disconnect_share(&tree).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_listing_maps_the_last_character_only() {
+    let _ = env_logger::try_init();
+
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+    let entries = client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("list_directory");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+
+    // Only the final space or period is substituted, so these come back with
+    // their interior ones intact. Substituting all of them would be an easy
+    // mistake that no single-character test would catch.
+    for expected in [
+        "two-spaces  ",
+        "two-periods..",
+        "period-then-space. ",
+        " leading-space",
+        ".leading-period",
+        "interior period.and space",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected:?} in {names:?}"
+        );
+    }
+
+    client.disconnect_share(&tree).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_listing_leaves_alone_what_is_not_in_the_table() {
+    let _ = env_logger::try_init();
+
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+    let entries = client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("list_directory");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+
+    for expected in [
+        "plain-ascii.txt",
+        "\u{65E5}\u{672C}\u{8A9E}.txt",
+        // Precomposed and decomposed both survive as they were stored: this
+        // crate does no Unicode normalization, deliberately.
+        "caf\u{E9}-nfc",
+        "cafe\u{301}-nfd",
+        "\u{1F4C1}-emoji",
+        // A private-use code point outside U+F001..U+F029 is not ours.
+        "outside-the-table-\u{F02A}",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected:?} in {names:?}"
+        );
+    }
+
+    client.disconnect_share(&tree).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_a_file_can_be_read_by_the_name_the_listing_gave() {
+    let _ = env_logger::try_init();
+
+    // Round-tripping the listing back through a CREATE is the assertion that
+    // matters: a decode with no matching encode would list beautifully and
+    // then fail to open anything.
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+
+    for name in [
+        "q?mark",
+        "all\"*:<>?\\|chars",
+        "\"how_are_you_feeling?\"_emojis.json",
+        "trailing-space ",
+        "trailing-period.",
+        "two-spaces  ",
+        "ctrl\u{01}one",
+    ] {
+        let data = client
+            .read_file(&mut tree, name)
+            .await
+            .unwrap_or_else(|e| panic!("read {name:?}: {e}"));
+        assert!(!data.is_empty(), "{name:?} came back empty");
+
+        let info = client
+            .stat(&mut tree, name)
+            .await
+            .unwrap_or_else(|e| panic!("stat {name:?}: {e}"));
+        assert_eq!(
+            info.size as usize,
+            data.len(),
+            "stat disagrees for {name:?}"
+        );
+    }
+
+    client.disconnect_share(&tree).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_every_component_of_a_path_is_mapped() {
+    let _ = env_logger::try_init();
+
+    // The bug this guards: mapping the path as one string turns its separators
+    // into name characters, and mapping only the leaf leaves the directory
+    // unreachable. Both fail here.
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+
+    let nested = client
+        .read_file(&mut tree, "su?bdir/in*ner.txt")
+        .await
+        .expect("read through a directory whose own name needs mapping");
+    assert_eq!(nested, b"nested content\n");
+
+    // Trailing space on the directory component, backslash in the leaf.
+    let deeper = client
+        .read_file(&mut tree, "dir-trailing-space /le\\af")
+        .await
+        .expect("read through a directory component with a trailing space");
+    assert_eq!(deeper, b"deeper content\n");
+
+    let entries = client
+        .list_directory(&mut tree, "su?bdir")
+        .await
+        .expect("list a directory whose name needs mapping");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"in*ner.txt"), "got {names:?}");
+
+    client.disconnect_share(&tree).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_what_this_crate_writes_is_what_finder_writes() {
+    let _ = env_logger::try_init();
+
+    // The Finder-parity assertion CI can actually make. `collide?me` exists in
+    // the fixture under the on-disk name macOS produces; an exclusive create
+    // for the same caller-facing name collides with it if and only if this
+    // crate encodes to the same bytes. An encoding that differed by one code
+    // point would create a second file and this would pass as `Ok`.
+    let mut client = weirdnames_client().await;
+    let tree = std::sync::Arc::new(client.connect_share("public").await.expect("connect_share"));
+
+    let err = client
+        .create_file_writer_exclusive(&tree, "collide?me")
+        .await
+        .err()
+        .expect("an exclusive create must collide with the pre-seeded name");
+    assert_eq!(
+        err.kind(),
+        smb2::ErrorKind::AlreadyExists,
+        "expected a collision with the private-use name on disk, got {err}"
+    );
+
+    // Same check one layer down, for a name that exercises the trailing rule.
+    let err = client
+        .create_file_writer_exclusive(&tree, "trailing-space ")
+        .await
+        .err()
+        .expect("an exclusive create must collide with the trailing-space name");
+    assert_eq!(err.kind(), smb2::ErrorKind::AlreadyExists, "got {err}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_a_written_file_survives_a_full_round_trip() {
+    let _ = env_logger::try_init();
+
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+
+    // Every character in the table, in leading, interior, and trailing
+    // positions, plus a name that is nothing but substitutions.
+    let names = [
+        "w-\"quote",
+        "w-star*",
+        "*w-lead-star",
+        "w-co:lon",
+        "w-l<t",
+        "w-g>t",
+        "w-q?mark",
+        "w-back\\slash",
+        "w-pi|pe",
+        "w-ctrl\u{01}\u{1F}",
+        "w-trailing-space ",
+        "w-trailing-period.",
+        "w-\"*:<>?\\|",
+        "w-mixed \"a\" ? b\\c. ",
+        "w-\u{1F600}-emoji?",
+        "w-\u{65E5}\u{672C}\u{8A9E}?",
+        "w-cafe\u{301}-nfd?",
+    ];
+
+    for name in names {
+        let path = format!("scratch/{name}");
+        let payload = format!("payload for {name}").into_bytes();
+
+        client
+            .write_file(&tree, &path, &payload)
+            .await
+            .unwrap_or_else(|e| panic!("write {name:?}: {e}"));
+
+        let read_back = client
+            .read_file(&mut tree, &path)
+            .await
+            .unwrap_or_else(|e| panic!("read {name:?}: {e}"));
+        assert_eq!(read_back, payload, "content differs for {name:?}");
+    }
+
+    // The listing has to hand back exactly the names that were written, or the
+    // encode and decode halves disagree.
+    let entries = client
+        .list_directory(&mut tree, "scratch")
+        .await
+        .expect("list scratch");
+    let listed: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    for name in names {
+        assert!(listed.contains(&name), "missing {name:?} in {listed:?}");
+    }
+
+    // Rename and delete address the file by the same name, through a different
+    // request shape (SET_INFO carries the target as its own buffer).
+    let renamed = "scratch/w-renamed?to.this ";
+    client
+        .rename(&tree, "scratch/w-q?mark", renamed)
+        .await
+        .expect("rename to a name that needs mapping");
+    assert!(client.stat(&mut tree, renamed).await.is_ok());
+    assert_eq!(
+        client
+            .stat(&mut tree, "scratch/w-q?mark")
+            .await
+            .expect_err("the old name must be gone")
+            .kind(),
+        smb2::ErrorKind::NotFound
+    );
+
+    for name in names {
+        let path = if name == "w-q?mark" {
+            renamed.to_string()
+        } else {
+            format!("scratch/{name}")
+        };
+        client
+            .delete_file(&tree, &path)
+            .await
+            .unwrap_or_else(|e| panic!("delete {path:?}: {e}"));
+    }
+
+    client.disconnect_share(&tree).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_a_directory_whose_name_needs_mapping_can_be_created() {
+    let _ = env_logger::try_init();
+
+    let mut client = weirdnames_client().await;
+    let mut tree = client.connect_share("public").await.expect("connect_share");
+
+    let dir = "scratch/made?by*smb2 ";
+    let file = "scratch/made?by*smb2 /in|side.txt";
+    client.delete_file(&tree, file).await.ok();
+    client.delete_directory(&tree, dir).await.ok();
+
+    client
+        .create_directory(&tree, dir)
+        .await
+        .expect("create a directory whose name needs mapping");
+    client
+        .write_file(&tree, file, b"inside")
+        .await
+        .expect("write into it");
+
+    let entries = client
+        .list_directory(&mut tree, dir)
+        .await
+        .expect("list it back");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"in|side.txt"), "got {names:?}");
+
+    client.delete_file(&tree, file).await.expect("cleanup file");
+    client
+        .delete_directory(&tree, dir)
+        .await
+        .expect("cleanup dir");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_a_name_the_mapping_cannot_fix_is_classified_honestly() {
+    let _ = env_logger::try_init();
+
+    // Bypasses the codec on purpose: a raw `?` is what a server answers
+    // STATUS_OBJECT_NAME_INVALID for, and after the mapping the crate has no
+    // ordinary path that produces one. The status still has to classify as
+    // something a consumer can branch on rather than as a generic protocol
+    // error, because a name can be invalid for reasons the table doesn't cover.
+    use smb2::msg::create::{CreateDisposition, CreateRequest, ImpersonationLevel, ShareAccess};
+    use smb2::types::flags::FileAccessMask;
+    use smb2::types::{Command, OplockLevel};
+
+    let mut conn = Connection::connect(WEIRDNAMES_ADDR, TIMEOUT)
+        .await
+        .expect("connect to smb-weirdnames");
+    conn.negotiate().await.expect("negotiate");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("guest session");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect");
+
+    let req = CreateRequest {
+        requested_oplock_level: OplockLevel::None,
+        impersonation_level: ImpersonationLevel::Impersonation,
+        desired_access: FileAccessMask::new(FileAccessMask::FILE_WRITE_DATA),
+        file_attributes: 0x80,
+        share_access: ShareAccess(0),
+        create_disposition: CreateDisposition::FileCreate,
+        create_options: 0,
+        name: "scratch\\raw?question".to_string(),
+        create_contexts: vec![],
+    };
+    let frame = conn
+        .execute(Command::Create, &req, Some(tree.tree_id))
+        .await
+        .expect("the request itself reaches the server");
+    assert_eq!(
+        frame.header.status,
+        smb2::types::status::NtStatus::OBJECT_NAME_INVALID,
+        "a raw wildcard character must be refused by name, not by hex"
+    );
+
+    let err = smb2::Error::Protocol {
+        status: frame.header.status,
+        command: Command::Create,
+    };
+    assert_eq!(err.kind(), smb2::ErrorKind::InvalidName);
+
+    tree.disconnect(&mut conn).await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn weirdnames_a_watch_reports_a_changed_name_the_way_a_listing_does() {
+    let _ = env_logger::try_init();
+
+    // CHANGE_NOTIFY carries names in its own buffer, so it is its own decode
+    // site. An encode/decode asymmetry here would let a watcher report a name
+    // no `Tree` method can then open.
+    //
+    // Its own directory, because the other tests in this file write into
+    // `scratch` concurrently and a watch cannot tell whose event it just got.
+    // The write has to happen while `next_events` is already awaiting: the
+    // first call is what puts the first CHANGE_NOTIFY on the wire.
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = "scratch/watch-probe";
+            let name = "watched?file .txt";
+            let path = format!("{dir}/{name}");
+
+            let mut watcher_client = weirdnames_client().await;
+            let watcher_share = watcher_client
+                .connect_share("public")
+                .await
+                .expect("connect_share (watcher)");
+            watcher_client.delete_file(&watcher_share, &path).await.ok();
+            watcher_client
+                .delete_directory(&watcher_share, dir)
+                .await
+                .ok();
+            watcher_client
+                .create_directory(&watcher_share, dir)
+                .await
+                .expect("create the watch directory");
+
+            let mut watcher = watcher_client
+                .watch(&watcher_share, dir, false)
+                .await
+                .expect("watch the probe directory");
+
+            let write_path = path.clone();
+            let writer_task = tokio::task::spawn_local(async move {
+                let mut writer_client = weirdnames_client().await;
+                let writer_share = writer_client
+                    .connect_share("public")
+                    .await
+                    .expect("connect_share (writer)");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                writer_client
+                    .write_file(&writer_share, &write_path, b"hello")
+                    .await
+                    .expect("write the watched file");
+                (writer_client, writer_share)
+            });
+
+            let events = tokio::time::timeout(Duration::from_secs(10), watcher.next_events())
+                .await
+                .expect("the watch must report within 10s")
+                .expect("next_events");
+            let reported: Vec<&str> = events.iter().map(|e| e.filename.as_str()).collect();
+            assert!(
+                reported.contains(&name),
+                "a watch must report the same name a listing would, got {reported:?}"
+            );
+            watcher.close().await.expect("watcher close");
+
+            let (mut writer_client, writer_share) = writer_task.await.unwrap();
+            writer_client
+                .delete_file(&writer_share, &path)
+                .await
+                .expect("cleanup file");
+            writer_client
+                .delete_directory(&writer_share, dir)
+                .await
+                .expect("cleanup dir");
+        })
+        .await;
+}
+
+// ── Concurrent connects ──────────────────────────────────────────────
+
+/// One full handshake against smb-auth: connect, negotiate, authenticate,
+/// tree connect. Everything a pool worker does before it has useful work.
+async fn one_handshake() -> std::result::Result<(), smb2::Error> {
+    let mut conn = Connection::connect(AUTH_ADDR, TIMEOUT).await?;
+    conn.negotiate().await?;
+    let _session = Session::setup(&mut conn, "testuser", "testpass", "").await?;
+    let _tree = Tree::connect(&mut conn, "private").await?;
+    Ok(())
+}
+
+/// Several connections opened at once from one process must all finish their
+/// handshake.
+///
+/// This is what `smb2-cli -j N` does on every batch, and what a test binary
+/// does when its cases run in parallel, so a failure here is a user-visible
+/// 30 s hang rather than a test artifact.
+///
+/// Width is what triggers it: two at a time never failed, four failed 11 times
+/// in 200. The three widths cover the pool sizes the CLI actually offers, and
+/// the whole thing costs about a second when it passes.
+///
+/// What it guards: every connection carries its own `ClientGuid`. Share one
+/// across connections and Samba routes the later ones to the smbd process
+/// owning the first, losing the negotiate's credit grant when they overlap.
+/// See `Inner::client_guid` and `docs/notes/samba-client-guid-connection-pass.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn concurrent_connects_all_finish_their_handshake() {
+    let _ = env_logger::try_init();
+
+    const WIDTHS: [usize; 3] = [4, 8, 16];
+    const WAVES: usize = 16;
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut attempts = 0;
+    for width in WIDTHS {
+        for wave in 0..WAVES {
+            let mut set = tokio::task::JoinSet::new();
+            for slot in 0..width {
+                set.spawn(async move {
+                    // A healthy handshake here takes single-digit
+                    // milliseconds. A wedged one waits out the crate's 30 s
+                    // unresponsive-server watchdog, so cutting it short keeps
+                    // a failing run readable instead of quarter-hour long.
+                    let outcome =
+                        tokio::time::timeout(Duration::from_secs(3), one_handshake()).await;
+                    (slot, outcome)
+                });
+            }
+            attempts += width;
+            while let Some(joined) = set.join_next().await {
+                let (slot, outcome) = joined.expect("a handshake task panicked");
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        failures.push(format!("width {width} wave {wave} slot {slot}: {e}"));
+                    }
+                    Err(_) => failures.push(format!(
+                        "width {width} wave {wave} slot {slot}: still unanswered after 3s"
+                    )),
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {attempts} concurrent handshakes failed; each one is a caller \
+         hanging for 30 s and then giving up:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}
+
+// ── DFS namespace roots (smb-dfs-namespace:10460, smb-dfs-failover:10461) ──
+//
+// A namespace root is a name that is NOT a tree-connectable share: TREE_CONNECT
+// is refused with STATUS_BAD_NETWORK_NAME and only a ROOT referral over IPC$
+// says where the storage is. That is the shape a domain-based DFS namespace has
+// in the field, and it is the one `smb-dfs-root` (the *link* fixture) cannot
+// reproduce, because its `[dfs]` is a real share.
+//
+// Samba serves it with `msdfs root = yes` + `msdfs proxy`, and smbd says so in
+// as many words: "refusing connection to dfs proxy share".
+//
+// ⚠️ These fixtures are the STRICTER of the two shapes for our accept-anything
+// reading: Samba answers `ServerType = 0` with header flags `0x02`, where
+// Windows answers `1` and `0x03` (MS-DFSC § 4.3, § 4.6). They would not catch a
+// regression that started demanding the Windows values. The two mock tests in
+// `protocol_flow.rs` cover that side.
+
+/// A client pointed at the namespace server, with the referral target mapped
+/// back to its port on the host.
+async fn dfs_namespace_client(addr: &str) -> SmbClient {
+    let mut overrides = HashMap::new();
+    overrides.insert("smb-dfs-target".to_string(), DFS_TARGET_ADDR.to_string());
+    SmbClient::connect(ClientConfig {
+        addr: addr.to_string(),
+        timeout: TIMEOUT,
+        username: String::new(),
+        password: String::new(),
+        domain: String::new(),
+        auto_reconnect: false,
+        compression: false,
+        dfs_enabled: true,
+        dfs_target_overrides: overrides,
+        connect_options: None,
+        ..Default::default()
+    })
+    .await
+    .unwrap_or_else(|e| panic!("SmbClient::connect to {addr} failed: {e}"))
+}
+
+/// The headline. Before this, `connect_share` on a namespace root returned
+/// "the share does not exist", which is the one thing that is not true.
+#[tokio::test]
+#[ignore]
+async fn dfs_namespace_root_connects_through_a_referral() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_namespace_client(DFS_NAMESPACE_ADDR).await;
+    let tree = client
+        .connect_share("projects")
+        .await
+        .expect("the namespace root must resolve to its target");
+
+    // The tree really sits on the target server, not the namespace server.
+    assert_eq!(tree.server, DFS_TARGET_ADDR);
+    assert_eq!(tree.share_name, "files");
+
+    // And it remembers what the caller actually asked for.
+    let origin = tree
+        .dfs_origin
+        .as_ref()
+        .expect("a redirected tree must carry its origin");
+    assert_eq!(origin.requested, r"\\127.0.0.1\projects");
+    assert_eq!(origin.target, r"\\smb-dfs-target\files");
+}
+
+/// The referral is not just a connect: the files behind it are readable.
+#[tokio::test]
+#[ignore]
+async fn dfs_namespace_root_reads_a_file_from_the_target() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_namespace_client(DFS_NAMESPACE_ADDR).await;
+    let mut tree = client
+        .connect_share("projects")
+        .await
+        .expect("connect_share");
+
+    let data = client
+        .read_file(&mut tree, "hello.txt")
+        .await
+        .expect("read through the namespace root");
+    assert_eq!(
+        String::from_utf8_lossy(&data).trim(),
+        "Hello from DFS target!"
+    );
+
+    let entries = client
+        .list_directory(&mut tree, "")
+        .await
+        .expect("list through the namespace root");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"hello.txt"), "got {names:?}");
+}
+
+/// MS-DFSC § 3.1.4.1 step 2: a known namespace goes straight to its target, so
+/// the refused TREE_CONNECT and the referral are paid once per TTL rather than
+/// once per connect.
+#[tokio::test]
+#[ignore]
+async fn dfs_namespace_root_is_cached_after_the_first_connect() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_namespace_client(DFS_NAMESPACE_ADDR).await;
+    client
+        .connect_share("projects")
+        .await
+        .expect("first connect");
+    let after_first = client.diagnostics().client.metrics.dfs_referrals_resolved;
+    assert_eq!(after_first, 1, "the first connect resolves one referral");
+
+    let tree = client
+        .connect_share("projects")
+        .await
+        .expect("second connect");
+    assert!(tree.dfs_origin.is_some());
+
+    let metrics = client.diagnostics().client.metrics;
+    assert_eq!(
+        metrics.dfs_referrals_resolved, 1,
+        "the second connect must not ask for another referral"
+    );
+    assert!(metrics.dfs_cache_hits >= 1);
+
+    // And the cache says what it knows about the namespace.
+    let cache = client.diagnostics().dfs_cache;
+    assert_eq!(cache.len(), 1, "one namespace, one entry");
+    assert!(
+        !cache[0].interlink,
+        "a plain root referral is not an interlink"
+    );
+}
+
+/// An ordinary share on the same server still tree-connects directly. The
+/// namespace machinery must not become a tax on every connect.
+#[tokio::test]
+#[ignore]
+async fn an_ordinary_share_on_a_namespace_server_connects_directly() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_namespace_client(DFS_NAMESPACE_ADDR).await;
+    let tree = client.connect_share("plain").await.expect("connect_share");
+
+    assert_eq!(tree.server, DFS_NAMESPACE_ADDR);
+    assert!(
+        tree.dfs_origin.is_none(),
+        "an ordinary share was not redirected anywhere"
+    );
+    assert_eq!(
+        client.diagnostics().client.metrics.dfs_referrals_resolved,
+        0,
+        "no referral should have been asked for"
+    );
+}
+
+/// ❌ A failed referral must not replace the original error. A share that is
+/// genuinely missing comes back as STATUS_BAD_NETWORK_NAME, not as anything
+/// about DFS — telling someone who mistyped a share name about namespaces is
+/// worse than telling them nothing.
+#[tokio::test]
+#[ignore]
+async fn a_missing_share_on_a_dfs_server_still_reports_a_missing_share() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_namespace_client(DFS_NAMESPACE_ADDR).await;
+    let err = client
+        .connect_share("no-such-share")
+        .await
+        .expect_err("a share that isn't there must fail");
+
+    assert_eq!(
+        err.status(),
+        Some(smb2::types::status::NtStatus::BAD_NETWORK_NAME),
+        "expected the original refusal, got {err:?}"
+    );
+    assert_eq!(err.kind(), smb2::ErrorKind::NotFound);
+}
+
+/// Two root targets with the first unreachable: a client that stops at the
+/// first one never reaches the files.
+#[tokio::test]
+#[ignore]
+async fn dfs_namespace_root_falls_through_to_a_live_target() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_namespace_client(DFS_FAILOVER_ADDR).await;
+    let mut tree = client
+        .connect_share("projects")
+        .await
+        .expect("the second target must be reached");
+
+    assert_eq!(tree.server, DFS_TARGET_ADDR, "landed on the live target");
+    let data = client
+        .read_file(&mut tree, "hello.txt")
+        .await
+        .expect("read from the target we failed over to");
+    assert_eq!(
+        String::from_utf8_lossy(&data).trim(),
+        "Hello from DFS target!"
+    );
+
+    // § 3.1.1 TargetHint: the working target is remembered, so the next
+    // lookup does not re-walk the dead one.
+    let cache = client.diagnostics().dfs_cache;
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache[0].target_count, 2, "the referral offered two targets");
+    assert_eq!(
+        cache[0].target_hint, 1,
+        "the second one is the one that works"
+    );
+}
+
+/// A namespace root's tree lives on the target's connection, and the
+/// streaming, handle, and watch calls have to go there too. Sent over the
+/// namespace server's connection instead, the target session's tree id means
+/// nothing (`STATUS_NETWORK_NAME_DELETED`), or, when the ids collide, names a
+/// different share.
+#[tokio::test]
+#[ignore]
+async fn dfs_namespace_root_streams_writes_and_watches_on_the_target() {
+    let _ = env_logger::try_init();
+
+    let mut client = dfs_namespace_client(DFS_NAMESPACE_ADDR).await;
+    let mut tree = client
+        .connect_share("projects")
+        .await
+        .expect("connect_share");
+    assert_eq!(tree.server, DFS_TARGET_ADDR, "the tree is on the target");
+
+    {
+        let mut download = client
+            .download(&tree, "hello.txt")
+            .await
+            .expect("download through the namespace root");
+        let mut received = Vec::new();
+        while let Some(chunk) = download.next_chunk().await {
+            received.extend_from_slice(&chunk.expect("next_chunk failed"));
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&received).trim(),
+            "Hello from DFS target!"
+        );
+    }
+
+    let dir = "_test_dfs_namespace_streams";
+    let _ = client.create_directory(&tree, dir).await;
+
+    let written = format!("{dir}/written.tmp");
+    let mut writer = client
+        .create_file_writer(&tree, &written)
+        .await
+        .expect("create_file_writer through the namespace root");
+    writer
+        .write_chunk(b"written through the namespace")
+        .await
+        .expect("write_chunk");
+    writer.finish().await.expect("finish");
+    let back = client
+        .read_file(&mut tree, &written)
+        .await
+        .expect("read back what the writer wrote");
+    assert_eq!(back, b"written through the namespace");
+
+    let mut watcher = client
+        .watch(&tree, &format!("{dir}/"), false)
+        .await
+        .expect("watch through the namespace root");
+    let watched = format!("{dir}/watched.tmp");
+    let (events, write) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(10), watcher.next_events()),
+        async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            client.write_file(&tree, &watched, b"watch me").await
+        }
+    );
+    write.expect("write_file into the watched directory");
+    let events = events
+        .expect("timed out waiting for a change notification")
+        .expect("next_events failed");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.action == smb2::FileNotifyAction::Added && e.filename == "watched.tmp"),
+        "expected watched.tmp to be reported as added, got {events:?}"
+    );
+    watcher.close().await.expect("watcher close");
+
+    for path in [&written, &watched] {
+        client.delete_file(&tree, path).await.expect("delete_file");
+    }
+    client
+        .delete_directory(&tree, dir)
+        .await
+        .expect("delete_directory");
+}
+
+// ── A small credit window (smb-smallcredits) ─────────────────────────
+
+/// Connect as guest to smb-smallcredits, whose window stops at 64 credits.
+async fn connect_smallcredits() -> (Connection, std::sync::Arc<Tree>) {
+    let mut conn = Connection::connect(SMALLCREDITS_ADDR, TIMEOUT)
+        .await
+        .expect("failed to connect to smb-smallcredits");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("guest session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect to 'public' failed");
+    (conn, std::sync::Arc::new(tree))
+}
+
+/// `expect`, but a failure also prints the connection's diagnostics. A
+/// `Disconnected` here once came from a full-suite run with no log lines at
+/// all, and the counters (send failures, malformed frames, credits, wire
+/// bytes) are what tell a socket the server closed from a teardown of ours.
+fn or_dump<T>(result: smb2::Result<T>, conn: &Connection, what: &str) -> T {
+    result.unwrap_or_else(|e| panic!("{what}: {e:?}\n{:#?}", conn.diagnostics()))
+}
+
+/// A compound READ of 5 MiB charges 82 credits, which a 64-credit window can
+/// never fund. It fails at once, before anything reaches the wire (Samba
+/// cuts the connection on a charge above its maximum), even while a
+/// watcher's long poll keeps a request outstanding and the old "nothing
+/// outstanding" rule can't fire. The connection stays healthy after.
+#[tokio::test]
+#[ignore]
+async fn smallcredits_an_unfundable_compound_fails_fast_and_the_connection_lives() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_smallcredits().await;
+    let dir = "_test_smallcredits_fail_fast";
+    let _ = tree.create_directory(&mut conn, dir).await;
+    let path = format!("{dir}/five-mib.bin");
+    let data: Vec<u8> = (0..=255u8).cycle().take(5 * 1024 * 1024).collect();
+    tree.write_file(&mut conn, &path, &data)
+        .await
+        .expect("write_file moves 5 MiB through a 64-credit window");
+
+    assert!(
+        conn.params().unwrap().max_read_size >= 5 * 1024 * 1024,
+        "the fixture must pair a small window with a large MaxReadSize"
+    );
+    let ceiling = conn
+        .credit_ceiling()
+        .expect("the server has shown where its window stops");
+    assert!(ceiling <= 64, "ceiling {ceiling} above `smb2 max credits`");
+
+    let mut watcher = tree.watch(&mut conn, dir, false).await.expect("watch");
+    {
+        let watching = watcher.next_events();
+        tokio::pin!(watching);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut watching)
+                .await
+                .is_err(),
+            "nothing changed, so the long poll stays parked"
+        );
+
+        conn.set_credit_wait_timeout(Duration::from_secs(60));
+        let started = std::time::Instant::now();
+        let result = tree
+            .read_file_compound_sized(&mut conn, &path, data.len() as u64)
+            .await;
+        assert!(
+            matches!(result, Err(smb2::Error::CreditStarvation { .. })),
+            "expected CreditStarvation, got {:?}",
+            result.map(|d| d.len())
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited {:?} for a window that can never fund it",
+            started.elapsed()
+        );
+
+        // Same connection, same watcher: still alive, and the read streams.
+        let streamed = tree
+            .read_file_pipelined(&mut conn, &path)
+            .await
+            .expect("a chunked read fits the window");
+        assert_eq!(streamed, data);
+    }
+    watcher.close().await.expect("watcher close");
+
+    tree.delete_file(&mut conn, &path).await.expect("delete");
+    let _ = tree.delete_directory(&mut conn, dir).await;
+}
+
+/// Every transfer that picks its own chunk size sizes it to the window: an
+/// 8 MiB `MaxWriteSize` WRITE (128 credits) would never be funded here.
+#[tokio::test]
+#[ignore]
+async fn smallcredits_chunked_transfers_fit_the_window() {
+    let _ = env_logger::try_init();
+    let (mut conn, tree) = connect_smallcredits().await;
+    conn.set_credit_wait_timeout(Duration::from_secs(5));
+    let path = "_test_smallcredits_chunked.bin";
+    let data: Vec<u8> = (0..=250u8).cycle().take(5 * 1024 * 1024 + 17).collect();
+
+    // A clone shares the connection, so it reports its diagnostics while a
+    // download holds `conn` borrowed.
+    let probe = conn.clone();
+    let opened = tree.create_file_writer(conn.clone(), path).await;
+    let mut writer = or_dump(opened, &probe, "create_file_writer");
+    or_dump(writer.write_chunk(&data).await, &probe, "FileWriter write");
+    assert_eq!(
+        or_dump(writer.finish().await, &probe, "FileWriter finish"),
+        data.len() as u64
+    );
+
+    let mut got = Vec::new();
+    {
+        let mut download = or_dump(tree.download(&mut conn, path).await, &probe, "download");
+        while let Some(chunk) = download.next_chunk().await {
+            got.extend_from_slice(&or_dump(chunk, &probe, "download chunk"));
+        }
+    }
+    assert_eq!(got, data, "the streamed download");
+
+    let written = tree.write_file_pipelined(&mut conn, path, &data).await;
+    or_dump(written, &probe, "write_file_pipelined");
+    let read = tree.read_file_pipelined(&mut conn, path).await;
+    assert_eq!(or_dump(read, &probe, "read_file_pipelined"), data);
+
+    let limit = conn.quick_read_limit();
+    assert!(limit > 0 && limit < 5 * 1024 * 1024, "limit {limit}");
+    let small = &data[..limit as usize];
+    let written = tree.write_file(&mut conn, path, small).await;
+    or_dump(written, &probe, "a small write_file");
+    let read = tree.read_file_compound_sized(&mut conn, path, limit).await;
+    assert_eq!(
+        or_dump(read, &probe, "a read under quick_read_limit is fundable"),
+        small
+    );
+
+    let deleted = tree.delete_file(&mut conn, path).await;
+    or_dump(deleted, &probe, "delete");
+}
+
+// ── An older Samba (smb-samba415) ─────────────────────────────────────
+
+/// Samba 4.15 refuses a FLUSH inside a compound, and its refusal panics the
+/// connection's smbd once the fsync it abandoned finishes (Samba bug 15172).
+/// A small-file write that compounded its FLUSH lost the connection on the
+/// first or second file, the shape a Cmdr user hit copying to a NAS
+/// (2026-10-19). Every write here has to land on one connection, and read
+/// back intact.
+#[tokio::test]
+#[ignore]
+async fn samba415_small_writes_keep_the_connection() {
+    let _ = env_logger::try_init();
+    let mut conn = Connection::connect(SAMBA415_ADDR, TIMEOUT)
+        .await
+        .expect("failed to connect to smb-samba415");
+    conn.negotiate().await.expect("negotiate failed");
+    let _session = Session::setup(&mut conn, "", "", "")
+        .await
+        .expect("guest session setup failed");
+    let tree = Tree::connect(&mut conn, "public")
+        .await
+        .expect("tree connect to 'public' failed");
+    let probe = conn.clone();
+
+    let dir = "_test_samba415_small_writes";
+    let _ = tree.create_directory(&mut conn, dir).await;
+    let files: Vec<(String, Vec<u8>)> = (0..20u8)
+        .map(|i| (format!("{dir}/file-{i:02}.bin"), vec![i; 6148]))
+        .collect();
+    for (path, data) in &files {
+        let written = tree.write_file(&mut conn, path, data).await;
+        assert_eq!(or_dump(written, &probe, path), data.len() as u64);
+    }
+    for (path, data) in &files {
+        let read = tree.read_file(&mut conn, path).await;
+        assert_eq!(&or_dump(read, &probe, path), data, "{path}");
+        or_dump(tree.delete_file(&mut conn, path).await, &probe, path);
+    }
+    or_dump(tree.delete_directory(&mut conn, dir).await, &probe, dir);
+}

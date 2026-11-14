@@ -1,0 +1,6 @@
+#include "TraverseDirect.xcconfig"
+// Direct-only composition. The Apple edition never links or embeds Sparkle.
+CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/Distribution/TraverseUpdater.entitlements
+INFOPLIST_FILE = $(SRCROOT)/.build/traverse-release/tooling/private-updater/TraverseInfo.plist
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_EXPLORER_DISTRIBUTION TRAVERSE_PRIVATE_UPDATER
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(SRCROOT)/.build/traverse-release/tooling/sparkle-2.10.0/unpacked/Sparkle.xcframework/macos-arm64_x86_64

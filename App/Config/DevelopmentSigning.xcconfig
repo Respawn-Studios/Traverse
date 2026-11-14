@@ -1,0 +1,5 @@
+// Portable default. Local identity/team overrides stay ignored and project-scoped.
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+#include? "DevelopmentSigning.local.xcconfig"
+#include "CopyPreviewQualification.xcconfig"

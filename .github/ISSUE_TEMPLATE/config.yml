@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Respawn Studios community
+    url: https://discord.gg/UdKp2uQBQy
+    about: Ask a usage question or discuss an idea with the community.
+  - name: Traverse roadmap
+    url: https://github.com/Respawn-Studios/Traverse/blob/main/docs/ROADMAP.md
+    about: Check launch priorities and future plans before proposing a feature.
+  - name: Security and private reports
+    url: https://github.com/Respawn-Studios/Traverse/blob/main/SECURITY.md
+    about: Keep vulnerability details out of public issues; follow the private-contact guidance.

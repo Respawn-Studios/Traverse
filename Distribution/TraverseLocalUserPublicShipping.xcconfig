@@ -1,0 +1,9 @@
+#include "TraverseDirect.xcconfig"
+// Fresh Developer ID direct shipping only; local-review cases use their own tag.
+ENABLE_APP_SANDBOX = NO
+CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/Distribution/DirectParent.entitlements
+MAC_EXPLORER_ACCESS_POLICY = local-user-v1
+MAC_EXPLORER_TRAVERSE_BUILD = developer-id-local-user-public-shipping-v1
+INFOPLIST_FILE = $(SRCROOT)/.build/traverse-release/tooling/direct-public-shipping/TraverseInfo.plist
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_EXPLORER_DISTRIBUTION TRAVERSE_PUBLIC_UPDATER TRAVERSE_LOCAL_USER_DIRECT
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(SRCROOT)/.build/traverse-release/tooling/sparkle-2.10.0/unpacked/Sparkle.xcframework/macos-arm64_x86_64

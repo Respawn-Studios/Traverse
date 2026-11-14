@@ -1,0 +1,7 @@
+// Portable builds have no qualified production volume set. This development
+// machine's reviewed identifiers are private, ignored and do not enable Copy.
+MAC_EXPLORER_COPY_PREVIEW_INTERNAL_VOLUME =
+MAC_EXPLORER_COPY_PREVIEW_WORKSPACE_VOLUME =
+MAC_EXPLORER_COPY_PREVIEW_HISTORY_VOLUME =
+MAC_EXPLORER_COPY_PREVIEW_QUALIFIED = NO
+#include? "CopyPreviewQualification.local.xcconfig"

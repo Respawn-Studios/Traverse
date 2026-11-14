@@ -1,0 +1,10 @@
+#include "TraverseDirect.xcconfig"
+// Separate local-user Developer ID qualification. Shipping remains held by
+// release-case policy until its exact signed artifact and direct feed qualify.
+ENABLE_APP_SANDBOX = NO
+CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/Distribution/DirectParent.entitlements
+MAC_EXPLORER_ACCESS_POLICY = local-user-v1
+MAC_EXPLORER_TRAVERSE_BUILD = developer-id-local-user-public-qualification-v1
+INFOPLIST_FILE = $(SRCROOT)/.build/traverse-release/tooling/direct-public-updater/TraverseInfo.plist
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_EXPLORER_DISTRIBUTION TRAVERSE_PUBLIC_UPDATER TRAVERSE_LOCAL_USER_DIRECT
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(SRCROOT)/.build/traverse-release/tooling/sparkle-2.10.0/unpacked/Sparkle.xcframework/macos-arm64_x86_64

@@ -1,0 +1,12 @@
+// Explicit candidate lane only. No certificate, team, final identity or SKU.
+// Select with xcodebuild -xcconfig; do not replace the owner's project settings.
+GENERATE_INFOPLIST_FILE = NO
+INFOPLIST_FILE = $(SRCROOT)/Distribution/Info.plist
+ENABLE_APP_SANDBOX = YES
+ENABLE_HARDENED_RUNTIME = YES
+CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/Distribution/AppStoreParent.entitlements
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_EXPLORER_DISTRIBUTION
+ARCHS = arm64
+ONLY_ACTIVE_ARCH = NO
+// Final copyright, bundle ID, profile, icon and export/privacy answers must be
+// resolved before an upload. Runtime distribution helper trust stays closed.

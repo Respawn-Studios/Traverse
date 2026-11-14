@@ -1,0 +1,17 @@
+[package]
+name = "macexplorer-smb2-qualification"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+smb2 = { path = "../../../.build/b10-network-tooling/smb2-b7e88bdf948e8e99923a40c9c2dcf3cba0f2d4aa/qualified/crates/smb2", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "sync", "macros"] }
+async-trait = "0.1"
+
+[profile.release]
+debug = false
+strip = false
+incremental = false

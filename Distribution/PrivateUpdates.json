@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "origin": "https://respawn-studios.com",
+  "feedPath": "/products/traverse/updates/appcast.xml",
+  "credentialAccount": "traverse-beta",
+  "publicEDKey": "MG4sBFr76ad6D4nGo+i2VuZ4hxVMEQZToBUjYyui3IA=",
+  "signingKeyAccount": "Respawn-Traverse-Update-Signing-v1",
+  "intervalSeconds": 21600
+}

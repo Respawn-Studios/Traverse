@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "scope": "Unmodified source for the pinned Sparkle framework and its CLI build dependency; no release signing keys.",
+  "components": [
+    {
+      "name": "Sparkle",
+      "version": "2.10.0",
+      "commit": "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+      "url": "https://codeload.github.com/sparkle-project/Sparkle/tar.gz/eef1a539a373c1f1a320624b1130fc5de7b2e100",
+      "filename": "Sparkle-eef1a539a373c1f1a320624b1130fc5de7b2e100.tar.gz",
+      "sha256": "fd2a5de329be3619111f9a73a1adeac9725a92292f0431c93679e5e2b0d48a04",
+      "licenseFile": "LICENSE",
+      "licenseSHA256": "389a4e4e9a32f059775b13a06e25a591445ba229d2838d26dd3e7c0c45127cfe"
+    },
+    {
+      "name": "swift-argument-parser",
+      "version": "0.4.4",
+      "commit": "83b23d940471b313427da226196661856f6ba3e0",
+      "url": "https://codeload.github.com/apple/swift-argument-parser/tar.gz/83b23d940471b313427da226196661856f6ba3e0",
+      "filename": "swift-argument-parser-83b23d940471b313427da226196661856f6ba3e0.tar.gz",
+      "sha256": "b8307fe6af249e2d6ba80a5ccd8ef2e5f54093b9495a90f2634734a8f64cae2d",
+      "licenseFile": "LICENSE.txt",
+      "licenseSHA256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55"
+    }
+  ]
+}

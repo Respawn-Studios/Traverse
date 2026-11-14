@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "purpose": "Isolated product-worker derivation; original benchmark artifacts are immutable",
+  "sources": {
+    "tools/analyzer/rust/main.rs": "bc8d582b4640acf0b0bac5c4a7f2780667fd5f95b616aba7975fad9f3e177799",
+    "tools/analyzer/AnalyzerNative.c": "73169e27f8a994da50d7c17d7e604a18a36407542c70492086d055c469229d5c",
+    "tools/analyzer/AnalyzerNative.h": "d3e31660adb87a8f3b8637ae075aa2533fdc495222a1420bd1689aad052eb819"
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "macexplorer-smb-qualification"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+smb = { path = "../../../.build/b10-network-tooling/smb-f4524d032c8951cc288e1c8231ad68588583abda/qualified/crates/smb", default-features = false, features = ["async", "sign", "encrypt"] }
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "sync", "macros"] }
+
+[profile.release]
+debug = false
+strip = false
+incremental = false

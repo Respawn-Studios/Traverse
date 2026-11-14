@@ -1,0 +1,7 @@
+#include "TraverseDirect.xcconfig"
+// Isolated generated-data qualification only. Not a shipping configuration.
+ENABLE_APP_SANDBOX = NO
+CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/Distribution/DirectParent.entitlements
+MAC_EXPLORER_ACCESS_POLICY = local-user-v1
+MAC_EXPLORER_TRAVERSE_BUILD = developer-id-local-user-qualification-v1
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_EXPLORER_DIRECT_ACCESS_QUALIFICATION

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "generatedUTC": "2026-11-14",
+  "method": "Asset-specific provenance below; canonical runtime app icon unchanged",
+  "runtimeIconChanged": false,
+  "assets": [
+    {
+      "path": "traverse-banner.png",
+      "bytes": 1508683,
+      "width": 1774,
+      "height": 887,
+      "sha256": "68da93e75428e9ee3c5606f5552e0bb0118685d01e17b2316bdd749a287e0aaf",
+      "description": "Promotional Traverse banner derived from the unchanged native folder/compass icon; not a product screenshot.",
+      "method": "OpenAI built-in image generation; manual visual review"
+    },
+    {
+      "path": "traverse-icon.png",
+      "bytes": 811240,
+      "width": 1024,
+      "height": 1024,
+      "sha256": "70c6817ab2a799068b34020aaf166d84560881e0c8447c0f3e3640dcdc930cff",
+      "method": "Verbatim ic10 PNG representation extracted from the existing ICNS; visually reviewed",
+      "source": "App/MacExplorer/Resources/AppIcon.icns",
+      "sourceSHA256": "951bc63adb873687d41be7d16a93bb16cf39158accad42e70498858f8e575057",
+      "description": "Existing Traverse application icon; no redesign or runtime asset change."
+    }
+  ]
+}

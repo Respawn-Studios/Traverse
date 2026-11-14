@@ -1,0 +1,22 @@
+// Explicit Traverse app-target configuration. Generated project lives in .build.
+// Existing development identity, settings, data and project remain independent.
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM = CDLNJRG82U
+PRODUCT_BUNDLE_IDENTIFIER = com.respawnstudios.traverse
+MARKETING_VERSION = 0.1.2
+CURRENT_PROJECT_VERSION = 3
+GENERATE_INFOPLIST_FILE = NO
+INFOPLIST_FILE = $(SRCROOT)/Distribution/TraverseInfo.plist
+ENABLE_APP_SANDBOX = YES
+ENABLE_HARDENED_RUNTIME = YES
+ENABLE_DEBUG_DYLIB = NO
+CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/Distribution/AppStoreParent.entitlements
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_EXPLORER_DISTRIBUTION
+ARCHS = arm64
+ONLY_ACTIVE_ARCH = NO
+MAC_EXPLORER_DISTRIBUTION_COPYRIGHT = Copyright © 2026 Respawn Studios. All rights reserved.
+MAC_EXPLORER_TRAVERSE_BUILD = app-store-v1
+MAC_EXPLORER_DISTRIBUTION_CHANNEL = app-store
+MAC_EXPLORER_ACCESS_POLICY = sandbox-selected-v1
+// Standard SSH/SMB encryption is implemented by bundled libraries. Do not claim
+// an export exemption here; answer the actual compliance form before testing.

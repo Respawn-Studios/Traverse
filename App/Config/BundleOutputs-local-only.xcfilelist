@@ -1,0 +1,4 @@
+$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/storage-scanner-worker
+$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ThirdPartyNotices.txt
+$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ThirdPartyManifest.json
+$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/PrivacyInfo.xcprivacy

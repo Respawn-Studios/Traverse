@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "capturedDate": "2026-11-14",
+  "applicationVersion": "0.1.6",
+  "applicationBuild": "91",
+  "sourceCommit": "320280b2504e73c8c8a0e87c8288f3e0267e29ff",
+  "platform": "macOS 27.2 (26B123), Apple Silicon",
+  "appearance": "System, shown in Dark appearance; Glass navigation/sidebar/status; opaque file content",
+  "interfaceSizePercent": 100,
+  "motion": "Full; system accessibility preferences take priority",
+  "method": "Native macOS app-window screenshots. Unmodified JPEG captures; no reconstructed interface or AI-generated product imagery. macOS window-sharing indicator is visible.",
+  "data": "Generated demo folders only; no personal documents or server credentials.",
+  "releaseState": "Development candidate; not a screenshot of public Build69.",
+  "assets": [
+    {
+      "path": "workspace-panes.jpg",
+      "width": 1140,
+      "height": 760,
+      "bytes": 97569,
+      "sha256": "16cd05d5d25a96d294bbea4f8f62ae7755b8a79307794df992c68ed1ae8bef75",
+      "description": "Two independent panes with generated folders and preserved tabs."
+    },
+    {
+      "path": "address-suggestions.jpg",
+      "width": 1140,
+      "height": 760,
+      "bytes": 86652,
+      "sha256": "91b287aeabe5ea8b05e6f7a1c1dc8081623560fe710cf6651f350bebe3e34157",
+      "description": "Editable address and folder-completion dropdown for an explicit generated path."
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "name": "contributor-v1",
+  "purpose": "Select the complete application, dependency, test and contributor sources; exclude local maintainer material and generated output.",
+  "retainedTrees": [
+    "App",
+    "Distribution",
+    "MacExplorer.xcodeproj",
+    "Packages",
+    "Vendor",
+    "Workers",
+    "tools",
+    "docs/engineering",
+    "docs/guides",
+    "docs/media"
+  ],
+  "retainedFiles": [
+    ".gitattributes",
+    ".gitignore",
+    ".github/FUNDING.yml",
+    ".github/pull_request_template.md",
+    "CONTRIBUTING.md",
+    "COMMERCIAL-LICENSING.md",
+    "LICENSE",
+    "LICENSING.md",
+    "README.md",
+    "docs/README.md",
+    "docs/BROWSER_DESIGN.md",
+    "docs/FILE_OPERATIONS.md",
+    "docs/PROJECT_FOUNDATION.md",
+    "docs/ROADMAP.md",
+    "PRIVACY.md",
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/ISSUE_TEMPLATE/feature_request.md",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    "SECURITY.md",
+    "TRADEMARKS.md"
+  ],
+  "omittedTrees": [
+    "Prototypes",
+    "docs"
+  ],
+  "omissionReason": "Local working notes, historical reports, generated output and throwaway prototypes are not contributor dependencies. All required application and worker source, resources, package tests, licenses, dependency locks and supported tools remain selected."
+}

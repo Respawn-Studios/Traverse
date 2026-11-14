@@ -1,0 +1,4 @@
+Copyright/SPDX headers retained from the checksum-verified published archive.
+
+russh-cryptovec-0.62.0/src/lib.rs
+// Copyright 2016 Pierre-Étienne Meunier

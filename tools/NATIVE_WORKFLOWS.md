@@ -1,0 +1,51 @@
+# Generated native workflows
+
+Use existing journeys after relevant behavior changes. They share the ordinary
+app and incremental build. Start with `python3 -B tools/dev.py native-check --help`
+and choose the check that exercises the changed route. See the
+[engineering guide](../docs/engineering/README.md) for validation levels and
+[file operations](../docs/FILE_OPERATIONS.md) for integrity contracts.
+
+| Area | Existing entry |
+| --- | --- |
+| Local text editing | `native-check local-editor`, `editor-preferences`, `editor-lines` |
+| Archive creation | `native-check create-zip`, `create-tar` |
+| ZIP edits | `native-check zip-add-copy`, `batch-rename` and the relevant editor journey |
+| Compressed TAR | `native-check compressed-tar` |
+| Grouped operations | `native-check selection-group` |
+| Saved analyses | `native-check analysis-persistence`; `--incremental-analysis` adds the retained-source refresh pair |
+| Generated chart presentation | `native-check storage-chart` |
+| Support report review | `native-check support-details` |
+| Shared tool windows | `native-check tool-windows` |
+| Remote metadata | `native-check connection-metadata --connection-phase find` or `viewport` |
+
+Run entries through `python3 -B tools/dev.py`. Use each entry's help for accepted
+flags; recording and layout flags are feature-specific. Existing Settings/Help/
+Drives flows support normal, reduced and off motion, with enlarged/light options
+where offered. [Motion review](ui_motion/README.md) describes retained capture
+inspection and the cached decoder.
+
+Offscreen mode, where supported, exercises generated functional commands without
+visible-input or visual acceptance. Native focus, materials, motion and physical
+input require an unlocked foreground session and the exact generated app/window.
+An Accessibility press or value setter alone does not establish actual keyboard
+input, submitted binding or successful connection. Do not inspect password values.
+
+Generated flows own only their marked repository-local fixtures. They do not
+authorize personal documents, real Trash, credentials, a server, OS preferences or
+publication. Real-connection checks require explicit generated listeners and
+private secret input; the native check does not start a server implicitly.
+Body-transfer, external receiver, sandbox grant, device and installed signature
+validation remain separate from metadata or view checks.
+
+Archive promise controllers can reuse the current Debug app with their existing
+`--ordinary-build` option. They bind its build receipt before launch and refuse
+a changed product. Generated callback checks do not establish a physical Finder
+drag or independently grant destination access. Reuse source-owned controllers
+rather than creating another app, copied source graph or test harness.
+
+The local-editor Save/focus journey retains native key-window guards and has no
+offscreen mode. Before automated input, verify the exact generated process,
+window and selection. Keep failure receipts and recovery data; inspect a failed
+wait before retrying the journey. A passing fixture check is evidence only for
+its exercised operation, source, product and runtime conditions.

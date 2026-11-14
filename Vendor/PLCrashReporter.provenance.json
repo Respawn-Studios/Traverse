@@ -1,0 +1,1882 @@
+{
+  "commit": "0254f941c646b1ed17b243654723d0f071e990d0",
+  "downstreamChanges": "The 22 include/ header links retain exact upstream target bytes. Source/PLCrashReporter.m has the reviewed private, exclusive pending-leaf, private-directory, and crash-time output-bound patch recorded in downstreamPatch. Use mutually exclusive Darwin no-follow flags: full-path O_NOFOLLOW_ANY when available, otherwise leaf-only O_NOFOLLOW; combining both is invalid and prevents report creation.",
+  "downstreamPatch": {
+    "patchedBytes": 44631,
+    "patchedSHA256": "0bd6e50ef559585386fb64889f024e498c54213d1206cfd38f83c5c5a825775c",
+    "path": "Source/PLCrashReporter.m",
+    "replacements": [
+      {
+        "after": "#import <sys/stat.h>\n#import <unistd.h>\n",
+        "before": ""
+      },
+      {
+        "after": "    /* A pending report is never overwritten, including after an interrupted\n     * recovery. Exclusive creation also avoids truncating a redirected leaf. */\n    int flags = O_WRONLY|O_CREAT|O_EXCL|O_NONBLOCK|O_CLOEXEC;\n#ifdef O_NOFOLLOW_ANY\n    /* Darwin rejects combining full-path and leaf-only no-follow flags. */\n    flags |= O_NOFOLLOW_ANY;\n#else\n    flags |= O_NOFOLLOW;\n#endif\n    int fd = open(sigctx->path, flags, 0600);\n",
+        "before": "    /* Open the output file */\n    int fd = open(sigctx->path, O_RDWR|O_CREAT|O_TRUNC, 0644);\n"
+      },
+      {
+        "after": "        return PLCRASH_EINTERNAL;\n    }\n    struct stat output;\n    if (fstat(fd, &output) != 0 || (output.st_mode & S_IFMT) != S_IFREG ||\n        output.st_uid != geteuid() || output.st_nlink != 1 ||\n        (output.st_mode & 0777) != 0600 || output.st_size != 0) {\n        close(fd);\n",
+        "before": ""
+      },
+      {
+        "after": "    signal_handler_context.max_report_size = _config.maxReportBytes;\n",
+        "before": ""
+      },
+      {
+        "after": "    NSDictionary *attributes = [NSDictionary dictionaryWithObject: [NSNumber numberWithUnsignedLong: 0700] forKey: NSFilePosixPermissions];\n",
+        "before": "    NSDictionary *attributes = [NSDictionary dictionaryWithObject: [NSNumber numberWithUnsignedLong: 0755] forKey: NSFilePosixPermissions];\n"
+      }
+    ],
+    "unifiedDiff": "--- a/Source/PLCrashReporter.m\n+++ b/Source/PLCrashReporter.m\n@@ -49,6 +49,8 @@\n #import <fcntl.h>\n #import <dlfcn.h>\n #import <mach-o/dyld.h>\n+#import <sys/stat.h>\n+#import <unistd.h>\n \n #import <stdatomic.h>\n \n@@ -143,10 +145,25 @@\n     plcrash_async_file_t file;\n     plcrash_error_t err;\n \n-    /* Open the output file */\n-    int fd = open(sigctx->path, O_RDWR|O_CREAT|O_TRUNC, 0644);\n+    /* A pending report is never overwritten, including after an interrupted\n+     * recovery. Exclusive creation also avoids truncating a redirected leaf. */\n+    int flags = O_WRONLY|O_CREAT|O_EXCL|O_NONBLOCK|O_CLOEXEC;\n+#ifdef O_NOFOLLOW_ANY\n+    /* Darwin rejects combining full-path and leaf-only no-follow flags. */\n+    flags |= O_NOFOLLOW_ANY;\n+#else\n+    flags |= O_NOFOLLOW;\n+#endif\n+    int fd = open(sigctx->path, flags, 0600);\n     if (fd < 0) {\n         PLCF_DEBUG(\"Could not open the crashlog output file: %s\", strerror(errno));\n+        return PLCRASH_EINTERNAL;\n+    }\n+    struct stat output;\n+    if (fstat(fd, &output) != 0 || (output.st_mode & S_IFMT) != S_IFREG ||\n+        output.st_uid != geteuid() || output.st_nlink != 1 ||\n+        (output.st_mode & 0777) != 0600 || output.st_size != 0) {\n+        close(fd);\n         return PLCRASH_EINTERNAL;\n     }\n     \n@@ -596,6 +613,7 @@\n \n     /* Set up the signal handler context */\n     signal_handler_context.path = strdup([[self crashReportPath] UTF8String]); // NOTE: would leak if this were not a singleton struct\n+    signal_handler_context.max_report_size = _config.maxReportBytes;\n     assert(_applicationIdentifier != nil);\n     assert(_applicationVersion != nil);\n     plcrash_log_writer_init(&signal_handler_context.writer, _applicationIdentifier, _applicationVersion, _applicationMarketingVersion, [self mapToAsyncSymbolicationStrategy: _config.symbolicationStrategy], false);\n@@ -1072,7 +1090,7 @@\n     NSFileManager *fm = [NSFileManager defaultManager];\n     \n     /* Set up reasonable directory attributes */\n-    NSDictionary *attributes = [NSDictionary dictionaryWithObject: [NSNumber numberWithUnsignedLong: 0755] forKey: NSFilePosixPermissions];\n+    NSDictionary *attributes = [NSDictionary dictionaryWithObject: [NSNumber numberWithUnsignedLong: 0700] forKey: NSFilePosixPermissions];\n     \n     /* Create the top-level path */\n     if (![fm fileExistsAtPath: [self crashReportDirectory]] &&\n",
+    "unifiedDiffSHA256": "82acee293b8d6136119fd0e9a97138946a13d8dfba3649270f6e4512c89c8842",
+    "upstreamBytes": 43899,
+    "upstreamSHA256": "9b2b15619c6c64f0b5b8faa6729854046b9158bac246db651f696ca9d91ae1bf"
+  },
+  "files": {
+    ".azure-pipelines/analyze-and-test-template.yml": {
+      "bytes": 2634,
+      "executable": false,
+      "sha256": "6749057d66e791d7eab6fa2835b250aeae608f3478e2ed61732e3d46fc745078"
+    },
+    ".azure-pipelines/build-plcrashreporter-1ES.yml": {
+      "bytes": 2455,
+      "executable": false,
+      "sha256": "dc66c8372ba1cbf14236efb772f7f4ec0c81f2296e36a6fc432ae319de8fd903"
+    },
+    ".azure-pipelines/build-template.yml": {
+      "bytes": 3983,
+      "executable": false,
+      "sha256": "a579650c3a7897c4d7954d423b139d1dfb73c11c65e6eec8c4aa0aa3b410f94e"
+    },
+    ".azure-pipelines/cocoapods-verification-template.yml": {
+      "bytes": 2212,
+      "executable": false,
+      "sha256": "3ef1881185158d5334826aea252df17693d1a8280fc4f9f252988d254d1018b1"
+    },
+    ".github/CODEOWNERS": {
+      "bytes": 33,
+      "executable": false,
+      "sha256": "b0c17f88c9524122f5610b45c2729421665a0a944e47f2805989b29808ea900c"
+    },
+    ".github/ISSUE_TEMPLATE/feature_request.md": {
+      "bytes": 588,
+      "executable": false,
+      "sha256": "5c0103c264e033da225c9460a0eb41cc3e8fa6a7d9e66f5a81d305b614d8c087"
+    },
+    ".github/ISSUE_TEMPLATE/problem_report.md": {
+      "bytes": 645,
+      "executable": false,
+      "sha256": "5f44810c76973a158977d75918ef370a717adb025ca1c5532bfa9cde20a4877c"
+    },
+    ".github/PULL_REQUEST_TEMPLATE.md": {
+      "bytes": 720,
+      "executable": false,
+      "sha256": "2aec4e7e28be0a379bc1e9fa6b8e0f1ab4a35355442814e78e562d27a4710a17"
+    },
+    ".gitignore": {
+      "bytes": 383,
+      "executable": false,
+      "sha256": "aeac0e38a04d2da6e1b061f10da41887dd524ddcf0d640f8abfbc3ff2eb7addd"
+    },
+    "CHANGELOG.md": {
+      "bytes": 7425,
+      "executable": false,
+      "sha256": "62e953d04bcc74736858f39695646b9279af368b9624311bdff3b8e5f360716a"
+    },
+    "CrashReporter.xcodeproj/TemplateIcon.icns": {
+      "bytes": 52318,
+      "executable": false,
+      "sha256": "35baf4b217cbb3a169410ee4c9e2089e206957a436354fe5c51959322f8a743f"
+    },
+    "CrashReporter.xcodeproj/project.pbxproj": {
+      "bytes": 315057,
+      "executable": false,
+      "sha256": "16d2414e62a7582610a3f6a45bbb3192ff52221a6f0493b35b666b56c874db12"
+    },
+    "CrashReporter.xcodeproj/project.xcworkspace/contents.xcworkspacedata": {
+      "bytes": 135,
+      "executable": false,
+      "sha256": "7f3b00b5c3fdb45242d7b87e1e5c4e25d1fa8129a16c94295ecc4e8ea2235c5f"
+    },
+    "CrashReporter.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist": {
+      "bytes": 238,
+      "executable": false,
+      "sha256": "dfa0f9bb85b95ccba9c6811adadf8cb407fb5d52088e89db83ebc308ec448542"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter Archive.xcscheme": {
+      "bytes": 2815,
+      "executable": false,
+      "sha256": "eb4d49882525f3e6c152742045e0d6be65ee9e2f72d8ea231d2d4c50b545fd02"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter Documentation.xcscheme": {
+      "bytes": 2851,
+      "executable": false,
+      "sha256": "55d74d4ac816793594576aea56cc4cd6dc5002a91cf438333938406bb08cc13a"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter XCFramework.xcscheme": {
+      "bytes": 2444,
+      "executable": false,
+      "sha256": "5f5cb4a095ef391d2d4e4cc5eee2ee6c7b912c009f78d9f15df409c4bf5b63e2"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter iOS Framework.xcscheme": {
+      "bytes": 2839,
+      "executable": false,
+      "sha256": "5dc579ad2396a7092989ae481df7e585ee1c74218fcb1961165c95311f407190"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter iOS Universal.xcscheme": {
+      "bytes": 2851,
+      "executable": false,
+      "sha256": "e7c0508d36649a30a09ab0f21fd4e1de94ca19f36b38cdc7f07cb0e1298732bc"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter iOS.xcscheme": {
+      "bytes": 3238,
+      "executable": false,
+      "sha256": "cdd370ccfb103fcb5de36c08e0a8bc9a8d71dece44711a98ca95afdc506f9266"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter macOS Framework.xcscheme": {
+      "bytes": 2845,
+      "executable": false,
+      "sha256": "074d37a28844eded07f57277955dcf3f61e2a483800049c1a3280984c38f4515"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter macOS Static Framework.xcscheme": {
+      "bytes": 2462,
+      "executable": false,
+      "sha256": "31772f9a51063b38c3d3f2ecef39a075007f95da425c539c81d06ce3259ef58e"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter macOS.xcscheme": {
+      "bytes": 3248,
+      "executable": false,
+      "sha256": "cdb58db01a942e036e9122960e04242041cfaff1428a3ab3ec52569c0f0685cf"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter tvOS Framework.xcscheme": {
+      "bytes": 2842,
+      "executable": false,
+      "sha256": "444f0b6f252176e62a65c1e512878b38718774fdcd6f22c0cb177cfbcd199200"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter tvOS Universal.xcscheme": {
+      "bytes": 2857,
+      "executable": false,
+      "sha256": "58bc7b87911ec16f70fe9354c3b20390e07b95d4f57c9d34d5e0d57b8281d5e3"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter tvOS.xcscheme": {
+      "bytes": 3257,
+      "executable": false,
+      "sha256": "275fbec61ee439ae0c48b046d845cf32e50cbec073464fd89af3e4569a73a165"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/CrashReporter.xcscheme": {
+      "bytes": 2396,
+      "executable": false,
+      "sha256": "2d24094b8ed22b349ab656d3161c672fd79f0f80c31bd56135ab8eef868eb51b"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/DemoCrash iOS.xcscheme": {
+      "bytes": 3268,
+      "executable": false,
+      "sha256": "20f0eb7c223f52e299dd18d287cf5cffc0544eeb408d9b8f86311cf463d7a3f7"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/DemoCrash macOS.xcscheme": {
+      "bytes": 3284,
+      "executable": false,
+      "sha256": "300e2202ad042c12d9e930e40c62296bd36c890bbf9df09e776387bce5d21047"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/DemoCrash tvOS.xcscheme": {
+      "bytes": 3276,
+      "executable": false,
+      "sha256": "2cf6e3d3049efbdd81fd704c83718bc9872d1e9f563e79b813e5cea6bcb2033c"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/Fuzz Testing.xcscheme": {
+      "bytes": 3244,
+      "executable": false,
+      "sha256": "6d4626002d526181854f4974109bd6ee99dbfa5d647690f3b9a91114526d9681"
+    },
+    "CrashReporter.xcodeproj/xcshareddata/xcschemes/plcrashutil.xcscheme": {
+      "bytes": 3236,
+      "executable": false,
+      "sha256": "b3f6dc19ff64dc3fb6f1c9bb1b8093dc557d29eb48d2db7eaf9cb5e663421da8"
+    },
+    "Dependencies/cgmanifest.json": {
+      "bytes": 389,
+      "executable": false,
+      "sha256": "2c84c618cafcd394c674dfe28f18a6fd9140fabf474067ef226e184802250c0a"
+    },
+    "Dependencies/protobuf-c/generate-pb-c.sh": {
+      "bytes": 167,
+      "executable": true,
+      "sha256": "98833129dc106091e607b460bf15e8bef513c2ee51e9aa373270ea03dd9654e6"
+    },
+    "Dependencies/protobuf-c/protobuf-c/protobuf-c.c": {
+      "bytes": 96735,
+      "executable": false,
+      "sha256": "ee6079d889fbd39f4281152bef3bda367f5676d29d5f5512d47dff6008c4474f"
+    },
+    "Dependencies/protobuf-c/protobuf-c/protobuf-c.h": {
+      "bytes": 33675,
+      "executable": true,
+      "sha256": "553b941b5e57db77ce841ffdf7ea3bbb24e03df3a7545ee8c70bf585bfcd2a75"
+    },
+    "Dependencies/protobuf.rb": {
+      "bytes": 2794,
+      "executable": false,
+      "sha256": "1c8c1fcea08817719221e15b7e84458c7fbc95514af81bedea3bd0b60b36d946"
+    },
+    "Documentation/Crash Log Format/IEEEtrantools.sty": {
+      "bytes": 83332,
+      "executable": false,
+      "sha256": "9af1a1c132fe82415afbd30bc092246c79385ddaa3e3b4d497cb119ad72f01d6"
+    },
+    "Documentation/Crash Log Format/PLCrashReportFormat.tex": {
+      "bytes": 1722,
+      "executable": false,
+      "sha256": "53ed3c943caece1ed5369bed607027166b1535e750e26dbfa214f2617a425a4e"
+    },
+    "Doxyfile": {
+      "bytes": 111208,
+      "executable": false,
+      "sha256": "f0bfbbddac8571af96e319ecac5374882263b0782ff0834364774b22a8a17feb"
+    },
+    "LICENSE": {
+      "bytes": 2361,
+      "executable": false,
+      "sha256": "45f57308a5f95039a6478cf1e47449aa11e28427777d81497bd654c1f41ef5af"
+    },
+    "Other Sources/Crash Demo/main.m": {
+      "bytes": 7164,
+      "executable": false,
+      "sha256": "ea23172b577185a048444333e6fb89e3bff1b5d78564278dbd3c6716144ef58f"
+    },
+    "Other Sources/Fuzz/fuzz-main.m": {
+      "bytes": 825,
+      "executable": false,
+      "sha256": "43a21371e5c2afa761347f7d05832cdcb8c51e9fd2be665092c6a15ffad55663"
+    },
+    "Other Sources/plcrashutil/main.m": {
+      "bytes": 4456,
+      "executable": false,
+      "sha256": "a84339b65308505c2d8fd64f808a4c4294a67716d427362e28971872904cf412"
+    },
+    "PLCrashReporter.podspec": {
+      "bytes": 1359,
+      "executable": false,
+      "sha256": "ec66827d5b1a64903978e81312c388e1da4467837c11c5c3c50a50ef0970a62a"
+    },
+    "Package.swift": {
+      "bytes": 1736,
+      "executable": false,
+      "sha256": "0ac5fd3ab50cafd24a52c003395e4c7bbfb82ff97c1fe2418e8537dbb3c6269c"
+    },
+    "README.md": {
+      "bytes": 11397,
+      "executable": false,
+      "sha256": "f226ba185626aae0f8833cfcda91e9a4aa89f3d803d034d9ed55163734c54555"
+    },
+    "Resources/CrashReporter.exp": {
+      "bytes": 1088,
+      "executable": true,
+      "sha256": "88266b3f688c1891053d1b7e5e1da8e20391ec2de38cb69415c8b0a22c7e3b13"
+    },
+    "Resources/CrashReporter.modulemap": {
+      "bytes": 138,
+      "executable": false,
+      "sha256": "8abbba862d1c9d2b6d850d0bd9a4341f1cf4fdfe1a3f78d0802acdd289366943"
+    },
+    "Resources/Default-568h@2x.png": {
+      "bytes": 18594,
+      "executable": false,
+      "sha256": "cff22ecf70a2ac5432c55cc83711992c766ce8c7a42613b4f1771bdb8393cb1e"
+    },
+    "Resources/DemoCrash-iOS-Info.plist": {
+      "bytes": 784,
+      "executable": false,
+      "sha256": "173f19db71151ec5db395da27176c30a18bbaae84ac7c61dfb9a802c6342fb28"
+    },
+    "Resources/DemoCrash-iOS.entitlements": {
+      "bytes": 295,
+      "executable": false,
+      "sha256": "b043dea477bbd5da1552ef2f436a0cb644b884bb2568a9f831bd4ee362f9e99b"
+    },
+    "Resources/DemoCrash-macOS-Info.plist": {
+      "bytes": 990,
+      "executable": false,
+      "sha256": "ec6c7b0d1d714c0c9fb3ec31da12507c4f64ba3dab2a6c5cbac401be18416354"
+    },
+    "Resources/DemoCrash-tvOS-Info.plist": {
+      "bytes": 784,
+      "executable": false,
+      "sha256": "173f19db71151ec5db395da27176c30a18bbaae84ac7c61dfb9a802c6342fb28"
+    },
+    "Resources/Info.plist": {
+      "bytes": 882,
+      "executable": false,
+      "sha256": "24f002d6a3122a64405c62940cfbbf3b4856a6c5e90ae5b208293352dad309d2"
+    },
+    "Resources/PrivacyInfo.xcprivacy": {
+      "bytes": 1150,
+      "executable": false,
+      "sha256": "59d5a7312365e76bd13f028da48f01415f4f5013f4ac2f326d02a84d024a7b02"
+    },
+    "Resources/Tests-Info.plist": {
+      "bytes": 620,
+      "executable": false,
+      "sha256": "713fa1a320a8464a24afcb405c2368a966095438c8805c30a40c7e780430d19f"
+    },
+    "Resources/Tests/PLCrashAsyncCompactUnwindEncodingTests/Makefile": {
+      "bytes": 1828,
+      "executable": false,
+      "sha256": "6e5e6e4707a9b9efaad871e7cab682cbd4ae6251c7d1429f45a742b259d5bbd8"
+    },
+    "Resources/Tests/PLCrashAsyncCompactUnwindEncodingTests/test.c": {
+      "bytes": 3347,
+      "executable": false,
+      "sha256": "e4534208c59e1063ce06e04edd8adb367ed96684b486a37924bb8f5e037f197c"
+    },
+    "Resources/Tests/PLCrashAsyncCompactUnwindEncodingTests/test.ios": {
+      "bytes": 66008,
+      "executable": true,
+      "sha256": "953b790285330465753980cbe920105dd730cd2fdc4d775023a2e4f6efeda95f"
+    },
+    "Resources/Tests/PLCrashAsyncCompactUnwindEncodingTests/test.macosx": {
+      "bytes": 16780,
+      "executable": true,
+      "sha256": "1e6c6ed24187caba8d10419fca18f9114ce901b4007895823f36277ea3c0a0bf"
+    },
+    "Resources/Tests/PLCrashAsyncCompactUnwindEncodingTests/test.sim": {
+      "bytes": 4488,
+      "executable": true,
+      "sha256": "ab921f033424c3c63d20a1153f5277f887d10e548a91c7bc2dca7b643048d079"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/Makefile": {
+      "bytes": 1816,
+      "executable": false,
+      "sha256": "c3118d802f2c5bb025479350b80265a4bef7fed5d1194e849514f3725e350df6"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/README.txt": {
+      "bytes": 1189,
+      "executable": false,
+      "sha256": "9e24aba1768d4a7466ef7db43b4b457a06f3bd94cbd4c3e7edd3b8fcb74100e2"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/build-regression-tests.sh": {
+      "bytes": 1837,
+      "executable": true,
+      "sha256": "6bb881fc3acbd445206ee3cae115268e2aeef5ee9b99cb88745121e594f885b4"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_disable_compact_frame.s.1": {
+      "bytes": 9336,
+      "executable": true,
+      "sha256": "fe1cdb92f16789906b784f6732d0adfc3d573d065fe0711d794ee456d1d35a69"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frame.s.2": {
+      "bytes": 9336,
+      "executable": true,
+      "sha256": "03834c88a787de801341464361d9957da0a78c25cfbdbe63aac97cb009f225f5"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frame.s.3": {
+      "bytes": 9336,
+      "executable": true,
+      "sha256": "8a96296ed2786bb26debddbdb18cf3f197996c63275a10c9253e1e816a6d91d0"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frame.s.4": {
+      "bytes": 9336,
+      "executable": true,
+      "sha256": "8a96296ed2786bb26debddbdb18cf3f197996c63275a10c9253e1e816a6d91d0"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frame.s.5": {
+      "bytes": 9336,
+      "executable": true,
+      "sha256": "41d3bd6cfa9e567a7fc18aaed5cd059a5907d74c0da9d0496b0bd654dcda5d15"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frameless.s.6": {
+      "bytes": 9432,
+      "executable": true,
+      "sha256": "5c774d0baa038c5dd2272ab48b94b129378a0e9b6a77b4a647825a741ab9ca3b"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frameless.s.7": {
+      "bytes": 9432,
+      "executable": true,
+      "sha256": "8fbfaf3e50b854b5f1eecf1daa2e4b68744adfc9f2efdff1625676ffab90928b"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frameless_big.s.8": {
+      "bytes": 9432,
+      "executable": true,
+      "sha256": "1686b7000cd8a705367d4c7517d2360f301ef8dfdd4857adfcb9bf459a5a382c"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_frameless_big.s.9": {
+      "bytes": 9432,
+      "executable": true,
+      "sha256": "f04fb2c806b99686febd5061fc25686a79e0065672cae8455d6f6598b61963b1"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_unusual.s.10": {
+      "bytes": 9200,
+      "executable": true,
+      "sha256": "104770ab505d74a670e85f24a0877bcc57607d090af3d2a8f92769c9115069f0"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_64_unusual.s.11": {
+      "bytes": 9200,
+      "executable": true,
+      "sha256": "3242f5899538552c7dc7663375f5053e59ab889a1e7532272d1bb4b1fa8ab56d"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_disable_compact_frame.s.12": {
+      "bytes": 9252,
+      "executable": true,
+      "sha256": "0e01ad93d91a1f25793be7b65aa6d23cdc03f75829aa478dcdb5117645e15149"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frame.s.13": {
+      "bytes": 9252,
+      "executable": true,
+      "sha256": "4793e6f0c1728981d923629e9fea77361823e3b0a8eb04a0039da30d932b9cbe"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frame.s.14": {
+      "bytes": 9252,
+      "executable": true,
+      "sha256": "19a5442402629da1abc08b333a7fcaf2508469d3bbaf3fb699efb558d932c8e1"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frame.s.15": {
+      "bytes": 9252,
+      "executable": true,
+      "sha256": "19a5442402629da1abc08b333a7fcaf2508469d3bbaf3fb699efb558d932c8e1"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frame.s.16": {
+      "bytes": 9252,
+      "executable": true,
+      "sha256": "4f501e170ccc13c77a84a07c7b9a605240691b4509d18dee06de3b7f05c89eed"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frameless.s.17": {
+      "bytes": 9260,
+      "executable": true,
+      "sha256": "5a1db18475ab4c048d59a8000ba156fb590087b403423dce992a00c7a8afc4cc"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frameless.s.18": {
+      "bytes": 9260,
+      "executable": true,
+      "sha256": "86e16402b49ef5b4f9499375aff796165ab7df08e879b55dd486a433380ebb7c"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frameless_big.s.19": {
+      "bytes": 9248,
+      "executable": true,
+      "sha256": "8f7b500613f4e2499055c7a99602f742260a16c084f0e409fffa8c4a89db04e8"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_frameless_big.s.20": {
+      "bytes": 9248,
+      "executable": true,
+      "sha256": "a349e968193277b23ee8f7f5a7237674ee7fbc5bdabbf923169a2c18decef811"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_unusual.s.21": {
+      "bytes": 9088,
+      "executable": true,
+      "sha256": "1f68922663703d4baa0a08d1bafef8c337c26f3db659bd3b8d03ba1b8cd4d09f"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression-bins/tbin.unwind_test_x86_unusual.s.22": {
+      "bytes": 9088,
+      "executable": true,
+      "sha256": "2d842929317dc17e2ece5687964ea5275f07bfb87260b573d3fc8f6ac7102d53"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_main.c": {
+      "bytes": 914,
+      "executable": false,
+      "sha256": "b0b91e57b1f2ee1e4f7996c13af7dd370d856e3125675e7dd0a1326cd3ed2244"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86.s": {
+      "bytes": 2366,
+      "executable": false,
+      "sha256": "29695c7eba170ec2fe2ae0df314e83acf9f54febc52ff1ad7832ffb31744992b"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_64.s": {
+      "bytes": 2907,
+      "executable": false,
+      "sha256": "e385c79916789cd0d8135a705b59627884848763035e9e547842bde2113b3f7c"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_64_disable_compact_frame.s": {
+      "bytes": 8789,
+      "executable": false,
+      "sha256": "8a0bf060bcc9c520d1b0ed90c9a442cf06abaeb29762510530061446bd066f1d"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_64_frame.s": {
+      "bytes": 10094,
+      "executable": false,
+      "sha256": "7807b5fe8a912664c64182e80cc6b7c605a15c1de66ddacc24cb55105a0cb4b0"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_64_frameless.s": {
+      "bytes": 12259,
+      "executable": false,
+      "sha256": "1111a82a6da28a594e64b34c51cf78b25128f968d1c3617991b64363de511cc0"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_64_frameless_big.s": {
+      "bytes": 12827,
+      "executable": false,
+      "sha256": "93ad79d983ca16f69d72224039ea6b4913b3a15349fe7c9b3a6738b64deb7086"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_64_unusual.s": {
+      "bytes": 5119,
+      "executable": false,
+      "sha256": "2cdf79892e319ad1b803a4c2aa3f9b284f75c8a5cd65133ff7935ca027fa5e5a"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_disable_compact_frame.s": {
+      "bytes": 12367,
+      "executable": false,
+      "sha256": "827958e5165183eb553d40b59a0190b8d30c55feda1afabdcc1f6a732cab6fea"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_frame.s": {
+      "bytes": 13743,
+      "executable": false,
+      "sha256": "aaf039e6d0ff158f00d4fd4857810b25e25fd0d63b0faa3296c8097a2f0fe870"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_frameless.s": {
+      "bytes": 10568,
+      "executable": false,
+      "sha256": "bd544bc5c9c24cfa3b953d8f3e9798341abc28235dfa1ce8e96206f4f8921779"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_frameless_big.s": {
+      "bytes": 10709,
+      "executable": false,
+      "sha256": "0bb17aeb9fb55e55a589e7d326ee45782e0d2192c8f68fa36ac206d10f53ff8f"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/regression/unwind_test_x86_unusual.s": {
+      "bytes": 7063,
+      "executable": false,
+      "sha256": "d8a07e5dbb0336614d6154947c3421dc3d55f4ec4e7c0a0858981a0cf03e1d94"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/test.c": {
+      "bytes": 4823,
+      "executable": false,
+      "sha256": "9e9121851471ef5080cf2713ed98ea0f1d75f17ca0463ae8933707f596bb755d"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/test.ios": {
+      "bytes": 33232,
+      "executable": true,
+      "sha256": "670c14434c3647ecdb43ddb86f9cbd6d32fb3cdf15b1249f9b012ad380690bff"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/test.macosx": {
+      "bytes": 24996,
+      "executable": true,
+      "sha256": "ebd3b0310568034004fa7d16c8640f5b8441a3e9a908234d17c98e79a64169a2"
+    },
+    "Resources/Tests/PLCrashAsyncDwarfEncodingTests/test.sim": {
+      "bytes": 8608,
+      "executable": true,
+      "sha256": "fb98ed7fae0a5277aa427cbfb06b0d8678962dcf53e5d22e1dda21db74143b03"
+    },
+    "Resources/fuzz_report.plcrash": {
+      "bytes": 8813,
+      "executable": false,
+      "sha256": "30e413814477f3ab77ec2acedfe0940a20112c0b41e30be4ea94e5a83e690bf8"
+    },
+    "SECURITY.md": {
+      "bytes": 2757,
+      "executable": false,
+      "sha256": "89c4e4b9ba7ec705482e2de05135d0626d33bf8c2c66119c65d7a306dd83459c"
+    },
+    "Scripts/build-framework.sh": {
+      "bytes": 1150,
+      "executable": true,
+      "sha256": "a650a62c10e719c678e0f1a9badb67ca6dd9b921b65b148e2150f169624cc3dc"
+    },
+    "Scripts/combine-frameworks.sh": {
+      "bytes": 722,
+      "executable": true,
+      "sha256": "3721b8d7fbcbd0258097c65a03cdb255b3badd82aef5280464cb3aa37bd1d68a"
+    },
+    "Scripts/combine-libraries.sh": {
+      "bytes": 795,
+      "executable": true,
+      "sha256": "d84265c2e7d5faadc02e8fb38f29120799c7133312141dd6a4a3e47505efb14d"
+    },
+    "Scripts/combine-xcframework.sh": {
+      "bytes": 1490,
+      "executable": true,
+      "sha256": "07277371a1fb1cafadc7400196cbe4644494d1af33081ed38761453241259518"
+    },
+    "Scripts/copy-products.sh": {
+      "bytes": 1715,
+      "executable": true,
+      "sha256": "3bb27ca03146457aed1fb6a3c3cb044e0d33bd1675530c1e36025ac9ea75f6fd"
+    },
+    "Scripts/create-archive.sh": {
+      "bytes": 862,
+      "executable": true,
+      "sha256": "f0e70c6e2ed479ddbf7b420bbe44910df48af35b08ea4d330170d9a24f87372b"
+    },
+    "Scripts/generate-documentation.sh": {
+      "bytes": 723,
+      "executable": true,
+      "sha256": "147e5bcea8def7f94e10269236eb0bc37164dc0052a468d6382b0d4e7f8ad07a"
+    },
+    "Scripts/verify-modifications.sh": {
+      "bytes": 1023,
+      "executable": true,
+      "sha256": "cb96280e0ff51843361361a7042f474f47f3de3e8c44898ea68830903479dd51"
+    },
+    "Source/CrashReporter.h": {
+      "bytes": 17194,
+      "executable": false,
+      "sha256": "7c983e8218b65ad97ac2e2414da913f6f53e72c7480f8cec84de5f0e49b74574"
+    },
+    "Source/CrashReporter.m": {
+      "bytes": 1524,
+      "executable": false,
+      "sha256": "e689e29697eee7cacd3b007287d188408ffbcd55cd1be21afb5f8f61d67763ed"
+    },
+    "Source/CrashReporterFramework.m": {
+      "bytes": 124,
+      "executable": false,
+      "sha256": "7f4ba7e8909358e93b1404afb552d67b88e8d26eceddb11f054ad32c232db443"
+    },
+    "Source/PLCrashAsync.c": {
+      "bytes": 18159,
+      "executable": false,
+      "sha256": "a2df37611566beec4fee4ac160c47f51ffc4b06148bac0fa57e39b3580f1aad5"
+    },
+    "Source/PLCrashAsync.h": {
+      "bytes": 9422,
+      "executable": false,
+      "sha256": "fd1ad73f743b838da9786dd30a126928e22fe086706a43a27b38763b0ca2d768"
+    },
+    "Source/PLCrashAsyncCompactUnwindEncoding.c": {
+      "bytes": 55219,
+      "executable": false,
+      "sha256": "4e6ff22073d79341a991dc242d860fe1797d51fc2bfb1f624ac5732721eb07bd"
+    },
+    "Source/PLCrashAsyncCompactUnwindEncoding.h": {
+      "bytes": 10258,
+      "executable": false,
+      "sha256": "5765fee47a70284803e76f1c895b49ce64c734c80a569b3206e243e046da5cfc"
+    },
+    "Source/PLCrashAsyncDwarfCFAState.cpp": {
+      "bytes": 13098,
+      "executable": false,
+      "sha256": "f06f3c43d1fd32a2d89d67b601bee1badd24e8deddc03d4297396643c0e5fac2"
+    },
+    "Source/PLCrashAsyncDwarfCFAState.hpp": {
+      "bytes": 14422,
+      "executable": false,
+      "sha256": "c47bad4a8b09e15d9f3451206347c54887b67d07e5d7a8db75b55f26e68b7e14"
+    },
+    "Source/PLCrashAsyncDwarfCFAStateEvaluation.cpp": {
+      "bytes": 37600,
+      "executable": false,
+      "sha256": "6591061f6def8ef4d2f900dda890a70c71685144846fde3efa055f5b089f2742"
+    },
+    "Source/PLCrashAsyncDwarfCIE.cpp": {
+      "bytes": 20692,
+      "executable": false,
+      "sha256": "508f989cc0267c944cf237ddb0666e0ae8a68f252e90777dadcc232a6eee13dd"
+    },
+    "Source/PLCrashAsyncDwarfCIE.hpp": {
+      "bytes": 7301,
+      "executable": false,
+      "sha256": "fb00323e03649c530a3e48259348157e3b553716cd3dc87af13809537036b6b7"
+    },
+    "Source/PLCrashAsyncDwarfEncoding.cpp": {
+      "bytes": 9294,
+      "executable": false,
+      "sha256": "9b1ea14e4d12c67de17eeaf1836c1c220811ca1179b1006bb733d42628812d4b"
+    },
+    "Source/PLCrashAsyncDwarfEncoding.hpp": {
+      "bytes": 2701,
+      "executable": false,
+      "sha256": "270edb5aded18b528c9166051c4fe450f059ac6f6c15f776f7c41f6ad1e652b3"
+    },
+    "Source/PLCrashAsyncDwarfExpression.cpp": {
+      "bytes": 27496,
+      "executable": false,
+      "sha256": "89726d6aba8c033c9515612e22ecda852dc1e7bac1c2eb59582ec81c03f39d5a"
+    },
+    "Source/PLCrashAsyncDwarfExpression.hpp": {
+      "bytes": 15990,
+      "executable": false,
+      "sha256": "43519ba3eeec955331d3bb210275b710ee4b5315495ea1029a72cdcfaf640705"
+    },
+    "Source/PLCrashAsyncDwarfFDE.cpp": {
+      "bytes": 11536,
+      "executable": false,
+      "sha256": "eae0fd649668e1507cf3672680927dad0a674b2e3a86e7e8500c4f4ec895e722"
+    },
+    "Source/PLCrashAsyncDwarfFDE.hpp": {
+      "bytes": 3528,
+      "executable": false,
+      "sha256": "90663bdcab341aeac0ac086b5ed4480813abf31dfb03b33d118df87ec99c09cf"
+    },
+    "Source/PLCrashAsyncDwarfPrimitives.cpp": {
+      "bytes": 21726,
+      "executable": false,
+      "sha256": "f3a7f6edcbccfe295d0b12aa544009b98ec0791b2cd1d38de058e6f41bcf926b"
+    },
+    "Source/PLCrashAsyncDwarfPrimitives.hpp": {
+      "bytes": 17771,
+      "executable": false,
+      "sha256": "cbe75eb93e2edc9c0353356d03b4f52468e781d4483d71e6125feed50b7d2f82"
+    },
+    "Source/PLCrashAsyncImageList.cpp": {
+      "bytes": 7776,
+      "executable": false,
+      "sha256": "4c35783f2294a51d83ca45a2650ee574f2bd44e29606a5592f03cf539b7c0f69"
+    },
+    "Source/PLCrashAsyncImageList.h": {
+      "bytes": 3426,
+      "executable": false,
+      "sha256": "bd16ce95a60c22096ff0eda3625101e690f136b33068b067a7b0045c825925a1"
+    },
+    "Source/PLCrashAsyncLinkedList.hpp": {
+      "bytes": 14975,
+      "executable": false,
+      "sha256": "c8760bb4a44181034a869f849b3982c7b0973bd191fb4226b2919670aef63d9b"
+    },
+    "Source/PLCrashAsyncMObject.c": {
+      "bytes": 22650,
+      "executable": false,
+      "sha256": "2539c8cca331480c0081884ca2f8aa85fae4b81325672df2a6ddb94c7f153ad3"
+    },
+    "Source/PLCrashAsyncMObject.h": {
+      "bytes": 4275,
+      "executable": false,
+      "sha256": "44fa69f5f04cc83840817756a34b041b9cb8727819e354765511fb8f97a8c4b6"
+    },
+    "Source/PLCrashAsyncMachExceptionInfo.c": {
+      "bytes": 6221,
+      "executable": false,
+      "sha256": "8ce4d3e097a021ab36e48abffb1a8dd3a25ce59303370774eb9925d29bba3810"
+    },
+    "Source/PLCrashAsyncMachExceptionInfo.h": {
+      "bytes": 2698,
+      "executable": false,
+      "sha256": "79aa79991ce20c0dcd628287631985fe22c2fd5ce3cf1f803e273e7e5e5c9b63"
+    },
+    "Source/PLCrashAsyncMachOImage.c": {
+      "bytes": 39951,
+      "executable": false,
+      "sha256": "0fcd689938883f3909192fca770186d8f0262a181b89467a181b0bdb401ab5f1"
+    },
+    "Source/PLCrashAsyncMachOImage.h": {
+      "bytes": 8629,
+      "executable": false,
+      "sha256": "3927e372950173ce5056a4008fac4c474d3705f234c71d0bb82f06a5a8d92123"
+    },
+    "Source/PLCrashAsyncMachOString.c": {
+      "bytes": 5089,
+      "executable": false,
+      "sha256": "95accd76b2f54a86f641e245af0209ffc9fc19ade5c980cd0561416ace425c7d"
+    },
+    "Source/PLCrashAsyncMachOString.h": {
+      "bytes": 2559,
+      "executable": false,
+      "sha256": "4dc957b99625746714b33ca9b3bcd52539287e5230a038242548ed4b80fbcb75"
+    },
+    "Source/PLCrashAsyncObjCSection.h": {
+      "bytes": 5074,
+      "executable": false,
+      "sha256": "d6c5f1b339c14f80753411c12415bc56f107ac743ce6d05789acc219daa33ade"
+    },
+    "Source/PLCrashAsyncObjCSection.mm": {
+      "bytes": 61146,
+      "executable": false,
+      "sha256": "d0a7c5dd90fcb028a5ec1fbdc6f5e4ca80b31fd1bbbffe8338d0e1996d88d747"
+    },
+    "Source/PLCrashAsyncSignalInfo.c": {
+      "bytes": 5124,
+      "executable": false,
+      "sha256": "e7c9fc739dafc2847a7e7dc0597e1e551cec37397ff7f7669a99c5e04133cf99"
+    },
+    "Source/PLCrashAsyncSignalInfo.h": {
+      "bytes": 1758,
+      "executable": false,
+      "sha256": "b49d0891d568655dce10fb7fe95d28b46f5c1b9fa2469fa7ec5b9cd0f7796bba"
+    },
+    "Source/PLCrashAsyncSymbolication.c": {
+      "bytes": 9185,
+      "executable": false,
+      "sha256": "3488babc758fbdda48b17904af09319e354b6de21f11326fac9bcbb272df5d8d"
+    },
+    "Source/PLCrashAsyncSymbolication.h": {
+      "bytes": 4510,
+      "executable": false,
+      "sha256": "4375b77b6d1e70c01f3424e973161e7f18d38a9857411a5c45445ddd881397de"
+    },
+    "Source/PLCrashAsyncThread.c": {
+      "bytes": 11403,
+      "executable": false,
+      "sha256": "2e31242427431f0474073acf8d3fe2fdd94fc5db238c229fa33b526e489fd5e7"
+    },
+    "Source/PLCrashAsyncThread.h": {
+      "bytes": 9469,
+      "executable": false,
+      "sha256": "3e3d6eb29eedefa8fa80439d409fab688a124b2d6064fc0c0c62741d8ce6773a"
+    },
+    "Source/PLCrashAsyncThread_arm.c": {
+      "bytes": 24927,
+      "executable": false,
+      "sha256": "9531820a0814a6697af4b7c6213eaa771dfebfdf9f4d8c0f68f62f5edf2bed91"
+    },
+    "Source/PLCrashAsyncThread_arm.h": {
+      "bytes": 3687,
+      "executable": false,
+      "sha256": "387809d372fde54466f532da16cdca73c1dd517637b2c2ecd33b9642691869a3"
+    },
+    "Source/PLCrashAsyncThread_current.S": {
+      "bytes": 8299,
+      "executable": false,
+      "sha256": "a7af679199102a55737ca8e3fc91afcb2e51b08f7daa26bb8deb8af7766c02ca"
+    },
+    "Source/PLCrashAsyncThread_current.c": {
+      "bytes": 5431,
+      "executable": false,
+      "sha256": "27e609f1cabcf96ebc8c86e314328694ca59875e75ac82bac8899664ab10aac0"
+    },
+    "Source/PLCrashAsyncThread_current_defs.h": {
+      "bytes": 2098,
+      "executable": false,
+      "sha256": "74c0523d3a0222a84ff08fb88f61a55f24ba105aea730bb861d27f37ae718579"
+    },
+    "Source/PLCrashAsyncThread_x86.c": {
+      "bytes": 22774,
+      "executable": false,
+      "sha256": "325d2d794b2d1337064200b9bbdb9f4c3f7441961399e2d494c95c68a1e1e38d"
+    },
+    "Source/PLCrashAsyncThread_x86.h": {
+      "bytes": 4383,
+      "executable": false,
+      "sha256": "3ea7bf6a24a1229cda976952ef8bef4f2afa1501b22b0879f0051f22b3831322"
+    },
+    "Source/PLCrashCompatConstants.h": {
+      "bytes": 4464,
+      "executable": false,
+      "sha256": "78b8f4baf02fd15cd05886f2588fc9247d0a4d2d6a4b2393e89f6d95a0cc2f4e"
+    },
+    "Source/PLCrashFeatureConfig.h": {
+      "bytes": 3705,
+      "executable": false,
+      "sha256": "be6f5f2c42e98f82d791c4a43f699ca741e4476f650deccc08b6f2557fe9e76e"
+    },
+    "Source/PLCrashFrameCompactUnwind.c": {
+      "bytes": 6510,
+      "executable": false,
+      "sha256": "0482f272f1403f4b6f7ebfeba3fa1a31500eeed69b82aed05e5a2a508b6bbfed"
+    },
+    "Source/PLCrashFrameCompactUnwind.h": {
+      "bytes": 1990,
+      "executable": false,
+      "sha256": "6e3a37a2ec00375cf8ba6e5c2351d37d1968095990dbee399192a6d96970ab7d"
+    },
+    "Source/PLCrashFrameDWARFUnwind.cpp": {
+      "bytes": 11167,
+      "executable": false,
+      "sha256": "6a927db3320aeecb5a30f14e039941a39677ded4e99433c0a89a940fa2ffef9c"
+    },
+    "Source/PLCrashFrameDWARFUnwind.h": {
+      "bytes": 1932,
+      "executable": false,
+      "sha256": "3167fcfff72da4dcc93e98c48a481298e39878eb44d59aaf0777a769f67843f0"
+    },
+    "Source/PLCrashFrameStackUnwind.c": {
+      "bytes": 4906,
+      "executable": false,
+      "sha256": "71041b6eed52b99714aa30f8255844ce1319fce88084036aee6b64dccab75d52"
+    },
+    "Source/PLCrashFrameStackUnwind.h": {
+      "bytes": 1863,
+      "executable": false,
+      "sha256": "92ea10f5d99fbad1f33c0b0b9bb798d6daa15e4388f881c400f8ab12586e2e6f"
+    },
+    "Source/PLCrashFrameWalker.c": {
+      "bytes": 9652,
+      "executable": false,
+      "sha256": "5c231e5ce047db4c90bb6de2b1699de5c0d3630c4872857cffc3e0e70e6b7096"
+    },
+    "Source/PLCrashFrameWalker.h": {
+      "bytes": 6002,
+      "executable": false,
+      "sha256": "6106e6cc2b046d66068412a543fa7f80e529f95daa8647be209f3d923a3d1e1e"
+    },
+    "Source/PLCrashHostInfo.h": {
+      "bytes": 2207,
+      "executable": false,
+      "sha256": "ad28d860e252653d6528fb7128f0dbaa003e49634286fa49724d49f780e8aec6"
+    },
+    "Source/PLCrashHostInfo.m": {
+      "bytes": 3700,
+      "executable": false,
+      "sha256": "948f198e49c7869d77c41fa65d2a8ed9bbb0f71f55609088e498dee1d1409762"
+    },
+    "Source/PLCrashLogWriter.h": {
+      "bytes": 7407,
+      "executable": false,
+      "sha256": "39e4c7557e768319cbc96c6f2be5038bfd8b4d1be2abec21f1f04c7a29f91386"
+    },
+    "Source/PLCrashLogWriter.m": {
+      "bytes": 53496,
+      "executable": false,
+      "sha256": "f646a102a73fe36d6e4893ce882673bb875a9e018772b307af1db621f7ad9735"
+    },
+    "Source/PLCrashLogWriterEncoding.c": {
+      "bytes": 8592,
+      "executable": false,
+      "sha256": "f931f8fec87acd1bfa7fa0d5bc932c51aaa8410f6df7a7e57232bbcd104117dd"
+    },
+    "Source/PLCrashLogWriterEncoding.h": {
+      "bytes": 1764,
+      "executable": false,
+      "sha256": "5da9e24072f566fba80c2120d3661dd46d67730c53d83b8907e57d1aad88f529"
+    },
+    "Source/PLCrashMachExceptionPort.h": {
+      "bytes": 2648,
+      "executable": false,
+      "sha256": "01f30a3f5f288ed873fdf9683b745f233579afb8220a5d32787240807832cd64"
+    },
+    "Source/PLCrashMachExceptionPort.m": {
+      "bytes": 10260,
+      "executable": false,
+      "sha256": "6ca843908a5cf9114cc72eb8c859dcaa3d67ac86c10590e6e0c2eeb560939b5e"
+    },
+    "Source/PLCrashMachExceptionPortSet.h": {
+      "bytes": 2953,
+      "executable": false,
+      "sha256": "1c1b1f48276d4824a12aebfcdb44cb6a9baf83f953f507334a037e685e0cef1b"
+    },
+    "Source/PLCrashMachExceptionPortSet.m": {
+      "bytes": 5315,
+      "executable": false,
+      "sha256": "c1e3d0cec992442958431ec2b1137e1c476886cb026984da11e7dbed27546fb0"
+    },
+    "Source/PLCrashMachExceptionServer.h": {
+      "bytes": 4471,
+      "executable": false,
+      "sha256": "66b7bd45613474a4b08de660ee4c21aa9c9e295bd4373b67aac0be27d2be5420"
+    },
+    "Source/PLCrashMachExceptionServer.m": {
+      "bytes": 36902,
+      "executable": false,
+      "sha256": "d2e3b73ca996fdf4f965cabd96ac2024d83865f3eba72cb1a6751f1c5491a40f"
+    },
+    "Source/PLCrashMacros.h": {
+      "bytes": 5022,
+      "executable": false,
+      "sha256": "a2738d434e4b8a292b155b72272787c6c44b82bcfcfd4d012e01a5417bdb7911"
+    },
+    "Source/PLCrashNamespace.h": {
+      "bytes": 22307,
+      "executable": false,
+      "sha256": "64446a2b84bbf9e5464efd91bd30e2bcac1aa522fa3a21f1ea79c6c9bf7e2a6c"
+    },
+    "Source/PLCrashProcessInfo.h": {
+      "bytes": 2125,
+      "executable": false,
+      "sha256": "0341c9815088a15fe951244c136dbf007175e4f66981c835e01d2895dc9dd38e"
+    },
+    "Source/PLCrashProcessInfo.m": {
+      "bytes": 5039,
+      "executable": false,
+      "sha256": "ec92a9e6957d75559d5b40ff9191ae00c1f7fee4a90368f2a9ce1c3b0237383f"
+    },
+    "Source/PLCrashReport.h": {
+      "bytes": 6757,
+      "executable": false,
+      "sha256": "a2280ce261880602231c5ca1c5096045cf69d7979209be84326862766b6e1922"
+    },
+    "Source/PLCrashReport.m": {
+      "bytes": 38509,
+      "executable": false,
+      "sha256": "aa6e12c9c80cd4cbba7593498f54468293742e6c92ba5874ce77b2f81e85d1d1"
+    },
+    "Source/PLCrashReport.pb-c.c": {
+      "bytes": 43324,
+      "executable": false,
+      "sha256": "482e8e8b6501a62a988e96f6a044efdbbca24bf04e9790999ba4ae1c3d09c9ea"
+    },
+    "Source/PLCrashReport.pb-c.h": {
+      "bytes": 24556,
+      "executable": false,
+      "sha256": "d987a004f6d761f17827939bd343b1437b10d9612222e2c9bf131aa9e9e68096"
+    },
+    "Source/PLCrashReport.proto": {
+      "bytes": 13413,
+      "executable": false,
+      "sha256": "9d362c8c85da198f7f1f252bb6f1b821b62e5d438ae268b191229dc47e13313f"
+    },
+    "Source/PLCrashReportApplicationInfo.h": {
+      "bytes": 2102,
+      "executable": false,
+      "sha256": "5c890bc6682b57f39c28bef8cf2bf1d94e84dcc7491f959eaa0a5b194829e777"
+    },
+    "Source/PLCrashReportApplicationInfo.m": {
+      "bytes": 2711,
+      "executable": false,
+      "sha256": "6bdef68505803bf7d785bd5c696dac04d8698304fe594b5c704c2a87cc8847e4"
+    },
+    "Source/PLCrashReportBinaryImageInfo.h": {
+      "bytes": 2404,
+      "executable": false,
+      "sha256": "793eb24e47a241d9a511ea1e6e58a0c325adb4b3329c280de51b2b21e6bbba47"
+    },
+    "Source/PLCrashReportBinaryImageInfo.m": {
+      "bytes": 3875,
+      "executable": false,
+      "sha256": "c925ac3120ee538abf5c98b03a634d6c5b9e1a77282b8af5a7a87fadd575e5b3"
+    },
+    "Source/PLCrashReportExceptionInfo.h": {
+      "bytes": 2205,
+      "executable": false,
+      "sha256": "83cdbcf420845f8aa5aa758aeb5d5db2ebe8d9ac0654d33ed3be79c9da1fd3f7"
+    },
+    "Source/PLCrashReportExceptionInfo.m": {
+      "bytes": 2744,
+      "executable": false,
+      "sha256": "153107e9227ad28baf356df2dbd704be472c8fc5c6b7eeee850e3d5c53255578"
+    },
+    "Source/PLCrashReportFormatter.h": {
+      "bytes": 2217,
+      "executable": false,
+      "sha256": "2494f6e89244a9030d1a1ad88d189df147d104535ce4b2553336471dc25a4980"
+    },
+    "Source/PLCrashReportMachExceptionInfo.h": {
+      "bytes": 1624,
+      "executable": false,
+      "sha256": "32b4717e9f47ee83c4665d8ac53fa773fbe457990c37558114b924a4d88cfdea"
+    },
+    "Source/PLCrashReportMachExceptionInfo.m": {
+      "bytes": 1886,
+      "executable": false,
+      "sha256": "c9bc3d95e5b2f10c0767c405c1da28ea307dc885b1af385fb183e245a9f570c2"
+    },
+    "Source/PLCrashReportMachineInfo.h": {
+      "bytes": 2753,
+      "executable": false,
+      "sha256": "1a39e96ed9607c459d518d44b4c974c8e5a922e0cfaa275935cd34852ce72a16"
+    },
+    "Source/PLCrashReportMachineInfo.m": {
+      "bytes": 3462,
+      "executable": false,
+      "sha256": "c8829fad9248dab9e453298adae21f8e36307d095ba1eeb696802bb5f8fae488"
+    },
+    "Source/PLCrashReportProcessInfo.h": {
+      "bytes": 2910,
+      "executable": false,
+      "sha256": "306bb5b715117b5466f4056ac0d9ce4b481a8a994401b6211443f248e53d8e1d"
+    },
+    "Source/PLCrashReportProcessInfo.m": {
+      "bytes": 3731,
+      "executable": false,
+      "sha256": "b0a0d665e45dccf51a26672ca98c616ffae4ef172c4e068e92d2e7774b32371b"
+    },
+    "Source/PLCrashReportProcessorInfo.h": {
+      "bytes": 2254,
+      "executable": false,
+      "sha256": "843c37d1b423bcfc918a1fb898270f438f7a783e3316cb3fce20712a83c6df10"
+    },
+    "Source/PLCrashReportProcessorInfo.m": {
+      "bytes": 2826,
+      "executable": false,
+      "sha256": "665cd7ca64a8f04abc8563ac5fe96de18b601b49d3089edbf0873063abc4466a"
+    },
+    "Source/PLCrashReportRegisterInfo.h": {
+      "bytes": 1588,
+      "executable": false,
+      "sha256": "f044a63c4b543bb85e6029ff4393dcdf08b06404ae669e3840de57c65cf81da2"
+    },
+    "Source/PLCrashReportRegisterInfo.m": {
+      "bytes": 1902,
+      "executable": false,
+      "sha256": "fe87916c61a3d88e971bce4633a8e7464e79f53a808163be5defca0b227762b4"
+    },
+    "Source/PLCrashReportSignalInfo.h": {
+      "bytes": 1684,
+      "executable": false,
+      "sha256": "32673a869356b750a6abd1e67401255f6725dcf18918fb499b7d00708831d870"
+    },
+    "Source/PLCrashReportSignalInfo.m": {
+      "bytes": 1954,
+      "executable": false,
+      "sha256": "89ff73932a309532d71368b3b675f50d5ceb015c2a9aa3edda98978093eb40b5"
+    },
+    "Source/PLCrashReportStackFrameInfo.h": {
+      "bytes": 1870,
+      "executable": false,
+      "sha256": "7df0518c679c22c3022f624cad19acb3b17938f4b3538e6a6030bc4d670830e6"
+    },
+    "Source/PLCrashReportStackFrameInfo.m": {
+      "bytes": 2278,
+      "executable": false,
+      "sha256": "d8794c727ae226b4b8dc07b77eda6b6b8566f2520d7799ad5cd588f977b039e3"
+    },
+    "Source/PLCrashReportSymbolInfo.h": {
+      "bytes": 1949,
+      "executable": false,
+      "sha256": "9134eaa7950f1090a077bfd6f5cfb5229f0dc4a866ec4210187628562674a3b7"
+    },
+    "Source/PLCrashReportSymbolInfo.m": {
+      "bytes": 2416,
+      "executable": false,
+      "sha256": "f1a0899e461db6438cc76f3bfb295c482ad969fe6353f8721e0ff835829673cc"
+    },
+    "Source/PLCrashReportSystemInfo.h": {
+      "bytes": 6027,
+      "executable": false,
+      "sha256": "23962e9bbafcedc712f8e374be387c81eedefe895135f247198705825763d1a3"
+    },
+    "Source/PLCrashReportSystemInfo.m": {
+      "bytes": 6412,
+      "executable": false,
+      "sha256": "4d10a6cabc5f72a12a48d2582cfbdace0abbaa5f1f052b17682b895bc0bc2bc9"
+    },
+    "Source/PLCrashReportTextFormatter.h": {
+      "bytes": 2131,
+      "executable": false,
+      "sha256": "1c791cc162d6a3bba010fb16a7e66339133ed85bb0afffbbf0fea07f5b627bd5"
+    },
+    "Source/PLCrashReportTextFormatter.m": {
+      "bytes": 22403,
+      "executable": false,
+      "sha256": "21cd556d19377ee5c34e2b645fc31acfaa200fc077585180d3c3f6ed06c8b7f1"
+    },
+    "Source/PLCrashReportThreadInfo.h": {
+      "bytes": 2505,
+      "executable": false,
+      "sha256": "e6b462b1275e37bde7bb96582d61fe43d2eca9b132bea37192c9e626b71131c9"
+    },
+    "Source/PLCrashReportThreadInfo.m": {
+      "bytes": 2568,
+      "executable": false,
+      "sha256": "9dc190020d75b3e6ba292074b4f0e1c6d82bd682997f783e40a980ae428a0c39"
+    },
+    "Source/PLCrashReporter.h": {
+      "bytes": 5064,
+      "executable": false,
+      "sha256": "aac94b0e9d0037ca83b488937dde95df3bd60918f85dfa6e030f78e0027a0436"
+    },
+    "Source/PLCrashReporter.m": {
+      "bytes": 43899,
+      "executable": false,
+      "sha256": "9b2b15619c6c64f0b5b8faa6729854046b9158bac246db651f696ca9d91ae1bf"
+    },
+    "Source/PLCrashReporterConfig.h": {
+      "bytes": 9752,
+      "executable": false,
+      "sha256": "683a216318dc67de6aaeebf3f59fd90d2bfee02ae143537c564c8063d2757563"
+    },
+    "Source/PLCrashReporterConfig.m": {
+      "bytes": 8180,
+      "executable": false,
+      "sha256": "bf026ce660c2496ffb235fbdea5bd09a0489f3aae1415f244bdb5af4ee316735"
+    },
+    "Source/PLCrashReporterNSError.h": {
+      "bytes": 1797,
+      "executable": false,
+      "sha256": "ee81396bc3d3b6e06b64d9c075fa178026f2bc5be7004848c6434c5e050c7fd6"
+    },
+    "Source/PLCrashReporterNSError.m": {
+      "bytes": 3459,
+      "executable": false,
+      "sha256": "85e62544c70127bad58ed246fb89536598a087fb500e42d81a350da94fb37d84"
+    },
+    "Source/PLCrashSignalHandler.h": {
+      "bytes": 2653,
+      "executable": false,
+      "sha256": "e33494a4bb2aad092fea598d52d884d9987f3b7bb903ea5dde1bef36512ef6ff"
+    },
+    "Source/PLCrashSignalHandler.mm": {
+      "bytes": 17163,
+      "executable": false,
+      "sha256": "b2b1c6a79f69c0eb398bb59c18648b121cc6aa152bbd10f13d01f7f1102d0a90"
+    },
+    "Source/PLCrashSysctl.c": {
+      "bytes": 9404,
+      "executable": false,
+      "sha256": "bb4b1425f3df51ad16998d3ec548f6a3566eb6b781ea9bc3ad6d109fbfa73411"
+    },
+    "Source/PLCrashSysctl.h": {
+      "bytes": 1798,
+      "executable": false,
+      "sha256": "491e8da2efa27b11d1cdb789c0d7af9c3dbc6f0bccf1f4edd29003712293f716"
+    },
+    "Source/PLCrashUncaughtExceptionHandler.h": {
+      "bytes": 1328,
+      "executable": false,
+      "sha256": "779993af0ee2c2eb20e7a2c507dc59a2840729e1afbb32a13209167f8a04e075"
+    },
+    "Source/PLCrashUncaughtExceptionHandler.m": {
+      "bytes": 1512,
+      "executable": false,
+      "sha256": "aa7971176f9b621689015e996402d4ba446fe86f19cca3505c43df6b6558a8ff"
+    },
+    "Source/dwarf_opstream.cpp": {
+      "bytes": 3277,
+      "executable": false,
+      "sha256": "35ac657a959f53282be1c462ee12c88e5f5f11c64b8c156e584c3876e6591e4a"
+    },
+    "Source/dwarf_opstream.hpp": {
+      "bytes": 9835,
+      "executable": false,
+      "sha256": "40cb16f51cedf8355a5f78d51a2f5b7f60222a26797bd112fe60ad5e794c5e31"
+    },
+    "Source/dwarf_private.h": {
+      "bytes": 1529,
+      "executable": false,
+      "sha256": "3e752f8f40cc19a4d15fce2ffd86d5916106da34007c67dcd8d79ceaf50e7a1c"
+    },
+    "Source/dwarf_stack.hpp": {
+      "bytes": 5765,
+      "executable": false,
+      "sha256": "9dbc1ed6dddf5d2307bb11017a7001aab61c4149beba05ac748441c1403c46ef"
+    },
+    "Tests/Libunwind Regression Tests/README.txt": {
+      "bytes": 1149,
+      "executable": false,
+      "sha256": "3285a7971356019f596bab0cc4e90893cd3d575cecc7058565d2d5df6a2b9389"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_arm.S": {
+      "bytes": 1355,
+      "executable": false,
+      "sha256": "fc75ccbbf05edddfccb22b9b641a1734513cd3b408d412d6ba504bd833cf1dab"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_arm64.S": {
+      "bytes": 4997,
+      "executable": false,
+      "sha256": "e255b9cfabb0a76bfc1ad6c755950c5df2510a12bdcc44a9a1deb65a65ec5bda"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_arm64_frame.S": {
+      "bytes": 8554,
+      "executable": false,
+      "sha256": "f406077f6b90ed7e5eaed3eba23d7ce455fc7b9f395757427a64ba3e0c0554be"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_arm64_frameless.S": {
+      "bytes": 11698,
+      "executable": false,
+      "sha256": "4d87c8ab145d9410277247d88411ca8d069fe46b1c36a5050931119a9f2fd3aa"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_harness.c": {
+      "bytes": 15318,
+      "executable": false,
+      "sha256": "873c4b99b6faded740b0a1ab4d3ae5c968aa84a7dee2befca14fab39290956de"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_harness.h": {
+      "bytes": 1198,
+      "executable": false,
+      "sha256": "358aaa614d64da782af55033276af30bf637fca603399974a6a73bee7e88aceb"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86.S": {
+      "bytes": 3447,
+      "executable": false,
+      "sha256": "aee1c84dd248d909a8f9185d1e8c3e8ba66f46d8986c94fa0e1cddd761a039a6"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_64.S": {
+      "bytes": 3949,
+      "executable": false,
+      "sha256": "cb5a03db23b91809a7b27a27847684b42a8abeabc026eeda129c3f4d52130193"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_64_disable_compact_frame.S": {
+      "bytes": 9732,
+      "executable": false,
+      "sha256": "d078f55e179193c00695f06eb1c0ddba06c7e2c169e9b0d560129cc0f8047cd6"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_64_frame.S": {
+      "bytes": 12123,
+      "executable": false,
+      "sha256": "0a471ea29281b798a320e86a9063234f58807ad7448fc066de83a40dc5ff97e8"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_64_frameless.S": {
+      "bytes": 14306,
+      "executable": false,
+      "sha256": "8f12560c3605e3b59def61f4a6186aac6810270631ced2b38c0ac3b9cb3c843f"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_64_frameless_big.S": {
+      "bytes": 14998,
+      "executable": false,
+      "sha256": "92fce9fb1202e06a37d5413afe78af9483635c6488d9dbbca5373f15b362c439"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_64_unusual.S": {
+      "bytes": 6438,
+      "executable": false,
+      "sha256": "a944a03fa450d314d95f39844d9dae018daca585812987fe0838bb60815d750b"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_disable_compact_frame.S": {
+      "bytes": 14647,
+      "executable": false,
+      "sha256": "31065ab483c4b6ec3ebc2b66826ab3253517aead7472e9037d3901035bd6b486"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_frame.S": {
+      "bytes": 15593,
+      "executable": false,
+      "sha256": "dd6c03a1378390111169e76679ffd478963b58f7e9054a06df5900dda791c10b"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_frameless.S": {
+      "bytes": 12292,
+      "executable": false,
+      "sha256": "3f427a9695270c5e8f55a6bcc4cde2e8bf5a8dbaaa071f744ea25d108c96634a"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_frameless_big.S": {
+      "bytes": 12644,
+      "executable": false,
+      "sha256": "996bfea09a9590215e4bb06b74eb46b53e4e5643c50eb71d19b2d896521beafd"
+    },
+    "Tests/Libunwind Regression Tests/unwind_test_x86_unusual.S": {
+      "bytes": 8247,
+      "executable": false,
+      "sha256": "ff382c812153e1ef64f9d1f7fdafec98376c0274b47d986e4b5dac14a852bb49"
+    },
+    "Tests/PLCrashAsyncCompactUnwindEncodingTests.m": {
+      "bytes": 54758,
+      "executable": false,
+      "sha256": "f45c768befbd62cd9cab24971d447aa1dcfad5b05f16808e00e6ff3212556e95"
+    },
+    "Tests/PLCrashAsyncDwarfCFAStateEvaluationTests.mm": {
+      "bytes": 41636,
+      "executable": false,
+      "sha256": "f24d2809e27cd9275c8acedac017d457961f2d5c0f945cb46f6f962c85ff9141"
+    },
+    "Tests/PLCrashAsyncDwarfCFAStateTests.mm": {
+      "bytes": 11695,
+      "executable": false,
+      "sha256": "186edc3c748325671d655ef20c8685682dc0d94ea142125809879fe69dbf8b9c"
+    },
+    "Tests/PLCrashAsyncDwarfCIETests.mm": {
+      "bytes": 10294,
+      "executable": false,
+      "sha256": "f586aca8b62e47710537d3fb047792b538c81805c80788c57202920d54cddab5"
+    },
+    "Tests/PLCrashAsyncDwarfEncodingTests.mm": {
+      "bytes": 7482,
+      "executable": false,
+      "sha256": "b48c046b0e73135c9fef45dc917dbc1c788b0ff955b02d474bcf68bce4d1a3d2"
+    },
+    "Tests/PLCrashAsyncDwarfExpressionTests.mm": {
+      "bytes": 30333,
+      "executable": false,
+      "sha256": "aa37dd37a1059576d1a1c6fc6e9f157f1f6451207b9d9149e6f320275ed1a0f6"
+    },
+    "Tests/PLCrashAsyncDwarfFDETests.mm": {
+      "bytes": 7917,
+      "executable": false,
+      "sha256": "62fcaa306ac63e0890d07d253e27936215459128beafb46475f2f7cb9af883a1"
+    },
+    "Tests/PLCrashAsyncDwarfPrimitivesTests.mm": {
+      "bytes": 28151,
+      "executable": false,
+      "sha256": "0688ae1f94777daa1788a0b99428c1d03031b74fe2fa3f65f6d9b2f09f91e379"
+    },
+    "Tests/PLCrashAsyncImageListTests.m": {
+      "bytes": 8472,
+      "executable": false,
+      "sha256": "6f0695b30135b62c03e468fc3d0a5ccd6278da712417ac505e5a0e407f2b48df"
+    },
+    "Tests/PLCrashAsyncLinkedListTests.mm": {
+      "bytes": 5039,
+      "executable": false,
+      "sha256": "33e3bfa653c6895a2945ec5227bb6bf63fe50792721a2fa7ec745f3066f8aee0"
+    },
+    "Tests/PLCrashAsyncMObjectTests.m": {
+      "bytes": 9362,
+      "executable": false,
+      "sha256": "4fc1c8a9a154e75282f9bafe72c1e2ada25fdd3a420f7ac5449171922885c438"
+    },
+    "Tests/PLCrashAsyncMachExceptionInfoTests.m": {
+      "bytes": 3190,
+      "executable": false,
+      "sha256": "132d7992921656417e0862701aa7bdee97a2ab18a25cd35de940eba8db77c4f7"
+    },
+    "Tests/PLCrashAsyncMachOImageTests.m": {
+      "bytes": 18448,
+      "executable": false,
+      "sha256": "f1aa5cb617630b7c3a974af60dd57d1873a5c5237471760b7a4555cde65080ad"
+    },
+    "Tests/PLCrashAsyncMachOStringTests.m": {
+      "bytes": 3831,
+      "executable": false,
+      "sha256": "4aa2e9b24dfc139315528e9cd2388e8642e007210a54f90caa062d9fa453a0ed"
+    },
+    "Tests/PLCrashAsyncObjCSectionTests.m": {
+      "bytes": 13140,
+      "executable": false,
+      "sha256": "4f33ba46e8ca6d4d06a5f4c7bfbb982f1c277a83830cd6f874bb220767c7d5e8"
+    },
+    "Tests/PLCrashAsyncSignalInfoTests.m": {
+      "bytes": 1992,
+      "executable": false,
+      "sha256": "65781aec54f57bf197d46dd6f56a8707995641e7fafd851e147cdaca1c835ad4"
+    },
+    "Tests/PLCrashAsyncSymbolicationTests.m": {
+      "bytes": 7478,
+      "executable": false,
+      "sha256": "b15b111efaca28d74fa424c2eb55dd138db7401e13c626e3388076dfa5cfe2c2"
+    },
+    "Tests/PLCrashAsyncTests.m": {
+      "bytes": 11496,
+      "executable": false,
+      "sha256": "0a441b27de597f2c2c5b7dc086b1b6ca90051b40cee30709d5731ccb3b8c008a"
+    },
+    "Tests/PLCrashAsyncThreadTests.m": {
+      "bytes": 22606,
+      "executable": false,
+      "sha256": "befbf94ed41403b28fb0dc3b2ce44da68f7733ff55b8113dfc30ae0bc956c581"
+    },
+    "Tests/PLCrashFrameCompactUnwindTests.m": {
+      "bytes": 2628,
+      "executable": false,
+      "sha256": "afbf1adebe590b46699414b47d200e41062f977f634b0b1c3c6e6a3bee2244c1"
+    },
+    "Tests/PLCrashFrameDWARFUnwindTests.m": {
+      "bytes": 2786,
+      "executable": false,
+      "sha256": "10588c040f5c92c9bbb0556165ff064d17e647c396b4a1262ecb2a0ccc1854a9"
+    },
+    "Tests/PLCrashFrameStackUnwindTests.m": {
+      "bytes": 6295,
+      "executable": false,
+      "sha256": "9dddc09598477a52a7911109abb4be757c0602f130e950a7986539e201c35379"
+    },
+    "Tests/PLCrashFrameWalkerTests.m": {
+      "bytes": 5224,
+      "executable": false,
+      "sha256": "dd458a9d9b9de6fdc917dab372a70dec050621aaac0815e8c296e66afeb5ad6c"
+    },
+    "Tests/PLCrashHostInfoTests.m": {
+      "bytes": 2894,
+      "executable": false,
+      "sha256": "071d7ef4cb5d3fd226fc3dd872a989cb207e5acd0f5c67467c2a3245482b6078"
+    },
+    "Tests/PLCrashLogWriterEncodingTests.m": {
+      "bytes": 6707,
+      "executable": false,
+      "sha256": "943def880e844040745c45dcf7cec38b8a5cad67c5b08f5615b15e2994c6b3fd"
+    },
+    "Tests/PLCrashLogWriterEncodingTests.pb-c.c": {
+      "bytes": 8024,
+      "executable": false,
+      "sha256": "af2a78cb2c6290562a6cf24fdb32ca2ca4da9b8d6d1c17fd157222b89fc5e553"
+    },
+    "Tests/PLCrashLogWriterEncodingTests.pb-c.h": {
+      "bytes": 3343,
+      "executable": false,
+      "sha256": "465e95a0906077e802b54db546c7166a9dd185df2840361362c960da7b68062c"
+    },
+    "Tests/PLCrashLogWriterEncodingTests.proto": {
+      "bytes": 1858,
+      "executable": false,
+      "sha256": "d598cf8ccf0c6d072f9ef45aac2407f83025047c7754de6bf4cb16e5255b2e77"
+    },
+    "Tests/PLCrashLogWriterTests.m": {
+      "bytes": 20527,
+      "executable": false,
+      "sha256": "aa1888006e4fb3360f7d011f397bf5dfcaced9feb80bf7f0ef1123dd74bc1cef"
+    },
+    "Tests/PLCrashMachExceptionPortSetTests.m": {
+      "bytes": 8526,
+      "executable": false,
+      "sha256": "1b6996de6ae3b37c0de2f183008f88c57cb7011c1cd5848c7314197d841c88a7"
+    },
+    "Tests/PLCrashMachExceptionPortTests.m": {
+      "bytes": 8331,
+      "executable": false,
+      "sha256": "4016445d56028aebf9ea8b943647a3d5416fc424e0215e64cbcdec381d41aef9"
+    },
+    "Tests/PLCrashMachExceptionServerTests.m": {
+      "bytes": 12124,
+      "executable": false,
+      "sha256": "379a4b2f5aabe9fcbeecbd1cdf2f16987afcc4ecab3e575839ddfbf02e51f4dd"
+    },
+    "Tests/PLCrashProcessInfoTests.m": {
+      "bytes": 3032,
+      "executable": false,
+      "sha256": "880d96bd84937df072bb279fa3d5b1879cd96a6b58b4f7c5e573d40c79f4cdfe"
+    },
+    "Tests/PLCrashReportTests.m": {
+      "bytes": 14626,
+      "executable": false,
+      "sha256": "a9a01598bf12cb7fd58afef42ab989a90c00b4db407073f6b0f62ec8d1e786fe"
+    },
+    "Tests/PLCrashReporterNSErrorTests.m": {
+      "bytes": 4205,
+      "executable": false,
+      "sha256": "91cecaca99ee010bbc7e54abab03d8bc618ab7ca8fb6f1fe9598537fb9c5314f"
+    },
+    "Tests/PLCrashReporterTests.m": {
+      "bytes": 7506,
+      "executable": false,
+      "sha256": "35aa72962b63bd67e6150dd230f01476909729ef66c5e5125c9e4a4a4e1ef905"
+    },
+    "Tests/PLCrashSignalHandlerTests.m": {
+      "bytes": 6555,
+      "executable": false,
+      "sha256": "2578748efbc940ff592ed13910482936eb51b195aad60a177af38e36162142bb"
+    },
+    "Tests/PLCrashSysctlTests.m": {
+      "bytes": 11226,
+      "executable": false,
+      "sha256": "03ffa715e8609976306da55c6d6f708d0f8899320a14d713238b940229c98e59"
+    },
+    "Tests/PLCrashTestCase.h": {
+      "bytes": 1536,
+      "executable": false,
+      "sha256": "00756cb0a3dcc348f6a59bacbc202ad328a6976e62bdfcd8942ed1723f1a01b7"
+    },
+    "Tests/PLCrashTestCase.m": {
+      "bytes": 4938,
+      "executable": false,
+      "sha256": "a267022ae4e03c4324053ec799b4ef4bfc01eb5f8c9707d0c50db638f8a618a1"
+    },
+    "Tests/PLCrashTestThread.h": {
+      "bytes": 1982,
+      "executable": false,
+      "sha256": "e8608734e2df2ecf5a6c21bec25281ba91c937b2786a228f1ad236912ebd7d61"
+    },
+    "Tests/PLCrashTestThread.m": {
+      "bytes": 2774,
+      "executable": false,
+      "sha256": "82cc2fa32a9eae8dd04d53f09e54f439057fb4ef251808cfa3cec1f87d2dd509"
+    },
+    "Tests/PLCrashTestThreadTests.m": {
+      "bytes": 1817,
+      "executable": false,
+      "sha256": "6b1b6602931e34b65b26c96748a7d5eff2e1d1831d83d73f6fd46d045770bac9"
+    },
+    "Tests/PLCrashUncaughtExceptionHandlerTests.m": {
+      "bytes": 1454,
+      "executable": false,
+      "sha256": "bcced52df32204f13e817f0c6f3d0b04886efdb4ec6df0b3ca91d2d74392c29a"
+    },
+    "Tests/SenTestCompat.h": {
+      "bytes": 5885,
+      "executable": false,
+      "sha256": "3da7c04f746f192f2cf99b9ead3249ba25b6a74df38a3558ec5af1dc3ecbe853"
+    },
+    "Tests/dwarf_encoding_test.h": {
+      "bytes": 1991,
+      "executable": false,
+      "sha256": "5c3eb2f697bc824b8cfb833d9a5164d5b10a928824a523d06870485712f3dec5"
+    },
+    "Tests/dwarf_opstream_tests.mm": {
+      "bytes": 8336,
+      "executable": false,
+      "sha256": "b2c26233e2407504b708be0cfa31cb56becaeefe547d9ef586747149af1e6017"
+    },
+    "Tests/dwarf_stack_tests.mm": {
+      "bytes": 5241,
+      "executable": false,
+      "sha256": "77bc342d8646a76a227d96ed57a7ede01c4b59e2c5c051ebf399e224883f1540"
+    },
+    "ThirdPartyNotices.txt": {
+      "bytes": 2174,
+      "executable": false,
+      "sha256": "80f7ace6d700d7be9525589d557698d11d85852b69ed096e12a9371167c39cb8"
+    },
+    "Tools/CrashViewer/CrashReporterQuicklook/CrashReporterQuicklook-Info.plist": {
+      "bytes": 1803,
+      "executable": true,
+      "sha256": "3d19e887321958e8e9d82514f08d0d62eb01239b78b74c04f9060bf01aacc392"
+    },
+    "Tools/CrashViewer/CrashReporterQuicklook/CrashReporterQuicklook-Prefix.pch": {
+      "bytes": 121,
+      "executable": true,
+      "sha256": "8d97bc795731d3a170dd4b45b7f5fc53e5c4e69c8eb77cc0b86b94de1e6239b0"
+    },
+    "Tools/CrashViewer/CrashReporterQuicklook/GeneratePreviewForURL.m": {
+      "bytes": 1627,
+      "executable": true,
+      "sha256": "d5fb3f77aea1775de2bd3e7193a00eb3b7d38908fab494f484d0c0171eee1e63"
+    },
+    "Tools/CrashViewer/CrashReporterQuicklook/GenerateThumbnailForURL.c": {
+      "bytes": 1099,
+      "executable": true,
+      "sha256": "17e1e6de08ef54d74bb1855e92e22951c1e9549ca1313a3df4cb79e04d149f16"
+    },
+    "Tools/CrashViewer/CrashReporterQuicklook/en.lproj/InfoPlist.strings": {
+      "bytes": 45,
+      "executable": true,
+      "sha256": "feb5e820d68ed31f871d2bdaf8d14935ed343a7a875ddd774d5556da8dfd951a"
+    },
+    "Tools/CrashViewer/CrashReporterQuicklook/main.c": {
+      "bytes": 9438,
+      "executable": true,
+      "sha256": "df3a29a1d4c9903ff3c2a92ee33b01466ffb544859beca0d3592865311087ff1"
+    },
+    "Tools/CrashViewer/CrashViewer.xcodeproj/project.pbxproj": {
+      "bytes": 38546,
+      "executable": true,
+      "sha256": "75590ca45c33a307f8b774aa5d195d25f9e586ef7324b0f6b6a0abc911398053"
+    },
+    "Tools/CrashViewer/CrashViewer/CrashViewer-Info.plist": {
+      "bytes": 3142,
+      "executable": true,
+      "sha256": "7a5ccf1b212bcd720d7222a7d09bfe56db57ab7cd033ceac029c7fda049f7092"
+    },
+    "Tools/CrashViewer/CrashViewer/CrashViewer-Prefix.pch": {
+      "bytes": 172,
+      "executable": true,
+      "sha256": "d68c3773ffcff85f41cade88fdef7f13af4533253326ca0ee36464781e554cf6"
+    },
+    "Tools/CrashViewer/CrashViewer/Images.xcassets/AppIcon.appiconset/Contents.json": {
+      "bytes": 903,
+      "executable": true,
+      "sha256": "884db26f7c9de0dd3e0542d616ba109636a804283b72dc2939a4c572a640d51a"
+    },
+    "Tools/CrashViewer/CrashViewer/PLAsyncTask.h": {
+      "bytes": 1974,
+      "executable": false,
+      "sha256": "5cfee3837aa94846e2dfecd09afd63ffef68a00d5dc7c6b6146b9fd92389db93"
+    },
+    "Tools/CrashViewer/CrashViewer/PLAsyncTask.m": {
+      "bytes": 5508,
+      "executable": false,
+      "sha256": "1d69c58b202c444520609b5470ad7bf9c28a3d715d19a05568fa400fd72f4aea"
+    },
+    "Tools/CrashViewer/CrashViewer/PLCrashDocument.h": {
+      "bytes": 1339,
+      "executable": true,
+      "sha256": "540bdda50a4f329d348432613f95809aa0decff4a8424f6d969261f921b63450"
+    },
+    "Tools/CrashViewer/CrashViewer/PLCrashDocument.m": {
+      "bytes": 2488,
+      "executable": true,
+      "sha256": "ce370cb647b688f1555c4bbe7cff5d44cea4b54d24d0850b78e8e492e7557046"
+    },
+    "Tools/CrashViewer/CrashViewer/PLCrashWindowController.h": {
+      "bytes": 1307,
+      "executable": false,
+      "sha256": "ad8889f5c97b67c5466fd9b046ac46bcf64a5a31d8bf3ef72adf162cf047f002"
+    },
+    "Tools/CrashViewer/CrashViewer/PLCrashWindowController.m": {
+      "bytes": 6704,
+      "executable": false,
+      "sha256": "cbcf79a9934f5d8891600e232969029aa88bdf7dc82348036260121f064ff23e"
+    },
+    "Tools/CrashViewer/CrashViewer/PLProgressIndicatorController.h": {
+      "bytes": 1328,
+      "executable": false,
+      "sha256": "c540b9288a87c6511d14cdfb0ffda8f9a52282d6a37e22715653007524540751"
+    },
+    "Tools/CrashViewer/CrashViewer/PLProgressIndicatorController.m": {
+      "bytes": 1601,
+      "executable": false,
+      "sha256": "62bc2c1a057bcf57aca84de52a5c42108ca1a374d9fa954daa0ed5d4506e273f"
+    },
+    "Tools/CrashViewer/CrashViewer/PLProgressIndicatorController.xib": {
+      "bytes": 1631,
+      "executable": false,
+      "sha256": "0215e1d14947c6f451155ea5c8da9d541991eea10dac537edb348eaf17f179c8"
+    },
+    "Tools/CrashViewer/CrashViewer/en.lproj/Credits.rtf": {
+      "bytes": 352,
+      "executable": true,
+      "sha256": "9b1c6a095be74cd0aed72a70f01267dc0dcab6abb6046fff1fcf6a89c1bc5520"
+    },
+    "Tools/CrashViewer/CrashViewer/en.lproj/InfoPlist.strings": {
+      "bytes": 45,
+      "executable": true,
+      "sha256": "feb5e820d68ed31f871d2bdaf8d14935ed343a7a875ddd774d5556da8dfd951a"
+    },
+    "Tools/CrashViewer/CrashViewer/en.lproj/MainMenu.xib": {
+      "bytes": 18022,
+      "executable": true,
+      "sha256": "ecbb646af4baec61b67c49a3ba60ce028fcf5a92bf62133deb22dfdf9beecb51"
+    },
+    "Tools/CrashViewer/CrashViewer/en.lproj/PLCrashWindow.xib": {
+      "bytes": 8130,
+      "executable": true,
+      "sha256": "01eed588a0609dce559ca2e993b61a7a6ee123059076234487a64c78885a9760"
+    },
+    "Tools/CrashViewer/CrashViewer/main.m": {
+      "bytes": 1331,
+      "executable": true,
+      "sha256": "518492e027954fbaa1b96db57a878a819ecb972acc0119ac7f43055a2dc56167"
+    },
+    "include/CrashReporter.h": {
+      "bytes": 17194,
+      "executable": false,
+      "sha256": "7c983e8218b65ad97ac2e2414da913f6f53e72c7480f8cec84de5f0e49b74574"
+    },
+    "include/PLCrashFeatureConfig.h": {
+      "bytes": 3705,
+      "executable": false,
+      "sha256": "be6f5f2c42e98f82d791c4a43f699ca741e4476f650deccc08b6f2557fe9e76e"
+    },
+    "include/PLCrashMacros.h": {
+      "bytes": 5022,
+      "executable": false,
+      "sha256": "a2738d434e4b8a292b155b72272787c6c44b82bcfcfd4d012e01a5417bdb7911"
+    },
+    "include/PLCrashNamespace.h": {
+      "bytes": 22307,
+      "executable": false,
+      "sha256": "64446a2b84bbf9e5464efd91bd30e2bcac1aa522fa3a21f1ea79c6c9bf7e2a6c"
+    },
+    "include/PLCrashReport.h": {
+      "bytes": 6757,
+      "executable": false,
+      "sha256": "a2280ce261880602231c5ca1c5096045cf69d7979209be84326862766b6e1922"
+    },
+    "include/PLCrashReportApplicationInfo.h": {
+      "bytes": 2102,
+      "executable": false,
+      "sha256": "5c890bc6682b57f39c28bef8cf2bf1d94e84dcc7491f959eaa0a5b194829e777"
+    },
+    "include/PLCrashReportBinaryImageInfo.h": {
+      "bytes": 2404,
+      "executable": false,
+      "sha256": "793eb24e47a241d9a511ea1e6e58a0c325adb4b3329c280de51b2b21e6bbba47"
+    },
+    "include/PLCrashReportExceptionInfo.h": {
+      "bytes": 2205,
+      "executable": false,
+      "sha256": "83cdbcf420845f8aa5aa758aeb5d5db2ebe8d9ac0654d33ed3be79c9da1fd3f7"
+    },
+    "include/PLCrashReportFormatter.h": {
+      "bytes": 2217,
+      "executable": false,
+      "sha256": "2494f6e89244a9030d1a1ad88d189df147d104535ce4b2553336471dc25a4980"
+    },
+    "include/PLCrashReportMachExceptionInfo.h": {
+      "bytes": 1624,
+      "executable": false,
+      "sha256": "32b4717e9f47ee83c4665d8ac53fa773fbe457990c37558114b924a4d88cfdea"
+    },
+    "include/PLCrashReportMachineInfo.h": {
+      "bytes": 2753,
+      "executable": false,
+      "sha256": "1a39e96ed9607c459d518d44b4c974c8e5a922e0cfaa275935cd34852ce72a16"
+    },
+    "include/PLCrashReportProcessInfo.h": {
+      "bytes": 2910,
+      "executable": false,
+      "sha256": "306bb5b715117b5466f4056ac0d9ce4b481a8a994401b6211443f248e53d8e1d"
+    },
+    "include/PLCrashReportProcessorInfo.h": {
+      "bytes": 2254,
+      "executable": false,
+      "sha256": "843c37d1b423bcfc918a1fb898270f438f7a783e3316cb3fce20712a83c6df10"
+    },
+    "include/PLCrashReportRegisterInfo.h": {
+      "bytes": 1588,
+      "executable": false,
+      "sha256": "f044a63c4b543bb85e6029ff4393dcdf08b06404ae669e3840de57c65cf81da2"
+    },
+    "include/PLCrashReportSignalInfo.h": {
+      "bytes": 1684,
+      "executable": false,
+      "sha256": "32673a869356b750a6abd1e67401255f6725dcf18918fb499b7d00708831d870"
+    },
+    "include/PLCrashReportStackFrameInfo.h": {
+      "bytes": 1870,
+      "executable": false,
+      "sha256": "7df0518c679c22c3022f624cad19acb3b17938f4b3538e6a6030bc4d670830e6"
+    },
+    "include/PLCrashReportSymbolInfo.h": {
+      "bytes": 1949,
+      "executable": false,
+      "sha256": "9134eaa7950f1090a077bfd6f5cfb5229f0dc4a866ec4210187628562674a3b7"
+    },
+    "include/PLCrashReportSystemInfo.h": {
+      "bytes": 6027,
+      "executable": false,
+      "sha256": "23962e9bbafcedc712f8e374be387c81eedefe895135f247198705825763d1a3"
+    },
+    "include/PLCrashReportTextFormatter.h": {
+      "bytes": 2131,
+      "executable": false,
+      "sha256": "1c791cc162d6a3bba010fb16a7e66339133ed85bb0afffbbf0fea07f5b627bd5"
+    },
+    "include/PLCrashReportThreadInfo.h": {
+      "bytes": 2505,
+      "executable": false,
+      "sha256": "e6b462b1275e37bde7bb96582d61fe43d2eca9b132bea37192c9e626b71131c9"
+    },
+    "include/PLCrashReporter.h": {
+      "bytes": 5064,
+      "executable": false,
+      "sha256": "aac94b0e9d0037ca83b488937dde95df3bd60918f85dfa6e030f78e0027a0436"
+    },
+    "include/PLCrashReporterConfig.h": {
+      "bytes": 9752,
+      "executable": false,
+      "sha256": "683a216318dc67de6aaeebf3f59fd90d2bfee02ae143537c564c8063d2757563"
+    }
+  },
+  "materializedHeaderLinks": [
+    {
+      "path": "include/CrashReporter.h",
+      "target": "../Source/CrashReporter.h"
+    },
+    {
+      "path": "include/PLCrashFeatureConfig.h",
+      "target": "../Source/PLCrashFeatureConfig.h"
+    },
+    {
+      "path": "include/PLCrashMacros.h",
+      "target": "../Source/PLCrashMacros.h"
+    },
+    {
+      "path": "include/PLCrashNamespace.h",
+      "target": "../Source/PLCrashNamespace.h"
+    },
+    {
+      "path": "include/PLCrashReport.h",
+      "target": "../Source/PLCrashReport.h"
+    },
+    {
+      "path": "include/PLCrashReportApplicationInfo.h",
+      "target": "../Source/PLCrashReportApplicationInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportBinaryImageInfo.h",
+      "target": "../Source/PLCrashReportBinaryImageInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportExceptionInfo.h",
+      "target": "../Source/PLCrashReportExceptionInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportFormatter.h",
+      "target": "../Source/PLCrashReportFormatter.h"
+    },
+    {
+      "path": "include/PLCrashReportMachExceptionInfo.h",
+      "target": "../Source/PLCrashReportMachExceptionInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportMachineInfo.h",
+      "target": "../Source/PLCrashReportMachineInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportProcessInfo.h",
+      "target": "../Source/PLCrashReportProcessInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportProcessorInfo.h",
+      "target": "../Source/PLCrashReportProcessorInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportRegisterInfo.h",
+      "target": "../Source/PLCrashReportRegisterInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportSignalInfo.h",
+      "target": "../Source/PLCrashReportSignalInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportStackFrameInfo.h",
+      "target": "../Source/PLCrashReportStackFrameInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportSymbolInfo.h",
+      "target": "../Source/PLCrashReportSymbolInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportSystemInfo.h",
+      "target": "../Source/PLCrashReportSystemInfo.h"
+    },
+    {
+      "path": "include/PLCrashReportTextFormatter.h",
+      "target": "../Source/PLCrashReportTextFormatter.h"
+    },
+    {
+      "path": "include/PLCrashReportThreadInfo.h",
+      "target": "../Source/PLCrashReportThreadInfo.h"
+    },
+    {
+      "path": "include/PLCrashReporter.h",
+      "target": "../Source/PLCrashReporter.h"
+    },
+    {
+      "path": "include/PLCrashReporterConfig.h",
+      "target": "../Source/PLCrashReporterConfig.h"
+    }
+  ],
+  "name": "PLCrashReporter",
+  "schema": 1,
+  "sourceArchiveSHA256": "7d5153ad5a9feba5988bf8d7a933aa1f1d8e85910665e25e32a3127e9ea0dc1e",
+  "sourceURL": "https://codeload.github.com/microsoft/plcrashreporter/tar.gz/0254f941c646b1ed17b243654723d0f071e990d0",
+  "version": "1.12.2"
+}
