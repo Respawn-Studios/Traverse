@@ -5,6 +5,7 @@
 <h1 align="center">Traverse</h1>
 
 <p align="center">
+  <a href="https://github.com/Respawn-Studios/Traverse/releases/latest"><img src="https://img.shields.io/github/v/release/Respawn-Studios/Traverse?color=007AFF" alt="Latest Traverse release"></a>
   <a href="docs/engineering/DEVELOPMENT_SETUP.md"><img src="https://img.shields.io/badge/macOS-15%2B-007AFF?logo=apple&amp;logoColor=white" alt="macOS 15 or later"></a>
   <a href="docs/engineering/DEVELOPMENT_SETUP.md"><img src="https://img.shields.io/badge/Apple-Silicon-555555" alt="Apple Silicon"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-2EA043" alt="GPLv3 license"></a>
@@ -156,9 +157,18 @@ Screenshots show a development build with made-up folders.
 
 Find downloads and release notes on
 [GitHub Releases](https://github.com/Respawn-Studios/Traverse/releases).
-Traverse's direct edition is distributed outside the Mac App Store. The planned
-Homebrew tap will get an install command here once its public artifact is
-available. Intel and Universal builds are not yet qualified.
+The signed, notarized direct edition is available outside the Mac App Store.
+You can also install it from our
+[official Homebrew tap](https://github.com/Respawn-Studios/homebrew-tap):
+
+```sh
+brew install --cask respawn-studios/tap/traverse
+```
+
+Requires Apple Silicon and macOS 15 or later. Intel and Universal builds are
+not yet qualified. Coming from a private beta? Finish pending operations there
+and quit it before installing. The direct edition keeps separate app data;
+earlier settings and recovery records are not silently migrated.
 
 ## Privacy
 

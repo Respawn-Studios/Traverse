@@ -425,7 +425,7 @@ private struct TraverseHelpView: View {
                 Text("Development build · separate from your installed beta").interfaceFont(.callout).foregroundStyle(.secondary)
             }
             if Bundle.main.object(forInfoDictionaryKey: "TraverseCommunityRelease") as? Bool != true {
-                Text("This is a pre-release build. Your feedback helps us make Traverse more reliable. What’s New describes this build’s features and limits.")
+                Text("Your feedback helps us make Traverse more reliable. What’s New describes this build’s features and limits.")
                     .interfaceFont(.callout).foregroundStyle(.secondary)
             }
             Button("Visit Traverse ↗") { owner.open("") }
