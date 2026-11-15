@@ -43,7 +43,7 @@ Ordinary Format UI, personal images and physical drives remain held.
 `DriveBenchmark.swift` uses `LocalStorage.DriveFileBenchmark` for an explicit
 folder-based workload. The core seals the chosen directory, uses one private
 scratch namespace, verifies generated data and reports cache/flush settings and
-guarded cleanup. Standard 256 MiB, Quick 64 MiB and Extended 1 GiB workloads have
+guarded cleanup. Compact 16 MiB, Quick 64 MiB, Standard 256 MiB and Extended 1 GiB workloads have
 a cooperative 180-second ceiling. Stop, close and Quit retain the actual worker
 and access until blocking calls return and cleanup settles.
 
@@ -57,12 +57,25 @@ actual bypass/flush outcome, phase rates, IOPS, block latency and bounded curves
 They are file-workload observations, not a hardware-health score or calibrated
 raw-device benchmark.
 
-At most eight results remain in session memory. Copy Results produces text or
-versioned JSON without volume names, filesystem identifiers or recovery paths.
+Quick Mix is one explicit click after folder selection. It runs a fixed 64 MiB
+sequential 1 MiB workload, waits for that run's guarded cleanup, then runs a
+16 MiB random 4 KiB QD1 workload with the same requested cache setting. Random
+preparation writes another 16 MiB outside its measured phases. One operation
+owner and access lease span both stages. Stop or close cancellation prevents
+the second stage from starting, while Quit waits for the active owner to drain;
+a failed or unclean first stage also stops the suite. Selected-drive identity
+and protection are checked again before the random stage. Each attempted stage
+remains an individual measured history entry, and
+the suite view reports only per-stage rates. No aggregate speed is inferred.
+
+At most eight individual results remain in session memory. Copy Results produces
+individual or paired text/versioned JSON without volume names, filesystem
+identifiers or recovery paths. A paired result with no second stage states that
+the random run was not started.
 Partial/failed runs keep byte/time facts without aggregate speed claims.
 `DriveBenchmarkComparison.swift` admits only completed, matching filesystem,
 workload, block/test/preparation-size, requested cache mode and actual cache/flush
-outcomes. Its paired view
+outcomes, including when the runs belong to different Quick Mix suites. Its paired view
 starts no read or benchmark and adds no persistent result store.
 
 ## Read-only health

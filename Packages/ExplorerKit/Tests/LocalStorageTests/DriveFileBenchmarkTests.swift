@@ -5,6 +5,63 @@ import Testing
 
 @Suite(.serialized)
 struct DriveFileBenchmarkTests {
+    @Test func quickMixReportKeepsMeasuredRunsSeparateAndHidesSelectionIdentity() throws {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let sequential = DriveBenchmarkResult(outcome: .completed, bytesWritten: 64 << 20, bytesRead: 64 << 20,
+            writeSeconds: 1, readSeconds: 2, flushSeconds: 0.5, workload: .sequential,
+            blockBytes: DriveSequentialBlockSize.mib1.bytes, cacheMode: .normal)
+        let random = DriveBenchmarkResult(outcome: .completed, bytesWritten: 16 << 20, bytesRead: 16 << 20,
+            writeSeconds: 3, readSeconds: 4, flushSeconds: 0.5, workload: .random4K,
+            blockBytes: 4096, cacheMode: .normal, preparationBytesWritten: 16 << 20,
+            writeLatency: .init(Array(repeating: 0.001, count: 4096)),
+            readLatency: .init(Array(repeating: 0.002, count: 4096)))
+        let first = try DriveBenchmarkReport(result: sequential, recordedAt: date)
+        let second = try DriveBenchmarkReport(result: random, recordedAt: date.addingTimeInterval(2))
+        let suite = try DriveBenchmarkSuiteReport(sequential: first, random4K: second)
+        #expect(suite.outcome == .completed && suite.sequential.writeAndFlush.megabytesPerSecond != nil)
+        #expect(suite.random4K?.readAndVerify.operationsPerSecond != nil)
+        let json = try suite.json()
+        let object = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(object["schemaVersion"] as? Int == 1 && object["preset"] as? String == "quick-mix-v1")
+        #expect((object["sequential"] as? [String: Any])?["schemaVersion"] as? Int == 2)
+        #expect((object["random4K"] as? [String: Any])?["workload"] as? String == "random4K")
+        #expect(suite.summary.contains("Sequential") && suite.summary.contains("Random 4 KiB"))
+        for text in [json, suite.summary] {
+            #expect(!text.contains("volumeName") && !text.contains("fileSystemID") && !text.contains("scratchURL"))
+        }
+        let stopped = try DriveBenchmarkSuiteReport(sequential: first, random4K: nil)
+        #expect(stopped.outcome == .partial && stopped.summary.contains("Not started"))
+        let failedRandom = DriveBenchmarkResult(outcome: .failed, failure: .cleanup,
+            bytesWritten: 4096, workload: .random4K, blockBytes: 4096, cacheMode: .normal,
+            scratchURL: URL(fileURLWithPath: "/generated/private-volume/private-scratch"))
+        let failedReport = try DriveBenchmarkReport(result: failedRandom, recordedAt: date.addingTimeInterval(2))
+        let failedSuite = try DriveBenchmarkSuiteReport(sequential: first, random4K: failedReport)
+        let failedJSON = try failedSuite.json()
+        #expect(failedSuite.outcome == .failed)
+        #expect(!failedSuite.summary.contains("private-volume") && !failedSuite.summary.contains("private-scratch"))
+        #expect(!failedJSON.contains("private-volume") && !failedJSON.contains("private-scratch"))
+        #expect(throws: DriveBenchmarkSuiteReport.Failure.self) {
+            _ = try DriveBenchmarkSuiteReport(sequential: second, random4K: first)
+        }
+    }
+
+    @Test func sequentialThenRandomReuseOneGuardedEngineAndCleanEachStage() async throws {
+        let root = try LocalStorageTestFixtures.directory()
+        defer { try? FileManager().removeItem(at: root) }
+        let sentinel = root.appendingPathComponent("sentinel")
+        try Data([7]).write(to: sentinel)
+        let reader = DriveFileBenchmark()
+        let selected = try await DriveFileBenchmark.prepareDirectory(root)
+        let sequential = await reader.runForTesting(in: selected, bytes: 8 << 20, cacheMode: .normal)
+        #expect(sequential.outcome == .completed && sequential.scratchURL == nil)
+        #expect(try FileManager().contentsOfDirectory(atPath: root.path) == ["sentinel"])
+        let random = await reader.runForTesting(in: selected, bytes: 1 << 20, workload: .random4K, cacheMode: .normal)
+        #expect(random.outcome == .completed && random.scratchURL == nil)
+        #expect(random.preparationBytesWritten == 1 << 20 && random.writeLatency.operations == 256)
+        #expect(try FileManager().contentsOfDirectory(atPath: root.path) == ["sentinel"])
+        #expect(try Data(contentsOf: sentinel) == Data([7]))
+    }
+
     @Test func copiedReportHasBoundedFiniteSamplesAndNoRecoveryIdentity() throws {
         let samples = [DriveBenchmarkSample(phase: .writing, elapsedSeconds: .nan, megabytesPerSecond: 1),
             .init(phase: .reading, elapsedSeconds: 1, megabytesPerSecond: .infinity)]
@@ -231,7 +288,7 @@ struct DriveFileBenchmarkTests {
         #expect(try FileManager().contentsOfDirectory(atPath: target.path).isEmpty)
         #expect(try FileManager().contentsOfDirectory(atPath: retained.path) == ["sentinel"])
         #expect(try Data(contentsOf: retained.appendingPathComponent("sentinel")) == Data([4]))
-        #expect(DriveBenchmarkSize.allCases.map(\.bytes) == [64 << 20, 256 << 20, 1024 << 20])
+        #expect(DriveBenchmarkSize.allCases.map(\.bytes) == [16 << 20, 64 << 20, 256 << 20, 1024 << 20])
     }
 }
 

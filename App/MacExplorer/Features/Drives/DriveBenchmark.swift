@@ -17,6 +17,7 @@ enum DriveBenchmarkFeature {
     @Published var workload = DriveBenchmarkWorkload.sequential
     @Published var sequentialBlockSize = DriveSequentialBlockSize.mib1
     @Published var cacheMode = DriveBenchmarkCacheMode.tryNoCache
+    @Published var preset = DriveBenchmarkPreset.selected
     @Published private(set) var folder: URL?
     @Published private(set) var volumeName = "Choose a folder on the drive to test"
     @Published private(set) var progress: DriveBenchmarkProgress?
@@ -29,6 +30,7 @@ enum DriveBenchmarkFeature {
     @Published private(set) var isWorking = false
     @Published private(set) var isChoosing = false
     @Published private(set) var isStopping = false
+    @Published private(set) var activeWorkload: DriveBenchmarkWorkload?
     private let reader = DriveFileBenchmark()
     private var controller: NSWindowController?
     private weak var embeddedWindow: NSWindow?
@@ -53,14 +55,21 @@ enum DriveBenchmarkFeature {
     var canRun: Bool {
         !hasPendingWork && folder != nil && selectedLease != nil && selectionIsCurrent
     }
-    enum CopyFormat { case summary, json }
+    enum CopyFormat { case summary, json, suiteSummary, suiteJSON }
     var canCopyResults: Bool { !hasPendingWork && !isWorking && !isChoosing && selectedRun != nil }
     func copyResults(_ format: CopyFormat) {
         guard canCopyResults, let run = selectedRun else { return }
         let text: String
         do {
-            let report = try DriveBenchmarkReport(result: run.result, recordedAt: run.date)
-            switch format { case .summary: text = report.summary; case .json: text = try report.json() }
+            switch format {
+            case .summary, .json:
+                let report = try DriveBenchmarkReport(result: run.result, recordedAt: run.date)
+                text = format == .summary ? report.summary : try report.json()
+            case .suiteSummary, .suiteJSON:
+                guard let suite = selectedSuite else { return }
+                let report = try suite.report()
+                text = format == .suiteSummary ? report.summary : try report.json()
+            }
             guard !text.isEmpty else { throw DriveBenchmarkReport.Failure.invalidDate }
         } catch {
             notice = "The selected result could not be prepared for copying."
@@ -70,11 +79,12 @@ enum DriveBenchmarkFeature {
         // succeeded. Invalid output leaves both Cut and the clipboard alone.
         browser?.clearCutSelection()
         let publication = browser.map { $0.clipboardWriter(text, []) } ?? BrowserClipboard.publish(text, urls: [])
-        if case .text = publication { notice = format == .summary ? "Copied benchmark summary." : "Copied benchmark JSON." }
+        if case .text = publication { notice = format == .summary || format == .suiteSummary ? "Copied benchmark summary." : "Copied benchmark JSON." }
         else { notice = "The clipboard could not be updated. Try again." }
     }
     #if DEBUG
     var chooseForVerification: ((NSWindow) async -> FolderAccessChoice?)?
+    var stageFinishedForVerification: ((DriveBenchmarkWorkload) -> Void)?
     #endif
 
     func show(from browser: BrowserViewController, target: ManagedVolume? = nil, health: ApplicationDriveDetails = .shared) {
@@ -213,65 +223,91 @@ enum DriveBenchmarkFeature {
         do { activity = try ApplicationFileActivity.beginOperation() }
         catch { operations.finish(owner: owner); notice = "A drive task is finishing. Try again when it completes."; return }
         let size = size, workload = workload, sequentialBlockSize = sequentialBlockSize, cacheMode = cacheMode
-        let started = Date(), volumeName = volumeName, group = selectedVolumeGroup
+        let preset = preset, volumeName = volumeName, group = selectedVolumeGroup
+        let steps: [(size: DriveBenchmarkSize, workload: DriveBenchmarkWorkload, block: DriveSequentialBlockSize)] =
+            preset == .quickMix ? [(.quick, .sequential, .mib1), (.compact, .random4K, .mib1)]
+                : [(size, workload, sequentialBlockSize)]
+        let suiteID: UUID? = preset == .quickMix ? owner : nil
         let diagnostic = ApplicationDiagnostics.shared.workflow(.driveBenchmark, context: .init(.driveBenchmark))
-        let updates = AsyncStream.makeStream(of: DriveBenchmarkProgress.self, bufferingPolicy: .bufferingNewest(1))
         runID = owner
         isWorking = true; isStopping = false; notice = ""; clearResult(); closeWhenDrained = false
         work = Task { [self] in
-            let presentation = Task { @MainActor [weak self] in
-                for await update in updates.stream {
-                    guard !Task.isCancelled, self?.runID == owner else { break }
-                    self?.progress = update
-                    if let rate = update.megabytesPerSecond, rate.isFinite,
-                       update.phase == .writing || update.phase == .reading {
-                        if self?.samples.count == 600 {
-                            self?.samples = self?.samples.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil } ?? []
-                        }
-                        self?.samples.append(.init(phase: update.phase, elapsedSeconds: update.elapsedSeconds, megabytesPerSecond: rate))
-                    }
-                }
-            }
             defer {
-                updates.continuation.finish(); presentation.cancel()
                 withExtendedLifetime(lease) {}; withExtendedLifetime(activity) {}
                 operations.finish(owner: owner)
-                runID = nil; isWorking = false; isStopping = false; work = nil
+                runID = nil; activeWorkload = nil; isWorking = false; isStopping = false; work = nil
                 finishDeferredClose()
             }
             diagnostic.event(.admitted, context: .init(.driveBenchmark))
-            let measured = await reader.run(in: selection, size: size, workload: workload,
-                                            sequentialBlockSize: sequentialBlockSize, cacheMode: cacheMode) {
-                // Record semantic boundaries before UI coalescing, not a log
-                // record per transferred chunk. No file inputs enter this seam.
-                if $0.completedBytes == 0 || $0.phase == .flushing {
-                    let phase: DiagnosticPhase
-                    switch $0.phase {
-                    case .preparing: phase = .preparing
-                    case .writing: phase = .transferring
-                    case .flushing: phase = .committing
-                    case .reading: phase = .verifying
-                    case .cleaningUp: phase = .cleaning
+            var lastResult: DriveBenchmarkResult?
+            var completedSteps = 0
+            for (index, step) in steps.enumerated() {
+                // One owner and activity lease span the pair. The previous
+                // guarded cleanup must return before the next stage starts.
+                if index > 0 {
+                    if Task.isCancelled { break }
+                    guard selectionIsCurrent else {
+                        notice = "The selected drive or its protection changed. Quick Mix stopped before the next test file was created."
+                        stop()
+                        break
                     }
-                    diagnostic.event(phase, context: .init(.driveBenchmark))
                 }
-                updates.continuation.yield($0)
+                activeWorkload = step.workload; progress = nil; samples = []
+                let started = Date()
+                let updates = AsyncStream.makeStream(of: DriveBenchmarkProgress.self, bufferingPolicy: .bufferingNewest(1))
+                let presentation = Task { @MainActor [weak self] in
+                    for await update in updates.stream {
+                        guard !Task.isCancelled, self?.runID == owner else { break }
+                        self?.progress = update
+                        if let rate = update.megabytesPerSecond, rate.isFinite,
+                           update.phase == .writing || update.phase == .reading {
+                            if self?.samples.count == 600 {
+                                self?.samples = self?.samples.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil } ?? []
+                            }
+                            self?.samples.append(.init(phase: update.phase, elapsedSeconds: update.elapsedSeconds, megabytesPerSecond: rate))
+                        }
+                    }
+                }
+                let measured = await reader.run(in: selection, size: step.size, workload: step.workload,
+                                                sequentialBlockSize: step.block, cacheMode: cacheMode) {
+                    // Record semantic boundaries before UI coalescing, not a
+                    // log record per chunk. No file inputs enter this seam.
+                    if $0.completedBytes == 0 || $0.phase == .flushing {
+                        let phase: DiagnosticPhase
+                        switch $0.phase {
+                        case .preparing: phase = .preparing
+                        case .writing: phase = .transferring
+                        case .flushing: phase = .committing
+                        case .reading: phase = .verifying
+                        case .cleaningUp: phase = .cleaning
+                        }
+                        diagnostic.event(phase, context: .init(.driveBenchmark))
+                    }
+                    updates.continuation.yield($0)
+                }
+                updates.continuation.finish()
+                await presentation.value
+                lastResult = measured; completedSteps += 1
+                result = measured; samples = measured.samples
+                let matchesHealth = health?.target?.fileSystemID == selection.fileSystemID
+                    || group != nil && health?.target?.group == group
+                let captured = matchesHealth
+                    ? health?.healthHistory.filter { $0.capturedAt >= started } ?? [] : []
+                let record = DriveBenchmarkRun(date: started, volumeName: volumeName, fileSystemID: selection.fileSystemID,
+                    result: measured, healthSamples: captured, suiteID: suiteID)
+                selectedRun = record
+                comparisonRunID = nil
+                history.insert(record, at: 0)
+                if history.count > 8 { history.removeLast(history.count - 8) }
+                #if DEBUG
+                stageFinishedForVerification?(step.workload)
+                #endif
+                guard measured.outcome == .completed, measured.scratchURL == nil else { break }
             }
-            result = measured
-            samples = measured.samples
-            let matchesHealth = health?.target?.fileSystemID == selection.fileSystemID
-                || group != nil && health?.target?.group == group
-            let captured = matchesHealth
-                ? health?.healthHistory.filter { $0.capturedAt >= started } ?? [] : []
-            let record = DriveBenchmarkRun(date: started, volumeName: volumeName, fileSystemID: selection.fileSystemID,
-                result: measured, healthSamples: captured)
-            selectedRun = record
-            comparisonRunID = nil
-            history.insert(record, at: 0)
-            if history.count > 8 { history.removeLast(history.count - 8) }
-            let phase: DiagnosticPhase = measured.outcome == .completed ? .completed : measured.outcome == .cancelled ? .cancelled : .failed
+            let phase: DiagnosticPhase = Task.isCancelled || lastResult?.outcome == .cancelled ? .cancelled
+                : completedSteps == steps.count && lastResult?.outcome == .completed ? .completed : .failed
             diagnostic.event(phase, context: .init(.driveBenchmark),
-                error: measured.failure.map { .init(domain: .benchmark, code: Self.failureCode($0)) })
+                error: lastResult?.failure.map { .init(domain: .benchmark, code: Self.failureCode($0)) })
         }
     }
     private static func failureCode(_ value: DriveBenchmarkFailure) -> Int64 {
@@ -289,8 +325,14 @@ enum DriveBenchmarkFeature {
         guard !hasPendingWork, run.fileSystemID == selectedDevice else { return }
         result = run.result; samples = run.result.samples; selectedRun = run; comparisonRunID = nil
     }
-    private func clearResult() { result = nil; selectedRun = nil; comparisonRunID = nil; progress = nil; samples = [] }
+    private func clearResult() { result = nil; selectedRun = nil; comparisonRunID = nil; progress = nil; samples = []; activeWorkload = nil }
     var recentRuns: [DriveBenchmarkRun] { history.filter { $0.fileSystemID == selectedDevice } }
+    var selectedSuite: DriveBenchmarkSuite? {
+        guard let suiteID = selectedRun?.suiteID,
+              let first = recentRuns.first(where: { $0.suiteID == suiteID && $0.result.workload == .sequential }) else { return nil }
+        let second = recentRuns.first { $0.suiteID == suiteID && $0.result.workload == .random4K }
+        return .init(sequential: first, random4K: second)
+    }
     var comparisonCandidates: [DriveBenchmarkRun] {
         guard let selectedRun else { return [] }
         return recentRuns.filter { DriveBenchmarkComparison(selected: selectedRun, reference: $0) != nil }
@@ -362,36 +404,55 @@ struct DriveBenchmarkView: View {
                     Button(model.folder == nil ? "Choose Test Folder…" : "Change Folder…", action: model.chooseFolder)
                         .disabled(model.hasPendingWork)
                 }
-                AdaptiveToolColumns(settings: settings, minimumWidth: 480) {
-                    Picker("Workload", selection: $model.workload) {
-                        Text("Sequential · large transfers").tag(DriveBenchmarkWorkload.sequential)
-                        Text("Random · 4 KiB access").tag(DriveBenchmarkWorkload.random4K)
-                    }.disabled(model.hasPendingWork)
-                } trailing: {
-                    Picker("Test size", selection: $model.size) {
-                        Text("Quick · 64 MiB").tag(DriveBenchmarkSize.quick)
-                        Text("Standard · 256 MiB").tag(DriveBenchmarkSize.standard)
-                        Text("Extended · 1 GiB").tag(DriveBenchmarkSize.extended)
-                    }.disabled(model.hasPendingWork)
-                }
-                AdaptiveToolColumns(settings: settings, minimumWidth: 480) {
-                    Picker("Sequential block", selection: $model.sequentialBlockSize) {
-                        ForEach(DriveSequentialBlockSize.allCases, id: \.self) { block in
-                            Text(block.title).tag(block)
-                        }
-                    }.disabled(model.hasPendingWork || model.workload == .random4K)
-                } trailing: {
-                    Picker("File caching", selection: $model.cacheMode) {
-                        Text("Normal system caching").tag(DriveBenchmarkCacheMode.normal)
-                        Text("Try no cache for test file").tag(DriveBenchmarkCacheMode.tryNoCache)
-                    }.disabled(model.hasPendingWork)
-                }
-                Text(model.workload == .random4K
-                    ? "4 KiB blocks · one operation at a time · preparation writes one extra test-file size."
-                    : "\(model.sequentialBlockSize.title) blocks · large sequential transfers · every byte verified.")
+                Picker("Run", selection: $model.preset) {
+                    Text("Selected workload").tag(DriveBenchmarkPreset.selected)
+                    Text("Quick Mix · sequential + random 4 KiB").tag(DriveBenchmarkPreset.quickMix)
+                }.disabled(model.hasPendingWork)
+                if model.preset == .selected {
+                    AdaptiveToolColumns(settings: settings, minimumWidth: 480) {
+                        Picker("Workload", selection: $model.workload) {
+                            Text("Sequential · large transfers").tag(DriveBenchmarkWorkload.sequential)
+                            Text("Random · 4 KiB access").tag(DriveBenchmarkWorkload.random4K)
+                        }.disabled(model.hasPendingWork)
+                    } trailing: {
+                        Picker("Test size", selection: $model.size) {
+                            Text("Compact · 16 MiB").tag(DriveBenchmarkSize.compact)
+                            Text("Quick · 64 MiB").tag(DriveBenchmarkSize.quick)
+                            Text("Standard · 256 MiB").tag(DriveBenchmarkSize.standard)
+                            Text("Extended · 1 GiB").tag(DriveBenchmarkSize.extended)
+                        }.disabled(model.hasPendingWork)
+                    }
+                    AdaptiveToolColumns(settings: settings, minimumWidth: 480) {
+                        Picker("Sequential block", selection: $model.sequentialBlockSize) {
+                            ForEach(DriveSequentialBlockSize.allCases, id: \.self) { block in
+                                Text(block.title).tag(block)
+                            }
+                        }.disabled(model.hasPendingWork || model.workload == .random4K)
+                    } trailing: { cachePicker }
+                } else { cachePicker }
+                Text(model.preset == .quickMix
+                    ? "One click: 64 MiB sequential at 1 MiB, then 16 MiB random at 4 KiB and one outstanding I/O. Each stage flushes, verifies and removes its own test file; random preparation writes another 16 MiB."
+                    : model.workload == .random4K
+                        ? "4 KiB blocks · one operation at a time · preparation writes one extra test-file size."
+                        : "\(model.sequentialBlockSize.title) blocks · large sequential transfers · every byte verified.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)
                 Text("Cache choice applies only to the generated test file. Neither mode clears macOS caches or measures a cold raw device.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)
+                if let suite = model.selectedSuite {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Quick Mix results", systemImage: "chart.bar.xaxis").interfaceFont(.headline)
+                        suiteRow("Sequential · 64 MiB", run: suite.sequential, random: false)
+                        if let random = suite.random4K {
+                            suiteRow("Random 4 KiB · 16 MiB", run: random, random: true)
+                        } else {
+                            Text("Random 4 KiB was not started. The sequential stage did not complete or Stop was requested.")
+                                .interfaceFont(.callout).foregroundStyle(.secondary)
+                        }
+                        Text("Each row is a separate generated-file run. Select an individual run below to inspect or compare matching measurements.")
+                            .interfaceFont(.caption).foregroundStyle(.secondary)
+                    }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 14))
+                }
                 if !model.isWorking, !model.comparisonCandidates.isEmpty {
                     Picker("Compare with", selection: $model.comparisonRunID) {
                         Text("No comparison").tag(nil as UUID?)
@@ -433,8 +494,9 @@ struct DriveBenchmarkView: View {
                         Text("\(run.volumeName) · \(run.result.workload == .random4K ? "Random 4 KiB" : "Sequential") · \(FileSizeText.string(run.result.bytesWritten)) · \(run.displayTimestamp)")
                             .interfaceFont(.caption).foregroundStyle(.secondary)
                     }
-                    Label(result.outcome == .completed ? "Benchmark complete" : result.outcome == .cancelled ? "Benchmark stopped" : "Benchmark could not finish",
-                          systemImage: result.outcome == .completed ? "checkmark.circle" : "exclamationmark.circle")
+                    let suiteComplete = model.selectedSuite.map { $0.sequential.result.outcome == .completed && $0.random4K?.result.outcome == .completed } ?? true
+                    Label(result.outcome == .completed && suiteComplete ? "Benchmark complete" : result.outcome == .cancelled ? "Benchmark stopped" : "Benchmark incomplete",
+                          systemImage: result.outcome == .completed && suiteComplete ? "checkmark.circle" : "exclamationmark.circle")
                         .interfaceFont(.headline)
                     if let failure = result.failure { Text(failureText(failure)).interfaceFont(.callout).foregroundStyle(.secondary) }
                     if let residue = result.scratchURL {
@@ -467,9 +529,10 @@ struct DriveBenchmarkView: View {
                                 Button { model.review(run) } label: {
                                     HStack {
                                         Text(run.displayTimestamp)
+                                        if run.suiteID != nil { Text("Quick Mix ·").foregroundStyle(.secondary) }
                                         Text(run.result.workload == .random4K ? "Random 4 KiB" : "Sequential")
                                         Spacer()
-                                        Text(run.result.outcome == .completed ? "Completed" : "Partial")
+                                        Text(run.result.outcome == .completed ? "Completed" : run.result.outcome == .cancelled ? "Stopped" : "Failed")
                                     }.interfaceFont(.caption)
                                 }.disabled(model.hasPendingWork)
                             }
@@ -484,13 +547,18 @@ struct DriveBenchmarkView: View {
           Divider()
           HStack {
               Menu("Copy Results") {
-                  Button("Summary") { model.copyResults(.summary) }
-                  Button("JSON") { model.copyResults(.json) }
+                  Button("Selected run summary") { model.copyResults(.summary) }
+                  Button("Selected run JSON") { model.copyResults(.json) }
+                  if model.selectedSuite != nil {
+                      Divider()
+                      Button("Quick Mix summary") { model.copyResults(.suiteSummary) }
+                      Button("Quick Mix JSON") { model.copyResults(.suiteJSON) }
+                  }
               }.disabled(!model.canCopyResults).fixedSize()
-                  .help("Copy the selected dated file-workload result without volume names, paths or hardware identifiers.")
+                  .help("Copy individual or Quick Mix generated-file results without volume names, paths or hardware identifiers.")
               Spacer()
               if model.isWorking { Button("Stop", action: model.stop).disabled(model.isStopping) }
-              else { Button("Run Benchmark", action: model.run).buttonStyle(.borderedProminent).disabled(!model.canRun) }
+              else { Button(model.preset == .quickMix ? "Run Quick Mix" : "Run Benchmark", action: model.run).buttonStyle(.borderedProminent).disabled(!model.canRun) }
           }.padding(.horizontal, 24).padding(.vertical, 14)
         }.animation(reduceMotion || !settings.motion.allows(.pages) ? nil : .easeOut(duration: 0.16 * settings.motion.mode.durationScale), value: model.isWorking)
             // Interpolating the replacement's geometry moves lower labels
@@ -499,12 +567,52 @@ struct DriveBenchmarkView: View {
             .toolPageCrossfade(model.comparisonRunID, motion: settings.motion)
     }
     private var fraction: Double {
-        guard let p = model.progress, p.totalBytes > 0 else { return 0 }
+        guard let p = model.progress, p.totalBytes > 0 else {
+            return model.preset == .quickMix && model.activeWorkload == .random4K ? 0.5 : 0
+        }
         let part = Double(p.completedBytes) / Double(p.totalBytes)
-        switch p.phase { case .preparing: return 0; case .writing: return part * 0.45; case .flushing: return 0.45; case .reading: return 0.5 + part * 0.48; case .cleaningUp: return 0.99 }
+        let stage: Double
+        switch p.phase { case .preparing: stage = 0; case .writing: stage = part * 0.45; case .flushing: stage = 0.45; case .reading: stage = 0.5 + part * 0.48; case .cleaningUp: stage = 0.99 }
+        return model.preset == .quickMix ? (model.activeWorkload == .random4K ? 0.5 : 0) + stage * 0.5 : stage
     }
     private var phaseTitle: String {
-        switch model.progress?.phase { case .preparing, nil: "Preparing test file…"; case .writing: "Writing test data…"; case .flushing: "Flushing writes…"; case .reading: "Reading and verifying…"; case .cleaningUp: "Removing test file…" }
+        let stage = model.preset == .quickMix ? (model.activeWorkload == .random4K ? "Random 4 KiB · " : "Sequential · ") : ""
+        switch model.progress?.phase {
+        case .preparing, nil: return stage + "Preparing test file…"
+        case .writing: return stage + "Writing test data…"
+        case .flushing: return stage + "Flushing writes…"
+        case .reading: return stage + "Reading and verifying…"
+        case .cleaningUp: return stage + "Removing test file…"
+        }
+    }
+    private var cachePicker: some View {
+        Picker("File caching", selection: $model.cacheMode) {
+            Text("Normal system caching").tag(DriveBenchmarkCacheMode.normal)
+            Text("Try no cache for test file").tag(DriveBenchmarkCacheMode.tryNoCache)
+        }.disabled(model.hasPendingWork)
+    }
+    private func suiteRow(_ title: String, run: DriveBenchmarkRun, random: Bool) -> some View {
+        let result = run.result
+        let writeAmount = random ? Double(result.writeLatency.operations) : Double(result.bytesWritten) / 1_000_000
+        let readAmount = random ? Double(result.readLatency.operations) : Double(result.bytesRead) / 1_000_000
+        let unit = random ? "IOPS" : "MB/s"
+        return HStack(alignment: .firstTextBaseline, spacing: 18) {
+            Text(title).interfaceFont(.callout.bold()).frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("Write + flush").interfaceFont(.caption).foregroundStyle(.secondary)
+                Text("\(suiteRate(result, writeAmount, result.writeSeconds + result.flushSeconds)) \(unit)")
+                    .monospacedDigit().interfaceFont(.callout)
+            }
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("Read + verify").interfaceFont(.caption).foregroundStyle(.secondary)
+                Text("\(suiteRate(result, readAmount, result.readSeconds)) \(unit)")
+                    .monospacedDigit().interfaceFont(.callout)
+            }
+        }
+    }
+    private func suiteRate(_ result: DriveBenchmarkResult, _ amount: Double, _ seconds: Double) -> String {
+        guard result.outcome == .completed, amount > 0, amount.isFinite, seconds > 0, seconds.isFinite else { return "—" }
+        return (amount / seconds).formatted(.number.precision(.fractionLength(0)))
     }
     private func metric(_ title: String, bytes: Int64?, seconds: Double?) -> some View {
         VStack(alignment: .leading, spacing: 8) {

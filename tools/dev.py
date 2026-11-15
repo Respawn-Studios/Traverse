@@ -819,6 +819,8 @@ def main() -> int:
                          help="Run Upload, folder/New Item or selected-file actions; none starts a server.")
     focused.add_argument("--sample-health", action="store_true", help="Add at most five read-only internal-drive readings to drive-status.")
     focused.add_argument("--random-benchmark", action="store_true", help="Exercise the 4 KiB random workload in drive-benchmark.")
+    focused.add_argument("--quick-mix-benchmark", action="store_true",
+                         help="Exercise the fixed sequential plus 4 KiB random Quick Mix in the existing generated drive-benchmark flow.")
     stopped_archive = subcommands.add_parser("verify-stopped-marked-archive-create",
         help="Finish only the independent final check of an existing generated marked ZIP/TAR case; no build or App launch.")
     stopped_archive.add_argument("case", type=Path)
@@ -941,6 +943,7 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
                          generated_port=args.generated_port, generated_fingerprint=args.generated_fingerprint,
                          private_input=sys.stdin.buffer.readline(130) if args.feature == "smb-connected-uploads" else None,
                          generated_flow=args.generated_flow, sample_health=args.sample_health, random_benchmark=args.random_benchmark,
+                         quick_mix_benchmark=args.quick_mix_benchmark,
                          promise_flow=args.promise_flow, folder_flow=args.folder_flow,
                          external_promise_receiver=args.external_promise_receiver,
                          public_tree=args.public_tree, public_archive=args.public_archive,

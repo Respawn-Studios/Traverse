@@ -195,6 +195,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                  generated_port: int | None = None, private_input: bytes | None = None,
                  generated_fingerprint: str | None = None,
                  generated_flow: str = "uploads", sample_health: bool = False, random_benchmark: bool = False,
+                 quick_mix_benchmark: bool = False,
                  promise_flow: bool = False, folder_flow: bool = False, external_promise_receiver: bool = False,
                  public_tree: bool = False, public_archive: bool = False,
                  incremental_analysis: bool = False, connection_phase: str = "persistence",
@@ -215,7 +216,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         raise ValueError("Incremental analysis uses the existing two-process standard persistence flow")
     if feature == "analysis-persistence" and offscreen and any((interactive, motion, large_interface)):
         raise ValueError("Offscreen analysis is functional only, without motion, visual sizing or interaction")
-    if sample_health and feature != "drive-status" or random_benchmark and feature != "drive-benchmark":
+    if sample_health and feature != "drive-status" or (random_benchmark or quick_mix_benchmark) and feature != "drive-benchmark" \
+            or random_benchmark and quick_mix_benchmark:
         raise ValueError("Choose the matching existing drive flow for hardware sampling or a random benchmark")
     if folder_flow:
         promise_flow = True
@@ -576,6 +578,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command.append("--sample-selected-internal-health")
     if random_benchmark:
         command.append("--random-benchmark")
+    if quick_mix_benchmark:
+        command.append("--quick-mix-benchmark")
     if feature == "compressed-tar":
         command.append("--compressed-tar")
     if feature == "startup-analysis":

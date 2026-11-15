@@ -9,6 +9,7 @@ import ExplorerCore
     /// The generated chooser supplies no real sandbox-grant acceptance.
     static func runBenchmark() async {
         let model = ApplicationDriveBenchmark.shared
+        let quickMix = ProcessInfo.processInfo.arguments.contains("--quick-mix-benchmark")
         var owner: BrowserWindowController?, area: URL?, failure: String?, checks: [String] = []
         var generatedBytes: Int64 = 0, motionFrames = 0
         var clips: [[String: String]] = []
@@ -72,6 +73,7 @@ import ExplorerCore
             checks.append("Actual folder selection seals its filesystem and accepts an observed sibling volume in the selected storage group; stale selected-drive discovery and protection refuse before the workload")
             model.size = .quick
             model.workload = ProcessInfo.processInfo.arguments.contains("--random-benchmark") ? .random4K : .sequential
+            model.preset = quickMix ? .quickMix : .selected
             let active = ApplicationFileActivity.gate.activeCount
             let oldClipboardWriter = browser.clipboardWriter
             var copiedResults: [String] = []
@@ -102,17 +104,31 @@ import ExplorerCore
             }
             await model.drain()
             guard let result = model.result else { throw UIVerification.Failure(message: "Missing benchmark result") }
-            try require(result.outcome == .completed && result.bytesWritten == 64 << 20 && result.bytesRead == 64 << 20
-                && result.workload == model.workload && result.preparationBytesWritten == (model.workload == .random4K ? 64 << 20 : 0)
+            let expectedBytes: Int64 = quickMix ? 16 << 20 : 64 << 20
+            let expectedWorkload: DriveBenchmarkWorkload = quickMix ? .random4K : model.workload
+            try require(result.outcome == .completed && result.bytesWritten == expectedBytes && result.bytesRead == expectedBytes
+                && result.workload == expectedWorkload && result.preparationBytesWritten == (expectedWorkload == .random4K ? expectedBytes : 0)
                 && result.scratchURL == nil && !model.isWorking && operations.activeOwner == nil
                 && ApplicationFileActivity.gate.activeCount == active, "Actual bounded benchmark did not complete and drain")
             generatedBytes += result.bytesWritten + result.preparationBytesWritten
+            if quickMix {
+                guard let suite = model.selectedSuite, let random = suite.random4K else {
+                    throw UIVerification.Failure(message: "Quick Mix did not retain both individual runs")
+                }
+                try require(suite.sequential.result.outcome == .completed
+                    && suite.sequential.result.bytesWritten == 64 << 20 && suite.sequential.result.bytesRead == 64 << 20
+                    && suite.sequential.result.blockBytes == 1 << 20 && suite.sequential.result.scratchURL == nil
+                    && random.id == model.selectedRun?.id && random.result.blockBytes == 4096,
+                    "Quick Mix stages did not retain exact separate measurements")
+                generatedBytes += suite.sequential.result.bytesWritten
+                checks.append("Quick Mix retained distinct 64 MiB sequential and 16 MiB random 4 KiB results after each guarded cleanup")
+            }
             let clean = try await Task.detached {
                 try FileManager().contentsOfDirectory(atPath: folder.path) == ["Sentinel.txt"]
                     && Data(contentsOf: folder.appendingPathComponent("Sentinel.txt")) == Data("Generated benchmark sentinel.\n".utf8)
             }.value
             try require(clean, "Benchmark changed sentinel or retained a scratch file")
-            checks.append("Ordinary quick workload writes and verifies64MiB, preserves the sentinel and releases exclusive/activity owners only after cleanup")
+            checks.append("Generated workload preserves the sentinel and releases exclusive/activity owners only after cleanup")
             try require(model.canCopyResults, "A completed selected result could not be copied")
             model.copyResults(.summary); model.copyResults(.json)
             try require(copiedResults.count == 2, "Summary/JSON did not publish exactly two text results")
@@ -122,11 +138,36 @@ import ExplorerCore
                 && copiedJSON?["cacheMode"] as? String == DriveBenchmarkCacheMode.tryNoCache.rawValue
                 && !copiedResults.contains(where: { $0.contains(folder.path) || $0.contains(volume.name) }),
                 "Copied benchmark output did not use the shared text publisher or retained a selection identity")
+            if quickMix {
+                model.copyResults(.suiteSummary); model.copyResults(.suiteJSON)
+                try require(copiedResults.count == 4 && copiedResults[2].hasPrefix("Traverse Quick Mix file benchmark"),
+                    "Quick Mix summary was not copied through the shared publisher")
+                let paired = try JSONSerialization.jsonObject(with: Data(copiedResults[3].utf8)) as? [String: Any]
+                try require(paired?["schemaVersion"] as? Int == 1
+                    && (paired?["sequential"] as? [String: Any])?["workload"] as? String == "sequential"
+                    && (paired?["random4K"] as? [String: Any])?["workload"] as? String == "random4K"
+                    && !copiedResults[3].contains(folder.path) && !copiedResults[3].contains(volume.name),
+                    "Quick Mix JSON lost separate workloads or included selection identity")
+                checks.append("Quick Mix summary/JSON copy both reports without folder or volume identity")
+            }
             checks.append("Explicit Summary/JSON copies use the shared text publisher on a private test sink, omit the chosen folder/volume identity and remain disabled during work")
             guard let reference = model.selectedRun else { throw UIVerification.Failure(message: "Missing recorded run") }
+            let referenceSuite = model.selectedSuite
             model.run(); await model.drain()
             guard let selected = model.selectedRun else { throw UIVerification.Failure(message: "Missing second recorded run") }
             generatedBytes += selected.result.bytesWritten + selected.result.preparationBytesWritten
+            if quickMix {
+                guard let first = referenceSuite, let second = model.selectedSuite,
+                      let firstRandom = first.random4K, let secondRandom = second.random4K else {
+                    throw UIVerification.Failure(message: "Second Quick Mix pair was not retained")
+                }
+                generatedBytes += second.sequential.result.bytesWritten
+                try require(DriveBenchmarkComparison(selected: second.sequential, reference: first.sequential) != nil
+                    && DriveBenchmarkComparison(selected: secondRandom, reference: firstRandom) != nil
+                    && DriveBenchmarkComparison(selected: secondRandom, reference: first.sequential) == nil,
+                    "Quick Mix comparison crossed workloads or rejected matching stages")
+                checks.append("Comparisons admit like Quick Mix stages only; sequential and random stages never share rates")
+            }
             try require(selected.result.outcome == .completed && model.comparisonCandidates.contains(where: { $0.id == reference.id }),
                 "Two completed matching workloads were not comparable")
             if ProcessInfo.processInfo.arguments.contains("--record-drive-benchmark"), let window = model.window, CGPreflightScreenCaptureAccess() {
@@ -144,7 +185,7 @@ import ExplorerCore
             try require(DriveBenchmarkComparison(selected: selected, reference: otherVolume) == nil
                 && DriveBenchmarkComparison(selected: selected, reference: selected) == nil,
                 "Comparison admitted another volume or the same run")
-            checks.append("Two real matched64MiB runs can be compared without a new read; self/foreign-volume comparisons are refused and phase rates remain finite")
+            checks.append("Two real matching runs can be compared without a new read; self/foreign-volume comparisons are refused and phase rates remain finite")
             if let window = model.window, CGPreflightScreenCaptureAccess() {
                 try await Task.sleep(for: .milliseconds(350))
                 try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/drive-benchmark.png"))
@@ -159,15 +200,50 @@ import ExplorerCore
                 try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/drive-benchmark-comparison-150.png"))
                 settings.interfaceSize = .init(100); settings.appearance = .dark
             }
-            model.run(); model.stop()
-            try require(model.hasPendingWork && model.isStopping, "Stop released the actual worker early")
+            if quickMix {
+                model.stageFinishedForVerification = { stage in
+                    if stage == .sequential { model.stop() }
+                }
+                model.run()
+            } else {
+                model.run(); model.stop()
+            }
+            try require(model.hasPendingWork, "Stop released the actual worker early")
             await model.drain()
-            try require(model.result?.outcome == .cancelled && model.result?.scratchURL == nil && !model.hasPendingWork
+            model.stageFinishedForVerification = nil
+            try require((quickMix ? model.selectedSuite?.sequential.result.outcome == .completed
+                                 && model.selectedSuite?.random4K == nil
+                                 && model.selectedSuite?.sequential.result.scratchURL == nil
+                                 : model.result?.outcome == .cancelled && model.result?.scratchURL == nil)
+                && !model.hasPendingWork
                 && operations.activeOwner == nil && ApplicationFileActivity.gate.activeCount == active, "Stopped native benchmark did not drain")
             generatedBytes += (model.result?.bytesWritten ?? 0) + (model.result?.preparationBytesWritten ?? 0)
-            try require(model.comparisonCandidates.isEmpty && model.comparisonRunID == nil,
-                "Partial result remained eligible for speed comparison")
+            if quickMix { checks.append("Stop between Quick Mix stages prevents random admission after sequential cleanup and holds the owner until drain") }
+            if quickMix {
+                let paired = try model.selectedSuite?.report()
+                try require(paired?.outcome == .partial && model.comparisonRunID == nil
+                    && model.comparisonCandidates.allSatisfy { $0.result.workload == .sequential },
+                    "Stopped Quick Mix mislabeled the missing stage or crossed comparison workloads")
+            } else {
+                try require(model.comparisonCandidates.isEmpty && model.comparisonRunID == nil,
+                    "Partial result remained eligible for speed comparison")
+            }
             checks.append("Actual Quit refuses during work; Stop retains the worker until cancellation and cleanup drain")
+            if quickMix {
+                model.stageFinishedForVerification = { stage in
+                    if stage == .sequential { drives.setProtection(.keepMounted, for: volume) }
+                }
+                model.run(); await model.drain()
+                model.stageFinishedForVerification = nil
+                try require(model.selectedSuite?.sequential.result.outcome == .completed
+                    && model.selectedSuite?.random4K == nil && !model.canRun
+                    && operations.activeOwner == nil && ApplicationFileActivity.gate.activeCount == active,
+                    "Changed physical-group protection admitted the random stage")
+                generatedBytes += model.selectedSuite?.sequential.result.bytesWritten ?? 0
+                drives.setProtection(.none, for: volume)
+                try require(model.canRun, "Cleared protection did not restore benchmark admission")
+                checks.append("Protection changed after sequential cleanup prevents Quick Mix random admission without retaining the operation owner")
+            }
             model.run(); model.window?.close()
             try require(model.hasPendingWork && model.isStopping, "Direct native close released work early")
             await model.drain()
@@ -191,7 +267,7 @@ import ExplorerCore
             let report: [String: Any] = ["passed": failure == nil, "failure": failure as Any? ?? NSNull(), "checks": checks,
                 "generatedBytes": generatedBytes, "nativeSandboxGrant": false, "rawDeviceRequests": 0,
                 "networkRequests": 0, "keychainCalls": 0, "motionFrames": motionFrames, "clips": clips, "actualOwnerDrain": !model.hasPendingWork,
-                "workload": model.workload.rawValue]
+                "workload": quickMix ? "quickMix" : model.workload.rawValue]
             try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
                 .write(to: area.appendingPathComponent("evidence/native-drive-benchmark.json"), options: .withoutOverwriting)
         }

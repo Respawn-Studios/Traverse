@@ -2,9 +2,9 @@ import Darwin
 import Foundation
 
 public enum DriveBenchmarkSize: String, CaseIterable, Sendable {
-    case quick, standard, extended
+    case compact, quick, standard, extended
     public var bytes: Int64 {
-        switch self { case .quick: 64 << 20; case .standard: 256 << 20; case .extended: 1024 << 20 }
+        switch self { case .compact: 16 << 20; case .quick: 64 << 20; case .standard: 256 << 20; case .extended: 1024 << 20 }
     }
 }
 
