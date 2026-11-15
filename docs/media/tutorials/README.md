@@ -1,7 +1,7 @@
 # Traverse in motion
 
-These short recordings show the public **0.2.0 (95)** release on macOS, using
-the dark appearance. They were recorded by the project maintainer and are
+These short macOS recordings come from the project maintainer, using the dark
+appearance. The first three show public **0.2.0 (95)**. All originals are
 published as supplied, without trimming, retouching or a new encode.
 
 - [Tabs and panes](tabs-and-panes.gif): arrange folders side by side, move tabs
@@ -10,12 +10,16 @@ published as supplied, without trimming, retouching or a new encode.
   folder, then copy a file between panes.
 - [Storage analysis](storage-analysis.gif): inspect a volume's recorded usage,
   explore a chart and switch between breakdowns in Properties.
+- [Address suggestions](address-bar-suggestions.gif): type a path, choose a
+  matching folder and move through the breadcrumb dropdown.
 
 The [feature guide](../../guides/features.md) explains the same workflows in
 text. For still images, see the [workspace screenshots](../screenshots/README.md).
 The [manifest](manifest.json) keeps the dimensions, timing and checksums handy
 when we replace a recording. Exact macOS version, CPU and interface-size settings
-weren't recorded with these clips.
+weren't recorded with these clips. The fourth clip's app build wasn't recorded
+separately. In the README, the first three display at 600 px wide and the address
+clip at its native 480 px. Each links to the original-size GIF.
 
 New recordings should follow the [media guide](../README.md). Keep the original
 locally, use useful alt text and check the whole frame before publishing.
