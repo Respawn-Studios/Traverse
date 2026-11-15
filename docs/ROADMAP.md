@@ -69,8 +69,9 @@ Useful charts should help you spot a change, rather than make you decipher a
 wall of numbers.
 
 The current development work adds a mixed benchmark suite, latency charts and
-comparisons, alongside APFS volume and formatting controls. Disk Utility
-remains the handoff for drive changes that Traverse cannot handle yet.
+comparisons. APFS work includes Add Volume for disk images and a formatting
+backend being checked on generated images. Normal formatting controls and
+physical-drive changes are still ahead; Disk Utility remains the handoff.
 
 ## Further down the trail
 
