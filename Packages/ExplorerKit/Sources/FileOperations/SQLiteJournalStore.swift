@@ -373,10 +373,11 @@ internal final class SQLiteJournalStore {
     }
 
     func beginArchiveUpdateEdit(protocolKind: OperationCatalogProtocol) throws -> JournalEditSession {
-        guard [.archiveUpdateV5, .archiveStrictCloneV6, .archiveNativeUpdateV13, .tarNativeUpdateV18].contains(protocolKind) else {
+        guard [.archiveUpdateV5, .archiveStrictCloneV6, .archiveNativeUpdateV13, .tarNativeUpdateV18, .tarGzipNativeUpdateV19].contains(protocolKind),
+              let title = ArchiveUpdateProfile.title(version: protocolKind.version) else {
             throw FileOperationFailure.recoveryUncertain
         }
-        return try beginEdit(operation: protocolKind == .tarNativeUpdateV18 ? "Update TAR" : "Update ZIP", nameRename: nil, reservedID: nil,
+        return try beginEdit(operation: title, nameRename: nil, reservedID: nil,
                              version: protocolKind.version)
     }
 
@@ -449,7 +450,7 @@ internal final class SQLiteJournalStore {
         let record = session.snapshot
         try measureJournal(hooks.metrics, .validation) {
             try validateFiles(); try OperationJournal.validateHeader(record)
-            if [5, 6, 13, 18].contains(record.version) { try OperationJournal.validateArchiveUpdate(record) }
+            if [5, 6, 13, 18, 19].contains(record.version) { try OperationJournal.validateArchiveUpdate(record) }
             if record.version == 7 { try OperationJournal.validateDownloadAdoption(record) }
             if record.version == 14 { try OperationJournal.validateReceivedPublicDownload(record) }
             if record.version == 15 { try OperationJournal.validatePublicZIPExtraction(record) }
@@ -546,7 +547,7 @@ internal final class SQLiteJournalStore {
         try measureJournal(hooks.metrics, .validation) {
             try validateFiles()
             try OperationJournal.validateHeader(record)
-            if [5, 6, 13, 18].contains(record.version) { try OperationJournal.validateArchiveUpdate(record) }
+            if [5, 6, 13, 18, 19].contains(record.version) { try OperationJournal.validateArchiveUpdate(record) }
             if record.version == 7 { try OperationJournal.validateDownloadAdoption(record) }
             if record.version == 14 { try OperationJournal.validateReceivedPublicDownload(record) }
             if record.version == 15 { try OperationJournal.validatePublicZIPExtraction(record) }
@@ -671,6 +672,7 @@ internal final class SQLiteJournalStore {
         allowDownloadAdoptionUndoHint: Bool = false,
         allowNativeOriginalUpdateUndoHint: Bool = false,
         allowNativeTARUpdateUndoHint: Bool = false,
+        allowNativeTARGzipUpdateUndoHint: Bool = false,
         allowPublicDownloadUndoHint: Bool = false,
         allowPublicZIPExtractionUndoHint: Bool = false,
         allowPublicTARExtractionUndoHint: Bool = false,
@@ -751,7 +753,7 @@ internal final class SQLiteJournalStore {
             // Load/validate the complete zero-step record before offering this
             // historical hint; a summary count or disabled Restore is not proof.
             let zipReplacementNotStarted: Bool
-            if [5, 6, 13, 18].contains(head.version), head.operation == (head.version == 18 ? "Update TAR" : "Update ZIP"), head.state == "needsReview",
+            if [5, 6, 13, 18, 19].contains(head.version), head.operation == ArchiveUpdateProfile.title(version: head.version), head.state == "needsReview",
                head.counts[0] == 0, head.counts[3] == 0 {
                 let record = try loadedRecord(id).record
                 zipReplacementNotStarted = record.steps.isEmpty && record.trashIntents.isEmpty
@@ -816,7 +818,8 @@ internal final class SQLiteJournalStore {
                     && !record.steps[0].undone
             } else { publicTreeUndoHint = false }
             let nativeZIPRestoreHint: Bool
-            if (head.version == 13 && allowNativeOriginalUpdateUndoHint) || (head.version == 18 && allowNativeTARUpdateUndoHint),
+            if (head.version == 13 && allowNativeOriginalUpdateUndoHint) || (head.version == 18 && allowNativeTARUpdateUndoHint)
+                || (head.version == 19 && allowNativeTARGzipUpdateUndoHint),
                head.counts[0] == 1, head.counts[1] == 1,
                ["mutating", "needsReview"].contains(head.state) {
                 nativeZIPRestoreHint = OperationJournal.hasRecordedNativeArchiveOriginalOnly(
@@ -827,8 +830,9 @@ internal final class SQLiteJournalStore {
                     || publicTARExtractionUndoHint || publicTreeUndoHint ||
                     ![7, 8, 10, 14, 15, 16, 17].contains(head.version) && head.state == "committed" && hasAction && head.allTrashKnown
                     && (head.version != 13 || allowNativeOriginalUpdateUndoHint)
-                    && (head.version != 18 || allowNativeTARUpdateUndoHint),
-                canRecover: ![7, 8, 10, 12, 13, 14, 15, 16, 17, 18].contains(head.version) && ["preparing", "mutating", "needsReview", "undoing"].contains(head.state) && hasAction && head.allTrashKnown,
+                    && (head.version != 18 || allowNativeTARUpdateUndoHint)
+                    && (head.version != 19 || allowNativeTARGzipUpdateUndoHint),
+                canRecover: ![7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19].contains(head.version) && ["preparing", "mutating", "needsReview", "undoing"].contains(head.state) && hasAction && head.allTrashKnown,
                 canRestoreOriginalZIP: nativeZIPRestoreHint,
                 requiresManualTrashReview: requiresManualTrashReview,
                 zipReplacementNotStarted: zipReplacementNotStarted,
@@ -877,11 +881,11 @@ internal final class SQLiteJournalStore {
         if head.version == 2 || head.version == 4 {
             guard head.counts[0] == 0, head.counts[1] == 0, head.counts[3] == 0,
                   head.nameRename != nil else { throw FileOperationFailure.recoveryUncertain }
-        } else if [5, 6, 13, 18].contains(head.version) {
-            guard head.operation == (head.version == 18 ? "Update TAR" : "Update ZIP"), head.nameRename == nil,
-                  head.counts[0] <= ([13, 18].contains(head.version) ? 2 : 3), head.counts[1] <= 1,
-                  head.counts[3] <= ([13, 18].contains(head.version) ? 0 : 1),
-                  (![13, 18].contains(head.version) || !["cleanupReview", "cleaned"].contains(head.state)),
+        } else if [5, 6, 13, 18, 19].contains(head.version) {
+            guard head.operation == ArchiveUpdateProfile.title(version: head.version), head.nameRename == nil,
+                  head.counts[0] <= ([13, 18, 19].contains(head.version) ? 2 : 3), head.counts[1] <= 1,
+                  head.counts[3] <= ([13, 18, 19].contains(head.version) ? 0 : 1),
+                  (![13, 18, 19].contains(head.version) || !["cleanupReview", "cleaned"].contains(head.state)),
                   (head.counts[0] == 0 || head.counts[1] == 1) else {
                 throw FileOperationFailure.recoveryUncertain
             }
@@ -1272,6 +1276,7 @@ internal final class SQLiteJournalStore {
         case 16: return .publicProducedTreeV16(record)
         case 17: return .publicTARExtractionFileV17(record)
         case 18: return .tarNativeUpdateV18(record)
+        case 19: return .tarGzipNativeUpdateV19(record)
         default: throw FileOperationFailure.recoveryUncertain
         }
     }

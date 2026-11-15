@@ -24,6 +24,7 @@ import LocalStorage
             try await Probe.wait("tar-members-local-page") { !browser.isLoading && browser.rowsByURL[source] != nil }
             browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.focusBrowserContent()
             browser.openSelection(nil)
+            try await Probe.prepareTARIfNeeded(source, browser: browser)
             try await Probe.wait("tar-members-root-page") { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }
             guard let owner = browser.currentArchive, let model = owner.tarModelForVerification,
                   let table = owner.table else { throw Probe.Failure(stage: "tar-members-root-owner") }
@@ -67,6 +68,7 @@ import LocalStorage
         func undo(_ id: UUID, expected: Data) async throws {
             browser.navigate(to: .directory(source.deletingLastPathComponent()))
             try await Probe.wait("tar-members-undo-local-page") { !browser.isLoading && browser.rowsByURL[source] != nil }
+            await browser.recoveryInspectionTask?.value
             let result = await cold.undo(recordID: id)
             let restored = try await Task.detached { try Data(contentsOf: source) }.value
             try Probe.need(result.result.disposition == .succeeded && restored == expected, "tar-members-cold-undo-exact")
@@ -80,7 +82,8 @@ import LocalStorage
             (.add, [], "", ["Added.bin", "Generated.json", "Other.json"]),
         ]
         func paths() async throws -> Set<String> {
-            let session = try await TARArchiveReader().open(source)
+            let reader = ApplicationCompressedArchives.shared.reader(excluding: [])
+            let session = try await (TARBrowserModel.isCompressed(source) ? reader.prepareCompressed(source) : reader.open(source))
             let result = try await session.searchNames("")
             await session.close()
             return Set(result.items.map(\.path))
@@ -112,12 +115,17 @@ import LocalStorage
             model.reviewMutation(action, addedSource: action == .add ? .init(urls: [added]) : nil)
             shown = try await review()
             if !name.isEmpty { try await typeName(name, in: shown) }
+            if action == .add, TARBrowserModel.isCompressed(source) { shown.model.tarCompression = .gzipFast }
             if !ProcessInfo.processInfo.arguments.contains("--offscreen"), action == .group || action == .add,
                CGPreflightScreenCaptureAccess(), let window = shown.window {
                 try await Probe.wait("tar-members-visible-review") { shown.model.canCreate }
                 try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/tar-\(action).png"))
             }
             let id = try await commit(shown)
+            if action == .add, TARBrowserModel.isCompressed(source) {
+                let bytes = try await Task.detached { try Data(contentsOf: source) }.value
+                try Probe.need(bytes.count >= 10 && bytes[8] == 4, "tar-members-selected-gzip-level-applied")
+            }
             try Probe.need(try await paths() == expected, "tar-members-exact-paths")
             try await undo(id, expected: before)
         }

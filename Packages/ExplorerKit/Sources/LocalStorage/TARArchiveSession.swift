@@ -131,13 +131,13 @@ public actor TARArchiveSession {
         return .init(binding:binding,roots:roots,wholeArchive:false)
     }
     public func selectionForMemberChanges(_ ids: Set<TARItemID>) throws -> TARMemberSelection {
-        guard !isCompressed, (1...128).contains(ids.count) else { throw TARArchiveFailure.invalidSelection }
+        guard (1...128).contains(ids.count) else { throw TARArchiveFailure.invalidSelection }
         let selected = try selectionForExtraction(ids)
         return .init(binding: selected.binding, roots: selected.roots,
             coveredSelectionCount: ids.count - selected.roots.count)
     }
     public func destinationForMemberChanges(_ folder: TARFolderID) throws -> TARMemberDestination {
-        guard !isCompressed, let binding else { throw TARArchiveFailure.unsupported }
+        guard let binding else { throw TARArchiveFailure.unsupported }
         let path = try folderPath(of: folder)
         return .init(binding: binding, virtualFolder: path.joined(separator: "/"))
     }
@@ -149,6 +149,18 @@ public actor TARArchiveSession {
     /// Explicit, complete regular-member preview; this operation reads no body.
     public func selectionForTextPreview(_ id:TARItemID)throws->TARTextPreviewSelection {
         try selectionForPreview(id, limits: .init(), image: false)
+    }
+    internal func selectionForTextPreview(atPath path: String) throws -> TARTextPreviewSelection {
+        guard let storage else { throw TARArchiveFailure.closed }
+        var cursor = 0
+        for component in path.split(separator: "/") {
+            try Task.checkCancellation()
+            guard let next = storage.nodes[cursor].children.first(where: {
+                storage.nodes[$0].name.utf8.elementsEqual(component.utf8)
+            }) else { throw TARArchiveFailure.changed }
+            cursor = next
+        }
+        return try selectionForPreview(.init(owner: root.owner, node: cursor), limits: .init(), image: false)
     }
     public func selectionForImagePreview(_ id: TARItemID) throws -> TARTextPreviewSelection {
         try selectionForPreview(id, limits: .image, image: true)

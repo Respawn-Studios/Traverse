@@ -90,7 +90,9 @@ import LocalStorage
             host.privateNames = ApplicationPrivateNames(directory: root.appendingPathComponent("state/names"), settings: settings)
             let nativeZIPUpdate = ProcessInfo.processInfo.arguments.contains("--native-original-update")
             let tarEditor = ProcessInfo.processInfo.arguments.contains("--tar-editor")
-            if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
+            if tarEditor {
+                host.recoverableFileOperations = host.operationCoordinator.engine(at: root.appendingPathComponent("state/history"))
+            } else if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
                 host.recoverableFileOperations = RecoverableFileOperations(
                     journalDirectory: root.appendingPathComponent("state/history"),
                     qualifyingNativeZIPRetainedOriginalCheckpoint: GeneratedZIPRetainedCheckpoint.shared.afterRetainedOriginal,
@@ -100,10 +102,8 @@ import LocalStorage
                 host.recoverableFileOperations = RecoverableFileOperations(
                     journalDirectory: root.appendingPathComponent("state/history"),
                     protecting: [root.appendingPathComponent("state")], activity: ApplicationFileActivity.beginOperation,
-                    authoredZIPMetadataPolicy: nativeZIPUpdate || tarEditor ? .nativeCreate : .exactSource,
-                    strictPortableTARCreationPolicy: tarEditor ? .nativeCreateQualification : .held,
+                    authoredZIPMetadataPolicy: nativeZIPUpdate ? .nativeCreate : .exactSource,
                     authoredZIPOriginalUpdateNativePolicy: nativeZIPUpdate ? .qualifiedNativeStage : .held,
-                    authoredTAROriginalUpdatePolicy: tarEditor ? .developmentNativeStage : .held,
                     zipOneFilePublicExtractionPolicy: ArchiveExtractionActivation.qualifiedZIPFileAvailable
                         ? .sourceQualification : .held)
             }
@@ -920,6 +920,7 @@ import LocalStorage
     }
     static func run() async {
         var root: URL?, context: Context?, checks: [String] = [], failure: String?
+        let coldTAR = ProcessInfo.processInfo.arguments.contains("--tar-editor-cold-undo")
         do {
             guard let raw = ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"] else { throw Failure(stage: "scope") }
             let area = URL(fileURLWithPath: raw)
@@ -930,6 +931,10 @@ import LocalStorage
                 && marker?["action"] as? String == "native-editor-preferences" && Bundle.main.bundleIdentifier == "local.macexplorer.development", "exact-generated-editor-preferences-scope")
             let archiveOnly = ProcessInfo.processInfo.arguments.contains("--archive-editor-only")
             root = area
+            if coldTAR {
+                try need(archiveOnly && ProcessInfo.processInfo.arguments.contains("--tar-editor"), "cold-tar-check-profile")
+                checks += try await ArchiveTextEditorVerification.coldTAR(root: area)
+            } else {
             if !archiveOnly { checks += try EditorSettingsAppChecks.check() }
             let files = try await fixture(area), c = Context(root: area, files: files); context = c
             c.owner.showWindow(nil); c.owner.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -953,11 +958,13 @@ import LocalStorage
             }
             checks += try await ArchiveTextEditorVerification.check(root: area, browser: c.browser, sources: [files.first, files.second])
             if !archiveOnly { checks += try await staleChecks(c) }
+            }
         } catch {
             if case EditorSettingsAppChecks.Failure.check(let label) = error { failure = label }
             else if let error = error as? ArchiveTextEditorVerification.Failure { failure = error.stage }
             else if let error = error as? NativeMotionRecorder.Failure { failure = "editor-motion-" + error.rawValue }
-            else { failure = (error as? Failure)?.stage ?? "closed-editor-preferences-failure" }
+            else { failure = (error as? Failure)?.stage
+                ?? "editor-error-" + String(reflecting: type(of: error)) + "-" + String((error as NSError).code) }
         }
         context?.browser.openAndShare.windowWillClose()
         context?.browser.suspendBrowser(); context?.owner.window?.performClose(nil)
@@ -971,7 +978,8 @@ import LocalStorage
                 "focusedArchiveEditor": ProcessInfo.processInfo.arguments.contains("--archive-editor-only"),
                 "interfacePercent": context?.settings.interfaceSize.percent ?? 0,
                 "nativeWindowsClosed": NSApp.windows.filter { $0.isVisible }.isEmpty]
-            try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("evidence/native-editor-preferences.json"), options: .withoutOverwriting)
+            let report = coldTAR ? "native-editor-preferences-cold.json" : "native-editor-preferences.json"
+            try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("evidence/" + report), options: .withoutOverwriting)
         }
         NSApp.terminate(nil)
     }

@@ -20,21 +20,23 @@ internal final class TAROutputStream {
     private var validated = false
     private var retired = false
     private var decoderPeakHeap: UInt64 = 0
+    private let preservedGzipHeader: GzipArchiveHeader?
     private(set) var count: UInt64 = 0
     var encodedCount: UInt64 { writer.count }
     var digest: Data { writer.digest() }
     var peakCodecHeap: UInt64 { max(gzip?.peakCodecHeap ?? 0, decoderPeakHeap) }
 
-    init(_ descriptor: Int32, encoding: Encoding = .plain, hooks: ZIPCreationHooks,
+    init(_ descriptor: Int32, encoding: Encoding = .plain, gzipHeader: GzipArchiveHeader? = nil, hooks: ZIPCreationHooks,
         check: @escaping @Sendable () throws -> Void) throws {
         writer = ZIPFileEncoder(descriptor, hooks: hooks)
+        preservedGzipHeader = gzipHeader
         switch encoding {
         case .plain: rawLimit = min(1 << 30, hooks.maximumEncodedBytes)
         case .gzip(let level):
             rawLimit = TARCompressedDecoder.maximumBytes
             let stageWriter = writer
             gzip = try GzipArchiveEncoder(maximumRaw: rawLimit,
-                maximumEncoded: min(TARCompressedDecoder.maximumBytes, hooks.maximumEncodedBytes), level: level,
+                maximumEncoded: min(TARCompressedDecoder.maximumBytes, hooks.maximumEncodedBytes), level: level, header: gzipHeader,
                 check: check, output: { try stageWriter.write($0, check: check) })
         }
     }
@@ -66,6 +68,9 @@ internal final class TAROutputStream {
         }
         guard Data(hash.finalize()) == digest else { throw Failure.mismatch }
         if gzip != nil {
+            if let preservedGzipHeader {
+                guard try GzipArchiveHeader(read(0, 10, check: check)) == preservedGzipHeader else { throw Failure.mismatch }
+            }
             decoderPeakHeap = try GzipArchiveEncoder.verify(writer.descriptor, rawBytes: count,
                 encodedBytes: encodedCount, expected: Data(rawHash.finalize()), check: check)
         }

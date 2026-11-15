@@ -27,15 +27,21 @@ internal final class GzipArchiveEncoder {
     private var finished = false
     private(set) var peakCodecHeap: UInt64 = 0
 
-    init(maximumRaw: UInt64, maximumEncoded: UInt64, level: Int32,
+    init(maximumRaw: UInt64, maximumEncoded: UInt64, level: Int32, header: GzipArchiveHeader? = nil,
         check: @escaping @Sendable () throws -> Void,
         output: @escaping (UnsafeRawBufferPointer) throws -> Void) throws {
         let context = Context(check: check, output: output); self.context = context
         var result = tr_gzip_result()
-        handle = tr_gzip_encoder_create(maximumRaw, maximumEncoded, level,
+        let nativeHeader = header.map { tr_gzip_header(modification_time: $0.modificationTime,
+            operating_system: $0.operatingSystem, text: $0.text ? 1 : 0) }
+        func create(_ header: UnsafePointer<tr_gzip_header>?) -> OpaquePointer? {
+            tr_gzip_encoder_create(maximumRaw, maximumEncoded, level, header,
             { raw in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().poll() } ?? 1 },
             { raw, bytes, count in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().consume(bytes, count) } ?? 0 },
             Unmanaged.passUnretained(context).toOpaque(), &result)
+        }
+        if var value = nativeHeader { handle = withUnsafePointer(to: &value) { create($0) } }
+        else { handle = create(nil) }
         try require(result)
         guard handle != nil else { throw TAROutputStream.Failure.mismatch }
     }

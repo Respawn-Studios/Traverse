@@ -202,7 +202,10 @@ import LocalStorage
                 let result = await plan.perform(using: engine, progress: nil)
                 received = result
                 if let id = result.recordID { latestRecordID = id }
-                interactions.publish(result, copyName == nil ? original.archiveURL : nil, destination)
+                // Rebind the editor before asking its browser to refresh the
+                // same reader. Gzip preparation is a full, cancellable read;
+                // a competing refresh must not make a confirmed Save look busy.
+                defer { interactions.publish(result, copyName == nil ? original.archiveURL : nil, destination) }
                 guard result.result.disposition == .succeeded, result.recordID != nil,
                       result.result.items.count == 1, result.result.items[0].status == .succeeded,
                       result.result.items[0].recoveryURLs.isEmpty else {

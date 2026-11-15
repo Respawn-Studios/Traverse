@@ -65,9 +65,11 @@ public final class TARArchiveReader: @unchecked Sendable {
     }
     public func openTextForEdit(_ selection: TARTextPreviewSelection,
         retaining lifetime: (any Sendable)? = nil) async throws -> TARTextEditDocument {
-        guard selection.binding.compressed == nil else { throw TARMemberEditFailure.compressedArchive }
         return try await perform(retaining: lifetime) { cancellation in
-            try TARTextPreviewReader.readChecked(selection, excluding: self.excludedRoots,
+            if selection.binding.compressed != nil {
+                _ = try TARMutationSource(selection.binding, check: cancellation.check)
+            }
+            return try TARTextPreviewReader.readChecked(selection, excluding: self.excludedRoots,
                 limits: self.limits, previewLimits: self.previewLimits,
                 check: cancellation.check, probe: self.probe) { bytes, check in
                 try check(); return try TARTextEditDocument(selection: selection, bytes: bytes)
@@ -78,10 +80,24 @@ public final class TARArchiveReader: @unchecked Sendable {
         expecting contents: TextDocumentValue? = nil,
         retaining lifetime: (any Sendable)? = nil) async throws -> TARTextEditDocument {
         let url = archive ?? previous.archiveURL
-        guard url.pathExtension.lowercased() == "tar",
+        let compressed = previous.selection.binding.compressed != nil
+        guard (compressed ? TARSourceBinding.isGzipFilename(url.lastPathComponent) : url.pathExtension.lowercased() == "tar"),
               url == previous.archiveURL || (contents != nil
                 && url.deletingLastPathComponent() == previous.archiveURL.deletingLastPathComponent()) else {
             throw TARArchiveFailure.invalidSelection
+        }
+        if compressed {
+            // A user-requested Save/Reload may prepare the new generation. Tab
+            // restoration and ordinary metadata browsing still never decode.
+            let session = try await prepareCompressed(url, retaining: lifetime,
+                publicQuarantineSource: previous.selection.binding.compressed?.original.security.publicWitness != nil)
+            let selected: TARTextPreviewSelection
+            do { selected = try await session.selectionForTextPreview(atPath: previous.archivePath) }
+            catch { await session.close(); throw error }
+            await session.close()
+            let document = try await openTextForEdit(selected, retaining: lifetime)
+            guard contents == nil || document.contents.encoded == contents?.encoded else { throw TARArchiveFailure.changed }
+            return document
         }
         return try await perform(retaining: lifetime) { cancellation in
             let output = try self.read(url, cancellation: cancellation)

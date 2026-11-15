@@ -99,7 +99,10 @@ struct TARClipboardSource {
     }
     var canPreviewSelected:Bool {canPreviewSelection(selection)}
     var canEditSelectedText: Bool { canEditTextSelection(selection) }
-    var allowsTextEditing: Bool { browser?.canOpenTARTextEditor == true && !isCompressedSource && summary?.blockedMembers == 0 }
+    var allowsTextEditing: Bool {
+        browser?.canOpenTARTextEditor == true && summary?.blockedMembers == 0
+            && (!isCompressedSource || TARGzipEditingFeature.available && compressedSummary != nil && !requiresPreparation)
+    }
     func canEditTextSelection(_ ids: Set<TARItemID>) -> Bool {
         allowsTextEditing && canPreviewSelection(ids) && items.contains {
             ids.contains($0.id) && !ArchiveImagePreview.supportsFilename($0.name)
@@ -451,7 +454,7 @@ struct TARClipboardSource {
     }
     func refresh(){if let source,let browser{
         if let embeddedPresentation {self.embeddedPresentation = .init(location:embeddedPresentation.location,state:embeddedViewState,token:UUID())}
-        open(source,from:browser)
+        open(source,from:browser,preparesCompressed:compressedSummary != nil && !requiresPreparation)
     }}
     private func start(){if work==nil{busy=true;work=Task{[self]in await pump()}}}
     private func pump()async {

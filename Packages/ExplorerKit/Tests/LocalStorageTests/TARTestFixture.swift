@@ -57,4 +57,19 @@ struct TARTestFixture {
         let fd = open(url.path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         try #require(fd >= 0); return (url, fd)
     }
+    func gzipSource() throws -> URL {
+        let url = root.appendingPathComponent("Source.tar.gz")
+        try Self.gzipCommand(["-n", "-c", source.path]).write(to: url, options: .withoutOverwriting)
+        return url
+    }
+    static func decodedGzip(_ source: URL) throws -> Data { try gzipCommand(["-d", "-c", source.path]) }
+    private static func gzipCommand(_ arguments: [String]) throws -> Data {
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip"); process.arguments = arguments
+        process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        try process.run()
+        let bytes = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+        try #require(process.terminationStatus == 0 && bytes.count <= 1 << 20)
+        return bytes
+    }
 }

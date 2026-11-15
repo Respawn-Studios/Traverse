@@ -133,7 +133,7 @@ final class ApplicationOperationCoordinator: ObservableObject {
             ordinaryHistory: ordinaryHistory)
         let portableTAR: StrictPortableTARCreationPolicy
         if markedArchiveReview || GeneratedSandboxReview.nativeTARCreateAdmitted
-            || NativeLocalProtectionPolicy.nativeTARCreateAvailable {
+            || NativeLocalProtectionPolicy.nativeTARCreateAvailable || TARArchiveEditingFeature.available {
             portableTAR = .nativeCreateQualification
         } else if AppFeatureAvailability.policy.edition == .development
                     && AppFeatureAvailability.allows(.tarCreation) && zipMetadata == .exactSource {
@@ -141,9 +141,13 @@ final class ApplicationOperationCoordinator: ObservableObject {
         } else { portableTAR = .held }
         let authoredPublicMark: NativeAuthoredCreatePublicMarkPolicy =
             markedArchiveReview || NativeLocalProtectionPolicy.nativeAuthoredCreatePublicMarkAvailable
+                || TARArchiveEditingFeature.available
                 ? .sourceQualification : .held
+        let authoredUpdatePublicMark: NativeAuthoredUpdatePublicMarkPolicy = TARArchiveEditingFeature.available
+            ? .sourceQualification : .held
         let tarOriginalUpdate: AuthoredTAROriginalUpdatePolicy = TARArchiveEditingFeature.available
             ? .developmentNativeStage : .held
+        let tarGzipUpdate: AuthoredTARGzipOriginalUpdatePolicy = TARGzipEditingFeature.available ? .developmentNativeStage : .held
         let tarGzipCreate: TARGzipCreationPolicy = TARGzipCreationFeature.available ? .developmentNativeCreate : .held
         let protectedNames = [directory.deletingLastPathComponent(),
                               directory.deletingLastPathComponent().appendingPathComponent("private-names", isDirectory: true),
@@ -197,8 +201,11 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 strictPortableTARCreationPolicy: portableTAR,
                 tarGzipCreationPolicy: tarGzipCreate,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
+                nativeAuthoredUpdatePublicMarkPolicy: authoredUpdatePublicMark,
                 authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
-                authoredTAROriginalUpdatePolicy: tarOriginalUpdate, downloadAdoptionPolicy: downloadAdoption,
+                authoredTAROriginalUpdatePolicy: tarOriginalUpdate,
+                authoredTARGzipOriginalUpdatePolicy: tarGzipUpdate,
+                downloadAdoptionPolicy: downloadAdoption,
                 receivedDownloadPublicQuarantinePolicy: publicDownload,
                 zipOneFilePublicExtractionPolicy: zipOneFileExtraction, tarOneFilePublicExtractionPolicy: tarFile,
                 receivedFolderPublicQuarantinePolicy: receivedFolder, zipTreePublicExtractionPolicy: zipTree,
@@ -211,8 +218,10 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 strictPortableTARCreationPolicy: portableTAR,
                 tarGzipCreationPolicy: tarGzipCreate,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
+                nativeAuthoredUpdatePublicMarkPolicy: authoredUpdatePublicMark,
                 authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
                 authoredTAROriginalUpdatePolicy: tarOriginalUpdate,
+                authoredTARGzipOriginalUpdatePolicy: tarGzipUpdate,
                 downloadAdoptionPolicy: downloadAdoption, receivedDownloadPublicQuarantinePolicy: publicDownload,
                 zipOneFilePublicExtractionPolicy: zipOneFileExtraction, tarOneFilePublicExtractionPolicy: tarFile,
                 receivedFolderPublicQuarantinePolicy: receivedFolder, zipTreePublicExtractionPolicy: zipTree,

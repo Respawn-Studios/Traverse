@@ -139,7 +139,7 @@ extension RecoverableFileOperations {
         switch format {
         case .zip: authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage
         case .strictPortableTAR: authoredTAROriginalUpdatePolicy == .developmentNativeStage
-        case .strictPortableTARGzip: false
+        case .strictPortableTARGzip: authoredTARGzipOriginalUpdatePolicy == .developmentNativeStage
         }
     }
 
@@ -147,6 +147,7 @@ extension RecoverableFileOperations {
         switch version {
         case 13: nativeArchiveUpdateEnabled(for: .zip)
         case 18: nativeArchiveUpdateEnabled(for: .strictPortableTAR)
+        case 19: nativeArchiveUpdateEnabled(for: .strictPortableTARGzip)
         default: false
         }
     }
@@ -160,13 +161,12 @@ extension RecoverableFileOperations {
     ) async throws -> ArchiveUpdatePlan {
         try await worker { cancellation in
             if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
-            guard authoredFormat != .strictPortableTARGzip else { throw FileOperationFailure.unsupported }
             guard !sources.isEmpty, sources.count <= 512, sources.first == original,
                   sources.count == selection.urls.count, sources.count == selection.identities.count,
-                  original.pathExtension.lowercased() == (authoredFormat == .zip ? "zip" : "tar"),
+                  authoredFormat.acceptsFilename(original.lastPathComponent),
                   Set(sources).count == sources.count else { throw FileOperationFailure.invalidRequest }
-            if authoredFormat == .strictPortableTAR {
-                guard self.authoredTAROriginalUpdatePolicy == .developmentNativeStage else {
+            if authoredFormat != .zip {
+                guard self.nativeArchiveUpdateEnabled(for: authoredFormat) else {
                     throw FileOperationFailure.unsupported
                 }
             }
@@ -208,7 +208,7 @@ extension RecoverableFileOperations {
                 throw FileOperationFailure.unsupported
             }
             let producer = try makeProducer({ try cancellation.check() })
-            if authoredFormat == .strictPortableTAR {
+            if authoredFormat != .zip {
                 guard let native = producer as? any NativeAuthoredArchiveFileProducer,
                       native.authoredArchiveFormat == authoredFormat,
                       producer is any StrictPortableTARFileProducer,
@@ -256,7 +256,7 @@ extension RecoverableFileOperations {
             try cancellation.check()
             let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks,
                                                cancellation: cancellation)
-            guard let record = try journal.inspectRecord(recordID), [5, 6, 13, 18].contains(record.version),
+            guard let record = try journal.inspectRecord(recordID), [5, 6, 13, 18, 19].contains(record.version),
                   let first = record.steps.first, let area = record.areas.first else { return nil }
             return [first.source, area.url.appendingPathComponent("displaced"),
                     area.url.appendingPathComponent("payload")]
@@ -266,9 +266,9 @@ extension RecoverableFileOperations {
     internal func validateArchiveOriginalUpdate(_ plan: ArchiveUpdatePlan,
                                                 cancellation: OperationCancellation) throws {
         try cancellation.check()
-        if plan.authoredFormat == .strictPortableTAR {
-            guard authoredTAROriginalUpdatePolicy == .developmentNativeStage,
-                  (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == .strictPortableTAR else {
+        if plan.authoredFormat != .zip {
+            guard nativeArchiveUpdateEnabled(for: plan.authoredFormat),
+                  (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == plan.authoredFormat else {
                 throw FileOperationFailure.unsupported
             }
         }
@@ -347,7 +347,8 @@ extension RecoverableFileOperations {
             guard !nativeOriginalUpdate || (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == plan.authoredFormat else {
                 throw FileOperationFailure.unsupported
             }
-            let protocolKind: OperationCatalogProtocol = plan.authoredFormat == .strictPortableTAR ? .tarNativeUpdateV18
+            let protocolKind: OperationCatalogProtocol = plan.authoredFormat == .strictPortableTARGzip ? .tarGzipNativeUpdateV19
+                : plan.authoredFormat == .strictPortableTAR ? .tarNativeUpdateV18
                 : nativeOriginalUpdate ? .archiveNativeUpdateV13
                 : strictClone ? .archiveStrictCloneV6 : .archiveUpdateV5
             let record = try journal.beginArchiveUpdateEdit(protocolKind: protocolKind); active = record
@@ -387,6 +388,10 @@ extension RecoverableFileOperations {
             if authoredZIPMetadataPolicy == .nativeStageQualification || nativeOriginalUpdate {
                 authoredZIP = plan.producer as? any NativeAuthoredArchiveFileProducer
             } else { authoredZIP = nil }
+            if nativeOriginalUpdate, nativeAuthoredUpdatePublicMarkPolicy == .sourceQualification,
+               authoredZIP?.hasMarkedSource == true {
+                try prepareNativeAuthoredPublicStageMark(fd, parent: area, name: "payload")
+            }
             // The native displacement proof applies to the old inode only.
             // Strict-clone production still uses the ordinary exact-mark path.
             let displacedZIP: (any NativeAuthoredArchiveFileProducer)? = strictClone

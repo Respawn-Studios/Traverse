@@ -32,13 +32,13 @@ Plain TAR opens directly. Gzip TAR requires explicit Prepare into the shared
 private pool, bounded to 128 MiB and four copies. Restoring a tab or searching
 names does not decode it. `ApplicationCompressedArchives` retains actual worker,
 source access and prepared-copy leases through drain and the volume/Quit barrier.
-A prepared spool path is never operation authority. Compressed-TAR rewriting,
-nesting and outgoing TAR promises require separate support.
+A prepared spool path is never operation authority. Nesting and outgoing TAR
+promises require separate support.
 
 ## TAR editing in development
 
-Plain TAR members can use the common native editor and archive workbench in
-Development builds. Rename, Remove, Duplicate, Move, Create File/New Folder,
+Plain and prepared gzip TAR members use the common native editor and archive
+workbench in Development builds. Rename, Remove, Duplicate, Move, Create File/New Folder,
 Group and Add all use one `TARMemberMutation`, including Cut/Paste and local
 file drops. The browser seals catalog selections; the table never writes files.
 Read-only and larger extraction selections keep their existing Copy route.
@@ -49,12 +49,26 @@ The edited member keeps ownership names, mode and unrelated PAX fields; its
 header and any PAX size override are updated together. Links, special members,
 unsupported root metadata and archives over 1 GiB refuse the write.
 
+Gzip rewriting reuses the retained, unlinked read-only spool. The original
+compressed file remains the source and history authority. One fresh decode
+must match that spool's digest, length and catalog; the output gets a second
+complete verification. Both raw TAR and gzip output stay within 128 MiB. The
+current writable wrapper preserves MTIME, OS and FTEXT, recalculates compression
+flags and refuses optional headers or concatenated streams rather than discard
+their metadata. Fast/Balanced/Smallest choices apply to the complete output.
+
 Save and Save TAR Copy use the existing guarded archive engine. TAR original
-replacement has its own default-held policy and v18 history, independent of
-ZIP v13. The earlier archive stays available for cold Undo; an interrupted
+replacement has its own default-held policy and v18 history; gzip has v19,
+independent of ZIP v13. The earlier archive stays available for cold Undo; an interrupted
 retained-original step has an explicit, revalidated Restore action. The writer
 keeps the native stage's macOS protection and never copies a source mark over
 it. This source support does not activate TAR editing in a distributed build.
+Initializing protection on a new Update payload has a separate default-held
+policy from Create. Only an empty owned private stage is eligible; existing
+stage protection and source metadata are never replaced. A consumed plan drops
+its entire spool ownership graph after the worker drains. Editor rebind finishes
+before browser refresh, and an already prepared browser can refresh a successful
+edit without another Prepare click.
 
 ## Creation and ZIP edits
 
@@ -63,8 +77,7 @@ It streams the same TAR records through the bounded system zlib encoder, then
 checks a fresh inflate, the emitted metadata and the completed file digest.
 There is no second full TAR spool. Raw TAR and compressed output each stay
 within 128 MiB. A separate default-held engine policy keeps this new authoring
-route out of distributed builds until qualification; gzip Original Update is
-still refused. Native stage protection and the existing cold Undo are shared
+route out of distributed builds until qualification. Native stage protection and the existing cold Undo are shared
 with plain TAR creation.
 
 Compress/Extract shortcuts share the full workbenches and guarded operations.
@@ -109,9 +122,15 @@ for the same destination. Each job retains cancellation, access and exactly-once
 completion through actual drain; a callback grants no folder access itself.
 
 Reuse existing archive package tests and `tools/dev.py native-check` entries:
-`create-zip`, `create-tar`, `create-targz`, `zip-add-copy`, `compressed-tar`, `tar-editor`, and relevant editor or
+`create-zip`, `create-tar`, `create-targz`, `zip-add-copy`, `compressed-tar`,
+`tar-editor`, `tar-gzip-editor`, and relevant editor or
 batch-rename journeys. Independently inspect generated output and original
 identity, conflict refusal, cancellation, interruption and guarded Undo.
 Offscreen functional checks do not establish motion, physical input, external
 receiver behavior or sandbox grants. See [file operations](../../../../docs/FILE_OPERATIONS.md)
 and the [engineering guide](../../../../docs/engineering/README.md).
+
+The two TAR editor journeys reuse the same ordinary Development engine. They
+include a second app process for the final edit/Create Undos. The existing
+`--marked-source-create` option also covers generated marked editor inputs;
+it grants no installed-app or OS-container scope.

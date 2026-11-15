@@ -260,7 +260,7 @@ enum ZIPMemberRenameFeature {
         self.sources = chosenSources
         parent = chosenSources[0].deletingLastPathComponent()
         if let memberEdit {
-            name = memberEdit.archiveURL.deletingPathExtension().lastPathComponent + "-edited." + memberEdit.formatName.lowercased()
+            name = ArchiveActionNames.editedCopyName(memberEdit.archiveURL)
         } else if nativeTARReview {
             name = sources.count == 1 ? sources[0].lastPathComponent + ".tar" : "Archive.tar"
         } else { name = sources.count == 1 ? sources[0].lastPathComponent + ".zip" : "Archive.zip" }
@@ -272,6 +272,7 @@ enum ZIPMemberRenameFeature {
         changes = Publishers.Merge(coordinator.objectWillChange, coordinator.transfers.objectWillChange)
             .receive(on: RunLoop.main).sink { [weak self] _ in self?.objectWillChange.send() }
         if nativeTARReview || memberEdit?.formatName == "TAR" { outputFormat = .tar }
+        if memberEdit?.formatName == "TAR.gz" { outputFormat = .tarGzip }
     }
     func requestPreview() {
         requestPreview(debounced: true)
@@ -366,8 +367,9 @@ enum ZIPMemberRenameFeature {
                     switch memberEdit {
                     case .tar(let mutation):
                         let change = mutation.reviewed(name: chosenMemberName, addedSources: Array(sources.dropFirst()))
-                        if originalUpdate { return .update(try await engine.prepareTARMemberMutationOriginal(change, observing: captured)) }
-                        return .create(try await engine.prepareTARMemberMutationCopy(change, outputName: chosenName, observing: captured))
+                        let encoding: TARCompression? = change.isCompressed ? chosenTARCompression : nil
+                        if originalUpdate { return .update(try await engine.prepareTARMemberMutationOriginal(change, compression: encoding, observing: captured)) }
+                        return .create(try await engine.prepareTARMemberMutationCopy(change, outputName: chosenName, compression: encoding, observing: captured))
                     case .batchRename(let selected):
                         let names = try chosenBatch.rule.names(for: chosenBatchNames)
                         if originalUpdate {

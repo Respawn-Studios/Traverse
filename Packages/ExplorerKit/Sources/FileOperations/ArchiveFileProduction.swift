@@ -25,6 +25,15 @@ public enum AuthoredZIPMetadataPolicy: Sendable, Equatable {
     case strictPortableTAR
     /// A gzip-encoded portable TAR; it has independent creation admission.
     case strictPortableTARGzip
+
+    public func acceptsFilename(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return switch self {
+        case .zip: lower.hasSuffix(".zip")
+        case .strictPortableTAR: lower.hasSuffix(".tar")
+        case .strictPortableTARGzip: lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz")
+        }
+    }
 }
 
 /// A separate, default-held engine admission for the development TAR route.
@@ -39,6 +48,9 @@ public enum StrictPortableTARCreationPolicy: Sendable, Equatable {
 /// Local authored gzip-TAR only. It grants no received-data or compressed
 /// original-update authority and remains held in ordinary engine composition.
 public enum TARGzipCreationPolicy: Sendable, Equatable { case held, developmentNativeCreate }
+/// Distinct from plain TAR updates and gzip creation; v19 alone can reverse
+/// the native compressed-original replacement protocol.
+public enum AuthoredTARGzipOriginalUpdatePolicy: Sendable, Equatable { case held, developmentNativeStage }
 
 /// An independent, default-held extension for newly authored local ZIP/TAR.
 /// It may initialize a fresh private Create stage from a marked-source fact;
@@ -46,6 +58,10 @@ public enum TARGzipCreationPolicy: Sendable, Equatable { case held, developmentN
 public enum NativeAuthoredCreatePublicMarkPolicy: Sendable, Equatable {
     case held, sourceQualification
 }
+
+/// Independent qualification for an authored Update's empty private payload.
+/// Create admission cannot authorize this route, and received data never uses it.
+public enum NativeAuthoredUpdatePublicMarkPolicy: Sendable, Equatable { case held, sourceQualification }
 
 /// Independent from Create/Copy so one engine can retain its accepted native
 /// authoring contract while a new Original Update record remains off by default.
@@ -107,10 +123,11 @@ public enum AuthoredTAROriginalUpdatePolicy: Sendable, Equatable {
     }
 }
 
-/// Only the concrete local ZIP edit producer implements this path. Generic
+/// Concrete local ZIP/TAR edit producers implement this path. Generic
 /// producers, received files and extraction retain their existing policy.
 @_spi(ArchiveProduction) public protocol NativeAuthoredArchiveFileProducer: ArchiveFileProducer {
     var authoredArchiveFormat: AuthoredArchiveFormat { get }
+    var hasMarkedSource: Bool { get }
     func produceNativeArchive(into descriptor: Int32, stageSecurity: AuthoredZIPSecurityWitness,
         allowSourceMarkInheritance: Bool, check: @Sendable () throws -> Void,
         progress: @Sendable (UInt64, Int) -> Void) throws -> AuthoredZIPProducedFile
@@ -332,9 +349,9 @@ extension RecoverableFileOperations {
     }
 
     /// A new authored archive is a different object from every selected input.
-    /// For an explicitly qualified Create, initialize only its own empty private
+    /// For an independently qualified Create or Update, initialize only its empty private
     /// stage when a marked input needs protection and the OS left it unmarked.
-    internal func prepareNativeAuthoredCreatePublicMark(_ descriptor: Int32,
+    internal func prepareNativeAuthoredPublicStageMark(_ descriptor: Int32,
         parent: DirectoryAnchor, name: String) throws {
         try parent.validate()
         var directoryFacts = stat(), stageFacts = stat()
@@ -640,7 +657,7 @@ extension RecoverableFileOperations {
             } else { nativeCreateMarkedSource = false }
             if nativeArchiveCreate, authoredZIP == nil, nativeCreateMarkedSource,
                nativeAuthoredCreatePublicMarkPolicy == .sourceQualification {
-                try prepareNativeAuthoredCreatePublicMark(descriptor, parent: area, name: "payload")
+                try prepareNativeAuthoredPublicStageMark(descriptor, parent: area, name: "payload")
             }
             let stageIdentity: EntrySnapshot?
             if let exactClone { stageIdentity = exactClone.identity }

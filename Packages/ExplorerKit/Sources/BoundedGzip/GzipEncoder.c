@@ -7,6 +7,7 @@
 #define TR_GZIP_CHUNK 65536u
 struct tr_gzip_encoder {
     z_stream stream;
+    gz_header header;
     tr_heap heap;
     tr_gzip_result result;
     uint64_t maximum_input,maximum_output;
@@ -28,12 +29,12 @@ static void tr_end(tr_gzip_encoder *encoder) {
     }
     if(encoder->heap.active || encoder->heap.invalid)encoder->result.status=TR_GZIP_INTERNAL;
 }
-tr_gzip_encoder *tr_gzip_encoder_create(uint64_t max_input,uint64_t max_output,int32_t level,
+tr_gzip_encoder *tr_gzip_encoder_create(uint64_t max_input,uint64_t max_output,int32_t level,const tr_gzip_header *header,
     tr_gzip_cancel cancel,tr_gzip_consume consume,void *context,tr_gzip_result *result) {
     if(!result)return NULL;
     memset(result,0,sizeof(*result));result->status=TR_GZIP_INVALID_INPUT;
     if(!max_input || max_input>TR_GZIP_MAXIMUM || !max_output || max_output>TR_GZIP_MAXIMUM ||
-       level<0 || level>9 || !consume)return NULL;
+       level<0 || level>9 || !consume || (header && header->text>1))return NULL;
     if(cancel && cancel(context)){result->status=TR_GZIP_CANCELLED;return NULL;}
     tr_gzip_encoder *encoder=calloc(1,sizeof(*encoder));
     if(!encoder){result->status=TR_GZIP_MEMORY_LIMIT;return NULL;}
@@ -47,7 +48,19 @@ tr_gzip_encoder *tr_gzip_encoder_create(uint64_t max_input,uint64_t max_output,i
         if(encoder->stream.state) {encoder->initialized=1;tr_end(encoder);}
         *result=tr_result(encoder);free(encoder);return NULL;
     }
-    encoder->initialized=1;*result=tr_result(encoder);return encoder;
+    encoder->initialized=1;
+    if(header) {
+        /* zlib retains this address until emission. It must live with the
+         * encoder, never on this function's stack or in a Swift temporary. */
+        encoder->header.time=header->modification_time;
+        encoder->header.os=header->operating_system;
+        encoder->header.text=header->text;
+        if(deflateSetHeader(&encoder->stream,&encoder->header)!=Z_OK) {
+            encoder->result.status=TR_GZIP_INTERNAL;tr_end(encoder);
+            *result=tr_result(encoder);free(encoder);return NULL;
+        }
+    }
+    *result=tr_result(encoder);return encoder;
 }
 static tr_gzip_result tr_encode(tr_gzip_encoder *encoder,const uint8_t *bytes,uint32_t count,int finish) {
     tr_gzip_result invalid={.status=TR_GZIP_INVALID_INPUT};

@@ -36,7 +36,7 @@ internal struct TARMutationLayout: Sendable {
     private let preservedPhysicalRecords: Int
     var entries: [Entry] { originals.compactMap { $0 } + appended }
 
-    init(_ mutation: TARMemberMutation, source: PinnedLocalFileSource, parsed: TARParsedDirectory,
+    init(_ mutation: TARMemberMutation, source: TARMutationSource, parsed: TARParsedDirectory,
         check: () throws -> Void) throws {
         originalRecords = parsed.records; endOffset = parsed.endOffset
         binding = mutation.binding
@@ -48,7 +48,7 @@ internal struct TARMutationLayout: Sendable {
         guard catalog.summary.blockedMembers == 0 else { throw TARMemberEditFailure.unsupportedArchive }
         let namespace = try Self.namespace(parsed.records, check: check)
         func read(_ offset: UInt64, _ count: Int) throws -> Data {
-            try source.read(offset, count, maximum: 66_560, check: check)
+            try source.read(offset, count, check: check)
         }
         switch mutation {
         case .replace(let document, let contents):
@@ -147,10 +147,10 @@ internal struct TARMutationLayout: Sendable {
         }
     }
     private func validateBinding(_ value: TARSourceBinding) throws {
-        guard value.compressed == nil else { throw TARMemberEditFailure.compressedArchive }
         // The writer separately binds its source stamp/witness. Both selected
         // source and destination must describe that same catalog generation.
         guard value.source == binding.source, value.stamp == binding.stamp,
+              value.compressed?.digest == binding.compressed?.digest,
               value.witness == binding.witness else { throw FileOperationFailure.sourceChanged }
     }
 

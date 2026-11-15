@@ -349,6 +349,7 @@ internal final class PreparedZIPCopyEdit: AuthoredZIPFileProducer, Sendable {
         let digest: Data
     }
     let preview: ArchiveProductionPreview
+    var hasMarkedSource: Bool { security.quarantine.expectedQuarantineSHA256 != nil || additions?.hasMarkedSource == true }
     private let intent: ZIPCopyEditIntent
     private let manifest: Manifest
     private let security: Security

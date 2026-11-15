@@ -1,6 +1,13 @@
 import Foundation
 
 enum ArchiveActionNames {
+    static func editedCopyName(_ source: URL) -> String {
+        let leaf = source.lastPathComponent
+        let suffix = leaf.lowercased().hasSuffix(".tar.gz") ? String(leaf.suffix(7)) : "." + source.pathExtension
+        let stem = String(leaf.dropLast(suffix.count))
+        return stem + "-edited" + suffix
+    }
+
     static func extractionFolder(for source: URL) -> String {
         let leaf = source.lastPathComponent
         let suffixes = [".tar.gz", ".tgz", ".tar", ".zip", ".jar"]

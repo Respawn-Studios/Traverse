@@ -76,12 +76,14 @@ public struct OperationRecoveryRecord: Identifiable, Sendable {
     public let locations: [URL]
     public let canUndo: Bool
     public let canRecover: Bool
-    /// V13 ZIP / v18 TAR: one saved retained-original after-image and no replacement
+    /// V13 ZIP / v18 TAR / v19 TAR.gz: one retained-original after-image and no replacement
     /// intent. The explicit restore action still rechecks the live filesystem.
     public let canRestoreOriginalZIP: Bool
     /// Shared presentation for separately admitted ZIP and TAR original updates.
     public var canRestoreOriginalArchive: Bool { canRestoreOriginalZIP }
-    public var originalArchiveFormatName: String { operation == "Update TAR" ? "TAR" : "ZIP" }
+    public var originalArchiveFormatName: String {
+        switch operation { case "Update TAR": "TAR"; case "Update TAR.gz": "TAR.gz"; default: "ZIP" }
+    }
     /// A fully validated v11 regular-file Trash record. This is independent of
     /// whether the native mark changed; older history never gains this status.
     public let nativeRegularFileTrashContract: Bool

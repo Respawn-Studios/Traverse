@@ -206,10 +206,14 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         if marked_source_create:
             raise ValueError("gzip TAR has a separate development creation route")
         feature = "create-tar"
-    tar_editor = feature == "tar-editor"
+    gzip_tar_editor = feature == "tar-gzip-editor"
+    tar_editor = feature in ("tar-editor", "tar-gzip-editor")
+    marked_archive_editor = tar_editor and marked_source_create
+    if marked_archive_editor:
+        marked_source_create = False
     native_zip_recovery = feature == "zip-editor-native-recovery"
     native_zip_update = feature in ("zip-update-native", "zip-editor-native", "zip-editor-native-recovery")
-    if feature in ("zip-editor-native", "zip-editor-native-recovery", "tar-editor"):
+    if feature in ("zip-editor-native", "zip-editor-native-recovery", "tar-editor", "tar-gzip-editor"):
         feature = "editor-preferences"
     if not offscreen:
         require_unlocked_console()
@@ -634,6 +638,10 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command.append("--tracked-zip")
     if tar_editor:
         command.extend(["--tar-editor", "--archive-editor-only"])
+        if gzip_tar_editor:
+            command.append("--gzip-tar-editor")
+        if marked_archive_editor:
+            command.append("--marked-archive-editor")
     if native_zip_update:
         command.append("--native-original-update")
     if native_zip_recovery:
@@ -676,6 +684,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         phases = ("unchanged", "unchanged-reopen") if incremental_analysis else ("seed", "reopen", "repair")
     elif feature == "selection-group":
         phases = ("suite", "recover")
+    elif tar_editor and not interactive:
+        phases = ("suite", "cold-undo")
     else:
         phases = (None,)
     for phase in phases:
@@ -683,6 +693,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             phase_command = command + (["--archive-create-cold-undo"] if phase == "cold-undo" else [])
         elif feature == "selection-group":
             phase_command = command + ["--group-phase", phase]
+        elif tar_editor:
+            phase_command = command + (["--tar-editor-cold-undo"] if phase == "cold-undo" else [])
         else:
             phase_command = command + ([phase] if phase else [])
         log_name = f"process-{phase}.log" if phase else "process.log"
@@ -696,6 +708,11 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                                             else 750 if feature == "sftp-group-upload" and interactive else 240)
         if result.returncode:
             raise RuntimeError(f"Native {feature} {phase or ''} failed; inspect {case / 'evidence'}")
+        if tar_editor:
+            phase_receipt = case / "evidence" / ("native-editor-preferences-cold.json" if phase == "cold-undo" else "native-editor-preferences.json")
+            phase_value = json.loads(phase_receipt.read_text()) if phase_receipt.is_file() else {}
+            if phase_value.get("passed") is not True or phase_value.get("actualOwnerDrain") is not True:
+                raise RuntimeError(f"Native TAR editor {phase or ''} failed at {phase_value.get('failure', 'missing report')}; inspect {case / 'evidence'}")
         if marked_source_create:
             phase_receipt = case / "evidence/native.json"
             phase_value = json.loads(phase_receipt.read_text()) if phase_receipt.is_file() else {}

@@ -8,6 +8,7 @@ public struct TARMemberSelection: Sendable, CustomStringConvertible, CustomDebug
     internal let roots: [TARExtractionSelection.Root]
     public let coveredSelectionCount: Int
     public var archiveURL: URL { binding.source }
+    public var isCompressed: Bool { binding.compressed != nil }
     public var archivePaths: [String] { roots.map(\.path) }
     public var folderPaths: [String] { roots.filter { $0.kind == .directory }.map(\.path) }
     public var description: String { "<checked TAR member set>" }
@@ -44,23 +45,24 @@ public enum TARMemberMutation: Sendable {
     }
     public var archiveURL: URL { binding.source }
     internal var addedSources: [URL] { if case .add(_, let sources) = self { sources } else { [] } }
+    public var isCompressed: Bool { binding.compressed != nil }
 }
 
 extension RecoverableFileOperations {
     public func prepareTARMemberMutationOriginal(_ mutation: TARMemberMutation,
-        observing source: FileOperationSelection) async throws -> ArchiveUpdatePlan {
+        compression: TARCompression? = nil, observing source: FileOperationSelection) async throws -> ArchiveUpdatePlan {
         try await prepareArchiveOriginalUpdate(sources: [mutation.archiveURL] + mutation.addedSources,
-            original: mutation.archiveURL, observing: source, authoredFormat: .strictPortableTAR) { check in
-            try PreparedTARMemberMutation(mutation, check: check, updatesOriginal: true)
+            original: mutation.archiveURL, observing: source, authoredFormat: mutation.binding.authoredFormat) { check in
+            try PreparedTARMemberMutation(mutation, compression: compression, check: check, updatesOriginal: true)
         }
     }
     public func prepareTARMemberMutationCopy(_ mutation: TARMemberMutation, outputName: String,
-        observing source: FileOperationSelection) async throws -> ArchiveCreationPlan {
-        guard (outputName as NSString).pathExtension.lowercased() == "tar" else { throw TARMemberEditFailure.invalidName }
+        compression: TARCompression? = nil, observing source: FileOperationSelection) async throws -> ArchiveCreationPlan {
+        guard mutation.binding.authoredFormat.acceptsFilename(outputName) else { throw TARMemberEditFailure.invalidName }
         return try await prepareArchiveCreation(sources: [mutation.archiveURL] + mutation.addedSources,
             parent: mutation.archiveURL.deletingLastPathComponent(), name: outputName,
-            observing: source, authoredFormat: .strictPortableTAR) { check in
-            try PreparedTARMemberMutation(mutation, check: check)
+            observing: source, authoredFormat: mutation.binding.authoredFormat) { check in
+            try PreparedTARMemberMutation(mutation, compression: compression, check: check)
         }
     }
 }

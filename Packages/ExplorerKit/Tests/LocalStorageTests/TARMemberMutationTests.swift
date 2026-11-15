@@ -33,10 +33,17 @@ struct TARMemberMutationTests {
         try await session.destinationForMemberChanges(session.folder(at: path.split(separator: "/").map(String.init)))
     }
 
-    @Test(arguments: Action.allCases, [false, true])
-    func memberChangesVerifyExpectedContentsAndColdUndo(action: Action, original: Bool) async throws {
+    @Test(arguments: Action.allCases, [(false, false), (false, true), (true, false), (true, true)])
+    func memberChangesVerifyExpectedContentsAndColdUndo(action: Action, variant: (original: Bool, compressed: Bool)) async throws {
+        let (original, compressed) = variant
         let fixture = try TARTestFixture(pax: true, folderTree: true)
-        let session = try await TARArchiveReader().open(fixture.source)
+        let source = try (compressed ? fixture.gzipSource() : fixture.source)
+        let before = try Data(contentsOf: source), cache = fixture.root.appendingPathComponent("cache")
+        try FileManager().createDirectory(at: cache, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let pool = TARCompressedPreparationPool(cacheDirectory: cache, activity: .init())
+        let reader = TARArchiveReader(compressedPool: pool)
+        let session = try await (compressed ? reader.prepareCompressed(source) : reader.open(source))
+        func flow() async throws {
         var expected = try snapshot(fixture.bytes)
         func relocated(_ root: String, to target: String, duplicate: Bool = false) {
             for (path, member) in Array(expected) where path == root || path.hasPrefix(root + "/") {
@@ -88,26 +95,32 @@ struct TARMemberMutationTests {
         let history = fixture.root.appendingPathComponent("history")
         let engine = RecoverableFileOperations(journalDirectory: history,
             strictPortableTARCreationPolicy: .nativeCreateQualification,
-            authoredTAROriginalUpdatePolicy: .developmentNativeStage)
-        let observed = try await engine.observeSelection([fixture.source] + mutation.addedSources)
+            tarGzipCreationPolicy: .developmentNativeCreate,
+            authoredTAROriginalUpdatePolicy: .developmentNativeStage,
+            authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
+        let observed = try await engine.observeSelection([source] + mutation.addedSources)
         let result: RecoverableOperationResult, output: URL
         if original {
             let plan = try await engine.prepareTARMemberMutationOriginal(mutation, observing: observed)
-            result = await engine.performArchiveOriginalUpdate(plan); output = fixture.source
+            result = await engine.performArchiveOriginalUpdate(plan); output = source
         } else {
-            let plan = try await engine.prepareTARMemberMutationCopy(mutation, outputName: "Edited.tar", observing: observed)
+            let plan = try await engine.prepareTARMemberMutationCopy(mutation, outputName: compressed ? "Edited.tar.gz" : "Edited.tar", observing: observed)
             result = await engine.performArchiveCreation(plan); output = plan.destination
-            #expect(try Data(contentsOf: fixture.source) == fixture.bytes)
+            #expect(try Data(contentsOf: source) == before)
         }
         #expect(result.result.disposition == .succeeded)
-        #expect(try snapshot(Data(contentsOf: output)) == expected)
+        #expect(try snapshot(compressed ? TARTestFixture.decodedGzip(output) : Data(contentsOf: output)) == expected)
         let id = try #require(result.recordID)
         let cold = RecoverableFileOperations(journalDirectory: history,
-            authoredTAROriginalUpdatePolicy: .developmentNativeStage)
+            authoredTAROriginalUpdatePolicy: .developmentNativeStage,
+            authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
         let undone = await cold.undo(recordID: id)
         #expect(undone.result.disposition == .succeeded)
-        #expect(try Data(contentsOf: fixture.source) == fixture.bytes)
+        #expect(try Data(contentsOf: source) == before)
         if !original { #expect(!FileManager().fileExists(atPath: output.path)) }
+        }
+        try await flow()
+        await session.close(); #expect(await pool.closeAndDrain())
     }
 
     @Test func conflictsSelfDescentsAndForeignDestinationsRefuseBeforePublication() async throws {

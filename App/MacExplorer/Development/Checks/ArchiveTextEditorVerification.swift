@@ -1,5 +1,7 @@
 #if DEBUG
 import AppKit
+import CryptoKit
+import CoreServices
 import ExplorerCore
 import FileOperations
 import LocalStorage
@@ -14,6 +16,37 @@ import LocalStorage
         while !ready() { try need(.now < deadline, stage); try await Task.sleep(for: .milliseconds(10)) }
     }
     private static func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }
+    private struct ColdTAR: Codable, Sendable {
+        let gzip: Bool
+        let creation, firstSave: UUID
+        let createdDigest, savedDigest, firstInputDigest, secondInputDigest: Data
+    }
+    private static func hash(_ url: URL) async throws -> Data {
+        try await Task.detached { Data(SHA256.hash(data: try Data(contentsOf: url))) }.value
+    }
+    static func coldTAR(root: URL) async throws -> [String] {
+        let gzip = ProcessInfo.processInfo.arguments.contains("--gzip-tar-editor")
+        let packet = try await Task.detached {
+            try JSONDecoder().decode(ColdTAR.self, from: Data(contentsOf: root.appendingPathComponent("evidence/tar-editor-cold-pending.json")))
+        }.value
+        try need(packet.gzip == gzip && packet.creation != packet.firstSave, "tar-cold-exact-profile")
+        let parent = root.appendingPathComponent("source/Generated Documents")
+        let source = parent.appendingPathComponent("Editor Archive." + (gzip ? "tar.gz" : "tar"))
+        let engine = ApplicationOperationCoordinator.shared.engine(at: root.appendingPathComponent("state/history"))
+        try await ApplicationOperationCoordinator.shared.prepareOperationState(for: engine)
+        try need(try await hash(source) == packet.savedDigest, "tar-cold-current-bytes")
+        let restored = await engine.undo(recordID: packet.firstSave)
+        let restoredDigest = try await hash(source)
+        try need(restored.result.disposition == .succeeded && restoredDigest == packet.createdDigest,
+            "tar-cold-first-save-undo")
+        let removed = await engine.undo(recordID: packet.creation)
+        let exists = await Task.detached { FileManager().fileExists(atPath: source.path) }.value
+        try need(removed.result.disposition == .succeeded && !exists, "tar-cold-create-undo")
+        let firstDigest = try await hash(parent.appendingPathComponent("Generated.json"))
+        let secondDigest = try await hash(parent.appendingPathComponent("Other.json"))
+        try need(firstDigest == packet.firstInputDigest && secondDigest == packet.secondInputDigest, "tar-cold-original-inputs")
+        return ["A separate native app process uses the ordinary Development engine to Undo the first text Save to exact earlier archive bytes, then Undo archive creation; generated inputs stay unchanged"]
+    }
     private static func sheetButton(_ title: String, in window: NSWindow?) -> NSButton? {
         window?.attachedSheet?.contentView.flatMap { views($0).compactMap { $0 as? NSButton }.first { $0.title == title } }
     }
@@ -33,6 +66,17 @@ import LocalStorage
         let view = doc.window.surface.textView
         view.insertText(text, replacementRange: .init(location: 0, length: view.string.utf16.count))
         view.breakUndoCoalescing()
+    }
+    static func prepareTARIfNeeded(_ source: URL, browser: BrowserViewController) async throws {
+        guard TARBrowserModel.isCompressed(source) else { return }
+        try await wait("tar-editor-preparation-page") {
+            browser.currentArchive?.source == source && (browser.currentArchive?.hasRenderedCurrentRowsForVerification == true
+                || browser.currentArchive?.tarModelForVerification?.canPrepareCompressed == true)
+        }
+        if browser.currentArchive?.tarModelForVerification?.canPrepareCompressed == true {
+            browser.currentArchive?.tarModelForVerification?.prepareCompressed()
+        }
+        try await wait("tar-editor-prepared-page") { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }
     }
     private static func acceptedNativeClose(_ settings: BrowserSettings) throws {
         let native = NativeTextEditorWindow(displayName: "Generated accepted close", installChrome: {
@@ -54,6 +98,7 @@ import LocalStorage
         let before = try await Task.detached { try Data(contentsOf: source) }.value
         browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.focusBrowserContent()
         browser.openSelection(nil)
+        if tar { try await prepareTARIfNeeded(source, browser: browser) }
         try await wait("zip-new-file-current-page") { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }
         try need(browser.canCreateTextFile, "zip-new-file-command-enabled")
         browser.createTextFile(nil)
@@ -92,6 +137,7 @@ import LocalStorage
         try await wait("zip-new-file-editor-save") { !doc.isBusy && !doc.isDirty && doc.latestRecordID != nil }
         guard let saved = doc.latestRecordID else { throw Failure(stage: "zip-new-file-save-record") }
         try await close(doc)
+        await browser.recoveryInspectionTask?.value
         let editUndo = await cold.undo(recordID: saved)
         try need(editUndo.result.disposition == .succeeded, "zip-new-file-editor-undo")
         creation.model.undo()
@@ -227,7 +273,9 @@ import LocalStorage
               sources.allSatisfy({ $0.path.hasPrefix(root.appendingPathComponent("source").path + "/") }),
               let parent = sources.first?.deletingLastPathComponent() else { throw Failure(stage: "archive-editor-generated-scope") }
         let tar = ProcessInfo.processInfo.arguments.contains("--tar-editor")
-        let format = tar ? "TAR" : "ZIP", suffix = tar ? "tar" : "zip"
+        let gzip = ProcessInfo.processInfo.arguments.contains("--gzip-tar-editor")
+        let format = gzip ? "TAR.gz" : tar ? "TAR" : "ZIP", suffix = gzip ? "tar.gz" : tar ? "tar" : "zip"
+        if gzip { ApplicationCompressedArchives.shared.cacheDirectoryForVerification = root.appendingPathComponent("cache") }
         let settings = browser.settings, previous = browser.settings.editorPreferences
         let previousMotion = settings.motion
         defer { settings.updateEditorPreferences(previous); settings.motion = previousMotion }
@@ -237,12 +285,25 @@ import LocalStorage
         do {
             let coordinator = ApplicationOperationCoordinator.shared
             try await coordinator.prepareOperationState(for: engine)
+            if tar, ProcessInfo.processInfo.arguments.contains("--marked-archive-editor") {
+                try await Task.detached {
+                    for url in sources {
+                        var values = URLResourceValues()
+                        values.quarantineProperties = [kLSQuarantineAgentNameKey as String: "Generated archive input",
+                            kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+                            kLSQuarantineTimeStampKey as String: Date()]
+                        var target = URL(fileURLWithPath: url.path); try target.setResourceValues(values)
+                    }
+                }.value
+            }
             let observed = try await engine.observeSelection(sources)
             let plan: ArchiveCreationPlan
-            if tar { plan = try await engine.prepareTARCreation(sources: sources, parent: parent, name: "Editor Archive.tar", observing: observed) }
+            if tar { plan = try await engine.prepareTARCreation(sources: sources, parent: parent,
+                name: "Editor Archive." + suffix, compression: gzip ? .gzipBalanced : .none, observing: observed) }
             else { plan = try await engine.prepareZIPCreation(sources: sources, parent: parent, name: "Editor Archive.zip", observing: observed) }
             let created = await engine.performArchiveCreation(plan)
-            try need(created.result.disposition == .succeeded, "archive-editor-generated-zip-create")
+            try need(created.result.disposition == .succeeded,
+                "archive-editor-generated-create: \(created.result.disposition), \(created.result.items.map(\.status))")
             let source = parent.appendingPathComponent("Editor Archive." + suffix)
             let originalBytes = try await Task.detached { try Data(contentsOf: source) }.value
             var native = previous; try native.setTarget(.traverse, forExtension: "json")
@@ -251,6 +312,7 @@ import LocalStorage
             try await wait("archive-editor-generated-zip-listing") { browser.rowsByURL[source] != nil && !browser.isLoading }
             browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.focusBrowserContent()
             browser.openSelection(nil)
+            if tar { try await prepareTARIfNeeded(source, browser: browser) }
             try await wait("archive-editor-inline-page") { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }
             let itemPath: String
             if tar {
@@ -278,6 +340,7 @@ import LocalStorage
             edit(first, in: doc); doc.window.saveButton.performClick(nil)
             try await wait("archive-editor-first-save") { !doc.isBusy && !doc.isDirty && doc.latestRecordID != nil }
             try need(doc.opened.contents.text == first && !doc.needsReview, "archive-editor-first-save-not-rebound")
+            let firstRecord = try unwrap(doc.latestRecordID, "archive-editor-first-record")
             let firstBytes = try await Task.detached { try Data(contentsOf: source) }.value
             edit(second, in: doc); doc.window.saveButton.performClick(nil)
             try await wait("archive-editor-second-save") { !doc.isBusy && !doc.isDirty && doc.opened.contents.text == second }
@@ -289,7 +352,9 @@ import LocalStorage
                 protecting: [root.appendingPathComponent("state")],
                 authoredZIPMetadataPolicy: nativeZIPUpdate ? .nativeCreate : .exactSource,
                 authoredZIPOriginalUpdateNativePolicy: nativeZIPUpdate ? .qualifiedNativeStage : .held,
-                authoredTAROriginalUpdatePolicy: tar ? .developmentNativeStage : .held)
+                authoredTAROriginalUpdatePolicy: tar ? .developmentNativeStage : .held,
+                authoredTARGzipOriginalUpdatePolicy: gzip ? .developmentNativeStage : .held)
+            await browser.recoveryInspectionTask?.value
             let restored = await cold.undo(recordID: secondRecord)
             let afterUndo = try await Task.detached { try Data(contentsOf: source) }.value
             try need(restored.result.disposition == .succeeded && afterUndo == firstBytes,
@@ -320,6 +385,7 @@ import LocalStorage
             try need(await doc.closeForTermination(), "archive-editor-close-quit-did-not-join")
             try await wait("archive-editor-owner-release") { doc.isClosed && editors.documentCount == 0 }
             document = nil
+            await browser.recoveryInspectionTask?.value
             let removedCopy = await cold.undo(recordID: copyRecord)
             let copyExists = await Task.detached { FileManager().fileExists(atPath: copy.path) }.value
             let finalOriginal = try await Task.detached { try Data(contentsOf: source) }.value
@@ -333,9 +399,15 @@ import LocalStorage
                 "Changed \(format) Save refuses without touching the archive or draft; explicit Reload, archive Copy-follow, copy Undo and actual user performClose/joined Quit complete through existing owners with Full closing motion enabled",
                 "A drained feature's accepted close acknowledges native willClose exactly once inside performClose without a deferred fade or implicit AppKit animation"]
             if tar {
-                checks.append("Plain TAR shares native editor preferences, Save/Reload, metadata-preserving copy, and independent v18 original-update/cold Undo admission")
+                checks.append("\(format) shares native editor preferences, Save/Reload, metadata-preserving copy, and independent v\(gzip ? 19 : 18) original-update/cold Undo admission")
                 checks.append(try await createFile(source: source, browser: browser, cold: cold, root: root, tar: true))
                 checks += try await TARMemberVerification.check(source: source, browser: browser, cold: cold, root: root)
+                let packet = ColdTAR(gzip: gzip, creation: try unwrap(created.recordID, "tar-cold-create-record"), firstSave: firstRecord,
+                    createdDigest: Data(SHA256.hash(data: originalBytes)), savedDigest: Data(SHA256.hash(data: firstBytes)),
+                    firstInputDigest: try await hash(sources[0]), secondInputDigest: try await hash(sources[1]))
+                try await Task.detached {
+                    try JSONEncoder().encode(packet).write(to: root.appendingPathComponent("evidence/tar-editor-cold-pending.json"), options: .withoutOverwriting)
+                }.value
             } else if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
                 checks += try await interruptedRestore(source: source, browser: browser, engine: engine, root: root)
             } else {
@@ -354,6 +426,9 @@ import LocalStorage
             await ApplicationArchiveExtraction.shared.closeAndDrain()
             throw error
         }
+    }
+    private static func unwrap<T>(_ value: T?, _ stage: String) throws -> T {
+        guard let value else { throw Failure(stage: stage) }; return value
     }
 }
 #endif

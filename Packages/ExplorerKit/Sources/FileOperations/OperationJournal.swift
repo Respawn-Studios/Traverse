@@ -10,7 +10,7 @@ internal struct JournalStep: Codable, Equatable, Sendable {
     let before: VerifiedTree
     var after: VerifiedTree?
     var undone: Bool = false
-    /// V13 ZIP / v18 TAR: first retained-original after-image passed the additional
+    /// V13 ZIP / v18 TAR / v19 TAR.gz: retained-original after-image passed the additional
     /// source-mark/public-security checks and was saved before replacement.
     var archiveOriginalRetainedQualified: Bool? = nil
     /// Forward v9/v12 directory admission witness. Retained through Undo and v10 Delete.
@@ -397,6 +397,7 @@ internal final class OperationJournal {
     func inspectSummaries(after: UUID? = nil, limit: Int = 64,
         allowNativeOriginalUpdateUndoHint: Bool = false,
         allowNativeTARUpdateUndoHint: Bool = false,
+        allowNativeTARGzipUpdateUndoHint: Bool = false,
         allowPublicDownloadUndoHint: Bool = false,
         allowPublicZIPExtractionUndoHint: Bool = false,
         allowPublicTARExtractionUndoHint: Bool = false,
@@ -410,6 +411,7 @@ internal final class OperationJournal {
             let page = try store.summaries(after: after, limit: limit, excluding: refusedIDs,
                 allowNativeOriginalUpdateUndoHint: allowNativeOriginalUpdateUndoHint,
                 allowNativeTARUpdateUndoHint: allowNativeTARUpdateUndoHint,
+                allowNativeTARGzipUpdateUndoHint: allowNativeTARGzipUpdateUndoHint,
                 allowPublicDownloadUndoHint: allowPublicDownloadUndoHint,
                 allowPublicZIPExtractionUndoHint: allowPublicZIPExtractionUndoHint,
                 allowPublicTARExtractionUndoHint: allowPublicTARExtractionUndoHint,
@@ -445,7 +447,7 @@ internal final class OperationJournal {
         for area in record.areas { metrics?.add(.validatedRows, 1); try validateArea(area, stepCount: record.steps.count) }
         for location in record.locations { metrics?.add(.validatedRows, 1); try validateLocation(location) }
         for intent in record.trashIntents { metrics?.add(.validatedRows, 1); try validateTrashIntent(intent) }
-        if [5, 6, 13, 18].contains(record.version) { try validateArchiveUpdate(record) }
+        if [5, 6, 13, 18, 19].contains(record.version) { try validateArchiveUpdate(record) }
         if record.version == 7 { try validateDownloadAdoption(record) }
         if record.version == 14 { try validateReceivedPublicDownload(record) }
         if record.version == 15 { try validatePublicZIPExtraction(record) }
@@ -494,12 +496,12 @@ internal final class OperationJournal {
                     throw FileOperationFailure.recoveryUncertain
                 }
             }
-        } else if [5, 6, 13, 18].contains(record.version) {
-            guard record.operation == (record.version == 18 ? "Update TAR" : "Update ZIP"), record.nameRename == nil, record.downloadAdoption == nil,
+        } else if [5, 6, 13, 18, 19].contains(record.version) {
+            guard record.operation == ArchiveUpdateProfile.title(version: record.version), record.nameRename == nil, record.downloadAdoption == nil,
                   record.persistentVolumes != nil, record.areas.count <= 1,
-                  record.steps.count <= ([13, 18].contains(record.version) ? 2 : 3),
-                  record.trashIntents.count <= ([13, 18].contains(record.version) ? 0 : 1),
-                  (![13, 18].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
+                  record.steps.count <= ([13, 18, 19].contains(record.version) ? 2 : 3),
+                  record.trashIntents.count <= ([13, 18, 19].contains(record.version) ? 0 : 1),
+                  (![13, 18, 19].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
                 throw FileOperationFailure.recoveryUncertain
             }
         } else if record.version == 14 {
@@ -594,7 +596,7 @@ internal final class OperationJournal {
         }
         guard record.steps.enumerated().allSatisfy({ index, step in
             step.archiveOriginalRetainedQualified == nil ||
-                ([13, 18].contains(record.version) && index == 0 && step.archiveOriginalRetainedQualified == true
+                ([13, 18, 19].contains(record.version) && index == 0 && step.archiveOriginalRetainedQualified == true
                     && step.after != nil)
         }) else { throw FileOperationFailure.recoveryUncertain }
     }
@@ -797,11 +799,11 @@ internal final class OperationJournal {
     /// Archive versions close the two rename topology. A display title alone must
     /// never turn an arbitrary tree job into an archive replacement or cleanup.
     static func validateArchiveUpdate(_ record: JournalRecord) throws {
-        guard [5, 6, 13, 18].contains(record.version), record.operation == (record.version == 18 ? "Update TAR" : "Update ZIP"),
+        guard [5, 6, 13, 18, 19].contains(record.version), record.operation == ArchiveUpdateProfile.title(version: record.version),
               record.areas.count <= 1,
-              record.steps.count <= ([13, 18].contains(record.version) ? 2 : 3),
-              record.trashIntents.count <= ([13, 18].contains(record.version) ? 0 : 1),
-              (![13, 18].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
+              record.steps.count <= ([13, 18, 19].contains(record.version) ? 2 : 3),
+              record.trashIntents.count <= ([13, 18, 19].contains(record.version) ? 0 : 1),
+              (![13, 18, 19].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
             throw FileOperationFailure.recoveryUncertain
         }
         let steps = record.steps
@@ -822,7 +824,7 @@ internal final class OperationJournal {
         }
         if !forward.isEmpty {
             guard let area,
-                  forward[0].source.pathExtension.lowercased() == (record.version == 18 ? "tar" : "zip"),
+                  ArchiveUpdateProfile.acceptsSource(forward[0].source, version: record.version),
                   sameURLRepresentation(forward[0].destination, area.url.appendingPathComponent("displaced")),
                   sameURLRepresentation(forward[0].source.deletingLastPathComponent(), area.url.deletingLastPathComponent()),
                   forward[0].before.identity.type == S_IFREG,
@@ -891,7 +893,7 @@ internal final class OperationJournal {
     }
 
     static func hasRecordedNativeArchiveOriginalOnly(_ record: JournalRecord) -> Bool {
-        guard [13, 18].contains(record.version), record.operation == (record.version == 18 ? "Update TAR" : "Update ZIP"),
+        guard [13, 18, 19].contains(record.version), record.operation == ArchiveUpdateProfile.title(version: record.version),
               ["mutating", "needsReview"].contains(record.state),
               record.steps.count == 1, record.areas.count == 1,
               record.trashIntents.isEmpty else { return false }
