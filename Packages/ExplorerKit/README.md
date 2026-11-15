@@ -30,13 +30,15 @@ protocol. TAR has its own explicit format/policy admission; ZIP qualification
 does not authorize it. Reading and explicit extraction remain in the ZIP/TAR
 reader and extraction files, with separate received-data protection policies.
 Current Preview/private-beta authoring uses the separately qualified native
-contracts. Plain-TAR member changes have Development-only source support:
-`TARMemberMutation` seals the requested change, `TARMutationLayout` checks its
-namespace and limits, and `TARMemberMutationWriter` streams it without unpacking
-an editable tree. `TARMemberHeader` preserves unrelated metadata, including
-local PAX fields. Text edits use this same writer. Original updates have a
-separately admitted v18 record; ZIP v13 cannot authorize their Undo. Compressed
-TAR rewriting and creation remain separate work.
+contracts. Plain and prepared gzip/bzip2 TAR member changes have Development-only source
+support. `TARMemberMutation` seals the requested change, `TARMutationLayout`
+checks its namespace and limits, and `TARMemberMutationWriter` streams it without
+unpacking an editable tree. `TARMemberHeader` preserves unrelated metadata,
+including local PAX fields. Text edits use this same writer. Compressed creation
+and rewriting use the shared bounded system codecs and a fresh complete decode
+check. Original updates have separately admitted v18 (TAR), v19 (gzip) and v20
+(bzip2) records; ZIP v13 cannot authorize their Undo. Each format remains held in
+distributed composition until its own qualification.
 The [roadmap](../../docs/ROADMAP.md) distinguishes shipped behavior, qualified
 work and future plans. Edition admission remains in application composition.
 
