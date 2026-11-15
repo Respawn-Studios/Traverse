@@ -64,7 +64,7 @@
   the sidebar or hide it completely. The footer button brings it back at its
   previous width, with your expanded sections and ordering intact.
 
-![Traverse with two independent folder panes and several tabs](docs/media/screenshots/workspace-panes.jpg)
+![Arrange tabs and folder panes in Traverse 0.2.0](docs/media/tutorials/tabs-and-panes.gif)
 
 ## Get everyday file work done
 
@@ -79,6 +79,8 @@
 - **Undo and native Trash.** Review recorded operations and restore eligible
   changes. Items moved to macOS Trash by Traverse stay together in its recorded
   Trash groups, with a dedicated Restore view.
+
+![Create and rename a folder, then drag a file into another pane](docs/media/tutorials/folders-and-drag-drop.gif)
 
 [File operations, conflicts and recovery](docs/guides/features.md#file-operations-and-recovery)
 
@@ -134,6 +136,8 @@
   supported hardware, or run an explicit verified file benchmark in a folder
   you choose. Supported internal health monitoring is opt-in.
 
+![Explore storage usage and change chart breakdowns in Properties](docs/media/tutorials/storage-analysis.gif)
+
 [Analysis and drive tools](docs/guides/features.md#storage-analysis)
 
 ## Settle into your own Mac workflow
@@ -152,8 +156,9 @@
 
 [Workspace and keyboard details](docs/guides/features.md#workspace-and-navigation)
 
-Screenshots show a development build with made-up folders.
-[Capture details](docs/media/screenshots/README.md).
+The GIFs show public **0.2.0 (95)**. The still screenshots show a development
+build with made-up folders. [Recording details and text alternatives](docs/media/tutorials/README.md) ·
+[Still capture details](docs/media/screenshots/README.md).
 
 ## Get Traverse
 

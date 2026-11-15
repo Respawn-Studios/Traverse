@@ -1,0 +1,50 @@
+{
+  "format": "traverse-tutorial-media-v1",
+  "recordings": [
+    {
+      "file": "tabs-and-panes.gif",
+      "sha256": "72db6fd575b05b4bf91f466aa333de83fe9ba2295d477ec3f4f7dc4cacd88f96",
+      "bytes": 3487944,
+      "width": 720,
+      "height": 475,
+      "frames": 192,
+      "durationSeconds": 16,
+      "appVersion": "0.2.0",
+      "appBuild": 95,
+      "platform": "macOS",
+      "appearance": "Dark",
+      "provenance": "Original app recording provided by the project maintainer",
+      "alterations": "None"
+    },
+    {
+      "file": "folders-and-drag-drop.gif",
+      "sha256": "f7f0aa59df9f258d1ba8758b5e2ca06a0a5409d2346cce1df3904a6b174d88d4",
+      "bytes": 1539681,
+      "width": 720,
+      "height": 475,
+      "frames": 211,
+      "durationSeconds": 17.58,
+      "appVersion": "0.2.0",
+      "appBuild": 95,
+      "platform": "macOS",
+      "appearance": "Dark",
+      "provenance": "Original app recording provided by the project maintainer",
+      "alterations": "None"
+    },
+    {
+      "file": "storage-analysis.gif",
+      "sha256": "824b59e9c4c2dbbe667ef9268ec0e3ef008bf790e58d2eddbdbb19991e130f04",
+      "bytes": 1882026,
+      "width": 720,
+      "height": 475,
+      "frames": 327,
+      "durationSeconds": 27.25,
+      "appVersion": "0.2.0",
+      "appBuild": 95,
+      "platform": "macOS",
+      "appearance": "Dark",
+      "provenance": "Original app recording provided by the project maintainer",
+      "alterations": "None"
+    }
+  ]
+}
