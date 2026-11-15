@@ -64,7 +64,9 @@
   the sidebar or hide it completely. The footer button brings it back at its
   previous width, with your expanded sections and ordering intact.
 
-![Arrange tabs and folder panes in Traverse 0.2.0](docs/media/tutorials/tabs-and-panes.gif)
+<p align="center">
+  <a href="docs/media/tutorials/tabs-and-panes.gif"><img src="docs/media/tutorials/tabs-and-panes.gif" width="600" alt="Arrange tabs and folder panes in Traverse 0.2.0"></a>
+</p>
 
 ## Get everyday file work done
 
@@ -80,7 +82,9 @@
   changes. Items moved to macOS Trash by Traverse stay together in its recorded
   Trash groups, with a dedicated Restore view.
 
-![Create and rename a folder, then drag a file into another pane](docs/media/tutorials/folders-and-drag-drop.gif)
+<p align="center">
+  <a href="docs/media/tutorials/folders-and-drag-drop.gif"><img src="docs/media/tutorials/folders-and-drag-drop.gif" width="600" alt="Create and rename a folder, then drag a file into another pane"></a>
+</p>
 
 [File operations, conflicts and recovery](docs/guides/features.md#file-operations-and-recovery)
 
@@ -136,7 +140,9 @@
   supported hardware, or run an explicit verified file benchmark in a folder
   you choose. Supported internal health monitoring is opt-in.
 
-![Explore storage usage and change chart breakdowns in Properties](docs/media/tutorials/storage-analysis.gif)
+<p align="center">
+  <a href="docs/media/tutorials/storage-analysis.gif"><img src="docs/media/tutorials/storage-analysis.gif" width="600" alt="Explore storage usage and change chart breakdowns in Properties"></a>
+</p>
 
 [Analysis and drive tools](docs/guides/features.md#storage-analysis)
 
@@ -152,13 +158,14 @@
   appearance choices, an enlarged interface and Full, Reduced or Off motion.
   System Reduce Motion takes priority.
 
-![Editing a folder address with Website, Weekend and Workbench suggestions](docs/media/screenshots/address-suggestions.jpg)
+<p align="center">
+  <a href="docs/media/tutorials/address-bar-suggestions.gif"><img src="docs/media/tutorials/address-bar-suggestions.gif" width="480" alt="Type a folder address, choose a dropdown suggestion and navigate with breadcrumbs"></a>
+</p>
 
 [Workspace and keyboard details](docs/guides/features.md#workspace-and-navigation)
 
-The GIFs show public **0.2.0 (95)**. The still screenshots show a development
-build with made-up folders. [Recording details and text alternatives](docs/media/tutorials/README.md) ·
-[Still capture details](docs/media/screenshots/README.md).
+These recordings were supplied by the project maintainer. Click a demo to open
+it at its original size. [Recording details and text alternatives](docs/media/tutorials/README.md).
 
 ## Get Traverse
 

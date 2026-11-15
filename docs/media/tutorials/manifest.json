@@ -14,7 +14,8 @@
       "platform": "macOS",
       "appearance": "Dark",
       "provenance": "Original app recording provided by the project maintainer",
-      "alterations": "None"
+      "alterations": "None",
+      "readmeDisplayWidth": 600
     },
     {
       "file": "folders-and-drag-drop.gif",
@@ -29,7 +30,8 @@
       "platform": "macOS",
       "appearance": "Dark",
       "provenance": "Original app recording provided by the project maintainer",
-      "alterations": "None"
+      "alterations": "None",
+      "readmeDisplayWidth": 600
     },
     {
       "file": "storage-analysis.gif",
@@ -44,7 +46,24 @@
       "platform": "macOS",
       "appearance": "Dark",
       "provenance": "Original app recording provided by the project maintainer",
-      "alterations": "None"
+      "alterations": "None",
+      "readmeDisplayWidth": 600
+    },
+    {
+      "file": "address-bar-suggestions.gif",
+      "sha256": "32ad872159d554e10acde3b1b0e7c1a832fd3797a0fd5fa29fb05aac60ff5eb2",
+      "bytes": 1142741,
+      "width": 480,
+      "height": 327,
+      "frames": 246,
+      "durationSeconds": 16.4,
+      "appVersion": null,
+      "appBuild": null,
+      "platform": "macOS",
+      "appearance": "Dark",
+      "provenance": "Original app recording provided by the project maintainer",
+      "alterations": "None",
+      "readmeDisplayWidth": 480
     }
   ]
 }
