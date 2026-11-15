@@ -140,6 +140,7 @@ extension RecoverableFileOperations {
         case .zip: authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage
         case .strictPortableTAR: authoredTAROriginalUpdatePolicy == .developmentNativeStage
         case .strictPortableTARGzip: authoredTARGzipOriginalUpdatePolicy == .developmentNativeStage
+        case .strictPortableTARBzip2: authoredTARBzip2OriginalUpdatePolicy == .developmentNativeStage
         }
     }
 
@@ -148,6 +149,7 @@ extension RecoverableFileOperations {
         case 13: nativeArchiveUpdateEnabled(for: .zip)
         case 18: nativeArchiveUpdateEnabled(for: .strictPortableTAR)
         case 19: nativeArchiveUpdateEnabled(for: .strictPortableTARGzip)
+        case 20: nativeArchiveUpdateEnabled(for: .strictPortableTARBzip2)
         default: false
         }
     }
@@ -256,7 +258,7 @@ extension RecoverableFileOperations {
             try cancellation.check()
             let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks,
                                                cancellation: cancellation)
-            guard let record = try journal.inspectRecord(recordID), [5, 6, 13, 18, 19].contains(record.version),
+            guard let record = try journal.inspectRecord(recordID), [5, 6, 13, 18, 19, 20].contains(record.version),
                   let first = record.steps.first, let area = record.areas.first else { return nil }
             return [first.source, area.url.appendingPathComponent("displaced"),
                     area.url.appendingPathComponent("payload")]
@@ -347,7 +349,8 @@ extension RecoverableFileOperations {
             guard !nativeOriginalUpdate || (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == plan.authoredFormat else {
                 throw FileOperationFailure.unsupported
             }
-            let protocolKind: OperationCatalogProtocol = plan.authoredFormat == .strictPortableTARGzip ? .tarGzipNativeUpdateV19
+            let protocolKind: OperationCatalogProtocol = plan.authoredFormat == .strictPortableTARBzip2 ? .tarBzip2NativeUpdateV20
+                : plan.authoredFormat == .strictPortableTARGzip ? .tarGzipNativeUpdateV19
                 : plan.authoredFormat == .strictPortableTAR ? .tarNativeUpdateV18
                 : nativeOriginalUpdate ? .archiveNativeUpdateV13
                 : strictClone ? .archiveStrictCloneV6 : .archiveUpdateV5

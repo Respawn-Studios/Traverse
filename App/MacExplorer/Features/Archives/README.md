@@ -37,7 +37,7 @@ promises require separate support.
 
 ## TAR editing in development
 
-Plain and prepared gzip TAR members use the common native editor and archive
+Plain and prepared gzip/bzip2 TAR members use the common native editor and archive
 workbench in Development builds. Rename, Remove, Duplicate, Move, Create File/New Folder,
 Group and Add all use one `TARMemberMutation`, including Cut/Paste and local
 file drops. The browser seals catalog selections; the table never writes files.
@@ -49,17 +49,23 @@ The edited member keeps ownership names, mode and unrelated PAX fields; its
 header and any PAX size override are updated together. Links, special members,
 unsupported root metadata and archives over 1 GiB refuse the write.
 
-Gzip rewriting reuses the retained, unlinked read-only spool. The original
+Compressed rewriting reuses the retained, unlinked read-only spool. The original
 compressed file remains the source and history authority. One fresh decode
 must match that spool's digest, length and catalog; the output gets a second
-complete verification. Both raw TAR and gzip output stay within 128 MiB. The
-current writable wrapper preserves MTIME, OS, FTEXT and opaque extra/name/comment
+complete verification. Both raw TAR and compressed output stay within 128 MiB.
+The gzip wrapper preserves MTIME, OS, FTEXT and opaque extra/name/comment
 fields within a 64 KiB header, recalculates compression flags and header CRC,
 and refuses malformed headers or concatenated streams rather than discard
 their metadata. Fast/Balanced/Smallest choices apply to the complete output.
+Bzip2 accepts `.tar.bz2` and `.tbz2`. It preserves an imported block-size
+setting unless the user chooses another compression option. Its system codec
+uses a charged heap ceiling of 8 MiB for encoding and 4 MiB for decoding;
+gzip uses 1 MiB. These are codec allocations, not whole-process memory caps.
+Cancellation is checked around codec calls; one bzip2 block can finish inside
+a call before Stop is observed. Work stays on the existing bounded worker.
 
 Save and Save TAR Copy use the existing guarded archive engine. TAR original
-replacement has its own default-held policy and v18 history; gzip has v19,
+replacement has its own default-held policy and v18 history; gzip has v19 and bzip2 v20,
 independent of ZIP v13. The earlier archive stays available for cold Undo; an interrupted
 retained-original step has an explicit, revalidated Restore action. The writer
 keeps the native stage's macOS protection and never copies a source mark over
@@ -73,9 +79,9 @@ edit without another Prepare click.
 
 ## Creation and ZIP edits
 
-Development also offers TAR + gzip with Fast, Balanced and Smallest choices.
-It streams the same TAR records through the bounded system zlib encoder, then
-checks a fresh inflate, the emitted metadata and the completed file digest.
+Development also offers TAR + gzip and TAR + bzip2 with Fast, Balanced and
+Smallest choices. Both stream the same TAR records through bounded system
+codecs, then check a fresh decode, the emitted metadata and the completed file digest.
 There is no second full TAR spool. Raw TAR and compressed output each stay
 within 128 MiB. A separate default-held engine policy keeps this new authoring
 route out of distributed builds until qualification. Native stage protection and the existing cold Undo are shared

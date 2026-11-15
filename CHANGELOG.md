@@ -8,12 +8,17 @@ Earlier private-beta version numbers belong to a separate release history.
 
 ### In development
 
-- Plain TAR member editing through the shared archive workbench and native
+- Plain and prepared gzip/bzip2 TAR member editing through the shared archive workbench and native
   editor: Rename, Remove, Duplicate, Move, Add, Create File/Folder, Group and
   Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo.
   This remains a development feature pending distribution qualification.
+- TAR.gz and TAR.bz2 creation through the shared archive publisher, with
+  compression choices and guarded Undo. Gzip edits preserve bounded optional
+  headers; bzip2 edits keep the current compression setting by default.
 - Benchmark block-size and file-cache options, with requested and actual cache
   behavior recorded in results and exports.
+- A bounded Quick Mix benchmark, matched suite comparisons and readable
+  per-block latency distributions alongside the existing result metrics.
 
 ## [0.2.0] - 2026-11-15
 

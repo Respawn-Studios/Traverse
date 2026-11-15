@@ -17,9 +17,9 @@ typedef struct tr_gzip_header {
  * Header buffers are copied during create into charged encoder-owned storage.
  * A complete header is capped at 64 KiB; absent and empty fields are distinct. */
 tr_gzip_encoder *tr_gzip_encoder_create(uint64_t maximum_input_bytes,
-    uint64_t maximum_output_bytes,int32_t level,const tr_gzip_header *header,tr_gzip_cancel cancel,
-    tr_gzip_consume consume,void *context,tr_gzip_result *result);
-tr_gzip_result tr_gzip_encoder_write(tr_gzip_encoder *encoder,const uint8_t *bytes,uint32_t count);
-tr_gzip_result tr_gzip_encoder_finish(tr_gzip_encoder *encoder);
-tr_gzip_result tr_gzip_encoder_destroy(tr_gzip_encoder *encoder);
+    uint64_t maximum_output_bytes,int32_t level,const tr_gzip_header *header,tr_codec_cancel cancel,
+    tr_codec_consume consume,void *context,tr_codec_result *result);
+tr_codec_result tr_gzip_encoder_write(tr_gzip_encoder *encoder,const uint8_t *bytes,uint32_t count);
+tr_codec_result tr_gzip_encoder_finish(tr_gzip_encoder *encoder);
+tr_codec_result tr_gzip_encoder_destroy(tr_gzip_encoder *encoder);
 #endif

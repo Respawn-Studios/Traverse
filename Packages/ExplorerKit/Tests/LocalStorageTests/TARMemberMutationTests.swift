@@ -33,11 +33,17 @@ struct TARMemberMutationTests {
         try await session.destinationForMemberChanges(session.folder(at: path.split(separator: "/").map(String.init)))
     }
 
-    @Test(arguments: Action.allCases, [(false, false), (false, true), (true, false), (true, true)])
-    func memberChangesVerifyExpectedContentsAndColdUndo(action: Action, variant: (original: Bool, compressed: Bool)) async throws {
-        let (original, compressed) = variant
+    @Test(arguments: Action.allCases, [(false, TARCompression.none), (true, .none), (false, .gzipBalanced), (true, .gzipBalanced), (false, .bzip2Balanced), (true, .bzip2Balanced)])
+    func memberChangesVerifyExpectedContentsAndColdUndo(action: Action, variant: (original: Bool, compression: TARCompression)) async throws {
+        let (original, compression) = variant
+        let compressed = compression != .none
         let fixture = try TARTestFixture(pax: true, folderTree: true)
-        let source = try (compressed ? fixture.gzipSource() : fixture.source)
+        let source: URL
+        switch compression {
+        case .none: source = fixture.source
+        case .bzip2Balanced: source = try fixture.bzip2Source()
+        default: source = try fixture.gzipSource()
+        }
         let before = try Data(contentsOf: source), cache = fixture.root.appendingPathComponent("cache")
         try FileManager().createDirectory(at: cache, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         let pool = TARCompressedPreparationPool(cacheDirectory: cache, activity: .init())
@@ -96,24 +102,29 @@ struct TARMemberMutationTests {
         let engine = RecoverableFileOperations(journalDirectory: history,
             strictPortableTARCreationPolicy: .nativeCreateQualification,
             tarGzipCreationPolicy: .developmentNativeCreate,
+            tarBzip2CreationPolicy: .developmentNativeCreate,
             authoredTAROriginalUpdatePolicy: .developmentNativeStage,
-            authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
+            authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage,
+            authoredTARBzip2OriginalUpdatePolicy: .developmentNativeStage)
         let observed = try await engine.observeSelection([source] + mutation.addedSources)
         let result: RecoverableOperationResult, output: URL
         if original {
             let plan = try await engine.prepareTARMemberMutationOriginal(mutation, observing: observed)
             result = await engine.performArchiveOriginalUpdate(plan); output = source
         } else {
-            let plan = try await engine.prepareTARMemberMutationCopy(mutation, outputName: compressed ? "Edited.tar.gz" : "Edited.tar", observing: observed)
+            let plan = try await engine.prepareTARMemberMutationCopy(mutation, outputName: "Edited." + compression.fileExtension, observing: observed)
             result = await engine.performArchiveCreation(plan); output = plan.destination
             #expect(try Data(contentsOf: source) == before)
         }
         #expect(result.result.disposition == .succeeded)
-        #expect(try snapshot(compressed ? TARTestFixture.decodedGzip(output) : Data(contentsOf: output)) == expected)
+        let decoded = try compression == .none ? Data(contentsOf: output)
+            : compression == .bzip2Balanced ? TARTestFixture.decodedBzip2(output) : TARTestFixture.decodedGzip(output)
+        #expect(try snapshot(decoded) == expected)
         let id = try #require(result.recordID)
         let cold = RecoverableFileOperations(journalDirectory: history,
             authoredTAROriginalUpdatePolicy: .developmentNativeStage,
-            authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
+            authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage,
+            authoredTARBzip2OriginalUpdatePolicy: .developmentNativeStage)
         let undone = await cold.undo(recordID: id)
         #expect(undone.result.disposition == .succeeded)
         #expect(try Data(contentsOf: source) == before)

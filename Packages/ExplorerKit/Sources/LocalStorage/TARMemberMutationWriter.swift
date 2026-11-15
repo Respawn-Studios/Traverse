@@ -16,7 +16,7 @@ internal final class PreparedTARMemberMutation: TARCreationSourceWitness, Native
     private let hooks: ZIPCreationHooks
     private let updatesOriginal: Bool
     private let encodedBytes: UInt64
-    private let compression: TARCompression
+    private let encoding: TAROutputStream.Encoding
 
     convenience init(_ document: TARTextEditDocument, contents: TextDocumentValue,
         check: @Sendable () throws -> Void, hooks: ZIPCreationHooks = .init(), updatesOriginal: Bool = false) throws {
@@ -30,9 +30,13 @@ internal final class PreparedTARMemberMutation: TARCreationSourceWitness, Native
             guard ProcessInfo.processInfo.systemUptime - began < 30 else { throw TARMemberEditFailure.limitReached }
         }
         try checkpoint(); let binding = mutation.binding
-        let encoding = compression ?? (binding.compressed == nil ? .none : .gzipBalanced)
-        guard (binding.compressed == nil) == (encoding == .none) else { throw TARMemberEditFailure.unsupportedArchive }
         let source = try TARMutationSource(binding, check: checkpoint)
+        let encoding: TAROutputStream.Encoding
+        if let compression {
+            guard compression.authoredFormat == binding.authoredFormat else { throw TARMemberEditFailure.unsupportedArchive }
+            encoding = compression.encoding
+        } else if let block = source.bzip2BlockSize { encoding = .bzip2(block) }
+        else { encoding = binding.compressed == nil ? .plain : .gzip(6) }
         let security = source.security
         let parsed = try source.parse(check: checkpoint)
         guard parsed.witness == binding.witness else { throw FileOperationFailure.sourceChanged }
@@ -51,7 +55,7 @@ internal final class PreparedTARMemberMutation: TARCreationSourceWitness, Native
         authoredArchiveFormat = binding.authoredFormat
         hasMarkedSource = security.marked || layout.additions?.hasMarkedSource == true
         self.hooks = hooks; self.updatesOriginal = updatesOriginal; self.encodedBytes = encodedBytes
-        self.compression = encoding
+        self.encoding = encoding
         preview = layout.preview
     }
     func validate(check: @Sendable () throws -> Void) throws {
@@ -81,7 +85,7 @@ internal final class PreparedTARMemberMutation: TARCreationSourceWitness, Native
             let initial = try ArchiveProducedFacts.receipt(descriptor, relative: "", hash: nil)
             guard initial.kind == S_IFREG, initial.size == 0 else { throw FileOperationFailure.destinationChanged }
             let writer = try TAROutputStream(descriptor,
-                encoding: compression.level.map { .gzip($0) } ?? .plain, gzipHeader: source.gzipHeader, hooks: hooks, check: checkpoint)
+                encoding: encoding, gzipHeader: source.gzipHeader, hooks: hooks, check: checkpoint)
             defer { writer.retire() }
             func copy(_ start: UInt64, _ end: UInt64, metadata: Bool = false) throws {
                 guard start <= end, end <= source.length else { throw TARMemberEditFailure.contentMismatch }

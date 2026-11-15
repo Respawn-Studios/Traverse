@@ -33,6 +33,10 @@ internal struct TARCompressedOriginalProof: Equatable, Sendable {
     let source: URL
     let stamp: PinnedLocalFileSource.Stamp
     let security: Security
+    let codec: TARCompressedCodec
+    init(source: URL, stamp: PinnedLocalFileSource.Stamp, security: Security, codec: TARCompressedCodec = .gzip) {
+        self.source = source; self.stamp = stamp; self.security = security; self.codec = codec
+    }
 }
 
 /// Only an unlinked, read-only descriptor is handed to a catalog or producer.

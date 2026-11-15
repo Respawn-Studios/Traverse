@@ -9,6 +9,7 @@ public struct TARMemberSelection: Sendable, CustomStringConvertible, CustomDebug
     public let coveredSelectionCount: Int
     public var archiveURL: URL { binding.source }
     public var isCompressed: Bool { binding.compressed != nil }
+    public var formatName: String { binding.formatName }
     public var archivePaths: [String] { roots.map(\.path) }
     public var folderPaths: [String] { roots.filter { $0.kind == .directory }.map(\.path) }
     public var description: String { "<checked TAR member set>" }
@@ -46,6 +47,7 @@ public enum TARMemberMutation: Sendable {
     public var archiveURL: URL { binding.source }
     internal var addedSources: [URL] { if case .add(_, let sources) = self { sources } else { [] } }
     public var isCompressed: Bool { binding.compressed != nil }
+    public var formatName: String { binding.formatName }
 }
 
 extension RecoverableFileOperations {

@@ -149,6 +149,8 @@ final class ApplicationOperationCoordinator: ObservableObject {
             ? .developmentNativeStage : .held
         let tarGzipUpdate: AuthoredTARGzipOriginalUpdatePolicy = TARGzipEditingFeature.available ? .developmentNativeStage : .held
         let tarGzipCreate: TARGzipCreationPolicy = TARGzipCreationFeature.available ? .developmentNativeCreate : .held
+        let tarBzip2Create: TARBzip2CreationPolicy = TARBzip2Feature.available ? .developmentNativeCreate : .held
+        let tarBzip2Update: AuthoredTARBzip2OriginalUpdatePolicy = TARBzip2Feature.available ? .developmentNativeStage : .held
         let protectedNames = [directory.deletingLastPathComponent(),
                               directory.deletingLastPathComponent().appendingPathComponent("private-names", isDirectory: true),
                               directory.deletingLastPathComponent().appendingPathComponent("drive-protection", isDirectory: true),
@@ -200,11 +202,13 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 authoredZIPMetadataPolicy: zipMetadata,
                 strictPortableTARCreationPolicy: portableTAR,
                 tarGzipCreationPolicy: tarGzipCreate,
+                tarBzip2CreationPolicy: tarBzip2Create,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
                 nativeAuthoredUpdatePublicMarkPolicy: authoredUpdatePublicMark,
                 authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
                 authoredTAROriginalUpdatePolicy: tarOriginalUpdate,
                 authoredTARGzipOriginalUpdatePolicy: tarGzipUpdate,
+                authoredTARBzip2OriginalUpdatePolicy: tarBzip2Update,
                 downloadAdoptionPolicy: downloadAdoption,
                 receivedDownloadPublicQuarantinePolicy: publicDownload,
                 zipOneFilePublicExtractionPolicy: zipOneFileExtraction, tarOneFilePublicExtractionPolicy: tarFile,
@@ -217,11 +221,13 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 activity: ApplicationFileActivity.beginOperation, authoredZIPMetadataPolicy: zipMetadata,
                 strictPortableTARCreationPolicy: portableTAR,
                 tarGzipCreationPolicy: tarGzipCreate,
+                tarBzip2CreationPolicy: tarBzip2Create,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
                 nativeAuthoredUpdatePublicMarkPolicy: authoredUpdatePublicMark,
                 authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
                 authoredTAROriginalUpdatePolicy: tarOriginalUpdate,
                 authoredTARGzipOriginalUpdatePolicy: tarGzipUpdate,
+                authoredTARBzip2OriginalUpdatePolicy: tarBzip2Update,
                 downloadAdoptionPolicy: downloadAdoption, receivedDownloadPublicQuarantinePolicy: publicDownload,
                 zipOneFilePublicExtractionPolicy: zipOneFileExtraction, tarOneFilePublicExtractionPolicy: tarFile,
                 receivedFolderPublicQuarantinePolicy: receivedFolder, zipTreePublicExtractionPolicy: zipTree,

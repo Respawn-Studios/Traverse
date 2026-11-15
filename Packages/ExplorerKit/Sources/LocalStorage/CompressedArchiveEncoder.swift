@@ -1,11 +1,11 @@
-import BoundedGzip
+import BoundedArchiveCodecs
 import CryptoKit
 import FileOperations
 import Foundation
 
 /// Synchronous, single-worker codec ownership. The C side has no path or file
 /// authority; encoded chunks go through the existing guarded stage writer.
-internal final class GzipArchiveEncoder {
+internal final class CompressedArchiveEncoder {
     private final class Context {
         let check: @Sendable () throws -> Void
         let output: (UnsafeRawBufferPointer) throws -> Void
@@ -23,21 +23,29 @@ internal final class GzipArchiveEncoder {
         }
     }
     private let context: Context
+    private let codec: TARCompressedCodec
     private var handle: OpaquePointer?
     private var finished = false
     private(set) var peakCodecHeap: UInt64 = 0
 
-    init(maximumRaw: UInt64, maximumEncoded: UInt64, level: Int32, header: GzipArchiveHeader? = nil,
+    init(maximumRaw: UInt64, maximumEncoded: UInt64, level: Int32, codec: TARCompressedCodec = .gzip, header: GzipArchiveHeader? = nil,
         check: @escaping @Sendable () throws -> Void,
         output: @escaping (UnsafeRawBufferPointer) throws -> Void) throws {
-        let context = Context(check: check, output: output); self.context = context
-        var result = tr_gzip_result()
+        let context = Context(check: check, output: output); self.context = context; self.codec = codec
+        var result = tr_codec_result()
         func create(_ header: UnsafePointer<tr_gzip_header>?) -> OpaquePointer? {
-            tr_gzip_encoder_create(maximumRaw, maximumEncoded, level, header,
+            if codec == .bzip2 {
+                return tr_bzip2_encoder_create(maximumRaw, maximumEncoded, level,
+                    { raw in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().poll() } ?? 1 },
+                    { raw, bytes, count in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().consume(bytes, count) } ?? 0 },
+                    Unmanaged.passUnretained(context).toOpaque(), &result)
+            }
+            return tr_gzip_encoder_create(maximumRaw, maximumEncoded, level, header,
             { raw in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().poll() } ?? 1 },
             { raw, bytes, count in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().consume(bytes, count) } ?? 0 },
             Unmanaged.passUnretained(context).toOpaque(), &result)
         }
+        guard codec == .gzip || header == nil else { throw TAROutputStream.Failure.mismatch }
         if let header {
             let extra = header.extra ?? Data(), name = header.name ?? Data(), comment = header.comment ?? Data()
             guard extra.count <= 65_535, name.count <= GzipArchiveHeader.maximumBytes,
@@ -57,9 +65,14 @@ internal final class GzipArchiveEncoder {
         try require(result)
         guard handle != nil else { throw TAROutputStream.Failure.mismatch }
     }
-    deinit { if let handle { _ = tr_gzip_encoder_destroy(handle) } }
+    deinit {
+        if let handle {
+            if codec == .gzip { _ = tr_gzip_encoder_destroy(handle) }
+            else { _ = tr_bzip2_encoder_destroy(handle) }
+        }
+    }
 
-    private func require(_ result: tr_gzip_result) throws {
+    private func require(_ result: tr_codec_result) throws {
         peakCodecHeap = max(peakCodecHeap, result.heap_peak_bytes)
         if let failure = context.failure { throw failure }
         guard result.status == 0 else { throw Self.failure(result.status) }
@@ -78,14 +91,15 @@ internal final class GzipArchiveEncoder {
             var offset = 0
             while offset < buffer.count {
                 let count = min(65_536, buffer.count - offset)
-                try require(tr_gzip_encoder_write(handle, buffer.baseAddress!.advanced(by: offset).assumingMemoryBound(to: UInt8.self), UInt32(count)))
+                let write = codec == .gzip ? tr_gzip_encoder_write : tr_bzip2_encoder_write
+                try require(write(handle, buffer.baseAddress!.advanced(by: offset).assumingMemoryBound(to: UInt8.self), UInt32(count)))
                 offset += count
             }
         }
     }
     func finish(rawBytes: UInt64, encodedBytes: () -> UInt64) throws {
         guard let handle, !finished else { throw TAROutputStream.Failure.mismatch }
-        let result = tr_gzip_encoder_finish(handle)
+        let result = codec == .gzip ? tr_gzip_encoder_finish(handle) : tr_bzip2_encoder_finish(handle)
         try require(result)
         guard result.members == 1, result.read_bytes == rawBytes, result.consumed_bytes == rawBytes,
               result.written_bytes == encodedBytes(), result.heap_remaining_bytes == 0 else {
@@ -93,7 +107,7 @@ internal final class GzipArchiveEncoder {
         }
         finished = true
     }
-    static func verify(_ descriptor: Int32, rawBytes: UInt64, encodedBytes: UInt64, expected: Data,
+    static func verify(_ descriptor: Int32, codec: TARCompressedCodec = .gzip, rawBytes: UInt64, encodedBytes: UInt64, expected: Data,
         check: @escaping @Sendable () throws -> Void) throws -> UInt64 {
         final class Digest {
             var hash = SHA256()
@@ -103,7 +117,8 @@ internal final class GzipArchiveEncoder {
         let context = Context(check: check, output: { bytes in
             digest.hash.update(bufferPointer: bytes); digest.count += UInt64(bytes.count)
         })
-        let result = tr_gzip_consume_fd(descriptor, encodedBytes, rawBytes, 1,
+        let decode = codec == .gzip ? tr_gzip_consume_fd : tr_bzip2_consume_fd
+        let result = decode(descriptor, encodedBytes, rawBytes, 1,
             { raw in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().poll() } ?? 1 },
             { raw, bytes, count in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().consume(bytes, count) } ?? 0 },
             Unmanaged.passUnretained(context).toOpaque())

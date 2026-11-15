@@ -25,6 +25,8 @@ public enum AuthoredZIPMetadataPolicy: Sendable, Equatable {
     case strictPortableTAR
     /// A gzip-encoded portable TAR; it has independent creation admission.
     case strictPortableTARGzip
+    /// A bzip2-encoded portable TAR, independently admitted from gzip.
+    case strictPortableTARBzip2
 
     public func acceptsFilename(_ name: String) -> Bool {
         let lower = name.lowercased()
@@ -32,6 +34,7 @@ public enum AuthoredZIPMetadataPolicy: Sendable, Equatable {
         case .zip: lower.hasSuffix(".zip")
         case .strictPortableTAR: lower.hasSuffix(".tar")
         case .strictPortableTARGzip: lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz")
+        case .strictPortableTARBzip2: lower.hasSuffix(".tar.bz2") || lower.hasSuffix(".tbz2")
         }
     }
 }
@@ -51,6 +54,9 @@ public enum TARGzipCreationPolicy: Sendable, Equatable { case held, developmentN
 /// Distinct from plain TAR updates and gzip creation; v19 alone can reverse
 /// the native compressed-original replacement protocol.
 public enum AuthoredTARGzipOriginalUpdatePolicy: Sendable, Equatable { case held, developmentNativeStage }
+public enum TARBzip2CreationPolicy: Sendable, Equatable { case held, developmentNativeCreate }
+/// v20 carries its own inverse authority; gzip and plain TAR cannot borrow it.
+public enum AuthoredTARBzip2OriginalUpdatePolicy: Sendable, Equatable { case held, developmentNativeStage }
 
 /// An independent, default-held extension for newly authored local ZIP/TAR.
 /// It may initialize a fresh private Create stage from a marked-source fact;
@@ -440,6 +446,9 @@ extension RecoverableFileOperations {
             if authoredFormat == .strictPortableTARGzip, self.tarGzipCreationPolicy != .developmentNativeCreate {
                 throw FileOperationFailure.unsupported
             }
+            if authoredFormat == .strictPortableTARBzip2, self.tarBzip2CreationPolicy != .developmentNativeCreate {
+                throw FileOperationFailure.unsupported
+            }
             guard !sources.isEmpty, sources.count <= 512, sources.count == selection.urls.count,
                   sources.count == selection.identities.count else { throw FileOperationFailure.invalidRequest }
             try validateName(name)
@@ -501,11 +510,13 @@ extension RecoverableFileOperations {
             guard !plan.receivedFile, !(plan.producer is any StrictPortableTARFileProducer) else {
                 throw FileOperationFailure.unsupported
             }
-        case .strictPortableTAR, .strictPortableTARGzip:
+        case .strictPortableTAR, .strictPortableTARGzip, .strictPortableTARBzip2:
             let tarSource = plan.producer as? any TARCreationSourceWitness
             let admitted: Bool
             if plan.authoredFormat == .strictPortableTARGzip {
                 admitted = tarGzipCreationPolicy == .developmentNativeCreate && tarSource != nil
+            } else if plan.authoredFormat == .strictPortableTARBzip2 {
+                admitted = tarBzip2CreationPolicy == .developmentNativeCreate && tarSource != nil
             } else { switch strictPortableTARCreationPolicy {
             case .held: admitted = false
             case .developmentExactSource:
@@ -579,7 +590,8 @@ extension RecoverableFileOperations {
         var publicationAttempted = false
         let label = plan.receivedFile ? plan.receivedOrigin.diagnosticPrefix
             : plan.authoredFormat == .strictPortableTAR ? "tar"
-            : plan.authoredFormat == .strictPortableTARGzip ? "tar-gzip" : "archive"
+            : plan.authoredFormat == .strictPortableTARGzip ? "tar-gzip"
+            : plan.authoredFormat == .strictPortableTARBzip2 ? "tar-bzip2" : "archive"
         var failureStage = label + "-admission"
         do {
             try hooks.archiveProduction.stage?(.admitted, plan.parent)
@@ -600,7 +612,8 @@ extension RecoverableFileOperations {
             else if plan.publicTARExtractionFile { record = try journal.beginPublicTARExtractionEdit() }
             else { record = try journal.beginEdit(operation: plan.receivedFile ? plan.receivedOrigin.fileHistoryTitle
                 : plan.authoredFormat == .strictPortableTAR ? "Create TAR"
-                : plan.authoredFormat == .strictPortableTARGzip ? "Create TAR.gz" : "Create ZIP") }
+                : plan.authoredFormat == .strictPortableTARGzip ? "Create TAR.gz"
+                : plan.authoredFormat == .strictPortableTARBzip2 ? "Create TAR.bz2" : "Create ZIP") }
             active = record
             for source in plan.sources { try record.appendLocation(source) }; try journal.save(record)
             failureStage = label + "-staging"
@@ -638,6 +651,7 @@ extension RecoverableFileOperations {
             let nativeTARCreate = plan.authoredFormat == .strictPortableTAR
                 && strictPortableTARCreationPolicy == .nativeCreateQualification
                 || plan.authoredFormat == .strictPortableTARGzip && tarGzipCreationPolicy == .developmentNativeCreate
+                || plan.authoredFormat == .strictPortableTARBzip2 && tarBzip2CreationPolicy == .developmentNativeCreate
             let nativeArchiveCreate = nativeCreate || nativeTARCreate
             if plan.authoredFormat == .zip && (authoredZIPMetadataPolicy == .nativeStageQualification || nativeCreate) {
                 authoredZIP = plan.producer as? any AuthoredZIPFileProducer

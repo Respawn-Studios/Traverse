@@ -82,7 +82,9 @@ public struct OperationRecoveryRecord: Identifiable, Sendable {
     /// Shared presentation for separately admitted ZIP and TAR original updates.
     public var canRestoreOriginalArchive: Bool { canRestoreOriginalZIP }
     public var originalArchiveFormatName: String {
-        switch operation { case "Update TAR": "TAR"; case "Update TAR.gz": "TAR.gz"; default: "ZIP" }
+        switch operation {
+        case "Update TAR": "TAR"; case "Update TAR.gz": "TAR.gz"; case "Update TAR.bz2": "TAR.bz2"; default: "ZIP"
+        }
     }
     /// A fully validated v11 regular-file Trash record. This is independent of
     /// whether the native mark changed; older history never gains this status.

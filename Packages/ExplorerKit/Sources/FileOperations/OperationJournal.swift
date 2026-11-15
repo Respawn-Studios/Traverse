@@ -398,6 +398,7 @@ internal final class OperationJournal {
         allowNativeOriginalUpdateUndoHint: Bool = false,
         allowNativeTARUpdateUndoHint: Bool = false,
         allowNativeTARGzipUpdateUndoHint: Bool = false,
+        allowNativeTARBzip2UpdateUndoHint: Bool = false,
         allowPublicDownloadUndoHint: Bool = false,
         allowPublicZIPExtractionUndoHint: Bool = false,
         allowPublicTARExtractionUndoHint: Bool = false,
@@ -412,6 +413,7 @@ internal final class OperationJournal {
                 allowNativeOriginalUpdateUndoHint: allowNativeOriginalUpdateUndoHint,
                 allowNativeTARUpdateUndoHint: allowNativeTARUpdateUndoHint,
                 allowNativeTARGzipUpdateUndoHint: allowNativeTARGzipUpdateUndoHint,
+                allowNativeTARBzip2UpdateUndoHint: allowNativeTARBzip2UpdateUndoHint,
                 allowPublicDownloadUndoHint: allowPublicDownloadUndoHint,
                 allowPublicZIPExtractionUndoHint: allowPublicZIPExtractionUndoHint,
                 allowPublicTARExtractionUndoHint: allowPublicTARExtractionUndoHint,
@@ -447,7 +449,7 @@ internal final class OperationJournal {
         for area in record.areas { metrics?.add(.validatedRows, 1); try validateArea(area, stepCount: record.steps.count) }
         for location in record.locations { metrics?.add(.validatedRows, 1); try validateLocation(location) }
         for intent in record.trashIntents { metrics?.add(.validatedRows, 1); try validateTrashIntent(intent) }
-        if [5, 6, 13, 18, 19].contains(record.version) { try validateArchiveUpdate(record) }
+        if [5, 6, 13, 18, 19, 20].contains(record.version) { try validateArchiveUpdate(record) }
         if record.version == 7 { try validateDownloadAdoption(record) }
         if record.version == 14 { try validateReceivedPublicDownload(record) }
         if record.version == 15 { try validatePublicZIPExtraction(record) }
@@ -496,12 +498,12 @@ internal final class OperationJournal {
                     throw FileOperationFailure.recoveryUncertain
                 }
             }
-        } else if [5, 6, 13, 18, 19].contains(record.version) {
+        } else if [5, 6, 13, 18, 19, 20].contains(record.version) {
             guard record.operation == ArchiveUpdateProfile.title(version: record.version), record.nameRename == nil, record.downloadAdoption == nil,
                   record.persistentVolumes != nil, record.areas.count <= 1,
-                  record.steps.count <= ([13, 18, 19].contains(record.version) ? 2 : 3),
-                  record.trashIntents.count <= ([13, 18, 19].contains(record.version) ? 0 : 1),
-                  (![13, 18, 19].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
+                  record.steps.count <= ([13, 18, 19, 20].contains(record.version) ? 2 : 3),
+                  record.trashIntents.count <= ([13, 18, 19, 20].contains(record.version) ? 0 : 1),
+                  (![13, 18, 19, 20].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
                 throw FileOperationFailure.recoveryUncertain
             }
         } else if record.version == 14 {
@@ -596,7 +598,7 @@ internal final class OperationJournal {
         }
         guard record.steps.enumerated().allSatisfy({ index, step in
             step.archiveOriginalRetainedQualified == nil ||
-                ([13, 18, 19].contains(record.version) && index == 0 && step.archiveOriginalRetainedQualified == true
+                ([13, 18, 19, 20].contains(record.version) && index == 0 && step.archiveOriginalRetainedQualified == true
                     && step.after != nil)
         }) else { throw FileOperationFailure.recoveryUncertain }
     }
@@ -799,11 +801,11 @@ internal final class OperationJournal {
     /// Archive versions close the two rename topology. A display title alone must
     /// never turn an arbitrary tree job into an archive replacement or cleanup.
     static func validateArchiveUpdate(_ record: JournalRecord) throws {
-        guard [5, 6, 13, 18, 19].contains(record.version), record.operation == ArchiveUpdateProfile.title(version: record.version),
+        guard [5, 6, 13, 18, 19, 20].contains(record.version), record.operation == ArchiveUpdateProfile.title(version: record.version),
               record.areas.count <= 1,
-              record.steps.count <= ([13, 18, 19].contains(record.version) ? 2 : 3),
-              record.trashIntents.count <= ([13, 18, 19].contains(record.version) ? 0 : 1),
-              (![13, 18, 19].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
+              record.steps.count <= ([13, 18, 19, 20].contains(record.version) ? 2 : 3),
+              record.trashIntents.count <= ([13, 18, 19, 20].contains(record.version) ? 0 : 1),
+              (![13, 18, 19, 20].contains(record.version) || !["cleanupReview", "cleaned"].contains(record.state)) else {
             throw FileOperationFailure.recoveryUncertain
         }
         let steps = record.steps
@@ -893,7 +895,7 @@ internal final class OperationJournal {
     }
 
     static func hasRecordedNativeArchiveOriginalOnly(_ record: JournalRecord) -> Bool {
-        guard [13, 18, 19].contains(record.version), record.operation == ArchiveUpdateProfile.title(version: record.version),
+        guard [13, 18, 19, 20].contains(record.version), record.operation == ArchiveUpdateProfile.title(version: record.version),
               ["mutating", "needsReview"].contains(record.state),
               record.steps.count == 1, record.areas.count == 1,
               record.trashIntents.isEmpty else { return false }

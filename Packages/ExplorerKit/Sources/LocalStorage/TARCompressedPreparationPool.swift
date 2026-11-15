@@ -138,17 +138,19 @@ public final class TARCompressedPreparationPool: @unchecked Sendable {
                         let admitted = try activity.begin(); defer { withExtendedLifetime(admitted) {} }
                         defer { withExtendedLifetime(lifetime) {} }
                         guard !ticket.isCancelled else { throw TARArchiveFailure.stopped }
-                        let suffix = original.lastPathComponent.lowercased()
-                        guard suffix.hasSuffix(".tar.gz") || suffix.hasSuffix(".tgz") else { throw TARArchiveFailure.unsupported }
+                        guard let codec = TARCompressedCodec.filename(original.lastPathComponent) else { throw TARArchiveFailure.unsupported }
                         progress(.init(.checkingSource, 0))
                         let source = try PinnedLocalFileSource(original, excluding: roots)
                         guard source.observed.size >= 0,
                               UInt64(source.observed.size) <= TARCompressedDecoder.maximumBytes else { throw TARArchiveFailure.limited }
+                        guard codec.accepts(try source.read(0, min(4, Int(source.observed.size)), maximum: 4, check: {
+                            guard !ticket.isCancelled else { throw TARArchiveFailure.stopped }
+                        })) else { throw TARArchiveFailure.malformed }
                         let security = try TARCompressedOriginalProof.Security.observe(source,
                             publicQuarantine: publicQuarantineSource)
                         try source.validate()
                         guard !ticket.isCancelled else { throw TARArchiveFailure.stopped }
-                        return .init(source: source.url, stamp: source.observed, security: security)
+                        return .init(source: source.url, stamp: source.observed, security: security, codec: codec)
                     }
                     self.probed(ticket.id, result: result, roots: roots)
                 }

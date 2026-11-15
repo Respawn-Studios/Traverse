@@ -115,7 +115,10 @@ import LocalStorage
             model.reviewMutation(action, addedSource: action == .add ? .init(urls: [added]) : nil)
             shown = try await review()
             if !name.isEmpty { try await typeName(name, in: shown) }
-            if action == .add, TARBrowserModel.isCompressed(source) { shown.model.tarCompression = .gzipFast }
+            if action == .add, TARBrowserModel.isCompressed(source) {
+                shown.model.keepsCurrentTARCompression = false
+                shown.model.tarCompression = model.formatName == "TAR.bz2" ? .bzip2Fast : .gzipFast
+            }
             if !ProcessInfo.processInfo.arguments.contains("--offscreen"), action == .group || action == .add,
                CGPreflightScreenCaptureAccess(), let window = shown.window {
                 try await Probe.wait("tar-members-visible-review") { shown.model.canCreate }
@@ -124,7 +127,8 @@ import LocalStorage
             let id = try await commit(shown)
             if action == .add, TARBrowserModel.isCompressed(source) {
                 let bytes = try await Task.detached { try Data(contentsOf: source) }.value
-                try Probe.need(bytes.count >= 10 && bytes[8] == 4, "tar-members-selected-gzip-level-applied")
+                try Probe.need(model.formatName == "TAR.bz2" ? bytes.count >= 4 && bytes[3] == 49
+                    : bytes.count >= 10 && bytes[8] == 4, "tar-members-selected-compression-applied")
             }
             try Probe.need(try await paths() == expected, "tar-members-exact-paths")
             try await undo(id, expected: before)

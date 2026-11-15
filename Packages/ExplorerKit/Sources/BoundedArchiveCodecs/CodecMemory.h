@@ -1,5 +1,5 @@
-#ifndef TRAVERSE_GZIP_MEMORY_H
-#define TRAVERSE_GZIP_MEMORY_H
+#ifndef TRAVERSE_CODEC_MEMORY_H
+#define TRAVERSE_CODEC_MEMORY_H
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -29,5 +29,9 @@ static void tr_release(voidpf opaque,voidpf address) {
     if(block->value.charged>h->active)h->invalid=1;
     else h->active-=block->value.charged;
     free(block);
+}
+static void *tr_bz_allocate(void *opaque,int items,int size) {
+    if(items<=0 || size<=0){((tr_heap *)opaque)->refused=1;return NULL;}
+    return tr_allocate(opaque,(uInt)items,(uInt)size);
 }
 #endif

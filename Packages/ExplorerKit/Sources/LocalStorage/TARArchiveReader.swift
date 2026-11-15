@@ -81,7 +81,8 @@ public final class TARArchiveReader: @unchecked Sendable {
         retaining lifetime: (any Sendable)? = nil) async throws -> TARTextEditDocument {
         let url = archive ?? previous.archiveURL
         let compressed = previous.selection.binding.compressed != nil
-        guard (compressed ? TARSourceBinding.isGzipFilename(url.lastPathComponent) : url.pathExtension.lowercased() == "tar"),
+        guard (compressed ? TARCompressedCodec.filename(url.lastPathComponent) == previous.selection.binding.compressed?.original.codec
+            : url.pathExtension.lowercased() == "tar"),
               url == previous.archiveURL || (contents != nil
                 && url.deletingLastPathComponent() == previous.archiveURL.deletingLastPathComponent()) else {
             throw TARArchiveFailure.invalidSelection

@@ -18,6 +18,7 @@ import LocalStorage
     private static func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }
     private struct ColdTAR: Codable, Sendable {
         let gzip: Bool
+        var bzip2: Bool? = nil
         let creation, firstSave: UUID
         let createdDigest, savedDigest, firstInputDigest, secondInputDigest: Data
     }
@@ -26,12 +27,13 @@ import LocalStorage
     }
     static func coldTAR(root: URL) async throws -> [String] {
         let gzip = ProcessInfo.processInfo.arguments.contains("--gzip-tar-editor")
+        let bzip2 = ProcessInfo.processInfo.arguments.contains("--bzip2-tar-editor")
         let packet = try await Task.detached {
             try JSONDecoder().decode(ColdTAR.self, from: Data(contentsOf: root.appendingPathComponent("evidence/tar-editor-cold-pending.json")))
         }.value
-        try need(packet.gzip == gzip && packet.creation != packet.firstSave, "tar-cold-exact-profile")
+        try need(packet.gzip == gzip && (packet.bzip2 ?? false) == bzip2 && !(gzip && bzip2) && packet.creation != packet.firstSave, "tar-cold-exact-profile")
         let parent = root.appendingPathComponent("source/Generated Documents")
-        let source = parent.appendingPathComponent("Editor Archive." + (gzip ? "tar.gz" : "tar"))
+        let source = parent.appendingPathComponent("Editor Archive." + (bzip2 ? "tar.bz2" : gzip ? "tar.gz" : "tar"))
         let engine = ApplicationOperationCoordinator.shared.engine(at: root.appendingPathComponent("state/history"))
         try await ApplicationOperationCoordinator.shared.prepareOperationState(for: engine)
         try need(try await hash(source) == packet.savedDigest, "tar-cold-current-bytes")
@@ -274,8 +276,9 @@ import LocalStorage
               let parent = sources.first?.deletingLastPathComponent() else { throw Failure(stage: "archive-editor-generated-scope") }
         let tar = ProcessInfo.processInfo.arguments.contains("--tar-editor")
         let gzip = ProcessInfo.processInfo.arguments.contains("--gzip-tar-editor")
-        let format = gzip ? "TAR.gz" : tar ? "TAR" : "ZIP", suffix = gzip ? "tar.gz" : tar ? "tar" : "zip"
-        if gzip { ApplicationCompressedArchives.shared.cacheDirectoryForVerification = root.appendingPathComponent("cache") }
+        let bzip2 = ProcessInfo.processInfo.arguments.contains("--bzip2-tar-editor")
+        let format = bzip2 ? "TAR.bz2" : gzip ? "TAR.gz" : tar ? "TAR" : "ZIP", suffix = bzip2 ? "tar.bz2" : gzip ? "tar.gz" : tar ? "tar" : "zip"
+        if gzip || bzip2 { ApplicationCompressedArchives.shared.cacheDirectoryForVerification = root.appendingPathComponent("cache") }
         let settings = browser.settings, previous = browser.settings.editorPreferences
         let previousMotion = settings.motion
         defer { settings.updateEditorPreferences(previous); settings.motion = previousMotion }
@@ -299,7 +302,7 @@ import LocalStorage
             let observed = try await engine.observeSelection(sources)
             let plan: ArchiveCreationPlan
             if tar { plan = try await engine.prepareTARCreation(sources: sources, parent: parent,
-                name: "Editor Archive." + suffix, compression: gzip ? .gzipBalanced : .none, observing: observed) }
+                name: "Editor Archive." + suffix, compression: bzip2 ? .bzip2Balanced : gzip ? .gzipBalanced : .none, observing: observed) }
             else { plan = try await engine.prepareZIPCreation(sources: sources, parent: parent, name: "Editor Archive.zip", observing: observed) }
             let created = await engine.performArchiveCreation(plan)
             try need(created.result.disposition == .succeeded,
@@ -353,7 +356,8 @@ import LocalStorage
                 authoredZIPMetadataPolicy: nativeZIPUpdate ? .nativeCreate : .exactSource,
                 authoredZIPOriginalUpdateNativePolicy: nativeZIPUpdate ? .qualifiedNativeStage : .held,
                 authoredTAROriginalUpdatePolicy: tar ? .developmentNativeStage : .held,
-                authoredTARGzipOriginalUpdatePolicy: gzip ? .developmentNativeStage : .held)
+                authoredTARGzipOriginalUpdatePolicy: gzip ? .developmentNativeStage : .held,
+                authoredTARBzip2OriginalUpdatePolicy: bzip2 ? .developmentNativeStage : .held)
             await browser.recoveryInspectionTask?.value
             let restored = await cold.undo(recordID: secondRecord)
             let afterUndo = try await Task.detached { try Data(contentsOf: source) }.value
@@ -399,10 +403,10 @@ import LocalStorage
                 "Changed \(format) Save refuses without touching the archive or draft; explicit Reload, archive Copy-follow, copy Undo and actual user performClose/joined Quit complete through existing owners with Full closing motion enabled",
                 "A drained feature's accepted close acknowledges native willClose exactly once inside performClose without a deferred fade or implicit AppKit animation"]
             if tar {
-                checks.append("\(format) shares native editor preferences, Save/Reload, metadata-preserving copy, and independent v\(gzip ? 19 : 18) original-update/cold Undo admission")
+                checks.append("\(format) shares native editor preferences, Save/Reload, metadata-preserving copy, and independent v\(bzip2 ? 20 : gzip ? 19 : 18) original-update/cold Undo admission")
                 checks.append(try await createFile(source: source, browser: browser, cold: cold, root: root, tar: true))
                 checks += try await TARMemberVerification.check(source: source, browser: browser, cold: cold, root: root)
-                let packet = ColdTAR(gzip: gzip, creation: try unwrap(created.recordID, "tar-cold-create-record"), firstSave: firstRecord,
+                let packet = ColdTAR(gzip: gzip, bzip2: bzip2, creation: try unwrap(created.recordID, "tar-cold-create-record"), firstSave: firstRecord,
                     createdDigest: Data(SHA256.hash(data: originalBytes)), savedDigest: Data(SHA256.hash(data: firstBytes)),
                     firstInputDigest: try await hash(sources[0]), secondInputDigest: try await hash(sources[1]))
                 try await Task.detached {

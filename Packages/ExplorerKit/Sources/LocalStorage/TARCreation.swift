@@ -30,13 +30,28 @@ public enum TARCreationFailure: Error, Sendable, Equatable {
 }
 
 public enum TARCompression: String, CaseIterable, Sendable {
-    case none, gzipFast, gzipBalanced, gzipSmallest
+    case none, gzipFast, gzipBalanced, gzipSmallest, bzip2Fast, bzip2Balanced, bzip2Smallest
     public var displayName: String {
-        switch self { case .none: "Uncompressed TAR"; case .gzipFast: "gzip · Fast"; case .gzipBalanced: "gzip · Balanced"; case .gzipSmallest: "gzip · Smallest" }
+        switch self {
+        case .none: "Uncompressed TAR"
+        case .gzipFast: "gzip · Fast"; case .gzipBalanced: "gzip · Balanced"; case .gzipSmallest: "gzip · Smallest"
+        case .bzip2Fast: "bzip2 · Fast"; case .bzip2Balanced: "bzip2 · Balanced"; case .bzip2Smallest: "bzip2 · Smallest"
+        }
     }
-    public var fileExtension: String { self == .none ? "tar" : "tar.gz" }
+    public var fileExtension: String { authoredFormat == .strictPortableTAR ? "tar" : authoredFormat == .strictPortableTARGzip ? "tar.gz" : "tar.bz2" }
+    internal var authoredFormat: AuthoredArchiveFormat {
+        switch self {
+        case .none: .strictPortableTAR
+        case .gzipFast, .gzipBalanced, .gzipSmallest: .strictPortableTARGzip
+        case .bzip2Fast, .bzip2Balanced, .bzip2Smallest: .strictPortableTARBzip2
+        }
+    }
     internal var level: Int32? {
-        switch self { case .none: nil; case .gzipFast: 1; case .gzipBalanced: 6; case .gzipSmallest: 9 }
+        switch self { case .none: nil; case .gzipFast, .bzip2Fast: 1; case .gzipBalanced, .bzip2Balanced: 6; case .gzipSmallest, .bzip2Smallest: 9 }
+    }
+    internal var encoding: TAROutputStream.Encoding {
+        guard let level else { return .plain }
+        return authoredFormat == .strictPortableTARGzip ? .gzip(level) : .bzip2(level)
     }
 }
 
@@ -46,7 +61,7 @@ public enum TARCompression: String, CaseIterable, Sendable {
 internal final class PreparedTARCreation: TARCreationSourceWitness, Sendable {
     let preview: ArchiveProductionPreview
     var hasMarkedSource: Bool { inventory.hasMarkedSource }
-    var authoredArchiveFormat: AuthoredArchiveFormat { compression == .none ? .strictPortableTAR : .strictPortableTARGzip }
+    var authoredArchiveFormat: AuthoredArchiveFormat { compression.authoredFormat }
     private let inventory: ZIPCreationInventory
     private let headers: [TARCreationHeader]
     private let hooks: ZIPCreationHooks
@@ -107,8 +122,7 @@ internal final class PreparedTARCreation: TARCreationSourceWitness, Sendable {
                 try validateInput(check: checkpoint)
                 let initial = try ArchiveProducedFacts.receipt(descriptor, relative: "", hash: nil)
                 guard initial.kind == S_IFREG, initial.size == 0 else { throw FileOperationFailure.destinationChanged }
-                let encoding: TAROutputStream.Encoding = compression.level.map { .gzip($0) } ?? .plain
-                let writer = try TAROutputStream(descriptor, encoding: encoding, hooks: hooks, check: checkpoint)
+                let writer = try TAROutputStream(descriptor, encoding: compression.encoding, hooks: hooks, check: checkpoint)
                 defer { writer.retire() }
                 for (index, node) in inventory.nodes.enumerated() {
                     try checkpoint()
@@ -188,13 +202,18 @@ extension RecoverableFileOperations {
     }
     internal func prepareTARCreation(sources: [URL], parent: URL, name: String, compression: TARCompression = .none,
         observing selection: FileOperationSelection, hooks: ZIPCreationHooks) async throws -> ArchiveCreationPlan {
-        let lower = name.lowercased()
-        guard compression == .none ? lower.hasSuffix(".tar") : lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz") else {
+        guard compression.authoredFormat.acceptsFilename(name) else {
             throw FileOperationFailure.invalidRequest
         }
-        let allowNativeMarkedSources = compression == .none ? nativeTARCreationAcceptsMarkedSources : nativeTARGzipCreationAcceptsMarkedSources
+        let allowNativeMarkedSources: Bool
+        switch compression.authoredFormat {
+        case .strictPortableTAR: allowNativeMarkedSources = nativeTARCreationAcceptsMarkedSources
+        case .strictPortableTARGzip: allowNativeMarkedSources = nativeTARGzipCreationAcceptsMarkedSources
+        case .strictPortableTARBzip2: allowNativeMarkedSources = nativeTARBzip2CreationAcceptsMarkedSources
+        case .zip: throw FileOperationFailure.invalidRequest
+        }
         return try await prepareArchiveCreation(sources: sources, parent: parent, name: name,
-            observing: selection, authoredFormat: compression == .none ? .strictPortableTAR : .strictPortableTARGzip) { check in
+            observing: selection, authoredFormat: compression.authoredFormat) { check in
             try PreparedTARCreation(sources, compression: compression, allowNativeMarkedSources: allowNativeMarkedSources,
                 check: check, hooks: hooks)
         }

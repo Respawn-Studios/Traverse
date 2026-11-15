@@ -24,11 +24,16 @@ Use an existing native flow to check application integration:
 ```sh
 python3 -B tools/dev.py native-check archive-pane --skip-build
 python3 -B tools/dev.py native-check tar-archive --skip-build
+python3 -B tools/dev.py native-check create-tarbz2 --skip-build
+python3 -B tools/dev.py native-check tar-bzip2-editor --marked-source-create --large-interface --skip-build
 ```
 
 Build first when compiled inputs changed. Check `native-check --help` for
 available flows and their options; an offscreen check does not establish
 foreground input, Finder drag delivery or signed distribution behavior.
+The Development TAR editor flows include a second app process for cold Undo.
+They reuse ordinary editor, workbench and operation owners; they do not enable
+the new routes in distributed editions.
 
 `native_promise_export.py` is a retained, bounded diagnostic for the native ZIP
 promise owner. Its `--ordinary-build` option reuses the current Debug build and

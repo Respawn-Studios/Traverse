@@ -18,10 +18,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "ExplorerCore"),
-        .target(name: "LocalStorage", dependencies: ["ExplorerCore", "FileOperations", "SSHConfiguration", "BoundedGzip", "DriveHealthNative"]),
+        .target(name: "LocalStorage", dependencies: ["ExplorerCore", "FileOperations", "SSHConfiguration", "BoundedArchiveCodecs", "DriveHealthNative"]),
         .target(name: "DriveHealthNative", publicHeadersPath: "include", linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
         .executableTarget(name: "DriveHealthWorker", dependencies: ["DriveHealthNative"]),
-        .target(name: "BoundedGzip", publicHeadersPath: "include", linkerSettings: [.linkedLibrary("z")]),
+        .target(name: "BoundedArchiveCodecs", publicHeadersPath: "include", linkerSettings: [.linkedLibrary("z"), .linkedLibrary("bz2")]),
         .target(name: "SSHConfiguration"),
         .target(name: "FileOperations"),
         .target(name: "Search", dependencies: ["ExplorerCore"]),

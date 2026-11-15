@@ -204,7 +204,7 @@ internal final class TARCompressedSpoolStorage {
         let monitor = Self.monitor(output, cancellation: cancellation, progress: { progress(.decoding, $0, $1) })
         let decoded: TARCompressedDecoder.Outcome
         progress(.decoding, 0, 0)
-        do { decoded = try TARCompressedDecoder.expand(input: source.descriptor, output: output, cancellation: cancellation) }
+        do { decoded = try TARCompressedDecoder.expand(input: source.descriptor, output: output, codec: proof.codec, cancellation: cancellation) }
         catch { monitor.stop(); throw error }
         monitor.stop()
         guard decoded.compressedBytes == UInt64(source.observed.size), decoded.decodedBytes <= TARCompressedDecoder.maximumBytes else {

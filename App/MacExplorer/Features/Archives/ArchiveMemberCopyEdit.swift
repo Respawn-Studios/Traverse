@@ -110,7 +110,7 @@ enum ArchiveMemberCopyEdit: Sendable {
     case group(ZIPMemberSetSelection)
     case tar(TARMemberMutation)
 
-    var formatName: String { if case .tar(let mutation) = self { mutation.isCompressed ? "TAR.gz" : "TAR" } else { "ZIP" } }
+    var formatName: String { if case .tar(let mutation) = self { mutation.formatName } else { "ZIP" } }
     var canUpdateOriginal: Bool { if case .tar = self { TARArchiveEditingFeature.available } else { ZIPOriginalUpdateFeature.available } }
     var kind: Kind {
         switch self {

@@ -10,6 +10,7 @@ internal final class TARMutationSource: @unchecked Sendable {
     let spool: TARCompressedSpoolLease?
     let security: ArchiveRewriteSourceSecurity
     let gzipHeader: GzipArchiveHeader?
+    let bzip2BlockSize: Int32?
     var length: UInt64 { spool?.decodedBytes ?? UInt64(original.observed.size) }
 
     init(_ binding: TARSourceBinding, check: @Sendable () throws -> Void) throws {
@@ -18,19 +19,27 @@ internal final class TARMutationSource: @unchecked Sendable {
         self.original = original; security = try ArchiveRewriteSourceSecurity(original); spool = binding.compressed
         if let spool {
             guard spool.original.source == binding.source, spool.original.stamp == binding.stamp,
-                  TARSourceBinding.isGzipFilename(binding.source.lastPathComponent),
+                  TARCompressedCodec.filename(binding.source.lastPathComponent) == spool.original.codec,
                   spool.decodedBytes <= TARCompressedDecoder.maximumBytes,
                   UInt64(original.observed.size) <= TARCompressedDecoder.maximumBytes else { throw TARMemberEditFailure.unsupportedArchive }
-            gzipHeader = try GzipArchiveHeader(original.read(0,
-                min(GzipArchiveHeader.maximumBytes, Int(original.observed.size)), maximum: GzipArchiveHeader.maximumBytes, check: check))
+            if spool.original.codec == .gzip {
+                gzipHeader = try GzipArchiveHeader(original.read(0,
+                    min(GzipArchiveHeader.maximumBytes, Int(original.observed.size)), maximum: GzipArchiveHeader.maximumBytes, check: check))
+                bzip2BlockSize = nil
+            } else {
+                let header = try original.read(0, 4, maximum: 4, check: check)
+                guard TARCompressedCodec.bzip2.accepts(header) else { throw TARMemberEditFailure.unsupportedArchive }
+                gzipHeader = nil; bzip2BlockSize = Int32(header[3] - 48)
+            }
             try spool.verifyDigest(check: check)
             try withoutActuallyEscaping(check) { check in
-                _ = try GzipArchiveEncoder.verify(original.descriptor, rawBytes: spool.decodedBytes,
+                _ = try CompressedArchiveEncoder.verify(original.descriptor, codec: spool.original.codec, rawBytes: spool.decodedBytes,
                     encodedBytes: UInt64(original.observed.size), expected: spool.digest, check: check)
             }
         } else {
             guard binding.source.pathExtension.lowercased() == "tar" else { throw TARMemberEditFailure.unsupportedArchive }
             gzipHeader = nil
+            bzip2BlockSize = nil
         }
         try validate()
     }
@@ -62,8 +71,8 @@ internal final class TARMutationSource: @unchecked Sendable {
 }
 
 extension TARSourceBinding {
-    static func isGzipFilename(_ name: String) -> Bool {
-        let lower = name.lowercased(); return lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz")
+    var formatName: String {
+        switch compressed?.original.codec { case .gzip: "TAR.gz"; case .bzip2: "TAR.bz2"; case nil: "TAR" }
     }
-    var authoredFormat: AuthoredArchiveFormat { compressed == nil ? .strictPortableTAR : .strictPortableTARGzip }
+    var authoredFormat: AuthoredArchiveFormat { compressed?.original.codec.authoredFormat ?? .strictPortableTAR }
 }

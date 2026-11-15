@@ -92,7 +92,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     let source: URL
     let format: ArchiveFormat
     private var allowsOriginalMutation: Bool {
-        format == .tar ? (TARBrowserModel.isCompressed(source) ? TARGzipEditingFeature.available : TARArchiveEditingFeature.available)
+        format == .tar ? (TARBrowserModel.isCompressed(source) ? TARBrowserModel.allowsCompressedEditing(source) : TARArchiveEditingFeature.available)
             : ZIPOriginalUpdateFeature.available
     }
     var isReadOnly: Bool {
@@ -693,9 +693,9 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
             rows.isHidden = showsPreparation
             if newlyShowingPreparation, let preparationView { ToolContentMotion.reveal(preparationView) }
             if newlyShowingRows { ToolContentMotion.reveal(rows.fileScrollView.contentView) }
-            caption.stringValue = (m.isCompressedSource ? "TAR.gz" : "TAR")
+            caption.stringValue = m.formatName
                 + (m.allowsTextEditing ? " · Editing" : " · Read-only")
-            caption.toolTip = m.compressedSizeDescription.map { $0 + "\nArchive is the original gzip size. Prepared TAR includes headers and padding. Files is the sum of recorded member sizes." }
+            caption.toolTip = m.compressedSizeDescription.map { $0 + "\nArchive is the original compressed size. Prepared TAR includes headers and padding. Files is the sum of recorded member sizes." }
                 ?? ArchiveBrowsingGuidance.contentHelp
             rows.update(m, settings: browser.settings, glassOverride: glass, showsOnlyCurrent: true)
             offset = m.offset; total = m.total; count = m.items.count; hasNext = m.hasNext

@@ -867,7 +867,10 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
         let args = ProcessInfo.processInfo.arguments, scale = args.contains("--zip-creation-scale"), drive = args.contains("--drive-zip-creation")
         let tar = args.contains("--create-tar")
         let gzip = args.contains("--gzip-tar")
-        try UIVerification.require(!gzip || tar && !args.contains("--marked-source-create"), "gzip creation has its separate development route")
+        let bzip2 = args.contains("--bzip2-tar")
+        let compressed = gzip || bzip2
+        try UIVerification.require(!(gzip && bzip2), "One TAR codec profile")
+        try UIVerification.require(!compressed || tar && !args.contains("--marked-source-create"), "Compressed creation has its separate development route")
         let source = root.appendingPathComponent("source/Input"), sources = [source.appendingPathComponent("Folder"), source.appendingPathComponent("Root.txt")]
         let journal = root.appendingPathComponent("state/operation-recovery")
         let markedSource = args.contains("--marked-source-create")
@@ -902,17 +905,17 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
             try await wait { !controller.model.isPreparing && controller.model.plan != nil }
             if tar {
                 try UIVerification.require(controller.model.offersOutputFormats, "Current development TAR creation is explicit")
-                controller.model.chooseOutputFormat(gzip ? .tarGzip : .tar)
-                let suffix = gzip ? ".tar.gz" : ".tar"
+                controller.model.chooseOutputFormat(bzip2 ? .tarBzip2 : gzip ? .tarGzip : .tar)
+                let suffix = bzip2 ? ".tar.bz2" : gzip ? ".tar.gz" : ".tar"
                 try await wait { !controller.model.isPreparing && controller.model.plan?.destination.lastPathComponent.hasSuffix(suffix) == true }
-                try UIVerification.require(controller.model.name.hasSuffix(suffix) && controller.model.createTitle == (gzip ? "Create TAR.gz" : "Create TAR"),
+                try UIVerification.require(controller.model.name.hasSuffix(suffix) && controller.model.createTitle == (bzip2 ? "Create TAR.bz2" : gzip ? "Create TAR.gz" : "Create TAR"),
                     "Format choice updates the suggested name and native primary action")
-                if gzip {
+                if compressed {
                     controller.model.chooseOutputFormat(.zip)
                     try await wait { !controller.model.isPreparing && controller.model.plan?.destination.pathExtension == "zip" }
                     try UIVerification.require(!controller.model.name.contains(".tar."), "Changing gzip back to ZIP removes the complete old suffix")
-                    controller.model.chooseOutputFormat(.tarGzip)
-                    controller.model.tarCompression = .gzipFast
+                    controller.model.chooseOutputFormat(bzip2 ? .tarBzip2 : .tarGzip)
+                    controller.model.tarCompression = bzip2 ? .bzip2Fast : .gzipFast
                     try await wait { !controller.model.isPreparing && controller.model.plan?.destination.lastPathComponent.hasSuffix(suffix) == true }
                 }
             }
@@ -948,14 +951,14 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
         if tar {
             let pool: TARCompressedPreparationPool?
             let reader: TARArchiveReader
-            if gzip {
+            if compressed {
                 let cache = root.appendingPathComponent("state/gzip-create-verification")
                 try await Task.detached { try FileManager().createDirectory(at: cache, withIntermediateDirectories: false,
                     attributes: [.posixPermissions: 0o700]) }.value
                 pool = TARCompressedPreparationPool(cacheDirectory: cache, activity: .init())
                 reader = TARArchiveReader(compressedPool: pool)
             } else { pool = nil; reader = TARArchiveReader() }
-            let checked = try await (gzip ? reader.prepareCompressed(plan.destination) : reader.open(plan.destination))
+            let checked = try await (compressed ? reader.prepareCompressed(plan.destination) : reader.open(plan.destination))
             try UIVerification.require(checked.summary.files == plan.files && checked.summary.folders == plan.folders
                 && checked.summary.logicalBytes == plan.logicalBytes, "Published TAR agrees with the reviewed source totals")
             await checked.close()
@@ -965,7 +968,7 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
             try UIVerification.require(checked.files == plan.files && checked.folders == plan.folders && checked.decodedBytes == plan.logicalBytes,
                 "Published ZIP differs from the reviewed source totals")
         }
-        try await Task.detached { try FileManager().copyItem(at: plan.destination, to: root.appendingPathComponent(gzip ? "evidence/Created.tar.gz" : tar ? "evidence/Created.tar" : "evidence/Created.zip")) }.value
+        try await Task.detached { try FileManager().copyItem(at: plan.destination, to: root.appendingPathComponent(bzip2 ? "evidence/Created.tar.bz2" : gzip ? "evidence/Created.tar.gz" : tar ? "evidence/Created.tar" : "evidence/Created.zip")) }.value
         if let sourceMark {
             let observedSource = try await Task.detached { try ArchiveCreationMarkState.observe(sources[1]) }.value
             let observedOutput = try await Task.detached { try ArchiveCreationMarkState.observe(plan.destination) }.value
@@ -1074,7 +1077,7 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
         try UIVerification.require(try await hashes(sources) == before, "ZIP creation or Undo changed the sources")
         let peak = peakResident(), added = peak > baseline ? peak - baseline : 0
         return ["passed": !scale || elapsed <= 10_000 && added <= 96 * 1_024 * 1_024 && heartbeat.count >= 2 && heartbeat.p95 <= 40,
-            "format": gzip ? "tar.gz" : tar ? "tar" : "zip",
+            "format": bzip2 ? "tar.bz2" : gzip ? "tar.gz" : tar ? "tar" : "zip",
             "scale": scale, "files": plan.files, "folders": plan.folders, "decodedBytes": plan.logicalBytes,
             "creationMilliseconds": elapsed, "baselineRSS": baseline, "peakRSS": peak, "addedRSS": added, "forwardPeakRSS": forwardPeak,
             "heartbeatP95Milliseconds": heartbeat.p95, "heartbeatWorstMilliseconds": heartbeat.worst, "heartbeatSamples": heartbeat.count,

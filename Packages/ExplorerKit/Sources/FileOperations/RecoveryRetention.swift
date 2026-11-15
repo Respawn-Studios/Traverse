@@ -98,7 +98,7 @@ extension RecoverableFileOperations {
         case .treeV1(let ordinary), .nameRenameV2(let ordinary),
              .treeV3(let ordinary), .nameRenameV4(let ordinary),
              .archiveUpdateV5(let ordinary), .archiveStrictCloneV6(let ordinary),
-             .archiveNativeUpdateV13(let ordinary), .tarNativeUpdateV18(let ordinary), .tarGzipNativeUpdateV19(let ordinary),
+             .archiveNativeUpdateV13(let ordinary), .tarNativeUpdateV18(let ordinary), .tarGzipNativeUpdateV19(let ordinary), .tarBzip2NativeUpdateV20(let ordinary),
              .receivedPublicDownloadV14(let ordinary),
              .publicZIPExtractionFileV15(let ordinary),
              .publicProducedTreeV16(let ordinary),
@@ -278,7 +278,7 @@ private struct RetainedArea {
 /// Every inverse needs durable materialization evidence; flags alone do not locate objects.
 private func cleanupEligibilityReason(_ record: JournalRecord) -> String? {
     if record.version == 7 { return "This adopted Download retains a separate spool handoff and has no qualified recovery cleanup." }
-    if [18, 19].contains(record.version) { return "This TAR update keeps its earlier archive for Undo. Cleanup is not available yet." }
+    if [18, 19, 20].contains(record.version) { return "This TAR update keeps its earlier archive for Undo. Cleanup is not available yet." }
     if record.version == 13 { return "This native ZIP update retains its original until cleanup is separately qualified." }
     if record.version == 14 { return "This public-mark Download candidate retains its private recovery area until cleanup is separately qualified." }
     if record.version == 15 { return "This ZIP extraction candidate retains its private recovery area until cleanup is separately qualified." }

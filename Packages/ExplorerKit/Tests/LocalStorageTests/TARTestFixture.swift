@@ -62,6 +62,21 @@ struct TARTestFixture {
         try Self.gzipCommand(["-n", "-c", source.path]).write(to: url, options: .withoutOverwriting)
         return url
     }
+    func bzip2Source(block: Int = 6) throws -> URL {
+        let url = root.appendingPathComponent("Source.tar.bz2")
+        try Self.bzip2Command(["-\(block)", "-c", source.path]).write(to: url, options: .withoutOverwriting)
+        return url
+    }
+    static func decodedBzip2(_ source: URL) throws -> Data { try bzip2Command(["-d", "-c", source.path]) }
+    private static func bzip2Command(_ arguments: [String]) throws -> Data {
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/bzip2"); process.arguments = arguments
+        process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        try process.run()
+        let bytes = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+        try #require(process.terminationStatus == 0 && bytes.count <= 4 << 20)
+        return bytes
+    }
     static func decodedGzip(_ source: URL) throws -> Data { try gzipCommand(["-d", "-c", source.path]) }
     private static func gzipCommand(_ arguments: [String]) throws -> Data {
         let process = Process(), output = Pipe()

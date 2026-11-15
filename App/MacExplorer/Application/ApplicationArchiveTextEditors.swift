@@ -24,6 +24,9 @@ enum TARArchiveEditingFeature {
 @MainActor enum TARGzipEditingFeature {
     static var available: Bool { TARArchiveEditingFeature.available && CompressedTARFeature.available }
 }
+@MainActor enum TARBzip2Feature {
+    static var available: Bool { TARArchiveEditingFeature.available && CompressedTARFeature.available }
+}
 
 @MainActor extension BrowserViewController {
     var canOpenTARTextEditor: Bool {

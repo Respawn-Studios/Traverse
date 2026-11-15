@@ -101,7 +101,7 @@ struct TARClipboardSource {
     var canEditSelectedText: Bool { canEditTextSelection(selection) }
     var allowsTextEditing: Bool {
         browser?.canOpenTARTextEditor == true && summary?.blockedMembers == 0
-            && (!isCompressedSource || TARGzipEditingFeature.available && compressedSummary != nil && !requiresPreparation)
+            && (!isCompressedSource || source.map(Self.allowsCompressedEditing) == true && compressedSummary != nil && !requiresPreparation)
     }
     func canEditTextSelection(_ ids: Set<TARItemID>) -> Bool {
         allowsTextEditing && canPreviewSelection(ids) && items.contains {
@@ -223,6 +223,11 @@ struct TARClipboardSource {
     }
     var preferredPreview: ArchivePreviewMode { .preferred(for: items.first { selection.contains($0.id) }?.name) }
     var isCompressedSource: Bool { source.map(Self.isCompressed) ?? false }
+    var formatName: String {
+        guard let name = source?.lastPathComponent.lowercased() else { return "TAR" }
+        if name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2") { return "TAR.bz2" }
+        return isCompressedSource ? "TAR.gz" : "TAR"
+    }
     var showsCompressedPreparation: Bool {
         CompressedTARFeature.available && isCompressedSource && (requiresPreparation || busy && summary == nil)
     }
@@ -238,6 +243,12 @@ struct TARClipboardSource {
     static func isCompressed(_ source: URL) -> Bool {
         let name = source.lastPathComponent.lowercased()
         return name.hasSuffix(".tar.gz") || name.hasSuffix(".tgz")
+            || TARBzip2Feature.available && (name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2"))
+    }
+    static func allowsCompressedEditing(_ source: URL) -> Bool {
+        let name = source.lastPathComponent.lowercased()
+        if name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2") { return TARBzip2Feature.available }
+        return TARGzipEditingFeature.available && (name.hasSuffix(".tar.gz") || name.hasSuffix(".tgz"))
     }
     func prepareCompressed() {
         guard canPrepareCompressed, let source, let browser else { return }

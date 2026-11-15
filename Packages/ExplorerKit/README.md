@@ -7,7 +7,7 @@ The existing Swift package supplies reusable behavior independently of native UI
 | --- | --- |
 | ExplorerCore | Item/location identity, navigation/workspace and shared values |
 | LocalStorage | Local platform adapters, access, volumes, editor and transfer support |
-| BoundedGzip | Small C bridge to system zlib; strict bounded gzip decoding for explicit TAR preparation |
+| BoundedArchiveCodecs | Bounded system zlib/libbz2 streams, shared descriptor checks and charged codec memory; no path/publication authority |
 | FileOperations | Preflight, execution, durable history, recovery and Undo |
 | Search | Filename/metadata queries and cancellation |
 | StorageAnalysis | Scanner protocol, stored results, classification and queries |

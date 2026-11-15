@@ -1,4 +1,4 @@
-import BoundedGzip
+import BoundedArchiveCodecs
 import Foundation
 
 /// The reviewed C codec owns only a synchronous descriptor-to-descriptor
@@ -34,9 +34,10 @@ internal enum TARCompressedDecoder {
         var failure: TARArchiveFailure { lock.withLock { timedOut || allocationLimited ? .limited : .stopped } }
     }
 
-    static func expand(input: Int32, output: Int32, cancellation: Cancellation) throws -> Outcome {
+    static func expand(input: Int32, output: Int32, codec: TARCompressedCodec = .gzip, cancellation: Cancellation) throws -> Outcome {
         let context = Unmanaged.passUnretained(cancellation).toOpaque()
-        let result = tr_gzip_expand_fd(input, output, maximumBytes, maximumBytes, maximumMembers,
+        let expand = codec == .gzip ? tr_gzip_expand_fd : tr_bzip2_expand_fd
+        let result = expand(input, output, maximumBytes, maximumBytes, maximumMembers,
             { raw in
                 guard let raw else { return 1 }
                 return Unmanaged<Cancellation>.fromOpaque(raw).takeUnretainedValue().poll()

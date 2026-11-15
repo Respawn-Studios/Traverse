@@ -10,6 +10,7 @@ public struct TARTextEditDocument: Sendable, CustomStringConvertible, CustomDebu
     public var archivePath: String { selection.record.path }
     public var displayName: String { selection.displayName }
     public var isCompressed: Bool { selection.binding.compressed != nil }
+    public var formatName: String { selection.binding.formatName }
     public var description: String { "<checked TAR text member>" }
     public var debugDescription: String { description }
     internal let selection: TARTextPreviewSelection
@@ -30,7 +31,7 @@ public enum TARMemberEditFailure: Error, Equatable, Sendable {
         switch self {
         case .compressedArchive: "This compressed TAR does not support editing. Its files can still be browsed and extracted."
         case .unsupportedArchive: "This TAR contains metadata or member types that Traverse cannot safely rewrite. The original is unchanged."
-        case .invalidName: "Keep this archive’s .tar, .tar.gz or .tgz extension. Existing files will be kept."
+        case .invalidName: "Keep the original archive format and extension. Existing files will be kept."
         case .invalidMemberName: "Use a single file or folder name without slashes, backslashes or control characters."
         case .conflict: "That name is already in the archive. Nothing was replaced."
         case .invalidDestination: "Choose another folder in this same archive. A folder cannot be moved inside itself."

@@ -1,5 +1,6 @@
 #include "GzipDecoder.h"
-#include "GzipMemory.h"
+#include "Bzip2Decoder.h"
+#include "DecoderStreams.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
@@ -41,10 +42,10 @@ static int tr_same_output(const struct stat *before,const struct stat *now,uint6
         before->st_birthtimespec.tv_sec==now->st_birthtimespec.tv_sec && before->st_birthtimespec.tv_nsec==now->st_birthtimespec.tv_nsec;
 }
 static int tr_local(int fd) {struct statfs volume;return fstatfs(fd,&volume)==0 && (volume.f_flags&MNT_LOCAL)!=0;}
-static tr_gzip_result tr_expand_core(int input,int output,uint64_t max_input,uint64_t max_output,
-    uint32_t max_members,tr_gzip_cancel cancel,void *context,tr_io io,uint64_t memory_limit,int output_file) {
-    tr_gzip_result result={.status=TR_GZIP_INVALID_INPUT};
-    struct stat source,destination,current;z_stream stream;memset(&stream,0,sizeof(stream));
+static tr_codec_result tr_expand_core(enum tr_decode_kind kind,int input,int output,uint64_t max_input,uint64_t max_output,
+    uint32_t max_members,tr_codec_cancel cancel,void *context,tr_io io,uint64_t memory_limit,int output_file) {
+    tr_codec_result result={.status=TR_CODEC_INVALID_INPUT};
+    struct stat source,destination,current;tr_decoder stream={.kind=kind};
     tr_heap heap={.limit=memory_limit};int initialized=0;
     unsigned char compressed[TR_GZIP_INPUT_CHUNK],expanded[TR_GZIP_OUTPUT_CHUNK];
     if(!max_input || max_input>TR_GZIP_MAXIMUM || max_output>TR_GZIP_MAXIMUM || !max_members || max_members>128)return result;
@@ -59,88 +60,100 @@ static tr_gzip_result tr_expand_core(int input,int output,uint64_t max_input,uin
         int write_mode=fcntl(output,F_GETFL);
         if(write_mode<0 || (write_mode&O_ACCMODE)==O_RDONLY || (write_mode&O_APPEND)!=0)return result;
     }
-    if((uint64_t)source.st_size>max_input){result.status=TR_GZIP_QUOTA;return result;}
-    if(cancel && cancel(context)){result.status=TR_GZIP_CANCELLED;return result;}
-    stream.zalloc=tr_allocate;stream.zfree=tr_release;stream.opaque=&heap;
-    int code=inflateInit2(&stream,15+16);
-    if(code!=Z_OK){result.status=code==Z_MEM_ERROR ? TR_GZIP_MEMORY_LIMIT:TR_GZIP_INTERNAL;goto finish;}
+    if((uint64_t)source.st_size>max_input){result.status=TR_CODEC_QUOTA;return result;}
+    if(cancel && cancel(context)){result.status=TR_CODEC_CANCELLED;return result;}
+    int code=tr_decoder_init(&stream,&heap);
+    if(code!=TR_CODEC_OK){result.status=code;goto finish;}
     initialized=1;
     for(;;) {
-        if(cancel && cancel(context)){result.status=TR_GZIP_CANCELLED;break;}
-        if(fstat(input,&current)!=0){result.status=TR_GZIP_IO;result.system_error=errno;break;}
-        if(!tr_same_source(&source,&current)){result.status=TR_GZIP_SOURCE_CHANGED;break;}
+        if(cancel && cancel(context)){result.status=TR_CODEC_CANCELLED;break;}
+        if(fstat(input,&current)!=0){result.status=TR_CODEC_IO;result.system_error=errno;break;}
+        if(!tr_same_source(&source,&current)){result.status=TR_CODEC_SOURCE_CHANGED;break;}
         if(stream.avail_in==0 && result.read_bytes<(uint64_t)source.st_size) {
             uint64_t remaining=(uint64_t)source.st_size-result.read_bytes;
             size_t wanted=remaining<TR_GZIP_INPUT_CHUNK ? (size_t)remaining:TR_GZIP_INPUT_CHUNK;
             ssize_t count=io.read(io.context,input,compressed,wanted,(off_t)result.read_bytes);
             if(count<0 && errno==EINTR)continue;
-            if(count<0){result.status=TR_GZIP_IO;result.system_error=errno;break;}
-            if(count==0){result.status=TR_GZIP_TRUNCATED;break;}
-            if((size_t)count>wanted){result.status=TR_GZIP_INTERNAL;break;}
+            if(count<0){result.status=TR_CODEC_IO;result.system_error=errno;break;}
+            if(count==0){result.status=TR_CODEC_TRUNCATED;break;}
+            if((size_t)count>wanted){result.status=TR_CODEC_INTERNAL;break;}
             result.read_bytes+=(uint64_t)count;stream.next_in=compressed;stream.avail_in=(uInt)count;
-            if(fstat(input,&current)!=0 || !tr_same_source(&source,&current)){result.status=TR_GZIP_SOURCE_CHANGED;break;}
+            if(fstat(input,&current)!=0 || !tr_same_source(&source,&current)){result.status=TR_CODEC_SOURCE_CHANGED;break;}
         }
         uint64_t remaining=max_output-result.written_bytes;
         uInt capacity=remaining<TR_GZIP_OUTPUT_CHUNK ? (uInt)remaining+1:TR_GZIP_OUTPUT_CHUNK;
-        stream.next_out=expanded;stream.avail_out=capacity;uInt before=stream.avail_in;
-        code=inflate(&stream,Z_NO_FLUSH);
-        size_t produced=capacity-stream.avail_out;uInt consumed=before-stream.avail_in;result.consumed_bytes+=consumed;
-        if(code!=Z_OK && code!=Z_STREAM_END && code!=Z_BUF_ERROR) {
-            result.status=code==Z_MEM_ERROR ? TR_GZIP_MEMORY_LIMIT:(code==Z_DATA_ERROR || code==Z_NEED_DICT ? TR_GZIP_CORRUPT:TR_GZIP_INTERNAL);break;
-        }
-        if(produced>remaining){result.status=TR_GZIP_QUOTA;break;}
+        uInt before=stream.avail_in;uint32_t produced=0;int ended=0;
+        code=tr_decoder_process(&stream,expanded,capacity,&produced,&ended);
+        uInt consumed=before-stream.avail_in;result.consumed_bytes+=consumed;
+        if(code!=TR_CODEC_OK){result.status=code;break;}
+        if(produced>remaining){result.status=TR_CODEC_QUOTA;break;}
         size_t offset=0;
         while(offset<produced) {
-            if(cancel && cancel(context)){result.status=TR_GZIP_CANCELLED;goto finish;}
-            if(fstat(input,&current)!=0 || !tr_same_source(&source,&current)){result.status=TR_GZIP_SOURCE_CHANGED;goto finish;}
-            if(output_file && (fstat(output,&current)!=0 || !tr_same_output(&destination,&current,result.written_bytes))){result.status=TR_GZIP_OUTPUT_CHANGED;goto finish;}
+            if(cancel && cancel(context)){result.status=TR_CODEC_CANCELLED;goto finish;}
+            if(fstat(input,&current)!=0 || !tr_same_source(&source,&current)){result.status=TR_CODEC_SOURCE_CHANGED;goto finish;}
+            if(output_file && (fstat(output,&current)!=0 || !tr_same_output(&destination,&current,result.written_bytes))){result.status=TR_CODEC_OUTPUT_CHANGED;goto finish;}
             ssize_t count=io.write(io.context,output,expanded+offset,produced-offset,(off_t)result.written_bytes);
             if(count<0 && errno==EINTR)continue;
-            if(count<=0){result.status=TR_GZIP_IO;result.system_error=count<0 ? errno:EIO;goto finish;}
-            if((size_t)count>produced-offset){result.status=TR_GZIP_INTERNAL;goto finish;}
+            if(count<=0){result.status=TR_CODEC_IO;result.system_error=count<0 ? errno:EIO;goto finish;}
+            if((size_t)count>produced-offset){result.status=TR_CODEC_INTERNAL;goto finish;}
             offset+=(size_t)count;result.written_bytes+=(uint64_t)count;
         }
-        if(code==Z_STREAM_END) {
+        if(ended) {
             result.members++;
-            if(stream.avail_in==0 && result.read_bytes==(uint64_t)source.st_size){result.status=TR_GZIP_OK;break;}
-            if(result.members>=max_members){result.status=TR_GZIP_QUOTA;break;}
-            Bytef *next=stream.next_in;uInt available=stream.avail_in;
-            if(inflateReset2(&stream,15+16)!=Z_OK){result.status=TR_GZIP_INTERNAL;break;}
-            stream.next_in=next;stream.avail_in=available;
+            if(stream.avail_in==0 && result.read_bytes==(uint64_t)source.st_size){result.status=TR_CODEC_OK;break;}
+            if(result.members>=max_members){result.status=TR_CODEC_QUOTA;break;}
+            initialized=0;
+            if(tr_decoder_end(&stream)!=TR_CODEC_OK){result.status=TR_CODEC_INTERNAL;break;}
+            code=tr_decoder_init(&stream,&heap);
+            if(code!=TR_CODEC_OK){result.status=code;break;}
+            initialized=1;
             continue;
         }
         if(!consumed && !produced) {
             if(stream.avail_in==0 && result.read_bytes<(uint64_t)source.st_size)continue;
-            result.status=TR_GZIP_TRUNCATED;break;
+            result.status=TR_CODEC_TRUNCATED;break;
         }
     }
 finish:
-    if(initialized && inflateEnd(&stream)!=Z_OK)result.status=TR_GZIP_INTERNAL;
+    if(initialized && tr_decoder_end(&stream)!=TR_CODEC_OK)result.status=TR_CODEC_INTERNAL;
     result.heap_peak_bytes=heap.peak;result.heap_remaining_bytes=heap.active;result.allocations=heap.allocations;
-    if(heap.active || heap.invalid)result.status=TR_GZIP_INTERNAL;
-    if(result.status==TR_GZIP_OK) {
-        if(output_file && fsync(output)!=0){result.status=TR_GZIP_IO;result.system_error=errno;}
-        else if(fstat(input,&current)!=0 || !tr_same_source(&source,&current))result.status=TR_GZIP_SOURCE_CHANGED;
-        else if(output_file && (fstat(output,&current)!=0 || !tr_same_output(&destination,&current,result.written_bytes)))result.status=TR_GZIP_OUTPUT_CHANGED;
+    if(heap.active || heap.invalid)result.status=TR_CODEC_INTERNAL;
+    if(result.status==TR_CODEC_OK) {
+        if(output_file && fsync(output)!=0){result.status=TR_CODEC_IO;result.system_error=errno;}
+        else if(fstat(input,&current)!=0 || !tr_same_source(&source,&current))result.status=TR_CODEC_SOURCE_CHANGED;
+        else if(output_file && (fstat(output,&current)!=0 || !tr_same_output(&destination,&current,result.written_bytes)))result.status=TR_CODEC_OUTPUT_CHANGED;
     }
     return result;
 }
-tr_gzip_result tr_gzip_expand_fd(int input,int output,uint64_t max_input,uint64_t max_output,
-    uint32_t max_members,tr_gzip_cancel cancel,void *context) {
+tr_codec_result tr_gzip_expand_fd(int input,int output,uint64_t max_input,uint64_t max_output,
+    uint32_t max_members,tr_codec_cancel cancel,void *context) {
     tr_io io={.read=tr_read,.write=tr_write};
-    return tr_expand_core(input,output,max_input,max_output,max_members,cancel,context,io,TR_GZIP_HEAP_LIMIT,1);
+    return tr_expand_core(TR_DECODE_GZIP,input,output,max_input,max_output,max_members,cancel,context,io,TR_GZIP_HEAP_LIMIT,1);
 }
 
-typedef struct tr_consumer { tr_gzip_consume callback; void *context; } tr_consumer;
+typedef struct tr_consumer { tr_codec_consume callback; void *context; } tr_consumer;
 static ssize_t tr_consume(void *context,int fd,const void *data,size_t size,off_t offset) {
     (void)fd;(void)offset;tr_consumer *consumer=context;
     if(size>TR_GZIP_OUTPUT_CHUNK || !consumer->callback(consumer->context,data,(uint32_t)size)){errno=EIO;return -1;}
     return (ssize_t)size;
 }
-tr_gzip_result tr_gzip_consume_fd(int input,uint64_t max_input,uint64_t max_output,
-    uint32_t max_members,tr_gzip_cancel cancel,tr_gzip_consume consume,void *context) {
-    if(!consume){tr_gzip_result invalid={.status=TR_GZIP_INVALID_INPUT};return invalid;}
+tr_codec_result tr_gzip_consume_fd(int input,uint64_t max_input,uint64_t max_output,
+    uint32_t max_members,tr_codec_cancel cancel,tr_codec_consume consume,void *context) {
+    if(!consume){tr_codec_result invalid={.status=TR_CODEC_INVALID_INPUT};return invalid;}
     tr_consumer consumer={.callback=consume,.context=context};
     tr_io io={.read=tr_read,.write=tr_consume,.context=&consumer};
-    return tr_expand_core(input,-1,max_input,max_output,max_members,cancel,context,io,TR_GZIP_HEAP_LIMIT,0);
+    return tr_expand_core(TR_DECODE_GZIP,input,-1,max_input,max_output,max_members,cancel,context,io,TR_GZIP_HEAP_LIMIT,0);
+}
+
+tr_codec_result tr_bzip2_expand_fd(int input,int output,uint64_t max_input,uint64_t max_output,
+    uint32_t max_members,tr_codec_cancel cancel,void *context) {
+    tr_io io={.read=tr_read,.write=tr_write};
+    return tr_expand_core(TR_DECODE_BZIP2,input,output,max_input,max_output,max_members,cancel,context,io,UINT64_C(4)<<20,1);
+}
+tr_codec_result tr_bzip2_consume_fd(int input,uint64_t max_input,uint64_t max_output,
+    uint32_t max_members,tr_codec_cancel cancel,tr_codec_consume consume,void *context) {
+    if(!consume){tr_codec_result invalid={.status=TR_CODEC_INVALID_INPUT};return invalid;}
+    tr_consumer consumer={.callback=consume,.context=context};
+    tr_io io={.read=tr_read,.write=tr_consume,.context=&consumer};
+    return tr_expand_core(TR_DECODE_BZIP2,input,-1,max_input,max_output,max_members,cancel,context,io,UINT64_C(4)<<20,0);
 }
