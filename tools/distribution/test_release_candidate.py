@@ -4,6 +4,18 @@ from distribution import release_candidate as c
 
 
 class ReleaseCandidateTests(unittest.TestCase):
+    def test_intel_case_is_immutable_and_limited_to_the_direct_public_edition(self):
+        intel=c.configuration(channel='developer-id',policy='local-user-v1',version='0.2.0',build='95',
+                              shipping=True,public_updater=True,architecture='x86_64')
+        self.assertEqual(c.configuration(intel,architecture='x86_64'),intel)
+        with self.assertRaises(ValueError):c.configuration(intel,architecture='arm64')
+        for channel,policy,public in [('app-store','sandbox-selected-v1',False),
+                                      ('developer-id','sandbox-selected-v1',True),
+                                      ('developer-id','local-user-v1',False)]:
+            with self.subTest(channel=channel,policy=policy,public=public),self.assertRaises(ValueError):
+                c.configuration(channel=channel,policy=policy,version='0.2.0',build='95',
+                                shipping=True,public_updater=public,architecture='x86_64')
+
     def test_public_mode_is_a_fresh_scoped_local_candidate_and_cannot_publish(self):
         request = dict(channel='developer-id', version='0.1.5', build='87', local=True, public_updater=True)
         public = c.configuration(**request)

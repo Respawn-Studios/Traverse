@@ -20,9 +20,11 @@ if __name__ == '__main__':
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--source-kit', type=Path)
     action.add_argument('--cask', action='store_true', help='Render a local Cask from an already prepared shipping feed')
+    parser.add_argument('--intel-case',help='Add the matching independently prepared Intel package to the Cask')
     args = parser.parse_args()
     case = require_case(args.case)
     if args.cask:
-        public_feed.prepare_cask(case)
+        public_feed.prepare_cask(case,require_case(args.intel_case) if args.intel_case else None)
     else:
+        if args.intel_case:parser.error('--intel-case requires --cask')
         prepare(case, args.source_kit)

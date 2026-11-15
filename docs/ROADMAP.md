@@ -30,7 +30,8 @@ our first public release:
   you can review before sharing, and a source tree contributors can find their
   way around.
 
-Our starting point is Apple Silicon and macOS 15 or later. The
+We started on Apple Silicon; 0.2.0 brings a separate Intel package too, with
+macOS 15 or later required. The
 [release notes](https://github.com/Respawn-Studios/Traverse/releases) tell you
 what's in each downloadable build; the [feature guide](guides/features.md) goes
 deeper into the current app.
@@ -73,8 +74,9 @@ wall of numbers.
   Something with the ease of AirDrop, across more of your devices.
 - **More power at your fingertips.** File comparison and hashes, link tools,
   useful Git context, terminal handoffs and custom actions.
-- **More Macs.** We'd love to bring Traverse to Intel too. That means qualifying
-  the app and its bundled workers together, not just changing a download label.
+- **More hardware stories.** Intel packages join Apple Silicon in 0.2.0. We'd
+  love feedback from different Macs, drives and enclosures to make the next
+  round of compatibility improvements practical.
 
 ## Help shape the journey
 

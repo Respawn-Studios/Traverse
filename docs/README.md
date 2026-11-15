@@ -8,6 +8,8 @@ notes are nearby when you want to look under the hood.
 
 - [Feature guide](guides/features.md): panes, file operations, archives, editing,
   servers, storage analysis and drive tools.
+- [Wiki walkthroughs](https://github.com/Respawn-Studios/Traverse/wiki): practical steps for everyday tasks.
+- [Changelog](../CHANGELOG.md): the public release history.
 - [Privacy](../PRIVACY.md): local processing, optional crash reports and networking.
 - [Roadmap](ROADMAP.md): release priorities and future directions.
 - [Security](../SECURITY.md): private vulnerability reporting.

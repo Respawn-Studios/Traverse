@@ -26,7 +26,7 @@ def source_membership_exceptions():
 
 def generate(*, destination: Path | None = None, traverse: bool = False, direct: bool = False,
              direct_access_qualification: bool = False, private_updater: bool = False,
-             public_updater: bool = False, direct_shipping: bool = False) -> None:
+             public_updater: bool = False, direct_shipping: bool = False, architecture: str = 'arm64') -> None:
     # The distribution project is generated under .build. Never rewrite the
     # owner's development project to select a different name/signing channel.
     product = "Traverse" if traverse else "Mac Explorer"
@@ -69,13 +69,14 @@ def generate(*, destination: Path | None = None, traverse: bool = False, direct:
     signing_config = ("Distribution/TraverseDirect.xcconfig" if direct else "Distribution/Traverse.xcconfig") if traverse else "App/Config/DevelopmentSigning.xcconfig"
     if direct_access_qualification:
         signing_config = "Distribution/TraverseDirectQualification.xcconfig"
+    updater_info = None
     if updater:
         signing_config = (("Distribution/TraverseLocalUserPublicShipping.xcconfig" if direct_shipping
             else "Distribution/TraverseLocalUserPublicUpdater.xcconfig") if direct_access_qualification
             else "Distribution/TraversePublicUpdater.xcconfig") if public_updater else "Distribution/TraverseUpdater.xcconfig"
         from distribution.sparkle import prepare
-        prepare(public=public_updater, local_user=direct_access_qualification,
-            direct_shipping=direct_shipping)
+        updater_info = prepare(public=public_updater, local_user=direct_access_qualification,
+            direct_shipping=direct_shipping,architecture=architecture)
         add("sparkle", 'isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = ".build/traverse-release/tooling/sparkle-2.10.0/unpacked/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"; sourceTree = "<group>";')
         add("sparkle-build", f'isa = PBXBuildFile; fileRef = {ids["sparkle"]};')
         add("updates", f'isa = XCSwiftPackageProductDependency; package = {ids["package"]}; productName = DirectUpdates;')
@@ -116,6 +117,8 @@ def generate(*, destination: Path | None = None, traverse: bool = False, direct:
         # also rename Swift package products and cause output collisions.
         common_target = 'ENABLE_USER_SCRIPT_SANDBOXING = NO; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; PRODUCT_NAME = Traverse; SWIFT_EMIT_LOC_STRINGS = NO; SWIFT_STRICT_CONCURRENCY = complete;'
     common_target += ' MAC_EXPLORER_HELPER_OUTPUT_PROFILE = network; FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/.build/crash-reporter-tooling/derived/Build/Products/Release-macosx");'
+    if updater_info is not None:
+        common_target += ' INFOPLIST_FILE = ' + json.dumps(str(updater_info)) + ';'
     for scope, settings in (("project", common_project), ("target", common_target)):
         for mode in ("debug", "release"):
             extra = 'DEBUG_INFORMATION_FORMAT = dwarf; ONLY_ACTIVE_ARCH = YES; OTHER_SWIFT_FLAGS = "$(inherited) -j4 -driver-batch-count 4"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";' if mode == "debug" else 'DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; SWIFT_COMPILATION_MODE = wholemodule;'

@@ -19,6 +19,11 @@ sys.dont_write_bytecode = True
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from distribution.traverse_packet import REPO, TOOLING, require_case, directory, put, audit
 from distribution import preflight, release_candidate
+from build_architecture import named
+
+def case_architecture(case):
+    config=release_candidate.configuration(json.loads((case/'configuration.json').read_bytes()))
+    return named(config.get('architecture','arm64')).name
 
 def qualified_metadata(case,info):
     version,build=info['CFBundleShortVersionString'],str(info['CFBundleVersion'])
@@ -48,6 +53,9 @@ def app_facts(case,app):
     info=plistlib.loads((app/'Contents/Info.plist').read_bytes())
     qualified_metadata(case,info)
     if info['LSMinimumSystemVersion']!='15.0':raise RuntimeError('Unexpected release metadata')
+    report=preflight.inspect(app,'com.respawnstudios.traverse','CDLNJRG82U','developer-id')
+    if any(not check['passed'] for check in report['checks']):
+        raise RuntimeError('DMG app does not match its signed architecture and mandatory helpers')
     return facts['CDHash']
 
 def release_metadata(case):
@@ -56,7 +64,7 @@ def release_metadata(case):
 
 def image_path(case):
     version,build=release_metadata(case)
-    return case/'dmg'/f'Traverse-{version}-{build}-arm64.dmg'
+    return case/'dmg'/f'Traverse-{version}-{build}-{case_architecture(case)}.dmg'
 
 def working_size_mib(payload_bytes):
     # APFS layout space is a packaging temporary, not the final download size.
@@ -196,7 +204,8 @@ def finish(case):
     with image.open('rb') as f:
         for block in iter(lambda:f.read(1024*1024),b''):digest.update(block)
     version,build=release_metadata(case)
-    manifest={'schema':1,'artifacts':[{'id':'traverse-'+version.replace('.','-')+'-'+build+'-arm64','filename':image.name,'bytes':image.stat().st_size,'sha256':digest.hexdigest(),'version':version,'build':build,'architecture':'arm64','minimumOS':'15.0','admission':{'schema':1,'team':'CDLNJRG82U','bundleID':'com.respawnstudios.traverse','version':version,'build':build,'channel':'Developer ID','gatekeeper':'accepted','stapled':True,'timestamped':True,'appCDHash':cdhash,'checkedAt':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'container':'dmg','containerGatekeeper':'accepted','containerStapled':True}}]}
+    arch=case_architecture(case)
+    manifest={'schema':1,'artifacts':[{'id':'traverse-'+version.replace('.','-')+'-'+build+'-'+arch,'filename':image.name,'bytes':image.stat().st_size,'sha256':digest.hexdigest(),'version':version,'build':build,'architecture':arch,'minimumOS':'15.0','admission':{'schema':1,'team':'CDLNJRG82U','bundleID':'com.respawnstudios.traverse','version':version,'build':build,'channel':'Developer ID','gatekeeper':'accepted','stapled':True,'timestamped':True,'appCDHash':cdhash,'checkedAt':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'container':'dmg','containerGatekeeper':'accepted','containerStapled':True}}]}
     put(output/'manifest.json',manifest)
     print(json.dumps({'dmg':image.name,'bytes':image.stat().st_size,'sha256':digest.hexdigest(),'notarized':True,'mountedReadback':True}))
 

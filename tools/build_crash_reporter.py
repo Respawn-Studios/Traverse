@@ -17,6 +17,7 @@ import uuid
 
 sys.dont_write_bytecode = True
 from distribution.artifact_files import read
+from distribution.helper_symbols import uuids
 
 REPO = Path(__file__).resolve().parents[1]
 VENDOR = REPO / "Vendor/PLCrashReporter"
@@ -171,7 +172,7 @@ def toolchain(env: dict) -> dict:
 
 
 def build_identity(env: dict) -> dict:
-    return dict(schema=1, version="1.12.2", commit=COMMIT, architecture="arm64", minimumOS="15.0",
+    return dict(schema=2, version="1.12.2", commit=COMMIT, architectures=["arm64", "x86_64"], minimumOS="15.0",
                 sourceSHA256=verify_sources(), builderSHA256=sha(read(Path(__file__), 128 << 10)), toolchain=toolchain(env))
 
 
@@ -185,6 +186,10 @@ def verify_prepared(*, identity: dict | None = None) -> dict:
         raise RuntimeError("Prepared crash reporter is stale; run the preparation step")
     if value.get("framework") != snapshot(FRAMEWORK, framework=True) or value.get("symbols") != snapshot(SYMBOLS):
         raise RuntimeError("Prepared crash reporter product/symbol identity differs")
+    binary_uuids = uuids(FRAMEWORK / "Versions/A/CrashReporter")
+    if set(binary_uuids) != {"arm64", "x86_64"} or binary_uuids != value.get("UUIDs") \
+            or binary_uuids != uuids(SYMBOLS / "Contents/Resources/DWARF/CrashReporter"):
+        raise RuntimeError("Crash reporter requires matching symbols for both Mac architectures")
     return value
 
 
@@ -197,7 +202,7 @@ def prepare() -> dict:
             pass
     command = [identity["toolchain"]["xcodebuild"], "-project", str(VENDOR / "CrashReporter.xcodeproj"),
                "-scheme", "CrashReporter macOS Framework", "-configuration", "Release", "-sdk", "macosx",
-               "-arch", "arm64", "-derivedDataPath", str(directory(ROOT / "derived")),
+               "ARCHS=arm64 x86_64", "ONLY_ACTIVE_ARCH=NO", "-derivedDataPath", str(directory(ROOT / "derived")),
                "-clonedSourcePackagesDirPath", str(directory(ROOT / "packages")),
                "-packageCachePath", str(directory(ROOT / "package-cache")),
                "-disableAutomaticPackageResolution", "-skipPackageUpdates", "-jobs", "4",
@@ -213,12 +218,11 @@ def prepare() -> dict:
         raise RuntimeError("Crash reporter inputs changed during compilation")
     binary = FRAMEWORK / "Versions/A/CrashReporter"
     symbols = SYMBOLS / "Contents/Resources/DWARF/CrashReporter"
-    binary_uuid = output(["/usr/bin/xcrun", "dwarfdump", "--uuid", str(binary)], env).split(" (")[0]
-    symbol_uuid = output(["/usr/bin/xcrun", "dwarfdump", "--uuid", str(symbols)], env).split(" (")[0]
-    if not binary_uuid.startswith("UUID: ") or binary_uuid != symbol_uuid:
+    binary_uuids = uuids(binary)
+    if set(binary_uuids) != {"arm64", "x86_64"} or binary_uuids != uuids(symbols):
         raise RuntimeError("Crash reporter framework and dSYM UUID differ")
     value = dict(passed=True, inputs=identity, framework=snapshot(FRAMEWORK, framework=True),
-                 symbols=snapshot(SYMBOLS), uuid=binary_uuid.removeprefix("UUID: "), log=log.relative_to(REPO).as_posix())
+                 symbols=snapshot(SYMBOLS), UUIDs=binary_uuids, log=log.relative_to(REPO).as_posix())
     fd, temporary = tempfile.mkstemp(prefix=".framework-", dir=ROOT)
     try:
         with os.fdopen(fd, "w") as stream:

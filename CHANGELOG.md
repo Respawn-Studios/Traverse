@@ -1,0 +1,67 @@
+# Changelog
+
+Public Traverse releases live here. Each download also has its own notes on
+[GitHub Releases](https://github.com/Respawn-Studios/Traverse/releases).
+Earlier private-beta version numbers belong to a separate release history.
+
+## [0.2.0] - 2026-11-15
+
+### Added
+
+- Separate Intel and Apple Silicon packages built from one source revision.
+  The app and every bundled worker match the selected CPU. macOS 15 remains
+  the minimum; Intel compatibility was exercised under Rosetta, with native
+  Intel testing still welcome.
+- Architecture-specific signed update feeds and automatic package selection in
+  the Homebrew tap. Existing Apple Silicon clients keep their established feed.
+- Wiki walkthroughs for the workspace, servers, archives, editing, storage and
+  recovery, plus this public changelog.
+
+### Security
+
+- Updated russh to 0.65.1 and Tokio to 1.54.1 across the production and retained
+  qualification lockfiles. The Windows-only transitive Pageant dependency is
+  also patched to 0.2.5; it is not shipped in the Mac app.
+- Refreshed checksum-bound source and license notices for both macOS targets.
+- Release admission binds the actual app/helper architecture and signed marker
+  to the requested case before notarization and installer readback.
+
+Build 95. Existing file-operation protections and access policies are unchanged.
+
+## [0.1.1] - 2026-11-15
+
+### Fixed
+
+- A successful update check keeps “You're up to date” in Help after its alert
+  closes, instead of showing a misleading failure.
+- About uses public-release wording alongside the exact version and build.
+- The optional support invitation appears after the second launch, remembers
+  each released update and respects its local opt-out. Every feature stays free.
+
+Build 94. File operations and access policies are unchanged from 0.1.0.
+
+## [0.1.0] - 2026-11-15
+
+Our first public, open-source release. Build 93 targets Apple Silicon and
+macOS 15 or later.
+
+### Added
+
+- Tabs, up to four panes, saved workspaces and an editable address with suggestions.
+- Local file operations, collision choices, native macOS Trash and guarded Undo.
+- SFTP and SMB transfers, supported server actions and text editing with saved
+  versions and protection against overwriting a changed remote file.
+- ZIP/TAR browsing, creation and extraction, plus changes inside supported ZIPs.
+- A native text editor with syntax colours, Find/Replace, smart indentation and
+  familiar Undo/Redo.
+- Metadata-based storage analysis, saved results and supported drive tools.
+- Local crash reports with a reviewed GitHub issue draft, a signed updater and
+  Homebrew installation.
+
+The [feature guide](docs/guides/features.md) covers formats, limits and supported
+workflows. Intel builds, broad external-drive SMART support and physical drive
+formatting were not qualified for this release.
+
+[0.2.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.2.0
+[0.1.1]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.1.1
+[0.1.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.1.0

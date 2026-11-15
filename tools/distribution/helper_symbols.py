@@ -73,10 +73,11 @@ def health_service_declared(info: dict) -> bool:
         and parent == store_helpers.PARENT and channel == 'developer-id' \
         and 'TraverseDirectStorageNamespace' not in info \
         and info.get('MacExplorerAccessPolicy') == store_helpers.SCOPED and valid_updater
+    from build_architecture import direct_app_architecture
     direct_keys = dict(TraverseDirectPublicUpdaterVersion='2.10.0',
         TraverseDirectStorageNamespace='com.respawnstudios.traverse.direct',
         MacExplorerFolderServices='public-folders-service-v1',
-        SUFeedURL='https://respawn-studios.com/products/traverse/direct-updates/appcast.xml',
+        SUFeedURL=direct_app_architecture(info).direct_feed_url,
         SUPublicEDKey='MG4sBFr76ad6D4nGo+i2VuZ4hxVMEQZToBUjYyui3IA=',
         SUVerifyUpdateBeforeExtraction=True, SURequireSignedFeed=True,
         SUSignedFeedFailureExpirationInterval=0, SUScheduledCheckInterval=21600,
@@ -187,6 +188,9 @@ def cargo_bundle(binary: Path) -> Path:
     build_path(binary)
     expected_roots = {REPO / '.build/traverse-release/tooling' / name / 'release'
                       for name in ('rust-smb', 'rust-sftp')}
+    expected_roots |= {REPO / '.build/traverse-release/tooling' / name / target / 'release'
+                       for name in ('rust-smb', 'rust-sftp')
+                       for target in ('aarch64-apple-darwin', 'x86_64-apple-darwin')}
     if binary.parent not in expected_roots:
         raise ValueError('Unknown Cargo symbol output root')
     bundle = binary.with_name(binary.name + '.dSYM')

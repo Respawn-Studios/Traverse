@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/Respawn-Studios/Traverse/releases/latest"><img src="https://img.shields.io/github/v/release/Respawn-Studios/Traverse?color=007AFF" alt="Latest Traverse release"></a>
   <a href="docs/engineering/DEVELOPMENT_SETUP.md"><img src="https://img.shields.io/badge/macOS-15%2B-007AFF?logo=apple&amp;logoColor=white" alt="macOS 15 or later"></a>
-  <a href="docs/engineering/DEVELOPMENT_SETUP.md"><img src="https://img.shields.io/badge/Apple-Silicon-555555" alt="Apple Silicon"></a>
+  <a href="docs/engineering/DEVELOPMENT_SETUP.md"><img src="https://img.shields.io/badge/architecture-Apple%20Silicon%20%2B%20Intel-555555" alt="Apple Silicon and Intel"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-2EA043" alt="GPLv3 license"></a>
   <a href="https://discord.gg/UdKp2uQBQy"><img src="https://img.shields.io/badge/Discord-join_us-5865F2?logo=discord&amp;logoColor=white" alt="Join the community on Discord"></a>
   <a href="https://buymeacoffee.com/respawnstudios"><img src="https://img.shields.io/badge/Buy_Me_a_Coffee-support_the_studio-FFDD00?logo=buymeacoffee&amp;logoColor=black" alt="Support Respawn Studios on Buy Me a Coffee"></a>
@@ -25,7 +25,7 @@
 
 <p align="center">
   Traverse is <strong>free and open source under <a href="LICENSE">GPLv3</a></strong> for<br>
-  <strong>Apple Silicon Macs running macOS 15 or later</strong>.<br>
+  <strong>Apple Silicon and Intel Macs running macOS 15 or later</strong>.<br>
   This is an early release, and we'd love your feedback. Check the release notes<br>
   for what's included in your download, especially an older beta.
 </p>
@@ -33,6 +33,8 @@
 <p align="center">
   <a href="https://github.com/Respawn-Studios/Traverse/releases">Releases</a> ·
   <a href="docs/guides/features.md">Feature guide</a> ·
+  <a href="https://github.com/Respawn-Studios/Traverse/wiki">Wiki</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="PRIVACY.md">Privacy</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="https://discord.gg/UdKp2uQBQy">Discord</a>
@@ -165,8 +167,9 @@ You can also install it from our
 brew install --cask respawn-studios/tap/traverse
 ```
 
-Requires Apple Silicon and macOS 15 or later. Intel and Universal builds are
-not yet qualified. Coming from a private beta? Finish pending operations there
+Requires macOS 15 or later. Releases from 0.2.0 offer separate Apple Silicon and
+Intel downloads; Homebrew chooses the matching package. Intel compatibility is
+checked under Rosetta, with native Intel feedback welcome. Coming from a private beta? Finish pending operations there
 and quit it before installing. The direct edition keeps separate app data;
 earlier settings and recovery records are not silently migrated.
 
@@ -192,8 +195,8 @@ python3 -B tools/dev.py run --skip-build
 [Contributing](CONTRIBUTING.md) covers source layout and relevant checks.
 [Documentation](docs/README.md) covers the browser, file operations and architecture.
 Bug fixes, clearer documentation and feature ideas are welcome.
-Contributors keep their copyright and contribute under GPLv3. No CLA or
-copyright assignment is required.
+
+You keep your copyright. Contributions use GPLv3; no CLA is required.
 
 ## License and community
 

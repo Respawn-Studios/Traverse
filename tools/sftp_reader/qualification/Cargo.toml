@@ -41,7 +41,7 @@ path = "src/bin/download_worker.rs"
 required-features = ["download-qualification"]
 
 [dependencies]
-russh = { version = "=0.64.1", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "=0.65.1", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = { version = "=3.0.1", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt", "io-util", "net", "sync", "time", "macros"] }
 rand = "=0.10.2"

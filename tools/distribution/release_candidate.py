@@ -1,5 +1,6 @@
 """Immutable release-case inputs. No signing, filesystem or account actions."""
 import re
+from build_architecture import named, direct_app_architecture
 
 DIRECT_SHIPPING_PURPOSE = 'direct-shipping-v1'
 RELEASE_PURPOSE_KEY = 'MacExplorerReleasePurpose'
@@ -24,7 +25,7 @@ def settings(override):
     return ['MARKETING_VERSION=' + checked['version'], 'CURRENT_PROJECT_VERSION=' + checked['build']]
 
 
-def configuration(saved=None, *, channel=None, policy=None, version=None, build=None, local=False, shipping=False, private_updater=False, public_updater=False):
+def configuration(saved=None, *, channel=None, policy=None, version=None, build=None, local=False, shipping=False, private_updater=False, public_updater=False, architecture=None):
     if local and shipping:
         raise ValueError('Local review and shipping are distinct case purposes')
     requested = version_override(version, build)
@@ -32,6 +33,8 @@ def configuration(saved=None, *, channel=None, policy=None, version=None, build=
         if not isinstance(saved, dict):
             raise ValueError('Invalid release configuration')
         result = dict(saved)
+        if architecture is not None and named(architecture).name != result.get('architecture', 'arm64'):
+            raise ValueError('A release case cannot switch architectures')
         if channel is not None and channel != result.get('channel'):
             raise ValueError('A release case cannot switch distribution channels')
         if policy is not None and policy != result.get('accessPolicy', 'sandbox-selected-v1'):
@@ -49,6 +52,8 @@ def configuration(saved=None, *, channel=None, policy=None, version=None, build=
     else:
         result = dict(channel=channel or 'app-store', accessPolicy=policy or 'sandbox-selected-v1',
                       qualificationOnly=policy == 'local-user-v1' and not shipping)
+        if architecture is not None:
+            result['architecture'] = named(architecture).name
         if requested is not None and not (local or shipping):
             raise ValueError('Version overrides require an explicit case purpose')
         if local or shipping:
@@ -71,6 +76,9 @@ def configuration(saved=None, *, channel=None, policy=None, version=None, build=
         and (selected!='developer-id'or access!='sandbox-selected-v1')):
         raise ValueError('The private updater is direct-only and retains the sandbox policy')
     public = result.get('publicUpdater', False)
+    arch = named(result.get('architecture', 'arm64'))
+    if arch.name == 'x86_64' and (selected != 'developer-id' or access != 'local-user-v1' or public is not True):
+        raise ValueError('Intel qualification requires the direct public edition')
     direct_shipping = access == 'local-user-v1' and result.get('shippingCandidate') is True
     if direct_shipping:
         if selected != 'developer-id' or result.get('releasePurpose') != DIRECT_SHIPPING_PURPOSE \
@@ -121,6 +129,9 @@ def shipping_metadata(saved, info, channel='developer-id'):
         raise ValueError('Exact fresh shipping case and channel required')
     admit_action(config,'notarize' if channel=='developer-id' else 'upload')
     verify_observed(info,config.get('versionOverride'),config.get('releasePurpose'))
+    if config.get('publicUpdater') is True and config.get('accessPolicy')=='local-user-v1' \
+            and direct_app_architecture(info).name!=config.get('architecture','arm64'):
+        raise ValueError('Signed app architecture differs from its immutable release case')
     if info.get('CFBundleIdentifier') != 'com.respawnstudios.traverse' \
             or info.get('MacExplorerAccessPolicy') != config.get('accessPolicy','sandbox-selected-v1') \
             or info.get('MacExplorerDistributionChannel') != channel:

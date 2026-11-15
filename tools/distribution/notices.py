@@ -22,7 +22,7 @@ from distribution.artifact_files import read
 from smb_reader.packet import TOOLCHAIN,TOOLING,environment
 from smb_reader.vendor_verified_source import verify
 
-TARGET='aarch64-apple-darwin'
+TARGETS=('aarch64-apple-darwin','x86_64-apple-darwin')
 LOCK=REPO/'tools/smb_reader/smb2-browser/Cargo.lock'
 OUTPUT=REPO/'Distribution'
 ALLOWED={'MIT','MIT OR Apache-2.0','Apache-2.0 OR MIT','Unlicense OR MIT',
@@ -132,10 +132,10 @@ def supplemental_notices(directory,package,locked,checks):
         texts[row['sha256']]=data.decode('utf-8');sources.append(dict(name=name,sha256=row['sha256'],provenance=row))
     return sources,texts,record['publishedVCS']
 
-def graph_components(lock_path,tooling,env,role):
+def graph_components(lock_path,tooling,env,role,target=TARGETS[0]):
     lock=read(lock_path);locked=lock_checksums(lock)
     raw=subprocess.check_output([str(TOOLCHAIN/'bin/cargo'),'metadata','--manifest-path',str(lock_path.with_name('Cargo.toml')),
-        '--locked','--offline','--format-version','1','--filter-platform',TARGET],cwd=REPO,env=env,stderr=subprocess.PIPE,timeout=30)
+        '--locked','--offline','--format-version','1','--filter-platform',target],cwd=REPO,env=env,stderr=subprocess.PIPE,timeout=30)
     if len(raw)>4<<20:raise RuntimeError('Dependency metadata bound')
     metadata=json.loads(raw);nodes={n['id']:n for n in metadata['resolve']['nodes']}
     root=metadata['resolve']['root'];pending=[root];reachable=set()
@@ -170,7 +170,7 @@ def graph_components(lock_path,tooling,env,role):
         if supplement is not None:component['publishedVCSForSupplement']=supplement
         components.append(component)
     if read(lock_path)!=lock:raise RuntimeError('Dependency lock changed during component preparation')
-    return components,texts,dict(role=role,path=str(lock_path.relative_to(REPO)),sha256=sha(lock))
+    return components,texts,dict(role=role,target=target,path=str(lock_path.relative_to(REPO)),sha256=sha(lock))
 
 def merge_components(graphs):
     found={};texts={};locks=[]
@@ -206,8 +206,12 @@ def build():
     if spec is None or spec.loader is None:raise RuntimeError('Isolated SFTP notice environment')
     packet=importlib.util.module_from_spec(spec);spec.loader.exec_module(packet)
     components,texts,locks=merge_components([
-        graph_components(LOCK,TOOLING,environment(),'smb'),
-        graph_components(REPO/'tools/sftp_reader/qualification/Cargo.lock',packet.TOOLING,packet.rust_environment(packet.directory(packet.TOOLING/'notices')),'sftp')])
+        graph_components(lock_path,tooling,env,role,target)
+        for lock_path,tooling,env,role in (
+            (LOCK,TOOLING,environment(),'smb'),
+            (REPO/'tools/sftp_reader/qualification/Cargo.lock',packet.TOOLING,
+             packet.rust_environment(packet.directory(packet.TOOLING/'notices')),'sftp'))
+        for target in TARGETS])
     crash_component,crash_texts=crash_reporter_component()
     components.append(crash_component);components.sort(key=lambda item:(item['name'],item['version']))
     texts.update(crash_texts)
@@ -230,7 +234,8 @@ def build():
     # notice bytes remain in the component provenance alongside this output hash.
     document=body.replace('\r\n','\n').replace('\r','\n').encode('utf-8')
     if len(document)>4<<20:raise RuntimeError('Bundled notice bound exceeded')
-    manifest=dict(version=1,target=TARGET,lockSHA256=sha(lock),dependencyGraphs=locks,rustCompilerSHA256=sha(read(TOOLCHAIN/'bin/rustc',32<<20)),
+    manifest=dict(version=1,targets=list(TARGETS),lockSHA256=sha(lock),dependencyGraphs=locks,
+        rustToolchainManifestSHA256=sha(read(REPO/'tools/rust-toolchain.json',65536)),
         rustLibraryCopyrightSHA256=sha(standard),components=components,noticeSHA256=sha(document),
         includesBuildDependencies=True,localAbsolutePathsIncluded=False,generatedNetworkRequests=0)
     if read(LOCK)!=lock or any(sha(read(REPO/item['path']))!=item['sha256'] for item in locks):raise RuntimeError('Dependency lock changed during notice preparation')
@@ -259,6 +264,6 @@ def main():
         for name,data in zip(['ThirdPartyNotices.txt','ThirdPartyManifest.json'],values):write_atomic(OUTPUT/name,data)
     else:values=verify_outputs()
     manifest=json.loads(values[1]);print(json.dumps(dict(passed=True,components=len(manifest['components']),noticeBytes=len(values[0]),
-        target=TARGET,networkRequests=0)))
+        targets=list(TARGETS),networkRequests=0)))
 
 if __name__=='__main__':main()

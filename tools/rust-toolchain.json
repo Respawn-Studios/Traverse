@@ -1,20 +1,35 @@
 {
   "version": "1.99.1",
-  "target": "aarch64-apple-darwin",
   "date": "2026-10-15",
   "prefix": ".build/b06-toolchain/rust-1.99.1",
-  "components": [
-    {
-      "filename": "rustc-1.99.1-aarch64-apple-darwin.tar.xz",
-      "sha256": "23948a0a9c162fd2952defb3fb0462c44e8fcfd1a4ab8a274a1e1bdb2cf810a3"
-    },
-    {
-      "filename": "rust-std-1.99.1-aarch64-apple-darwin.tar.xz",
-      "sha256": "fe79d6ab5a0321de26463999d8c112b8ad3eafbcbcf822d66a2300b45dde1031"
-    },
-    {
-      "filename": "cargo-1.99.1-aarch64-apple-darwin.tar.xz",
-      "sha256": "685e563d94db1f003ffa5f5831439eec02569b9950b69867953c8213269c1eaf"
-    }
-  ]
+  "components": {
+    "aarch64-apple-darwin": [
+      {
+        "filename": "rustc-1.99.1-aarch64-apple-darwin.tar.xz",
+        "sha256": "23948a0a9c162fd2952defb3fb0462c44e8fcfd1a4ab8a274a1e1bdb2cf810a3"
+      },
+      {
+        "filename": "rust-std-1.99.1-aarch64-apple-darwin.tar.xz",
+        "sha256": "fe79d6ab5a0321de26463999d8c112b8ad3eafbcbcf822d66a2300b45dde1031"
+      },
+      {
+        "filename": "cargo-1.99.1-aarch64-apple-darwin.tar.xz",
+        "sha256": "685e563d94db1f003ffa5f5831439eec02569b9950b69867953c8213269c1eaf"
+      }
+    ],
+    "x86_64-apple-darwin": [
+      {
+        "filename": "rustc-1.99.1-x86_64-apple-darwin.tar.xz",
+        "sha256": "203feef2c2165d7dda1f30ccf75590f72a6abc52ce259ed1c418de84a6887698"
+      },
+      {
+        "filename": "rust-std-1.99.1-x86_64-apple-darwin.tar.xz",
+        "sha256": "484d5b88b424ddd29df196e1eb9420c8335bb5fac90a3c37140253345a8c65c4"
+      },
+      {
+        "filename": "cargo-1.99.1-x86_64-apple-darwin.tar.xz",
+        "sha256": "6636dabcec164909d1c6eb9e2c596148787c84f7d3a02ff68a141569077f80b5"
+      }
+    ]
+  }
 }

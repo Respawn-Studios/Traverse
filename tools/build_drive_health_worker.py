@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import plistlib
 import re
 import shutil
@@ -17,13 +16,15 @@ import subprocess
 from tempfile import TemporaryDirectory
 import uuid
 from bundle_helper import directory, publish, regular
+from build_architecture import selected
 from distribution import helper_symbols, remote_editor_qa, store_helpers
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / 'Packages/ExplorerKit/Sources/DriveHealthNative'
 WORKER = ROOT / 'Packages/ExplorerKit/Sources/DriveHealthWorker/main.c'
 SERVICE = ROOT / 'Packages/ExplorerKit/Sources/DriveHealthXPCService/main.c'
-OUTPUT = ROOT / '.build/drive-health'
+ARCHITECTURE = selected()
+OUTPUT = ARCHITECTURE.cache_directory(ROOT / '.build/drive-health')
 C_SOURCES = [NATIVE / name for name in ('THSMART.c', 'THAssociation.c', 'THAcquisition.c', 'THWire.c')]
 SOURCES = C_SOURCES + sorted((NATIVE / 'include').glob('*.h')) + [WORKER]
 SERVICE_SOURCES = C_SOURCES + sorted((NATIVE / 'include').glob('*.h')) + [SERVICE]
@@ -89,9 +90,7 @@ def build(*, symbols=False) -> Path:
 
 def _locked_build(output: Path, *, symbols=False) -> Path:
     sdk = subprocess.check_output(['/usr/bin/xcrun', '--show-sdk-path'], text=True, timeout=15).strip()
-    arch = platform.machine()
-    if arch not in ('arm64', 'x86_64'):
-        raise RuntimeError('Unsupported local Preview architecture')
+    arch = ARCHITECTURE.name
     fingerprint = dict(format='drive-health-preview-build-v1', sdk=sdk, architecture=arch,
                        builderSHA256=sha(Path(__file__).resolve()),
                        sourceSHA256={str(path.relative_to(ROOT)): sha(path) for path in SOURCES})
@@ -154,9 +153,7 @@ def _locked_build(output: Path, *, symbols=False) -> Path:
 def _locked_build_service(output: Path, parent_requirement: str) -> Path:
     """Compile the same acquisition/codec with the one-request libxpc entry."""
     sdk = subprocess.check_output(['/usr/bin/xcrun', '--show-sdk-path'], text=True, timeout=15).strip()
-    arch = platform.machine()
-    if arch not in ('arm64', 'x86_64'):
-        raise RuntimeError('Unsupported drive-health service architecture')
+    arch = ARCHITECTURE.name
     fingerprint = dict(format='drive-health-xpc-build-v1', sdk=sdk, architecture=arch,
         parentRequirement=parent_requirement, symbols=helper_symbols.POLICY,
         builderSHA256=sha(Path(__file__).resolve()),

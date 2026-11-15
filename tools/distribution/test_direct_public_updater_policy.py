@@ -16,6 +16,37 @@ class DirectPublicUpdaterPolicyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.info=sparkle.metadata(public=True,local_user=True)
 
+    def test_intel_case_rejects_an_arm_app_before_notary_or_dmg_admission(self):
+        root=Path(__file__).resolve().parents[2]/'.build/traverse-release'
+        root.mkdir(parents=True,exist_ok=True)
+        with TemporaryDirectory(dir=root) as temporary:
+            case=Path(temporary)
+            config=release_candidate.configuration(channel='developer-id',policy='local-user-v1',
+                version='0.2.0',build='95',shipping=True,public_updater=True,architecture='x86_64')
+            (case/'configuration.json').write_text(json.dumps(config))
+            app=case/'export/Traverse.app';(app/'Contents').mkdir(parents=True)
+            info=dict(sparkle.metadata(public=True,local_user=True,direct_shipping=True),
+                CFBundleShortVersionString='0.2.0',CFBundleVersion='95',
+                CFBundleIdentifier='com.respawnstudios.traverse',MacExplorerAccessPolicy='local-user-v1',
+                MacExplorerDistributionChannel='developer-id')
+            (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+            with mock.patch.object(notarize_direct_app,'inspect') as inspect:
+                with self.assertRaises(ValueError):notarize_direct_app.admit(case,app)
+                inspect.assert_not_called()
+            with self.assertRaises(ValueError):direct_dmg.qualified_metadata(case,info)
+            intel=dict(info,**{key:value for key,value in sparkle.metadata(public=True,local_user=True,
+                direct_shipping=True,architecture='x86_64').items() if key in ('SUFeedURL','TraverseDirectArchitecture')})
+            self.assertEqual(direct_dmg.qualified_metadata(case,intel),('0.2.0','95'))
+
+    def test_intel_metadata_binds_the_separate_feed_to_health_service_identity(self):
+        info=dict(sparkle.metadata(public=True,local_user=True,direct_shipping=True,architecture='x86_64'),
+            CFBundleIdentifier='com.respawnstudios.traverse',MacExplorerDistributionChannel='developer-id',
+            MacExplorerAccessPolicy='local-user-v1',MacExplorerStorageMode='portable',TraverseDriveHealthServiceVersion=1)
+        self.assertEqual(info['SUFeedURL'],'https://respawn-studios.com/products/traverse/direct-updates-intel/appcast.xml')
+        self.assertTrue(helper_symbols.health_service_declared(info))
+        for change in (dict(TraverseDirectArchitecture='arm64'),dict(SUFeedURL=self.info['SUFeedURL'])):
+            with self.subTest(change=change),self.assertRaises(ValueError):helper_symbols.health_service_declared(dict(info,**change))
+
     def test_distinct_metadata_and_no_sandbox_installer_settings(self):
         info=self.info
         self.assertEqual(info['SUFeedURL'],
@@ -76,7 +107,7 @@ class DirectPublicUpdaterPolicyTests(unittest.TestCase):
             project=Path(temporary)/'Traverse.xcodeproj'
             generate(destination=project,traverse=True,direct=True,
                 direct_access_qualification=True,public_updater=True,direct_shipping=True)
-            prepared.assert_called_once_with(public=True,local_user=True,direct_shipping=True)
+            prepared.assert_called_once_with(public=True,local_user=True,direct_shipping=True,architecture='arm64')
             self.assertIn('Distribution/TraverseLocalUserPublicShipping.xcconfig',
                 (project/'project.pbxproj').read_text())
             with mock.patch.object(traverse,'generate') as generated, \

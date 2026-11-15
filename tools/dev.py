@@ -28,6 +28,7 @@ from runtime_diagnostics import inspect as inspect_runtime_diagnostics
 from native_build_inputs import product_inputs, source_inputs
 from distribution.release_notes import verify_bundled as verify_release_notes
 from distribution.artifact_files import read as read_artifact
+from build_architecture import ARCHITECTURES, host, named
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / ".build"
@@ -156,9 +157,10 @@ def check_source_backups() -> None:
         raise RuntimeError("Move source backups into an ignored build root before building the app.")
 
 
-def build(*, preserve_project: bool = True, configuration: str = "debug") -> None:
+def build(*, preserve_project: bool = True, configuration: str = "debug", architecture: str | None = None) -> None:
     if configuration not in ("debug", "release"):
         raise ValueError("Unknown native build configuration")
+    target = host() if architecture is None else named(architecture)
     check_source_backups()
     verify_release_notes()
     # Check reviewed generated inputs before paying for a native compile.
@@ -178,7 +180,7 @@ def build(*, preserve_project: bool = True, configuration: str = "debug") -> Non
     sources = source_inputs()
     build_log = execute([
         "xcodebuild", "-project", str(ROOT / "MacExplorer.xcodeproj"),
-        "-scheme", "MacExplorer", "-configuration", configuration.title(), "-destination", f"platform=macOS,arch={os.uname().machine}",
+        "-scheme", "MacExplorer", "-configuration", configuration.title(), "-destination", f"platform=macOS,arch={target.name}",
         "-derivedDataPath", str(derived), "-clonedSourcePackagesDirPath", str(packages),
         "-resultBundlePath", str(result), "-skipPackageUpdates", "-disableAutomaticPackageResolution",
         "-disablePackageRepositoryCache", "-packageCachePath", str(local_directory("package-cache")),
@@ -186,7 +188,8 @@ def build(*, preserve_project: bool = True, configuration: str = "debug") -> Non
         "CODE_SIGN_STYLE=Manual",
         "COMPILER_INDEX_STORE_ENABLE=NO",
         "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
-        "ONLY_ACTIVE_ARCH=YES", "OTHER_SWIFT_FLAGS=$(inherited) -j4 -driver-batch-count 4",
+        "ONLY_ACTIVE_ARCH=YES", f"ARCHS={target.name}", f"TRAVERSE_BUILD_ARCH={target.name}",
+        "OTHER_SWIFT_FLAGS=$(inherited) -j4 -driver-batch-count 4",
         f"CLANG_MODULE_CACHE_PATH={local_directory('compiler-cache/xcode')}",
         f"SWIFT_MODULE_CACHE_PATH={local_directory('compiler-cache/xcode-swift')}",
         "build",
@@ -201,7 +204,7 @@ def build(*, preserve_project: bool = True, configuration: str = "debug") -> Non
     # Consumers pin this record and the exact product before any live check.
     manifest = local_directory("results") / f"current-build-{configuration}.json"
     temporary = manifest.with_name(manifest.name + "." + uuid.uuid4().hex)
-    value = dict(format="traverse-native-build-v1", passed=True, configuration=configuration.title(),
+    value = dict(format="traverse-native-build-v1", passed=True, configuration=configuration.title(), architecture=target.name,
                  application=str(application), sourceSHA256=sources, productSHA256=products,
                  buildLog=str(build_log.relative_to(ROOT)), signatureLog=str(signature_log.relative_to(ROOT)),
                  sourceUnchanged=True, completedUTC=datetime.now(timezone.utc).isoformat())
@@ -771,6 +774,8 @@ def main() -> int:
     native_build = subcommands.add_parser("build", help="Build the native app and verify local signature; create a project if missing.")
     native_build.add_argument("--configuration", choices=("debug", "release"), default="debug",
                               help="Native optimization configuration; Release uses separate build products.")
+    native_build.add_argument("--arch", choices=tuple(ARCHITECTURES), default=host().name,
+                              help="Build the app and every bundled helper for this Mac architecture.")
     native_build.add_argument("--preserve-project", action="store_true",
                               help="Build the existing Xcode project without regenerating owner edits.")
     native_build.add_argument("--regenerate-project", action="store_false", dest="preserve_project",
@@ -916,7 +921,7 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
     args = parser.parse_args()
     try:
         if args.command == "build":
-            build(preserve_project=args.preserve_project, configuration=args.configuration)
+            build(preserve_project=args.preserve_project, configuration=args.configuration, architecture=args.arch)
         elif args.command == "test":
             test(args.filter, args.configuration, serial=args.serial)
         elif args.command == "native-check":

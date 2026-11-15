@@ -20,8 +20,10 @@ from bundle_helper import publish
 from distribution import helper_symbols
 from distribution import remote_editor_qa
 from ssh_profiles import packet as profile_packet
+from build_architecture import selected
 
 RELEASE=helper_symbols.requested(os.environ)
+ARCHITECTURE=selected()
 BASE_FEATURES=('download-qualification','upload-qualification','folder-download-qualification')
 # The prepared editor backend is packaged in both configurations. Ordinary UI
 # activation remains gated separately; protocol mode needs an admitted permit.
@@ -33,7 +35,7 @@ if _agent_qa and not remote_editor_qa.admitted_build(os.environ):
 FEATURES=BASE_FEATURES+('inplace-edit-v1','remote-action-qualification')+(
     ('agent-qualification',) if _agent_qa else ())
 RELEASE_TOOLING=REPO/'.build/traverse-release/tooling'
-OUTPUT=(profile_packet.TOOLING/'ordinary-release-worker')if RELEASE else profile_packet.TOOLING/'ordinary-worker'
+OUTPUT=ARCHITECTURE.cache_directory((profile_packet.TOOLING/'ordinary-release-worker')if RELEASE else profile_packet.TOOLING/'ordinary-worker')
 PROJECT=REPO/'tools/sftp_reader/qualification'
 IDENTIFIER='local.macexplorer.sftp.metadata'
 def profile_audit():
@@ -58,7 +60,7 @@ def inputs():
     sources+=[p for p in (PROJECT/'src').rglob('*.rs') if not p.is_relative_to(PROJECT/'src/bin')]
     sources+=sorted((REPO/'tools/sftp_reader/catalog').glob('*'))
     sources += [REPO/'tools/smb_reader/catalog/StoreAuthority.c']
-    return dict(version=9,target='arm64-apple-macos15.0',features=list(FEATURES),inPlaceStartup=[3,7,1],metadataProtocolRemainsBodyFree=True,symbols=helper_symbols.POLICY if RELEASE else None,compilerSHA256=digest(TOOLCHAIN/'bin/rustc'),
+    return dict(version=10,target=ARCHITECTURE.clang_target,features=list(FEATURES),inPlaceStartup=[3,7,1],metadataProtocolRemainsBodyFree=True,symbols=helper_symbols.POLICY if RELEASE else None,compilerSHA256=digest(TOOLCHAIN/'bin/rustc'),
         sdk=subprocess.check_output(['/usr/bin/xcrun','--show-sdk-path'],text=True).strip(),sourceSHA256={str(p.relative_to(REPO)):digest(p) for p in sources if p.is_file()},
         **helper_symbols.rust_source_path_fingerprint(RELEASE))
 def compilation_audit(child,target,temporary):
@@ -99,6 +101,7 @@ def build():
     label=str(time.time_ns());log=OUTPUT/('build-'+label+'.log')
     with log.open('xb') as output:
         env=profile_packet.rust_environment(OUTPUT);env['SDKROOT']=wanted['sdk']
+        env.pop('CARGO_BUILD_TARGET',None)
         if RELEASE:
             # Reuse the release cache recognized by the shared symbol policy.
             # Registry/toolchain and all existing storage bounds stay unchanged.
@@ -106,7 +109,7 @@ def build():
             env['CARGO_PROFILE_RELEASE_DEBUG']='line-tables-only'
             env['CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO']='packed'
             helper_symbols.apply_cargo_rust_source_path_policy(env, RELEASE)
-        child=subprocess.Popen([str(TOOLCHAIN/'bin/cargo'),'build','--manifest-path',str(PROJECT/'Cargo.toml'),'--release','--locked','--offline','--features',','.join(FEATURES),'--bin','catalog_worker'],
+        child=subprocess.Popen([str(TOOLCHAIN/'bin/cargo'),'build','--manifest-path',str(PROJECT/'Cargo.toml'),'--release','--locked','--offline','--features',','.join(FEATURES),'--bin','catalog_worker',*ARCHITECTURE.cargo_arguments()],
             cwd=REPO,env=env,stdin=subprocess.DEVNULL,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
         began=time.monotonic()
         try:
@@ -120,7 +123,7 @@ def build():
                 os.killpg(child.pid,15)
                 try:child.wait(timeout=3)
                 except subprocess.TimeoutExpired:os.killpg(child.pid,9);child.wait(timeout=3)
-    source=(RELEASE_TOOLING/'rust-sftp/release/catalog_worker')if RELEASE else profile_packet.TOOLING/'target/release/catalog_worker'
+    source=ARCHITECTURE.cargo_product(RELEASE_TOOLING/'rust-sftp' if RELEASE else profile_packet.TOOLING/'target','catalog_worker')
     if source.is_symlink() or not source.is_file() or source.stat().st_nlink!=1 or source.stat().st_size>8*MIB:raise RuntimeError('Ordinary SFTP binary bound')
     if binary.is_symlink() or binary.exists() and (not binary.is_file() or binary.stat().st_nlink!=1):raise RuntimeError('Ordinary SFTP cache target')
     shutil.copyfile(source,binary);binary.chmod(0o755)

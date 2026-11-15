@@ -6,11 +6,20 @@ struct PublicUpdatePolicyTests {
     @Test func localUserFeedAndArchivesCannotCrossTheScopedPublicLane() throws {
         let direct = PublicUpdateEndpoint.directProduction
         let scoped = PublicUpdateEndpoint.production
-        let archive = try #require(URL(string:
-            "https://respawn-studios.com/products/traverse/direct-updates/archives/"
-            + String(repeating: "a", count: 64) + ".dmg"))
+        let archive = direct.feed.deletingLastPathComponent()
+            .appending(path: "archives/" + String(repeating: "a", count: 64) + ".dmg")
+        #if arch(arm64)
         #expect(direct.feed.absoluteString ==
             "https://respawn-studios.com/products/traverse/direct-updates/appcast.xml")
+        let otherArchitecture = try #require(URL(string:
+            "https://respawn-studios.com/products/traverse/direct-updates-intel/appcast.xml"))
+        #else
+        #expect(direct.feed.absoluteString ==
+            "https://respawn-studios.com/products/traverse/direct-updates-intel/appcast.xml")
+        let otherArchitecture = try #require(URL(string:
+            "https://respawn-studios.com/products/traverse/direct-updates/appcast.xml"))
+        #endif
+        #expect(!direct.permits(otherArchitecture))
         #expect(direct.permits(direct.feed))
         #expect(direct.permits(archive))
         #expect(!direct.permits(scoped.feed))

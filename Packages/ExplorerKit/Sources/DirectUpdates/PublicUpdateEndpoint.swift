@@ -4,8 +4,14 @@ import Foundation
 /// authorization value to place in a URL, header, or persistent store.
 public struct PublicUpdateEndpoint: Sendable, Equatable {
     public static let production = Self(origin: URL(string: "https://respawn-studios.com")!)
-    public static let directProduction = Self(origin: URL(string: "https://respawn-studios.com")!,
-                                              lane: "direct-updates")
+    #if arch(arm64)
+    private static let directLane = "direct-updates"
+    #elseif arch(x86_64)
+    private static let directLane = "direct-updates-intel"
+    #else
+    #error("Traverse requires a qualified Mac architecture")
+    #endif
+    public static let directProduction = Self(origin: URL(string: "https://respawn-studios.com")!, lane: directLane)
     public let origin: URL
     private let lane: String
 

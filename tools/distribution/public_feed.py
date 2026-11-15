@@ -21,6 +21,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from distribution import preflight, private_feed, release_candidate, release_notes, source_capsule, sparkle
 from distribution.traverse_packet import REPO, audit, directory, put, require_case
+from build_architecture import named, direct_app_architecture
 
 PUBLIC_KEY = 'MG4sBFr76ad6D4nGo+i2VuZ4hxVMEQZToBUjYyui3IA='
 ORIGIN = 'https://respawn-studios.com'
@@ -36,15 +37,17 @@ class FeedEdition(Enum):
     DIRECT = 'direct'
 
 
-def edition_contract(edition):
+def edition_contract(edition, architecture='arm64'):
+    arch=named(architecture)
     if edition is FeedEdition.SCOPED:
+        if arch.name!='arm64':raise ValueError('The scoped edition remains ARM only')
         return dict(base=BASE, feed=FEED_URL, policy='sandbox-selected-v1',
                     marker='TraversePublicUpdaterVersion', mode='public-updater-v1',
                     channel='public-free-v1', output='public-updates', title='Traverse public updates')
     if edition is FeedEdition.DIRECT:
-        return dict(base=DIRECT_BASE, feed=DIRECT_FEED_URL, policy='local-user-v1',
+        return dict(base=ORIGIN+'/products/traverse/'+arch.direct_update_lane, feed=arch.direct_feed_url, policy='local-user-v1',
                     marker='TraverseDirectPublicUpdaterVersion', mode='direct-public-updater-v1',
-                    channel='direct-public-free-v1', output='direct-updates', title='Traverse direct updates')
+                    channel='direct-public-free-v1', output=arch.direct_update_lane, title='Traverse direct updates')
     raise ValueError('Unknown public feed edition')
 SOURCE_LIMIT = 256 << 20
 DMG_LIMIT = 128 << 20
@@ -99,7 +102,8 @@ def source_record(path, inspected, build_inputs):
 
 
 def public_app_record(info, item, actual_cdhash, edition=FeedEdition.SCOPED):
-    contract = edition_contract(edition)
+    architecture=item.get('architecture','arm64')
+    contract = edition_contract(edition,architecture)
     other_marker = ('TraverseDirectPublicUpdaterVersion' if edition is FeedEdition.SCOPED
                     else 'TraversePublicUpdaterVersion')
     if not isinstance(info, dict) or info.get(contract['marker']) != '2.10.0' \
@@ -115,7 +119,8 @@ def public_app_record(info, item, actual_cdhash, edition=FeedEdition.SCOPED):
         raise ValueError('The signed app is not the '
                          + ('scoped' if edition is FeedEdition.SCOPED else 'direct') + ' public updater')
     if edition is FeedEdition.DIRECT:
-        if info.get('MacExplorerStorageMode') != 'portable' \
+        if direct_app_architecture(info).name!=architecture \
+                or info.get('MacExplorerStorageMode') != 'portable' \
                 or info.get(release_candidate.RELEASE_PURPOSE_KEY) != release_candidate.DIRECT_SHIPPING_PURPOSE \
                 or info.get('TraverseDirectStorageNamespace') != DIRECT_STORAGE_NAMESPACE \
                 or info.get('MacExplorerFolderServices') != 'public-folders-service-v1' \
@@ -138,7 +143,7 @@ def public_app_record(info, item, actual_cdhash, edition=FeedEdition.SCOPED):
                   feedURL=contract['feed'], publicEDKey=PUBLIC_KEY,
                   appCDHash=item['admission']['appCDHash'])
     if edition is FeedEdition.DIRECT:
-        record.update(accessPolicy=contract['policy'], storageNamespace=DIRECT_STORAGE_NAMESPACE,
+        record.update(architecture=architecture,accessPolicy=contract['policy'], storageNamespace=DIRECT_STORAGE_NAMESPACE,
                       driveHealthServiceVersion=1,
                       releasePurpose=release_candidate.DIRECT_SHIPPING_PURPOSE)
     return record
@@ -148,7 +153,8 @@ def admit_artifact(checked, item, entry, edition=FeedEdition.SCOPED):
     """Validate the immutable case and Developer ID receipt before signer access."""
     if edition is FeedEdition.DIRECT:
         checked = release_candidate.configuration(checked)
-    contract = edition_contract(edition)
+    architecture=named(checked.get('architecture','arm64')).name
+    contract = edition_contract(edition,architecture)
     if checked.get('shippingCandidate') is not True or checked.get('publicUpdater') is not True \
             or checked.get('privateUpdater') is True or checked.get('channel') != 'developer-id' \
             or checked.get('accessPolicy') != contract['policy'] \
@@ -161,12 +167,12 @@ def admit_artifact(checked, item, entry, edition=FeedEdition.SCOPED):
         raise ValueError('Frozen notes, case and DMG version must agree')
     version = item['version']; build = item['build']
     if not VERSION.fullmatch(version) or not BUILD.fullmatch(build) or int(build) > 2_147_483_647 \
-            or item.get('id') != 'traverse-' + version.replace('.', '-') + '-' + build + '-arm64' \
-            or item.get('filename') != f'Traverse-{version}-{build}-arm64.dmg' \
-            or item.get('architecture') != 'arm64' or item.get('minimumOS') != '15.0' \
+            or item.get('id') != 'traverse-' + version.replace('.', '-') + '-' + build + '-'+architecture \
+            or item.get('filename') != f'Traverse-{version}-{build}-{architecture}.dmg' \
+            or item.get('architecture') != architecture or item.get('minimumOS') != '15.0' \
             or not SHA.fullmatch(item.get('sha256', '')) or type(item.get('bytes')) is not int \
             or not 0 < item['bytes'] <= DMG_LIMIT:
-        raise ValueError('Only the bounded public arm64 DMG is admitted')
+        raise ValueError('Only the bounded matching-architecture public DMG is admitted')
     proof = item.get('admission')
     exact = dict(schema=1, bundleID='com.respawnstudios.traverse', version=version, build=build,
                  channel='Developer ID', team='CDLNJRG82U', timestamped=True, stapled=True,
@@ -180,12 +186,13 @@ def admit_artifact(checked, item, entry, edition=FeedEdition.SCOPED):
 
 
 def canonical_feed(manifest, edition=FeedEdition.SCOPED):
-    contract = edition_contract(edition)
     item = manifest['artifact']; source = manifest['sourceKit']; note = manifest['note']; app = manifest['app']
+    architecture=named(item.get('architecture','arm64')).name
+    contract = edition_contract(edition,architecture)
     if app.get('mode') != contract['mode'] or app.get('feedURL') != contract['feed']:
         raise ValueError('Feed app does not match its edition')
     if edition is FeedEdition.DIRECT:
-        if app.get('accessPolicy') != contract['policy'] \
+        if app.get('architecture','arm64')!=architecture or app.get('accessPolicy') != contract['policy'] \
                 or app.get('storageNamespace') != DIRECT_STORAGE_NAMESPACE \
                 or app.get('driveHealthServiceVersion') != 1 \
                 or app.get('releasePurpose') != release_candidate.DIRECT_SHIPPING_PURPOSE:
@@ -207,12 +214,13 @@ def canonical_feed(manifest, edition=FeedEdition.SCOPED):
                        + DIRECT_STORAGE_NAMESPACE + '" driveHealthServiceVersion="1"'
                        + ' releasePurpose="' + release_candidate.DIRECT_SHIPPING_PURPOSE + '"'
                        if edition is FeedEdition.DIRECT else '')
+    hardware = '<sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>' if architecture=='arm64' else ''
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:traverse="https://respawn-studios.com/ns/traverse-updates/1"><channel>
 <title>{contract['title']}</title><link>{ORIGIN}/products/traverse/</link><description>Public Traverse updates</description>
 <item><title>Traverse {item['version']}</title><link>{ORIGIN}/products/traverse/</link>
 <sparkle:version>{item['build']}</sparkle:version><sparkle:shortVersionString>{item['version']}</sparkle:shortVersionString>
-<sparkle:minimumSystemVersion>15.0.0</sparkle:minimumSystemVersion><sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+<sparkle:minimumSystemVersion>15.0.0</sparkle:minimumSystemVersion>{hardware}
 <pubDate>{format_datetime(date)}</pubDate>
 <sparkle:releaseNotesLink sparkle:edSignature="{note['edSignature']}" sparkle:length="{note['bytes']}">{contract['base']}/notes/{item['build']}.html</sparkle:releaseNotesLink>
 <enclosure url="{contract['base']}/archives/{item['sha256']}.dmg" length="{item['bytes']}" type="application/octet-stream" sparkle:edSignature="{item['edSignature']}"/>
@@ -229,7 +237,7 @@ def inspect_source(path):
 
 def render_cask(checked, catalog, entry):
     """Render the direct edition only, from the same admitted feed identity."""
-    contract = edition_contract(FeedEdition.DIRECT)
+    contract = edition_contract(FeedEdition.DIRECT,checked.get('architecture','arm64'))
     item = catalog['artifact']; app = catalog['app']
     admit_artifact(checked, item, entry, FeedEdition.DIRECT)
     expected = dict(bundleID='com.respawnstudios.traverse', version=item['version'],
@@ -252,7 +260,7 @@ def render_cask(checked, catalog, entry):
   desc "Native macOS file explorer"
   homepage "{ORIGIN}/products/traverse/"
 
-  depends_on arch: :arm64
+  depends_on arch: :{'arm64' if item['architecture']=='arm64' else 'intel'}
   depends_on macos: :sequoia
 
   app "Traverse.app"
@@ -260,16 +268,16 @@ end
 '''.encode('utf-8')
 
 
-def prepare_cask(case):
-    """Local recipe only; existing shipping admission runs before artifact reads."""
+def _cask_inputs(case):
+    """Verify a prepared feed and exact DMG before a recipe uses either."""
     checked = release_candidate.configuration(json.loads(
         source_capsule.read_at(case, 'configuration.json', 8192)))
     if checked.get('publicUpdater') is not True or checked.get('shippingCandidate') is not True \
             or checked.get('localReviewOnly') is True:
         raise ValueError('A fresh public-updater shipping case is required')
-    contract = edition_contract(FeedEdition.DIRECT)
+    contract = edition_contract(FeedEdition.DIRECT,checked.get('architecture','arm64'))
     output = case / contract['output']
-    catalog = json.loads(source_capsule.read_at(output, 'direct-updates.json', 1 << 20))
+    catalog = json.loads(source_capsule.read_at(output, contract['output']+'.json', 1 << 20))
     item = catalog['artifact']
     dmg = json.loads(source_capsule.read_at(case, 'dmg/manifest.json', 65536))
     if dmg.get('schema') != 1 or dmg.get('artifacts') != [
@@ -277,7 +285,7 @@ def prepare_cask(case):
         raise ValueError('Cask must use the exact prepared final DMG')
     history = private_feed.frozen_history(case, item)
     entry = release_notes.release_for_build(history, item['version'], item['build'])
-    recipe = render_cask(checked, catalog, entry or {})
+    render_cask(checked, catalog, entry or {})
     receipt = json.loads(source_capsule.read_at(output, 'prepared.json', 65536))
     if receipt.get('passed') is not True or receipt.get('binarySourceInputsMatched') is not True \
             or any(receipt.get(key) != value for key, value in dict(
@@ -296,6 +304,51 @@ def prepare_cask(case):
     image = source_capsule.read_at(case, 'dmg/' + item['filename'], DMG_LIMIT)
     if len(image) != item['bytes'] or hashlib.sha256(image).hexdigest() != item['sha256']:
         raise ValueError('Cask DMG bytes differ from the prepared feed')
+    return checked,catalog,entry or {},output
+
+
+def render_cask_pair(arm, intel):
+    """One recipe, two independently admitted packages from the same source."""
+    for checked,catalog,entry in (arm,intel):render_cask(checked,catalog,entry)
+    a,b=arm[1],intel[1]
+    if a['artifact']['architecture']!='arm64' or b['artifact']['architecture']!='x86_64' \
+            or any(a['artifact'][key]!=b['artifact'][key] for key in ('version','build','minimumOS')) \
+            or a['sourceKit']!=b['sourceKit'] or a['buildSourceSHA256']!=b['buildSourceSHA256']:
+        raise ValueError('Homebrew packages must match one version and corresponding source')
+    item=a['artifact']
+    blocks=[]
+    for name,catalog in (('arm',a),('intel',b)):
+        artifact=catalog['artifact']
+        contract=edition_contract(FeedEdition.DIRECT,artifact['architecture'])
+        blocks.append(f'''  on_{name} do
+    sha256 "{artifact['sha256']}"
+    url "{contract['base']}/archives/{artifact['sha256']}.dmg"
+  end''')
+    platforms='\n\n'.join(blocks)
+    return f'''cask "traverse" do
+  version "{item['version']},{item['build']}"
+
+{platforms}
+
+  name "Traverse"
+  desc "Native macOS file explorer"
+  homepage "{ORIGIN}/products/traverse/"
+
+  depends_on macos: :sequoia
+
+  app "Traverse.app"
+end
+'''.encode('utf-8')
+
+
+def prepare_cask(case,intel_case=None):
+    """Local recipe only; never installs or publishes a Cask."""
+    checked,catalog,entry,output=_cask_inputs(case)
+    recipe=render_cask(checked,catalog,entry)
+    if intel_case is not None:
+        intel_checked,intel_catalog,intel_entry,_=_cask_inputs(intel_case)
+        recipe=render_cask_pair((checked,catalog,entry),(intel_checked,intel_catalog,intel_entry))
+    item=catalog['artifact']
     directory(output)
     path = output / 'traverse.rb'
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -307,10 +360,10 @@ def prepare_cask(case):
 
 
 def prepare(case, source_kit_path, edition=FeedEdition.SCOPED):
-    contract = edition_contract(edition)
     config = json.loads(source_capsule.read_at(case, 'configuration.json', 8192))
     # Admit only an immutable shipping case before signing, Keychain or output.
     checked = release_candidate.configuration(config)
+    contract = edition_contract(edition,checked.get('architecture','arm64'))
     if checked.get('publicUpdater') is not True or checked.get('shippingCandidate') is not True \
             or checked.get('localReviewOnly') is True:
         raise ValueError('A fresh public-updater shipping case is required')

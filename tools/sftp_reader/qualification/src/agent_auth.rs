@@ -223,11 +223,11 @@ impl<'a> Cursor<'a>{
     struct GeneratedServer{public:PublicKey}
     impl server::Handler for GeneratedServer{
         type Error=russh::Error;
-        async fn auth_publickey_offered(&mut self,user:&str,key:&PublicKey)->Result<server::Auth,Self::Error>{
-            Ok(if user=="generated"&&key==&self.public{server::Auth::Accept}else{server::Auth::reject()})
+        async fn auth_publickey_offered(&mut self,user:&str,key:server::PublicKeyOffer<'_>)->Result<server::Auth,Self::Error>{
+            Ok(if user=="generated"&&key.public_key==&self.public{server::Auth::Accept}else{server::Auth::reject()})
         }
-        async fn auth_publickey(&mut self,user:&str,key:&PublicKey)->Result<server::Auth,Self::Error>{
-            Ok(if user=="generated"&&key==&self.public{server::Auth::Accept}else{server::Auth::reject()})
+        async fn auth_publickey(&mut self,user:&str,key:server::VerifiedPublicKey<'_>)->Result<server::Auth,Self::Error>{
+            Ok(if user=="generated"&&key.public_key==&self.public{server::Auth::Accept}else{server::Auth::reject()})
         }
     }
 

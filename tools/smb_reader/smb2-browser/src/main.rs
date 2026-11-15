@@ -1,5 +1,5 @@
-//! Qualification-only authenticated, metadata-only browser worker.
-//! One socket owner and one bounded SQLite owner; no ordinary application route.
+//! Bundled SMB browser and explicit file-operation worker.
+//! Metadata browsing and each selected transfer/action use separate bounded policies.
 #[path = "../../common.rs"] mod common;
 #[path = "../../auth_security.rs"] mod security;
 #[path = "../../catalog/catalog.rs"] mod catalog;

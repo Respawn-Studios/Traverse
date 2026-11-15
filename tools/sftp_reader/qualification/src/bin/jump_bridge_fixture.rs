@@ -12,8 +12,8 @@ struct Bridge{auth:ssh_fixture::Fixture,target:u16,deny:bool,forwards:Arc<Atomic
 impl server::Handler for Bridge {
     type Error=russh::Error;
     async fn auth_none(&mut self,user:&str)->Result<server::Auth,russh::Error>{self.auth.auth_none(user).await}
-    async fn auth_publickey_offered(&mut self,user:&str,key:&PublicKey)->Result<server::Auth,russh::Error>{self.auth.auth_publickey_offered(user,key).await}
-    async fn auth_publickey(&mut self,user:&str,key:&PublicKey)->Result<server::Auth,russh::Error>{self.auth.auth_publickey(user,key).await}
+    async fn auth_publickey_offered(&mut self,user:&str,key:server::PublicKeyOffer<'_>)->Result<server::Auth,russh::Error>{self.auth.auth_publickey_offered(user,key).await}
+    async fn auth_publickey(&mut self,user:&str,key:server::VerifiedPublicKey<'_>)->Result<server::Auth,russh::Error>{self.auth.auth_publickey(user,key).await}
     async fn auth_password(&mut self,user:&str,password:&str)->Result<server::Auth,russh::Error>{self.auth.auth_password(user,password).await}
     async fn auth_keyboard_interactive<'a>(&'a mut self,user:&str,submethods:&str,response:Option<server::Response<'a>>)->Result<server::Auth,russh::Error>{self.auth.auth_keyboard_interactive(user,submethods,response).await}
     async fn channel_open_session(&mut self,channel:Channel<server::Msg>,reply:server::ChannelOpenHandle,_:&mut server::Session)->Result<(),russh::Error>{drop(reply);drop(channel);Ok(())}

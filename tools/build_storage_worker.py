@@ -22,11 +22,13 @@ import uuid
 from bundle_helper import publish, regular
 from distribution import helper_symbols
 from distribution import remote_editor_qa
+from build_architecture import selected
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "Workers/StorageScanner"
-OUTPUT = ROOT / ".build/storage-scanner"
+ARCHITECTURE = selected()
+OUTPUT = ARCHITECTURE.cache_directory(ROOT / ".build/storage-scanner")
 RUSTC = ROOT / ".build/b06-toolchain/rust-1.99.1/bin/rustc"
 # Qualified compact observations, first-observation references and explicit
 # per-request metadata policies and qualified committed-prefix presentation.
@@ -211,7 +213,7 @@ def current_input(*, symbols: bool) -> tuple[dict, str, dict[str, str]]:
                        sdk_resolved=str(selected_sdk), sdk_version=sdk_version,
                        sdk_settings_path=str(sdk_settings), sdk_settings_sha256=sha(sdk_settings), xcode=xcode,
                        clang=str(selected_clang), clang_version=clang_version, clang_sha256=sha(selected_clang),
-                       target="aarch64-apple-darwin", deployment="15.0", optimization="3/thin/1/abort",
+                       target=ARCHITECTURE.rust_target, deployment="15.0", optimization="3/thin/1/abort",
                        result_config=list(RESULT_CONFIG), symbols=helper_symbols.POLICY if symbols else None,
                        **helper_symbols.rust_source_path_fingerprint(symbols))
     return fingerprint, sdk, env
@@ -354,11 +356,11 @@ def _build_locked() -> Path:
                 helper_symbols.validate(binary, binary.with_name(binary.name + '.dSYM'))
             return binary
     commands = [
-        ["/usr/bin/clang", "-O3", *(['-gline-tables-only'] if symbols else []), "-target", "arm64-apple-macosx15.0", "-isysroot", sdk,
+        ["/usr/bin/clang", "-O3", *(['-gline-tables-only'] if symbols else []), "-target", ARCHITECTURE.clang_target, "-isysroot", sdk,
          "-c", str(SOURCE / "ScannerNative.c"), "-o", str(OUTPUT / "ScannerNative.o")],
         [str(RUSTC), *helper_symbols.rust_source_path_arguments(symbols),
          *[item for flag in RESULT_CONFIG for item in ("--cfg", flag)],
-         "--edition=2024", "--target=aarch64-apple-darwin", "-C", "opt-level=3",
+         "--edition=2024", "--target=" + ARCHITECTURE.rust_target, "-C", "opt-level=3",
          "-C", "panic=abort", "-C", "lto=thin", "-C", "codegen-units=1", "-C", "linker=/usr/bin/clang",
          *(['-C', 'debuginfo=line-tables-only', '-C', 'split-debuginfo=packed'] if symbols else []),
          "-C", "link-arg=-isysroot", "-C", "link-arg=" + sdk, "-C", "link-arg=" + str(OUTPUT / "ScannerNative.o"),

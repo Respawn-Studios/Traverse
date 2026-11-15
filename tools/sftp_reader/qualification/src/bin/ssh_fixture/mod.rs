@@ -52,14 +52,16 @@ impl server::Handler for Fixture {
     async fn auth_none(&mut self,_user:&str)->Result<server::Auth,russh::Error>{
         self.counts.unexpected_auth.fetch_add(1,Ordering::SeqCst);Ok(server::Auth::reject())
     }
-    async fn auth_publickey_offered(&mut self,user:&str,key:&russh::keys::PublicKey)->Result<server::Auth,russh::Error>{
+    async fn auth_publickey_offered(&mut self,user:&str,key:server::PublicKeyOffer<'_>)->Result<server::Auth,russh::Error>{
+        let key=key.public_key;
         if let Some(expected)=&self.public_key{
             self.counts.key_offers.fetch_add(1,Ordering::SeqCst);
             return Ok(if user=="generated"&&key==expected{server::Auth::Accept}else{server::Auth::reject()})
         }
         self.counts.unexpected_auth.fetch_add(1,Ordering::SeqCst);Ok(server::Auth::reject())
     }
-    async fn auth_publickey(&mut self,user:&str,key:&russh::keys::PublicKey)->Result<server::Auth,russh::Error>{
+    async fn auth_publickey(&mut self,user:&str,key:server::VerifiedPublicKey<'_>)->Result<server::Auth,russh::Error>{
+        let key=key.public_key;
         self.counts.auth.fetch_add(1,Ordering::SeqCst);
         if self.scenario.starts_with("mfa-key")&&user=="generated"&&self.public_key.as_ref()==Some(key){
             self.key_partial=true;return Ok(server::Auth::Reject{proceed_with_methods:Some((&[russh::MethodKind::KeyboardInteractive][..]).into()),partial_success:true})

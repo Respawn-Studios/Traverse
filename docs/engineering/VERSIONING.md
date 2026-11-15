@@ -56,3 +56,10 @@ passed notarization is still awaiting publication and installed acceptance.
 
 See [Releasing Traverse](OPEN_SOURCE_RELEASE.md) for the artifact and delivery
 checks, and [the roadmap](../ROADMAP.md) for what we would like to build next.
+
+Architecture variants share the same product version and build number when
+they come from the same release source. For example, `Traverse-0.2.0-95-arm64.dmg`
+and `Traverse-0.2.0-95-x86_64.dmg` are two packages for one release. Each has its
+own signature, checksum and qualification. An architecture label never replaces
+those checks. Keep [CHANGELOG.md](../../CHANGELOG.md) focused on public releases;
+the app's catalog may also include unreleased Preview history.

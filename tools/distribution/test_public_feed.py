@@ -253,6 +253,29 @@ class PublicFeedTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             public_feed.render_cask(dict(checked, localReviewOnly=True), catalog, entry)
 
+    def test_intel_feed_and_homebrew_pair_require_the_matching_case_and_source(self):
+        arm=self.cask_fixture()
+        checked,catalog,entry=copy.deepcopy(arm)
+        checked['architecture']='x86_64'
+        item=catalog['artifact'];item.update(architecture='x86_64',sha256='9'*64,
+            id=item['id'].removesuffix('arm64')+'x86_64',
+            filename=item['filename'].removesuffix('arm64.dmg')+'x86_64.dmg')
+        catalog['app'].update(architecture='x86_64',
+            feedURL=public_feed.edition_contract(public_feed.FeedEdition.DIRECT,'x86_64')['feed'])
+        intel=(checked,catalog,entry)
+        body=public_feed.canonical_feed(catalog,public_feed.FeedEdition.DIRECT)
+        self.assertIn(b'/direct-updates-intel/archives/',body)
+        self.assertNotIn(b'hardwareRequirements',body)
+        recipe=public_feed.render_cask_pair(arm,intel).decode()
+        self.assertIn('on_arm do',recipe);self.assertIn('on_intel do',recipe)
+        self.assertNotIn('depends_on arch:',recipe)
+        self.assertIn('9'*64,recipe)
+        with self.assertRaises(ValueError):public_feed.admit_artifact(arm[0],item,entry,public_feed.FeedEdition.DIRECT)
+        wrong=copy.deepcopy(intel);wrong[1]['sourceKit']['sha256']='0'*64
+        with self.assertRaises(ValueError):public_feed.render_cask_pair(arm,wrong)
+        wrong=copy.deepcopy(intel);wrong[1]['app']['feedURL']=public_feed.DIRECT_FEED_URL
+        with self.assertRaises(ValueError):public_feed.render_cask_pair(arm,wrong)
+
     def test_cask_retains_shipping_hold_before_any_artifact_or_signer_access(self):
         checked, _, _ = self.cask_fixture()
         for config in (dict(checked, releasePurpose='qualification'),

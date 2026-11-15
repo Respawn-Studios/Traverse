@@ -7,7 +7,16 @@ public enum DirectPublicEditionIdentity {
     public static let bundleIdentifier = "com.respawnstudios.traverse"
     public static let storageNamespace = "com.respawnstudios.traverse.direct"
     public static let updaterVersion = "2.10.0"
-    public static let feedURL = "https://respawn-studios.com/products/traverse/direct-updates/appcast.xml"
+    #if arch(arm64)
+    public static let architecture = "arm64"
+    private static let updateLane = "direct-updates"
+    #elseif arch(x86_64)
+    public static let architecture = "x86_64"
+    private static let updateLane = "direct-updates-intel"
+    #else
+    #error("Traverse requires a qualified Mac architecture")
+    #endif
+    public static let feedURL = "https://respawn-studios.com/products/traverse/\(updateLane)/appcast.xml"
     public static let updatePublicKey = "MG4sBFr76ad6D4nGo+i2VuZ4hxVMEQZToBUjYyui3IA="
 
     /// Product presentation can distinguish a shipping app from the otherwise
@@ -24,6 +33,8 @@ public enum DirectPublicEditionIdentity {
               info["MacExplorerStorageMode"] as? String == "portable",
               info["TraverseDirectStorageNamespace"] as? String == storageNamespace,
               info["TraverseDirectPublicUpdaterVersion"] as? String == updaterVersion,
+              (info["TraverseDirectArchitecture"] as? String == architecture
+                || info["TraverseDirectArchitecture"] == nil && architecture == "arm64"),
               info["MacExplorerFolderServices"] as? String == "public-folders-service-v1",
               info["SUFeedURL"] as? String == feedURL,
               info["SUPublicEDKey"] as? String == updatePublicKey,

@@ -5,7 +5,7 @@ Software components and their license terms
 Components
 
 PLCrashReporter 1.12.2 — MIT AND Apache-2.0 AND BSD-2-Clause
-License notices 48, 79, 65
+License notices 49, 80, 66
 
 aead 0.6.1 — MIT OR Apache-2.0
 License notices 104, 35
@@ -17,19 +17,19 @@ aes 0.9.3 — MIT OR Apache-2.0
 License notices 101, 28
 
 aes-gcm 0.11.1 — Apache-2.0 OR MIT
-License notices 101, 110
+License notices 101, 109
 
 argon2 0.6.0 — MIT OR Apache-2.0
-License notices 101, 56
+License notices 101, 57
 
 async-trait 0.1.92 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 autocfg 1.5.1 — Apache-2.0 OR MIT
 License notices 99, 30
 
 base16ct 1.0.0 — Apache-2.0 OR MIT
-License notices 101, 53
+License notices 101, 54
 
 base64ct 1.8.3 — Apache-2.0 OR MIT
 License notices 101, 32
@@ -38,7 +38,7 @@ bcrypt-pbkdf 0.11.0 — MIT OR Apache-2.0
 License notices 38, 37
 
 bitflags 2.13.2 — MIT OR Apache-2.0
-License notices 99, 62
+License notices 99, 63
 
 blake2 0.11.0 — MIT OR Apache-2.0
 License notices 101, 39
@@ -50,22 +50,22 @@ block-padding 0.4.2 — MIT OR Apache-2.0
 License notices 101, 94
 
 blowfish 0.10.0 — MIT OR Apache-2.0
-License notices 101, 50
+License notices 101, 51
 
 byteorder 1.5.0 — Unlicense OR MIT
 License notices 3, 13
 
 bytes 1.12.1 — MIT
-License notices 47
+License notices 48
 
 cbc 0.2.1 — MIT OR Apache-2.0
-License notices 101, 60
+License notices 101, 61
 
 cc 1.9.0 — MIT OR Apache-2.0
 License notices 99, 40
 
 ccm 0.6.1 — Apache-2.0 OR MIT
-License notices 101, 73
+License notices 101, 74
 
 cfg-if 1.0.5 — MIT OR Apache-2.0
 License notices 99, 40
@@ -74,7 +74,7 @@ cfg_aliases 0.2.2 — MIT
 License notices 34, 17
 
 chacha20 0.10.2 — MIT OR Apache-2.0
-License notices 101, 110
+License notices 101, 109
 
 chrono 0.4.45 — MIT OR Apache-2.0
 License notices 92
@@ -86,43 +86,46 @@ cmac 0.8.0 — MIT OR Apache-2.0
 License notices 101, 96
 
 cmov 0.5.4 — Apache-2.0 OR MIT
-License notices 118, 71
+License notices 117, 72
 
 const-oid 0.10.2 — Apache-2.0 OR MIT
-License notices 101, 73
+License notices 101, 74
 
 core-foundation-sys 0.8.7 — MIT OR Apache-2.0
-License notices 99, 58
+License notices 99, 59
 
 cpubits 0.1.1 — MIT OR Apache-2.0
 License notices 101, 1
 
 cpufeatures 0.3.1 — MIT OR Apache-2.0
-License notices 101, 73
+License notices 101, 74
 
 crossbeam-utils 0.8.23 — MIT OR Apache-2.0
-License notices 99, 55
+License notices 99, 56
 
 crypto-bigint 0.7.6 — Apache-2.0 OR MIT
-License notices 101, 56
+License notices 101, 57
 
 crypto-common 0.2.2 — MIT OR Apache-2.0
-License notices 101, 122
+License notices 101, 121
 
 crypto-primes 0.7.2 — Apache-2.0 OR MIT
-License notices 115, 19
+License notices 114, 19
 
 ctr 0.10.1 — MIT OR Apache-2.0
-License notices 101, 60
+License notices 101, 61
 
 ctutils 0.4.2 — Apache-2.0 OR MIT
-License notices 118, 90
+License notices 117, 90
 
 ctutils 0.4.5 — Apache-2.0 OR MIT
-License notices 118, 90
+License notices 117, 90
 
 curve25519-dalek 5.0.0 — BSD-3-Clause
-License notices 42
+License notices 43
+
+curve25519-dalek-derive 0.1.1 — MIT/Apache-2.0
+License notices 99, 24
 
 dashmap 6.2.1 — MIT
 License notices 16
@@ -134,34 +137,34 @@ dbl 0.5.0 — MIT OR Apache-2.0
 License notices 101, 94
 
 delegate 0.13.5 — MIT OR Apache-2.0
-License notices 106, 111
+License notices 106, 110
 
 der 0.8.2 — Apache-2.0 OR MIT
-License notices 101, 73
+License notices 101, 74
 
 des 0.9.0 — MIT OR Apache-2.0
-License notices 15, 41
+License notices 15, 42
 
 digest 0.11.3 — MIT OR Apache-2.0
 License notices 101, 103
 
 ecdsa 0.17.0 — Apache-2.0 OR MIT
-License notices 76, 95
+License notices 77, 95
 
 ed25519 3.0.0 — Apache-2.0 OR MIT
-License notices 76, 95
+License notices 77, 95
 
 ed25519-dalek 3.0.0 — BSD-3-Clause
-License notices 77
+License notices 78
 
 elliptic-curve 0.14.1 — Apache-2.0 OR MIT
-License notices 101, 123
+License notices 101, 122
 
 enum_dispatch 0.3.13 — MIT OR Apache-2.0
 License notices 18
 
 equivalent 1.0.3 — Apache-2.0 OR MIT
-License notices 99, 72
+License notices 99, 73
 
 ff 0.14.0 — MIT/Apache-2.0
 License notices 38, 86
@@ -170,76 +173,73 @@ find-msvc-tools 0.1.15 — MIT OR Apache-2.0
 License notices 99, 40
 
 futures 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-channel 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-core 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-executor 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-io 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-macro 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-sink 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-task 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
+License notices 29, 64
 
 futures-util 0.3.34 — MIT OR Apache-2.0
-License notices 29, 63
-
-generic-array 0.14.9 — MIT
-License notices 112
+License notices 29, 64
 
 generic-array 1.4.5 — MIT
-License notices 112
+License notices 111
 
 getrandom 0.2.17 — MIT OR Apache-2.0
-License notices 102, 44
+License notices 102, 45
 
 getrandom 0.4.3 — MIT OR Apache-2.0
-License notices 102, 52
+License notices 102, 53
 
 ghash 0.6.0 — Apache-2.0 OR MIT
-License notices 101, 110
+License notices 101, 109
 
 group 0.14.0 — MIT/Apache-2.0
-License notices 74, 99, 24
+License notices 75, 99, 24
 
 hashbrown 0.14.5 — MIT OR Apache-2.0
-License notices 99, 134
+License notices 99, 133
 
 hashbrown 0.17.1 — MIT OR Apache-2.0
-License notices 99, 134
+License notices 99, 133
 
 hex 0.4.3 — MIT OR Apache-2.0
-License notices 114, 131
+License notices 113, 130
 
 hex-literal 1.1.0 — MIT OR Apache-2.0
 License notices 101, 5
 
 hkdf 0.13.0 — MIT OR Apache-2.0
-License notices 57, 121
+License notices 58, 120
 
 hmac 0.13.0 — MIT OR Apache-2.0
 License notices 101, 96
 
 hybrid-array 0.4.15 — MIT OR Apache-2.0
-License notices 101, 71
+License notices 101, 72
 
 iana-time-zone 0.1.65 — MIT OR Apache-2.0
-License notices 66, 124
+License notices 67, 123
 
 indexmap 2.14.2 — Apache-2.0 OR MIT
-License notices 99, 126
+License notices 99, 125
 
 inout 0.2.5 — MIT OR Apache-2.0
 License notices 101, 98
@@ -248,22 +248,22 @@ keccak 0.2.2 — Apache-2.0 OR MIT
 License notices 101, 84
 
 kem 0.3.0 — Apache-2.0 OR MIT
-License notices 129, 122
+License notices 128, 121
 
 libc 0.2.191 — MIT OR Apache-2.0
-License notices 59, 14
+License notices 60, 14
 
 lock_api 0.4.14 — MIT OR Apache-2.0
-License notices 99, 116
+License notices 99, 115
 
 log 0.4.34 — MIT OR Apache-2.0
-License notices 99, 62
+License notices 99, 63
 
 lz4_flex 0.14.0 — MIT
 License notices 8
 
 md-5 0.11.0 — MIT OR Apache-2.0
-License notices 101, 80
+License notices 101, 81
 
 md4 0.11.0 — MIT OR Apache-2.0
 License notices 101, 88
@@ -278,166 +278,166 @@ mio 1.2.4 — MIT
 License notices 6
 
 ml-kem 0.3.3 — Apache-2.0 OR MIT
-License notices 101, 119
+License notices 101, 118
 
 module-lattice 0.2.3 — Apache-2.0 OR MIT
-License notices 101, 119
+License notices 101, 118
 
 nix 0.31.3 — MIT
-License notices 64
+License notices 65
 
 num-bigint 0.5.1 — MIT OR Apache-2.0
-License notices 99, 62
+License notices 99, 63
 
 num-integer 0.1.47 — MIT OR Apache-2.0
-License notices 99, 62
+License notices 99, 63
 
 num-traits 0.2.19 — MIT OR Apache-2.0
-License notices 99, 62
+License notices 99, 63
 
 num_enum 0.7.6 — BSD-3-Clause OR MIT OR Apache-2.0
-License notices 59, 11, 24
+License notices 60, 11, 24
 
 num_enum_derive 0.7.6 — BSD-3-Clause OR MIT OR Apache-2.0
-License notices 59, 11, 24
+License notices 60, 11, 24
 
 once_cell 1.21.4 — MIT OR Apache-2.0
 License notices 99, 24
 
 p256 0.14.0 — Apache-2.0 OR MIT
-License notices 101, 123
+License notices 101, 122
 
 p384 0.14.0 — Apache-2.0 OR MIT
 License notices 101, 4
 
 p521 0.14.0 — Apache-2.0 OR MIT
-License notices 101, 123
+License notices 101, 122
 
 parking_lot_core 0.9.12 — MIT OR Apache-2.0
-License notices 99, 116
+License notices 99, 115
 
 password-hash 0.6.1 — MIT OR Apache-2.0
-License notices 101, 123
+License notices 101, 122
 
 pbkdf2 0.13.0 — MIT OR Apache-2.0
 License notices 101, 87
 
 pem-rfc7468 1.0.0 — Apache-2.0 OR MIT
-License notices 101, 43
+License notices 101, 44
 
 phc 0.6.1 — Apache-2.0 OR MIT
-License notices 101, 56
+License notices 101, 57
 
 pin-project-lite 0.2.17 — Apache-2.0 OR MIT
 License notices 12, 24
 
 pkcs1 0.8.0-rc.4 — Apache-2.0 OR MIT
-License notices 101, 43
+License notices 101, 44
 
 pkcs5 0.8.1 — Apache-2.0 OR MIT
-License notices 101, 56
+License notices 101, 57
 
 pkcs8 0.11.0 — Apache-2.0 OR MIT
-License notices 101, 73
+License notices 101, 74
 
 poly1305 0.9.1 — Apache-2.0 OR MIT
 License notices 101, 107
 
 polyval 0.7.3 — Apache-2.0 OR MIT
-License notices 101, 110
+License notices 101, 109
 
 primefield 0.14.0 — Apache-2.0 OR MIT
-License notices 101, 49
+License notices 101, 50
 
 primeorder 0.14.0 — Apache-2.0 OR MIT
 License notices 101, 23
 
 proc-macro-crate 3.5.0 — MIT OR Apache-2.0
-License notices 81, 24
+License notices 82, 24
 
 proc-macro2 1.0.107 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 quote 1.0.47 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 rand 0.10.2 — MIT OR Apache-2.0
 License notices 89, 36, 22
 
 rand_core 0.10.1 — MIT OR Apache-2.0
-License notices 91, 68, 83
+License notices 91, 69, 83
 
 rfc6979 0.6.0 — Apache-2.0 OR MIT
-License notices 76, 95
+License notices 77, 95
 
 ring 0.17.14 — Apache-2.0 AND ISC
-License notices 105, 2, 128, 99, 69, 97
+License notices 105, 2, 127, 99, 70, 97
 
 rsa 0.10.0-rc.18 — MIT OR Apache-2.0
-License notices 75, 33
+License notices 76, 33
 
-russh 0.64.1 — Apache-2.0
-License notices 118, 82
+russh 0.65.1 — Apache-2.0
+License notices 117, 41
 
 russh-cryptovec 0.62.0 — Apache-2.0
-License notices 118, 46
+License notices 117, 47
 
 russh-sftp 3.0.1 — Apache-2.0
 License notices 20
 
 russh-util 0.52.0 — Apache-2.0
-License notices 118
+License notices 117
 
 rustc_version 0.4.1 — MIT OR Apache-2.0
-License notices 99, 116
+License notices 99, 115
 
 rustversion 1.0.23 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 salsa20 0.11.0 — MIT OR Apache-2.0
-License notices 101, 67
+License notices 101, 68
 
 scopeguard 1.2.0 — MIT OR Apache-2.0
-License notices 99, 133
+License notices 99, 132
 
 scrypt 0.12.0 — MIT OR Apache-2.0
-License notices 101, 56
+License notices 101, 57
 
 sec1 0.8.1 — Apache-2.0 OR MIT
-License notices 101, 56
+License notices 101, 57
 
 semver 1.0.28 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 serde 1.0.229 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 serde_bytes 0.11.19 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 serde_core 1.0.229 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 serde_derive 1.0.229 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 serdect 0.4.3 — Apache-2.0 OR MIT
-License notices 118, 31
+License notices 117, 31
 
 sha1 0.11.0 — MIT OR Apache-2.0
-License notices 101, 80
+License notices 101, 81
 
 sha2 0.11.1 — MIT OR Apache-2.0
-License notices 101, 80
+License notices 101, 81
 
 sha3 0.12.0 — MIT OR Apache-2.0
-License notices 101, 61
+License notices 101, 62
 
 shake 0.1.0 — MIT OR Apache-2.0
 License notices 101, 7
 
 shlex 2.0.1 — MIT OR Apache-2.0
-License notices 54, 45
+License notices 55, 46
 
 signature 3.0.0 — Apache-2.0 OR MIT
 License notices 101, 95
@@ -449,13 +449,13 @@ smallvec 1.16.3 — MIT OR Apache-2.0
 License notices 99, 9
 
 smb2 0.33.0 — MIT OR Apache-2.0
-License notices 65, 25
+License notices 66, 25
 
 socket2 0.6.5 — MIT OR Apache-2.0
 License notices 99, 40
 
 spki 0.8.1 — Apache-2.0 OR MIT
-License notices 101, 56
+License notices 101, 57
 
 sponge-cursor 0.1.0 — MIT OR Apache-2.0
 License notices 101, 7
@@ -464,27 +464,27 @@ ssh-cipher 0.3.0 — Apache-2.0 OR MIT
 License notices 101, 1
 
 ssh-encoding 0.3.0 — Apache-2.0 OR MIT
-License notices 101, 56
+License notices 101, 57
 
 ssh-key 0.7.0-rc.11 — Apache-2.0 OR MIT
-License notices 101, 56
+License notices 101, 57
 
 subtle 2.6.1 — BSD-3-Clause
-License notices 120
+License notices 119
 
 syn 2.0.119 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 syn 3.0.9 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 thiserror 2.0.21 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
 thiserror-impl 2.0.21 — MIT OR Apache-2.0
-License notices 59, 24
+License notices 60, 24
 
-tokio 1.54.0 — MIT
+tokio 1.54.1 — MIT
 License notices 27
 
 tokio-macros 2.7.2 — MIT
@@ -494,40 +494,37 @@ tokio-util 0.7.20 — MIT
 License notices 27
 
 toml_datetime 1.1.2+spec-1.1.0 — MIT OR Apache-2.0
-License notices 26, 70
+License notices 26, 71
 
 toml_edit 0.25.17+spec-1.1.0 — MIT OR Apache-2.0
-License notices 26, 70
+License notices 26, 71
 
 toml_parser 1.1.5+spec-1.1.0 — MIT OR Apache-2.0
-License notices 26, 70
+License notices 26, 71
 
 twox-hash 2.1.5 — MIT
-License notices 130
+License notices 129
 
 typenum 1.20.1 — MIT OR Apache-2.0
-License notices 125, 51, 100
+License notices 124, 52, 100
 
 unicode-ident 1.0.27 — (MIT OR Apache-2.0) AND Unicode-3.0
-License notices 59, 24, 132
+License notices 60, 24, 131
 
 universal-hash 0.6.1 — MIT OR Apache-2.0
-License notices 101, 127
+License notices 101, 126
 
 untrusted 0.9.0 — ISC
-License notices 78
-
-version_check 0.9.5 — MIT/Apache-2.0
-License notices 99, 109
+License notices 79
 
 winnow 1.0.4 — MIT
-License notices 117
+License notices 116
 
 wnaf 0.14.1 — Apache-2.0 OR MIT
-License notices 101, 113
+License notices 101, 112
 
 zeroize 1.9.1 — Apache-2.0 OR MIT
-License notices 118, 84
+License notices 117, 84
 
 
 Notice 1
@@ -1959,7 +1956,7 @@ DEALINGS IN THE SOFTWARE.
 
 Notice 24
 ------------------------------------------------------------------------
-Applies to: async-trait 0.1.92, group 0.14.0, num_enum 0.7.6, num_enum_derive 0.7.6, once_cell 1.21.4, pin-project-lite 0.2.17, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, syn 2.0.119, syn 3.0.9, thiserror 2.0.21, thiserror-impl 2.0.21, unicode-ident 1.0.27
+Applies to: async-trait 0.1.92, curve25519-dalek-derive 0.1.1, group 0.14.0, num_enum 0.7.6, num_enum_derive 0.7.6, once_cell 1.21.4, pin-project-lite 0.2.17, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, syn 2.0.119, syn 3.0.9, thiserror 2.0.21, thiserror-impl 2.0.21, unicode-ident 1.0.27
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -2222,7 +2219,7 @@ Applies to: toml_datetime 1.1.2+spec-1.1.0, toml_edit 0.25.17+spec-1.1.0, toml_p
 
 Notice 27
 ------------------------------------------------------------------------
-Applies to: tokio 1.54.0, tokio-util 0.7.20
+Applies to: tokio 1.54.1, tokio-util 0.7.20
 
 MIT License
 
@@ -3140,6 +3137,61 @@ DEALINGS IN THE SOFTWARE.
 
 Notice 41
 ------------------------------------------------------------------------
+Applies to: russh 0.65.1
+
+Copyright/SPDX headers retained from the checksum-verified published archive.
+
+russh-0.65.1/src/auth.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/cipher/chacha20poly1305.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/cipher/clear.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/cipher/gcm.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/cipher/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/client/encrypted.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/client/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/kex/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/keys/key.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/lib.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/msg.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/negotiation.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/server/encrypted.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/server/mod.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/session.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+russh-0.65.1/src/sshbuffer.rs
+// Copyright 2016 Pierre-Étienne Meunier
+
+
+Notice 42
+------------------------------------------------------------------------
 Applies to: des 0.9.0
 
 Copyright (c) 2017-2024 The RustCrypto Project Developers
@@ -3170,7 +3222,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 42
+Notice 43
 ------------------------------------------------------------------------
 Applies to: curve25519-dalek 5.0.0
 
@@ -3205,7 +3257,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-Notice 43
+Notice 44
 ------------------------------------------------------------------------
 Applies to: pem-rfc7468 1.0.0, pkcs1 0.8.0-rc.4
 
@@ -3236,7 +3288,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 44
+Notice 45
 ------------------------------------------------------------------------
 Applies to: getrandom 0.2.17
 
@@ -3268,7 +3320,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 45
+Notice 46
 ------------------------------------------------------------------------
 Applies to: shlex 2.0.1
 
@@ -3295,7 +3347,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 
-Notice 46
+Notice 47
 ------------------------------------------------------------------------
 Applies to: russh-cryptovec 0.62.0
 
@@ -3305,7 +3357,7 @@ russh-cryptovec-0.62.0/src/lib.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
 
-Notice 47
+Notice 48
 ------------------------------------------------------------------------
 Applies to: bytes 1.12.1
 
@@ -3336,7 +3388,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 48
+Notice 49
 ------------------------------------------------------------------------
 Applies to: PLCrashReporter 1.12.2
 
@@ -3396,7 +3448,7 @@ file are licensed as follows:
     under the License.
 
 
-Notice 49
+Notice 50
 ------------------------------------------------------------------------
 Applies to: primefield 0.14.0
 
@@ -3427,7 +3479,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 50
+Notice 51
 ------------------------------------------------------------------------
 Applies to: blowfish 0.10.0
 
@@ -3458,7 +3510,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 51
+Notice 52
 ------------------------------------------------------------------------
 Applies to: typenum 1.20.1
 
@@ -3665,7 +3717,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-Notice 52
+Notice 53
 ------------------------------------------------------------------------
 Applies to: getrandom 0.4.3
 
@@ -3697,7 +3749,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 53
+Notice 54
 ------------------------------------------------------------------------
 Applies to: base16ct 1.0.0
 
@@ -3729,7 +3781,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 54
+Notice 55
 ------------------------------------------------------------------------
 Applies to: shlex 2.0.1
 
@@ -3748,7 +3800,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-Notice 55
+Notice 56
 ------------------------------------------------------------------------
 Applies to: crossbeam-utils 0.8.23
 
@@ -3781,7 +3833,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 56
+Notice 57
 ------------------------------------------------------------------------
 Applies to: argon2 0.6.0, crypto-bigint 0.7.6, phc 0.6.1, pkcs5 0.8.1, scrypt 0.12.0, sec1 0.8.1, spki 0.8.1, ssh-encoding 0.3.0, ssh-key 0.7.0-rc.11
 
@@ -3812,7 +3864,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 57
+Notice 58
 ------------------------------------------------------------------------
 Applies to: hkdf 0.13.0
 
@@ -4019,7 +4071,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-Notice 58
+Notice 59
 ------------------------------------------------------------------------
 Applies to: core-foundation-sys 0.8.7
 
@@ -4050,7 +4102,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 59
+Notice 60
 ------------------------------------------------------------------------
 Applies to: async-trait 0.1.92, libc 0.2.191, num_enum 0.7.6, num_enum_derive 0.7.6, proc-macro2 1.0.107, quote 1.0.47, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, syn 2.0.119, syn 3.0.9, thiserror 2.0.21, thiserror-impl 2.0.21, unicode-ident 1.0.27
 
@@ -4232,7 +4284,7 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 END OF TERMS AND CONDITIONS
 
 
-Notice 60
+Notice 61
 ------------------------------------------------------------------------
 Applies to: cbc 0.2.1, ctr 0.10.1
 
@@ -4264,7 +4316,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 61
+Notice 62
 ------------------------------------------------------------------------
 Applies to: sha3 0.12.0
 
@@ -4299,7 +4351,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 62
+Notice 63
 ------------------------------------------------------------------------
 Applies to: bitflags 2.13.2, log 0.4.34, num-bigint 0.5.1, num-integer 0.1.47, num-traits 0.2.19
 
@@ -4330,7 +4382,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 63
+Notice 64
 ------------------------------------------------------------------------
 Applies to: futures 0.3.34, futures-channel 0.3.34, futures-core 0.3.34, futures-executor 0.3.34, futures-io 0.3.34, futures-macro 0.3.34, futures-sink 0.3.34, futures-task 0.3.34, futures-util 0.3.34
 
@@ -4362,7 +4414,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 64
+Notice 65
 ------------------------------------------------------------------------
 Applies to: nix 0.31.3
 
@@ -4389,7 +4441,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 
-Notice 65
+Notice 66
 ------------------------------------------------------------------------
 Applies to: PLCrashReporter 1.12.2, smb2 0.33.0
 
@@ -4595,7 +4647,7 @@ APPENDIX: How to apply the Apache License to your work.
    limitations under the License.
 
 
-Notice 66
+Notice 67
 ------------------------------------------------------------------------
 Applies to: iana-time-zone 0.1.65
 
@@ -4802,7 +4854,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-Notice 67
+Notice 68
 ------------------------------------------------------------------------
 Applies to: salsa20 0.11.0
 
@@ -4834,7 +4886,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 68
+Notice 69
 ------------------------------------------------------------------------
 Applies to: rand_core 0.10.1
 
@@ -5027,7 +5079,7 @@ APPENDIX: How to apply the Apache License to your work.
    identification within third-party archives.
 
 
-Notice 69
+Notice 70
 ------------------------------------------------------------------------
 Applies to: ring 0.17.14
 
@@ -5056,7 +5108,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 70
+Notice 71
 ------------------------------------------------------------------------
 Applies to: toml_datetime 1.1.2+spec-1.1.0, toml_edit 0.25.17+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0
 
@@ -5081,7 +5133,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-Notice 71
+Notice 72
 ------------------------------------------------------------------------
 Applies to: cmov 0.5.4, hybrid-array 0.4.15
 
@@ -5112,7 +5164,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 72
+Notice 73
 ------------------------------------------------------------------------
 Applies to: equivalent 1.0.3
 
@@ -5143,7 +5195,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 73
+Notice 74
 ------------------------------------------------------------------------
 Applies to: ccm 0.6.1, const-oid 0.10.2, cpufeatures 0.3.1, der 0.8.2, pkcs8 0.11.0
 
@@ -5174,7 +5226,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 74
+Notice 75
 ------------------------------------------------------------------------
 Applies to: group 0.14.0
 
@@ -5194,7 +5246,7 @@ license, shall be dual licensed as above, without any additional terms or
 conditions.
 
 
-Notice 75
+Notice 76
 ------------------------------------------------------------------------
 Applies to: rsa 0.10.0-rc.18
 
@@ -5401,7 +5453,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-Notice 76
+Notice 77
 ------------------------------------------------------------------------
 Applies to: ecdsa 0.17.0, ed25519 3.0.0, rfc6979 0.6.0
 
@@ -5608,7 +5660,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-Notice 77
+Notice 78
 ------------------------------------------------------------------------
 Applies to: ed25519-dalek 3.0.0
 
@@ -5642,7 +5694,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-Notice 78
+Notice 79
 ------------------------------------------------------------------------
 Applies to: untrusted 0.9.0
 
@@ -5661,7 +5713,7 @@ Applies to: untrusted 0.9.0
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
-Notice 79
+Notice 80
 ------------------------------------------------------------------------
 Applies to: PLCrashReporter 1.12.2
 
@@ -5713,7 +5765,7 @@ above license.
 END OF Protobuf-c NOTICES AND INFORMATION
 
 
-Notice 80
+Notice 81
 ------------------------------------------------------------------------
 Applies to: md-5 0.11.0, sha1 0.11.0, sha2 0.11.1
 
@@ -5747,7 +5799,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 81
+Notice 82
 ------------------------------------------------------------------------
 Applies to: proc-macro-crate 3.5.0
 
@@ -5952,61 +6004,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-
-Notice 82
-------------------------------------------------------------------------
-Applies to: russh 0.64.1
-
-Copyright/SPDX headers retained from the checksum-verified published archive.
-
-russh-0.64.1/src/auth.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/cipher/chacha20poly1305.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/cipher/clear.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/cipher/gcm.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/cipher/mod.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/client/encrypted.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/client/mod.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/kex/mod.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/keys/key.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/lib.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/msg.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/negotiation.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/server/encrypted.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/server/mod.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/session.rs
-// Copyright 2016 Pierre-Étienne Meunier
-
-russh-0.64.1/src/sshbuffer.rs
-// Copyright 2016 Pierre-Étienne Meunier
 
 
 Notice 83
@@ -6681,7 +6678,7 @@ DEALINGS IN THE SOFTWARE.
 
 Notice 99
 ------------------------------------------------------------------------
-Applies to: autocfg 1.5.1, bitflags 2.13.2, cc 1.9.0, cfg-if 1.0.5, core-foundation-sys 0.8.7, crossbeam-utils 0.8.23, equivalent 1.0.3, find-msvc-tools 0.1.15, group 0.14.0, hashbrown 0.14.5, hashbrown 0.17.1, indexmap 2.14.2, lock_api 0.4.14, log 0.4.34, num-bigint 0.5.1, num-integer 0.1.47, num-traits 0.2.19, once_cell 1.21.4, parking_lot_core 0.9.12, ring 0.17.14, rustc_version 0.4.1, scopeguard 1.2.0, smallvec 1.16.3, socket2 0.6.5, version_check 0.9.5
+Applies to: autocfg 1.5.1, bitflags 2.13.2, cc 1.9.0, cfg-if 1.0.5, core-foundation-sys 0.8.7, crossbeam-utils 0.8.23, curve25519-dalek-derive 0.1.1, equivalent 1.0.3, find-msvc-tools 0.1.15, group 0.14.0, hashbrown 0.14.5, hashbrown 0.17.1, indexmap 2.14.2, lock_api 0.4.14, log 0.4.34, num-bigint 0.5.1, num-integer 0.1.47, num-traits 0.2.19, once_cell 1.21.4, parking_lot_core 0.9.12, ring 0.17.14, rustc_version 0.4.1, scopeguard 1.2.0, smallvec 1.16.3, socket2 0.6.5
 
                               Apache License
                         Version 2.0, January 2004
@@ -7849,31 +7846,6 @@ SOFTWARE.
 
 Notice 109
 ------------------------------------------------------------------------
-Applies to: version_check 0.9.5
-
-The MIT License (MIT)
-Copyright (c) 2017-2018 Sergio Benitez
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-Notice 110
-------------------------------------------------------------------------
 Applies to: aes-gcm 0.11.1, chacha20 0.10.2, ghash 0.6.0, polyval 0.7.3
 
 Copyright (c) 2019-2026 The RustCrypto Project Developers
@@ -7903,7 +7875,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 111
+Notice 110
 ------------------------------------------------------------------------
 Applies to: delegate 0.13.5
 
@@ -7934,9 +7906,9 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 112
+Notice 111
 ------------------------------------------------------------------------
-Applies to: generic-array 0.14.9, generic-array 1.4.5
+Applies to: generic-array 1.4.5
 
 The MIT License (MIT)
 
@@ -7961,7 +7933,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-Notice 113
+Notice 112
 ------------------------------------------------------------------------
 Applies to: wnaf 0.14.1
 
@@ -7993,7 +7965,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 114
+Notice 113
 ------------------------------------------------------------------------
 Applies to: hex 0.4.3
 
@@ -8200,7 +8172,7 @@ Applies to: hex 0.4.3
    limitations under the License.
 
 
-Notice 115
+Notice 114
 ------------------------------------------------------------------------
 Applies to: crypto-primes 0.7.2
 
@@ -8407,7 +8379,7 @@ Applies to: crypto-primes 0.7.2
    limitations under the License.
 
 
-Notice 116
+Notice 115
 ------------------------------------------------------------------------
 Applies to: lock_api 0.4.14, parking_lot_core 0.9.12, rustc_version 0.4.1
 
@@ -8438,7 +8410,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 117
+Notice 116
 ------------------------------------------------------------------------
 Applies to: winnow 1.0.4
 
@@ -8462,9 +8434,9 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
-Notice 118
+Notice 117
 ------------------------------------------------------------------------
-Applies to: cmov 0.5.4, ctutils 0.4.2, ctutils 0.4.5, russh 0.64.1, russh-cryptovec 0.62.0, russh-util 0.52.0, serdect 0.4.3, zeroize 1.9.1
+Applies to: cmov 0.5.4, ctutils 0.4.2, ctutils 0.4.5, russh 0.65.1, russh-cryptovec 0.62.0, russh-util 0.52.0, serdect 0.4.3, zeroize 1.9.1
 
 
                                  Apache License
@@ -8670,7 +8642,7 @@ Applies to: cmov 0.5.4, ctutils 0.4.2, ctutils 0.4.5, russh 0.64.1, russh-crypto
    limitations under the License.
 
 
-Notice 119
+Notice 118
 ------------------------------------------------------------------------
 Applies to: ml-kem 0.3.3, module-lattice 0.2.3
 
@@ -8695,7 +8667,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-Notice 120
+Notice 119
 ------------------------------------------------------------------------
 Applies to: subtle 2.6.1
 
@@ -8730,7 +8702,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-Notice 121
+Notice 120
 ------------------------------------------------------------------------
 Applies to: hkdf 0.13.0
 
@@ -8762,7 +8734,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 122
+Notice 121
 ------------------------------------------------------------------------
 Applies to: crypto-common 0.2.2, kem 0.3.0
 
@@ -8793,7 +8765,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 123
+Notice 122
 ------------------------------------------------------------------------
 Applies to: elliptic-curve 0.14.1, p256 0.14.0, p521 0.14.0, password-hash 0.6.1
 
@@ -8824,7 +8796,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 124
+Notice 123
 ------------------------------------------------------------------------
 Applies to: iana-time-zone 0.1.65
 
@@ -8855,14 +8827,14 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 125
+Notice 124
 ------------------------------------------------------------------------
 Applies to: typenum 1.20.1
 
 MIT OR Apache-2.0
 
 
-Notice 126
+Notice 125
 ------------------------------------------------------------------------
 Applies to: indexmap 2.14.2
 
@@ -8893,7 +8865,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 127
+Notice 126
 ------------------------------------------------------------------------
 Applies to: universal-hash 0.6.1
 
@@ -8924,7 +8896,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 128
+Notice 127
 ------------------------------------------------------------------------
 Applies to: ring 0.17.14
 
@@ -8943,7 +8915,7 @@ OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
-Notice 129
+Notice 128
 ------------------------------------------------------------------------
 Applies to: kem 0.3.0
 
@@ -8962,7 +8934,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-Notice 130
+Notice 129
 ------------------------------------------------------------------------
 Applies to: twox-hash 2.1.5
 
@@ -8989,7 +8961,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-Notice 131
+Notice 130
 ------------------------------------------------------------------------
 Applies to: hex 0.4.3
 
@@ -9015,7 +8987,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-Notice 132
+Notice 131
 ------------------------------------------------------------------------
 Applies to: unicode-ident 1.0.27
 
@@ -9060,7 +9032,7 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 
-Notice 133
+Notice 132
 ------------------------------------------------------------------------
 Applies to: scopeguard 1.2.0
 
@@ -9091,7 +9063,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-Notice 134
+Notice 133
 ------------------------------------------------------------------------
 Applies to: hashbrown 0.14.5, hashbrown 0.17.1
 

@@ -9,17 +9,17 @@
       "notices": [
         {
           "name": "Vendor/PLCrashReporter/LICENSE",
-          "noticeNumber": 48,
+          "noticeNumber": 49,
           "sha256": "45f57308a5f95039a6478cf1e47449aa11e28427777d81497bd654c1f41ef5af"
         },
         {
           "name": "Vendor/PLCrashReporter/ThirdPartyNotices.txt",
-          "noticeNumber": 79,
+          "noticeNumber": 80,
           "sha256": "80f7ace6d700d7be9525589d557698d11d85852b69ed096e12a9371167c39cb8"
         },
         {
           "name": "Vendor/smb2/LICENSE-APACHE",
-          "noticeNumber": 65,
+          "noticeNumber": 66,
           "sha256": "6955628237fe98483693c2e357db2b2e2b1d95661ad4dc48f05d1d019f96e0dd"
         }
       ],
@@ -103,7 +103,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 110,
+          "noticeNumber": 109,
           "sha256": "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0"
         }
       ],
@@ -123,7 +123,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -138,7 +138,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -183,7 +183,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 53,
+          "noticeNumber": 54,
           "sha256": "54fb6dfe99a6906f862aa40282f0e8e9d9d0f22d57d99ab8acbaf4c8ceaa70e0"
         }
       ],
@@ -243,7 +243,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 62,
+          "noticeNumber": 63,
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
         }
       ],
@@ -324,7 +324,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 50,
+          "noticeNumber": 51,
           "sha256": "4ff7fc936cdf875209dace77be5f98df16df51d82df7a2069f4d264d1d61c259"
         }
       ],
@@ -360,7 +360,7 @@
       "notices": [
         {
           "name": "LICENSE",
-          "noticeNumber": 47,
+          "noticeNumber": 48,
           "sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42"
         }
       ],
@@ -380,7 +380,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 60,
+          "noticeNumber": 61,
           "sha256": "63af4bea227c94d021e99427f6ca3a4b8efddadcca93ab6130f708cf6138cf68"
         }
       ],
@@ -420,7 +420,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 73,
+          "noticeNumber": 74,
           "sha256": "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa"
         }
       ],
@@ -481,7 +481,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 110,
+          "noticeNumber": 109,
           "sha256": "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0"
         }
       ],
@@ -553,12 +553,12 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 71,
+          "noticeNumber": 72,
           "sha256": "70c9d40f1f9545c3f133b8a67206e89da850f6468eed072281bb3701514114a9"
         }
       ],
@@ -579,7 +579,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 73,
+          "noticeNumber": 74,
           "sha256": "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa"
         }
       ],
@@ -599,7 +599,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 58,
+          "noticeNumber": 59,
           "sha256": "62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3"
         }
       ],
@@ -641,7 +641,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 73,
+          "noticeNumber": 74,
           "sha256": "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa"
         }
       ],
@@ -661,7 +661,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 55,
+          "noticeNumber": 56,
           "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab"
         }
       ],
@@ -681,7 +681,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -702,7 +702,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 122,
+          "noticeNumber": 121,
           "sha256": "d2e7ec5355c96eeade56b09187ceb48a6a30299da3ce7531a66d3d11405ab963"
         }
       ],
@@ -717,7 +717,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 115,
+          "noticeNumber": 114,
           "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         },
         {
@@ -743,7 +743,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 60,
+          "noticeNumber": 61,
           "sha256": "63af4bea227c94d021e99427f6ca3a4b8efddadcca93ab6130f708cf6138cf68"
         }
       ],
@@ -758,7 +758,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
@@ -778,7 +778,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
@@ -798,11 +798,31 @@
       "notices": [
         {
           "name": "LICENSE",
-          "noticeNumber": 42,
+          "noticeNumber": 43,
           "sha256": "403c53069750101aeb9df7e15f127056ceaf7e4e92d0b919a1f4c084afd5f1d4"
         }
       ],
       "version": "5.0.0"
+    },
+    {
+      "declaredLicense": "MIT/Apache-2.0",
+      "graphs": [
+        "sftp"
+      ],
+      "name": "curve25519-dalek-derive",
+      "notices": [
+        {
+          "name": "LICENSE-APACHE",
+          "noticeNumber": 99,
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "name": "LICENSE-MIT",
+          "noticeNumber": 24,
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ],
+      "version": "0.1.1"
     },
     {
       "declaredLicense": "MIT",
@@ -874,7 +894,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 111,
+          "noticeNumber": 110,
           "provenance": {
             "name": "LICENSE-MIT",
             "origin": "recorded-upstream-base-revision",
@@ -906,7 +926,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 73,
+          "noticeNumber": 74,
           "sha256": "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa"
         }
       ],
@@ -926,7 +946,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 41,
+          "noticeNumber": 42,
           "sha256": "39bec22df7525380b392c7ead6f098e8bce157600a020150955fd8aa86d63afb"
         }
       ],
@@ -962,7 +982,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 76,
+          "noticeNumber": 77,
           "sha256": "78779d420019e6b4630376af8e86b6b335ee8a2f89ede6e0411e0469a326aaa4"
         },
         {
@@ -982,7 +1002,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 76,
+          "noticeNumber": 77,
           "sha256": "78779d420019e6b4630376af8e86b6b335ee8a2f89ede6e0411e0469a326aaa4"
         },
         {
@@ -1002,7 +1022,7 @@
       "notices": [
         {
           "name": "LICENSE",
-          "noticeNumber": 77,
+          "noticeNumber": 78,
           "sha256": "7a313964a6e050794d2ad57f4863c11f6bbe055c0ae6ce2cf3b9fc45150bada3"
         }
       ],
@@ -1022,7 +1042,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 123,
+          "noticeNumber": 122,
           "sha256": "d8c4ab431f20da8452c9a217084163822e5fd9d134e1343903c929f2859fc8fd"
         }
       ],
@@ -1057,7 +1077,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 72,
+          "noticeNumber": 73,
           "sha256": "7365cc8878a1d7ce155a58c4ca09c3d7a6be413efa5334a80ea842912b669349"
         }
       ],
@@ -1117,7 +1137,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1137,7 +1157,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1158,7 +1178,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1178,7 +1198,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1198,7 +1218,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1218,7 +1238,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1238,7 +1258,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1259,7 +1279,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1280,7 +1300,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 63,
+          "noticeNumber": 64,
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
         }
       ],
@@ -1295,22 +1315,7 @@
       "notices": [
         {
           "name": "LICENSE",
-          "noticeNumber": 112,
-          "sha256": "c09aae9d3c77b531f56351a9947bc7446511d6b025b3255312d3e3442a9a7583"
-        }
-      ],
-      "version": "0.14.9"
-    },
-    {
-      "declaredLicense": "MIT",
-      "graphs": [
-        "sftp"
-      ],
-      "name": "generic-array",
-      "notices": [
-        {
-          "name": "LICENSE",
-          "noticeNumber": 112,
+          "noticeNumber": 111,
           "sha256": "c09aae9d3c77b531f56351a9947bc7446511d6b025b3255312d3e3442a9a7583"
         }
       ],
@@ -1330,7 +1335,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 44,
+          "noticeNumber": 45,
           "sha256": "42fa16951ce7f24b5a467a40e5b449a1d41e662f97ca779864f053f39e097737"
         }
       ],
@@ -1351,7 +1356,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 52,
+          "noticeNumber": 53,
           "sha256": "523a42c25d245dde9c015f882cec7f4555aad883382a6cf19b4b7d9b2cd5419b"
         }
       ],
@@ -1372,7 +1377,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 110,
+          "noticeNumber": 109,
           "sha256": "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0"
         }
       ],
@@ -1387,7 +1392,7 @@
       "notices": [
         {
           "name": "COPYRIGHT",
-          "noticeNumber": 74,
+          "noticeNumber": 75,
           "sha256": "7429802d3e67e3308471b91fbea341e484c4e0a23d0fb230a8636c38184cec79"
         },
         {
@@ -1417,7 +1422,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 134,
+          "noticeNumber": 133,
           "sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2"
         }
       ],
@@ -1437,7 +1442,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 134,
+          "noticeNumber": 133,
           "sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2"
         }
       ],
@@ -1452,12 +1457,12 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 114,
+          "noticeNumber": 113,
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 131,
+          "noticeNumber": 130,
           "sha256": "f7bdb3426d045cd50efd4953026e3eb5a83d0199f458a075602611b9344da5b9"
         }
       ],
@@ -1492,12 +1497,12 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 57,
+          "noticeNumber": 58,
           "sha256": "59013a5c8d3a19c26a457579105915a5d51bb0c09d579f8cdedf12e4203c3018"
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 121,
+          "noticeNumber": 120,
           "sha256": "d288f9c9b4590446ec18c22ead8f8b5a12a3d4025b68f62dc9015063eb9cca69"
         }
       ],
@@ -1539,7 +1544,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 71,
+          "noticeNumber": 72,
           "sha256": "70c9d40f1f9545c3f133b8a67206e89da850f6468eed072281bb3701514114a9"
         }
       ],
@@ -1554,12 +1559,12 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 66,
+          "noticeNumber": 67,
           "sha256": "696759d65dfe558ff7d9f031c76db19ec5c0767470fb67c4e8d990820d1e99c9"
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 124,
+          "noticeNumber": 123,
           "sha256": "da28ccc6b158fc2d8cccc74e99794b1cff1d29bd7bbeb019442fcf0c04c6cad9"
         }
       ],
@@ -1579,7 +1584,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 126,
+          "noticeNumber": 125,
           "sha256": "ecc269ef87fd38a1d98e30bfac9ba964a9dbd9315c3770fed98d4d7cb5882055"
         }
       ],
@@ -1635,12 +1640,12 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 129,
+          "noticeNumber": 128,
           "sha256": "f25e815326bb6e7efb7baf7eeca7f096cd05bc1af9bb7c408984db61bd69e304"
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 122,
+          "noticeNumber": 121,
           "sha256": "d2e7ec5355c96eeade56b09187ceb48a6a30299da3ce7531a66d3d11405ab963"
         }
       ],
@@ -1656,7 +1661,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -1681,7 +1686,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 116,
+          "noticeNumber": 115,
           "sha256": "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5"
         }
       ],
@@ -1702,7 +1707,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 62,
+          "noticeNumber": 63,
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
         }
       ],
@@ -1737,7 +1742,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 80,
+          "noticeNumber": 81,
           "sha256": "831e0f43ad0bf014c1c4fec5767aae470434c1d66d6e671be2d823e729063e25"
         }
       ],
@@ -1829,7 +1834,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 119,
+          "noticeNumber": 118,
           "sha256": "d0fb27c23e807f1fc6f506d161984b294a1f05c9888ae31f056d1712685948ad"
         }
       ],
@@ -1849,7 +1854,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 119,
+          "noticeNumber": 118,
           "sha256": "d0fb27c23e807f1fc6f506d161984b294a1f05c9888ae31f056d1712685948ad"
         }
       ],
@@ -1864,7 +1869,7 @@
       "notices": [
         {
           "name": "LICENSE",
-          "noticeNumber": 64,
+          "noticeNumber": 65,
           "sha256": "66e3ee1fa7f909ad3c612d556f2a0cdabcd809ad6e66f3b0605015ac64841b70"
         }
       ],
@@ -1884,7 +1889,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 62,
+          "noticeNumber": 63,
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
         }
       ],
@@ -1904,7 +1909,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 62,
+          "noticeNumber": 63,
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
         }
       ],
@@ -1924,7 +1929,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 62,
+          "noticeNumber": 63,
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
         }
       ],
@@ -1939,7 +1944,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -1964,7 +1969,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2014,7 +2019,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 123,
+          "noticeNumber": 122,
           "sha256": "d8c4ab431f20da8452c9a217084163822e5fd9d134e1343903c929f2859fc8fd"
         }
       ],
@@ -2054,7 +2059,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 123,
+          "noticeNumber": 122,
           "sha256": "d8c4ab431f20da8452c9a217084163822e5fd9d134e1343903c929f2859fc8fd"
         }
       ],
@@ -2074,7 +2079,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 116,
+          "noticeNumber": 115,
           "sha256": "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5"
         }
       ],
@@ -2094,7 +2099,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 123,
+          "noticeNumber": 122,
           "sha256": "d8c4ab431f20da8452c9a217084163822e5fd9d134e1343903c929f2859fc8fd"
         }
       ],
@@ -2135,7 +2140,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 43,
+          "noticeNumber": 44,
           "sha256": "4148e7b027fba018131f297b4fe27995386ba317018d6855e182fd0e86cd754f"
         }
       ],
@@ -2155,7 +2160,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -2196,7 +2201,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 43,
+          "noticeNumber": 44,
           "sha256": "4148e7b027fba018131f297b4fe27995386ba317018d6855e182fd0e86cd754f"
         }
       ],
@@ -2216,7 +2221,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -2236,7 +2241,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 73,
+          "noticeNumber": 74,
           "sha256": "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa"
         }
       ],
@@ -2277,7 +2282,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 110,
+          "noticeNumber": 109,
           "sha256": "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0"
         }
       ],
@@ -2297,7 +2302,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 49,
+          "noticeNumber": 50,
           "sha256": "4621bda86773a67b5645bbd25cf1bf8b6820d4fcec3885b23b9ceec612007f63"
         }
       ],
@@ -2332,7 +2337,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 81,
+          "noticeNumber": 82,
           "sha256": "8ada45cd9f843acf64e4722ae262c622a2b3b3007c7310ef36ac1061a30f6adb"
         },
         {
@@ -2353,7 +2358,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2374,7 +2379,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2425,7 +2430,7 @@
         },
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 68,
+          "noticeNumber": 69,
           "sha256": "6df43f6f4b5d4587f3d8d71e45532c688fd168afa5fe89d571cb32fa09c4ef51"
         },
         {
@@ -2445,7 +2450,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 76,
+          "noticeNumber": 77,
           "sha256": "78779d420019e6b4630376af8e86b6b335ee8a2f89ede6e0411e0469a326aaa4"
         },
         {
@@ -2475,7 +2480,7 @@
         },
         {
           "name": "LICENSE-other-bits",
-          "noticeNumber": 128,
+          "noticeNumber": 127,
           "sha256": "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f"
         },
         {
@@ -2485,7 +2490,7 @@
         },
         {
           "name": "src/polyfill/once_cell/LICENSE-MIT",
-          "noticeNumber": 69,
+          "noticeNumber": 70,
           "sha256": "6ee2ed6c77710de911761acd5fc1ad1da00f476beb1a7ef27e78c2d1858deafc"
         },
         {
@@ -2505,7 +2510,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 75,
+          "noticeNumber": 76,
           "sha256": "769f80b5bcb42ed0af4e4d2fd74e1ac9bf843cb80c5a29219d1ef3544428a6bb"
         },
         {
@@ -2525,34 +2530,34 @@
       "notices": [
         {
           "name": "LICENSE.txt",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "provenance": {
             "name": "LICENSE.txt",
             "origin": "recorded-upstream-base-revision",
             "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-            "url": "https://raw.githubusercontent.com/Eugeny/russh/e5d80a07dc554480b6ea3b2e14adfc190407b627/LICENSE.txt"
+            "url": "https://raw.githubusercontent.com/Eugeny/russh/b33092aad1e51c66258a12e8b83fc473a68d9d34/LICENSE.txt"
           },
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
           "name": "PUBLISHED-COPYRIGHT-HEADERS.txt",
-          "noticeNumber": 82,
+          "noticeNumber": 41,
           "provenance": {
             "name": "PUBLISHED-COPYRIGHT-HEADERS.txt",
             "origin": "checksum-verified-published-source",
-            "sha256": "8b24f8ac875aa7d743b2dddafc96b51b4e20f7d447f2041e2e2cbda9a3e2d021",
-            "url": "https://crates.io/api/v1/crates/russh/0.64.1/download"
+            "sha256": "37d3aa06a511376e5f24c687d3b0cdcc6d583a0642a006e1f4856b136801264f",
+            "url": "https://crates.io/api/v1/crates/russh/0.65.1/download"
           },
-          "sha256": "8b24f8ac875aa7d743b2dddafc96b51b4e20f7d447f2041e2e2cbda9a3e2d021"
+          "sha256": "37d3aa06a511376e5f24c687d3b0cdcc6d583a0642a006e1f4856b136801264f"
         }
       ],
       "publishedVCSForSupplement": {
         "git": {
-          "sha1": "e5d80a07dc554480b6ea3b2e14adfc190407b627"
+          "sha1": "b33092aad1e51c66258a12e8b83fc473a68d9d34"
         },
         "path_in_vcs": "russh"
       },
-      "version": "0.64.1"
+      "version": "0.65.1"
     },
     {
       "declaredLicense": "Apache-2.0",
@@ -2563,7 +2568,7 @@
       "notices": [
         {
           "name": "LICENSE.txt",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "provenance": {
             "name": "LICENSE.txt",
             "origin": "recorded-upstream-base-revision",
@@ -2574,7 +2579,7 @@
         },
         {
           "name": "PUBLISHED-COPYRIGHT-HEADERS.txt",
-          "noticeNumber": 46,
+          "noticeNumber": 47,
           "provenance": {
             "name": "PUBLISHED-COPYRIGHT-HEADERS.txt",
             "origin": "checksum-verified-published-source",
@@ -2616,7 +2621,7 @@
       "notices": [
         {
           "name": "LICENSE-2.0.txt",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "provenance": {
             "name": "LICENSE-2.0.txt",
             "origin": "recorded-upstream-base-revision",
@@ -2649,7 +2654,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 116,
+          "noticeNumber": 115,
           "sha256": "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5"
         }
       ],
@@ -2665,7 +2670,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2690,7 +2695,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 67,
+          "noticeNumber": 68,
           "sha256": "6bfc9e0412997fc00de5379aa3b2e919449d2adee1aee3b0cb9ee0a5fd367956"
         }
       ],
@@ -2710,7 +2715,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 133,
+          "noticeNumber": 132,
           "sha256": "fb77f0a9c53e473abe5103c8632ef9f0f2874d4fb3f17cb2d8c661aab9cee9d7"
         }
       ],
@@ -2730,7 +2735,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -2750,7 +2755,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -2765,7 +2770,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2785,7 +2790,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2805,7 +2810,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2826,7 +2831,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2846,7 +2851,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -2866,7 +2871,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
@@ -2892,7 +2897,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 80,
+          "noticeNumber": 81,
           "sha256": "831e0f43ad0bf014c1c4fec5767aae470434c1d66d6e671be2d823e729063e25"
         }
       ],
@@ -2913,7 +2918,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 80,
+          "noticeNumber": 81,
           "sha256": "831e0f43ad0bf014c1c4fec5767aae470434c1d66d6e671be2d823e729063e25"
         }
       ],
@@ -2933,7 +2938,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 61,
+          "noticeNumber": 62,
           "sha256": "6462612d92b861384dcd378168a7a0ef3ef28876d3d380d382cb5a3091e360b8"
         }
       ],
@@ -2968,12 +2973,12 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 54,
+          "noticeNumber": 55,
           "sha256": "553fffcd9b1cb158bc3e9edc35da85ca5c3b3d7d2e61c883ebcfa8a65814b583"
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 45,
+          "noticeNumber": 46,
           "sha256": "4455bf75a91154108304cb283e0fea9948c14f13e20d60887cf2552449dea3b1"
         }
       ],
@@ -3044,7 +3049,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 65,
+          "noticeNumber": 66,
           "sha256": "6955628237fe98483693c2e357db2b2e2b1d95661ad4dc48f05d1d019f96e0dd"
         },
         {
@@ -3090,7 +3095,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -3150,7 +3155,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -3170,7 +3175,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 56,
+          "noticeNumber": 57,
           "sha256": "57a4d75c1d095bb94754a478f3cd15e60ac66a5c5627d844be01a918eea5fe88"
         }
       ],
@@ -3185,7 +3190,7 @@
       "notices": [
         {
           "name": "LICENSE",
-          "noticeNumber": 120,
+          "noticeNumber": 119,
           "sha256": "d1fc1bc0d155df60b2e7705b6b2ae02a05c96f948e1cec6e2fb86360b09f346b"
         }
       ],
@@ -3201,7 +3206,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -3222,7 +3227,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -3243,7 +3248,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -3264,7 +3269,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -3289,7 +3294,7 @@
           "sha256": "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552"
         }
       ],
-      "version": "1.54.0"
+      "version": "1.54.1"
     },
     {
       "declaredLicense": "MIT",
@@ -3336,7 +3341,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 70,
+          "noticeNumber": 71,
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
         }
       ],
@@ -3356,7 +3361,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 70,
+          "noticeNumber": 71,
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
         }
       ],
@@ -3376,7 +3381,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 70,
+          "noticeNumber": 71,
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
         }
       ],
@@ -3391,7 +3396,7 @@
       "notices": [
         {
           "name": "LICENSE.txt",
-          "noticeNumber": 130,
+          "noticeNumber": 129,
           "sha256": "f59bcb1c02654665f78a5f290bae76b6358137675f6459f51e6d474a4623d8ea"
         }
       ],
@@ -3407,12 +3412,12 @@
       "notices": [
         {
           "name": "LICENSE",
-          "noticeNumber": 125,
+          "noticeNumber": 124,
           "sha256": "db11fec9946737df39ca3898d9cd8c10ec6f6c3a884a6802b0ad0b81b4e8f23a"
         },
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 51,
+          "noticeNumber": 52,
           "sha256": "516b24e051bf5630880ebbd55c40a25ce9552ebaf8970a53e8976eb70e522406"
         },
         {
@@ -3433,7 +3438,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 59,
+          "noticeNumber": 60,
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
         },
         {
@@ -3443,7 +3448,7 @@
         },
         {
           "name": "LICENSE-UNICODE",
-          "noticeNumber": 132,
+          "noticeNumber": 131,
           "sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1"
         }
       ],
@@ -3464,7 +3469,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 127,
+          "noticeNumber": 126,
           "sha256": "efa52eb70a774b62c50cf50f5e57e2625c29d375d09b91132f4f020e47b9944e"
         }
       ],
@@ -3479,31 +3484,11 @@
       "notices": [
         {
           "name": "LICENSE.txt",
-          "noticeNumber": 78,
+          "noticeNumber": 79,
           "sha256": "7abd9b6960dcf7d4d0a48606a5b71bfe37d472db68d70637f3a58a56785f1621"
         }
       ],
       "version": "0.9.0"
-    },
-    {
-      "declaredLicense": "MIT/Apache-2.0",
-      "graphs": [
-        "sftp"
-      ],
-      "name": "version_check",
-      "notices": [
-        {
-          "name": "LICENSE-APACHE",
-          "noticeNumber": 99,
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
-        },
-        {
-          "name": "LICENSE-MIT",
-          "noticeNumber": 109,
-          "sha256": "b7e650f3fce5c53249d1cdc608b54df156a97edd636cf9d23498d0cfe7aec63e"
-        }
-      ],
-      "version": "0.9.5"
     },
     {
       "declaredLicense": "MIT",
@@ -3514,7 +3499,7 @@
       "notices": [
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 117,
+          "noticeNumber": 116,
           "sha256": "cb5aedb296c5246d1f22e9099f925a65146f9f0d6b4eebba97fd27a6cdbbab2d"
         }
       ],
@@ -3534,7 +3519,7 @@
         },
         {
           "name": "LICENSE-MIT",
-          "noticeNumber": 113,
+          "noticeNumber": 112,
           "sha256": "c1c9d5ca65122bab96e368709f8cfe9b92b443a3c21306c3260fc98eaac7e5fc"
         }
       ],
@@ -3549,7 +3534,7 @@
       "notices": [
         {
           "name": "LICENSE-APACHE",
-          "noticeNumber": 118,
+          "noticeNumber": 117,
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
@@ -3565,21 +3550,38 @@
     {
       "path": "tools/smb_reader/smb2-browser/Cargo.lock",
       "role": "smb",
-      "sha256": "6a492ece4342ceed7438c1c9e7441fd7c83e06f1b071f2e7038d8650ca417c65"
+      "sha256": "495a39ac624cf9849eb8bd3498e24ed2b83638d20792ae9ee3ff25e19b1d46ba",
+      "target": "aarch64-apple-darwin"
+    },
+    {
+      "path": "tools/smb_reader/smb2-browser/Cargo.lock",
+      "role": "smb",
+      "sha256": "495a39ac624cf9849eb8bd3498e24ed2b83638d20792ae9ee3ff25e19b1d46ba",
+      "target": "x86_64-apple-darwin"
     },
     {
       "path": "tools/sftp_reader/qualification/Cargo.lock",
       "role": "sftp",
-      "sha256": "f89c975bc9f55b72be780384a3ee9234f3e1eee553de000287a7429114c0169c"
+      "sha256": "f4aff999a1ed8efa31cb8a2b6ebee1b0e5e39f849e32877cd868772784c51817",
+      "target": "aarch64-apple-darwin"
+    },
+    {
+      "path": "tools/sftp_reader/qualification/Cargo.lock",
+      "role": "sftp",
+      "sha256": "f4aff999a1ed8efa31cb8a2b6ebee1b0e5e39f849e32877cd868772784c51817",
+      "target": "x86_64-apple-darwin"
     }
   ],
   "generatedNetworkRequests": 0,
   "includesBuildDependencies": true,
   "localAbsolutePathsIncluded": false,
-  "lockSHA256": "6a492ece4342ceed7438c1c9e7441fd7c83e06f1b071f2e7038d8650ca417c65",
-  "noticeSHA256": "734f7795dc44a17b9d560be7b44fdb58287e6a954eaa0e91a8946a94d1596f3f",
-  "rustCompilerSHA256": "1ba7bb8e273bd64125f4048d2ecce530e0a6470e565ab1b3aecf0b82b532f7b1",
+  "lockSHA256": "495a39ac624cf9849eb8bd3498e24ed2b83638d20792ae9ee3ff25e19b1d46ba",
+  "noticeSHA256": "788dd2fc64324904e5a284e37eb61eae28888371a21757f090f9c8e957c75667",
   "rustLibraryCopyrightSHA256": "5647be074c8edf7339fd863055923a8fc80bc5610a8d4661ec3b767b9d392c27",
-  "target": "aarch64-apple-darwin",
+  "rustToolchainManifestSHA256": "733b8e71695f1ccd29195946bd118bbc506c9b0de1e22868bcebd167805ce305",
+  "targets": [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin"
+  ],
   "version": 1
 }

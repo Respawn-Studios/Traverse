@@ -563,7 +563,7 @@ impl Verified {
         let handle=self.handle.take().ok_or(Failure::Closed)?;
         tokio::time::timeout(self.deadline,async{
             let queued=handle.disconnect(russh::Disconnect::ByApplication,"Client closed","").await.is_ok();
-            // russh 0.64.1 returns Err(Disconnect) after its own requested
+            // russh can return Err(Disconnect) after its own requested
             // disconnect: run_inner starts with that result and only changes
             // it to Ok for a received peer SSH disconnect. Accept that exact
             // local exit only when our request was queued. This is task

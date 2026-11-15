@@ -203,7 +203,7 @@ def public_registry(fetch: bool) -> tuple[dict[str, bytes], dict, str]:
     cargo = TOOLCHAIN / "bin/cargo"
     _, cargo_version = require_toolchain()
     identity = {"locks": locks, "cargoSHA256": sha(read(cargo, 64 << 20)),
-                "cargoVersion": cargo_version, "target": "aarch64-apple-darwin", "selectionVersion": 2}
+                "cargoVersion": cargo_version, "targets": ["aarch64-apple-darwin", "x86_64-apple-darwin"], "selectionVersion": 3}
     key = sha(json.dumps(identity, sort_keys=True).encode())
     parent = local_directory("source-registry")
     case = parent / key
@@ -227,10 +227,11 @@ def public_registry(fetch: bool) -> tuple[dict[str, bytes], dict, str]:
         env.update(CARGO_HOME=str(home), CARGO_TARGET_DIR=str(home / "target"),
                    RUSTUP_HOME=str(home / "rustup"), TMPDIR=str(home / "tmp"))
         refuse_private_configuration(env)
-        run([str(cargo), "fetch", "--manifest-path", str(ROOT / manifest),
-             "--locked", "--target", identity["target"]], env, fetch=True)
-        run([str(cargo), "metadata", "--manifest-path", str(ROOT / manifest), "--locked", "--offline",
-             "--format-version", "1", "--filter-platform", identity["target"]], env)
+        for target in identity["targets"]:
+            run([str(cargo), "fetch", "--manifest-path", str(ROOT / manifest),
+                 "--locked", "--target", target], env, fetch=True)
+            run([str(cargo), "metadata", "--manifest-path", str(ROOT / manifest), "--locked", "--offline",
+                 "--format-version", "1", "--filter-platform", target], env)
     values, graphs = dependency_inputs({role: stage / role for role in GRAPHS})
     if locks != {role: sha(read((ROOT / manifest).with_name("Cargo.lock")))
                  for role, (_, manifest) in GRAPHS.items()}:
@@ -364,7 +365,7 @@ def main() -> None:
         raise RuntimeError("Worktree changed during source preparation; retain this case for review")
     record = {"schema": 1, "prepared": True, "published": False, "sourceCommit": commit,
               "sourceSelection": args.selection, "privacyReview": "NOT EXERCISED",
-              "target": "aarch64-apple-darwin", "cargoVersion": "1.99.1", "projectFiles": len(expected),
+              "targets": ["aarch64-apple-darwin", "x86_64-apple-darwin"], "cargoVersion": "1.99.1", "projectFiles": len(expected),
               "dependencyGraphs": graphs, "sdkSources": [item for item, _ in sources],
               "publicRegistryReceipt": registry_key,
               "cleanExportBuild": "NOT EXERCISED", "binaryCorrespondence": "NOT EXERCISED",

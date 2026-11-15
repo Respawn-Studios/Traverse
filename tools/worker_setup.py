@@ -26,8 +26,8 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from dev import local_directory
+from build_architecture import ARCHITECTURES, host, named
 
-TARGET = "aarch64-apple-darwin"
 TOOLCHAIN = ROOT / ".build/b06-toolchain/rust-1.99.1"
 GRAPHS = {
     "smb": ("tools/smb_reader/packet.py", "tools/smb_reader/smb2-browser/Cargo.toml"),
@@ -123,17 +123,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fetch", action="store_true",
                         help="Fetch only the two locked production graphs from public registries.")
+    parser.add_argument("--arch", choices=tuple(ARCHITECTURES), default=host().name,
+                        help="Prepare dependencies for this native or cross-built Mac architecture.")
     args = parser.parse_args()
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
-        raise RuntimeError("The currently qualified worker toolchain is Apple Silicon macOS only")
+    if platform.system() != "Darwin":
+        raise RuntimeError("The bundled workers require the pinned macOS toolchain")
+    target = named(args.arch).rust_target
     cargo = TOOLCHAIN / "bin/cargo"
     version, cargo_version = require_toolchain()
+    if not (TOOLCHAIN / "lib/rustlib" / target / "lib").is_dir():
+        raise RuntimeError("Install the pinned Rust standard library for " + target + " first")
     locks = {role: (ROOT / manifest).with_name("Cargo.lock").read_bytes()
              for role, (_, manifest) in GRAPHS.items()}
     for data in locks.values(): require_public_lock(data)
     require_public_manifests()
     report = {"format": "traverse-worker-setup-v1", "compiler": version, "cargo": cargo_version,
-              "networkRequested": args.fetch, "graphs": {}}
+              "target": target, "networkRequested": args.fetch, "graphs": {}}
     for role, (packet_path, manifest) in GRAPHS.items():
         packet = load_packet(role, packet_path)
         env = packet.environment() if role == "smb" else packet.rust_environment(packet.directory(packet.TOOLING / "setup"))
@@ -141,10 +146,10 @@ def main() -> None:
         if args.fetch:
             print("Fetching locked " + role.upper() + " dependencies…", flush=True)
             run([str(cargo), "fetch", "--manifest-path", str(ROOT / manifest),
-                 "--locked", "--target", TARGET], env, fetch=True)
+                 "--locked", "--target", target], env, fetch=True)
         metadata = json.loads(run([str(cargo), "metadata", "--manifest-path", str(ROOT / manifest),
                                    "--locked", "--offline", "--format-version", "1",
-                                   "--filter-platform", TARGET], env))
+                                   "--filter-platform", target], env))
         if (ROOT / manifest).with_name("Cargo.lock").read_bytes() != locks[role]:
             raise RuntimeError("A production lockfile changed; review it before building")
         report["graphs"][role] = {"packages": len(metadata["packages"]),

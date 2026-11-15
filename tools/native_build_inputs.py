@@ -41,7 +41,7 @@ def source_inputs() -> dict[str, str]:
                    "completion_helper_gate.py",
                    "folder_services.py",
                    "build_storage_worker.py", "build_network_helpers.py", "build_drive_health_worker.py",
-                   "bundle_helper.py", "build_crash_reporter.py")),
+                   "bundle_helper.py", "build_crash_reporter.py", "build_architecture.py")),
         ("Packages/ExplorerKit", ("Package.swift",)),
         ("tools/sftp_reader", ("build_ordinary_worker.py", "packet.py", "catalog/catalog.rs")),
         ("tools/sftp_reader/qualification", ("Cargo.toml", "Cargo.lock", "build.rs")),

@@ -1,6 +1,6 @@
 # Using Traverse
 
-Traverse is a Mac file explorer for Apple Silicon and macOS 15 or
+Traverse is a Mac file explorer for Apple Silicon and Intel with macOS 15 or
 later. This guide describes current source; a downloaded release
 has its own feature set in its release notes. Start with the
 [main README](../../README.md) for downloads, setup and community links.
@@ -226,7 +226,7 @@ they do not measure raw-disk speed or guarantee real-world application performan
 
 Destructive formatting, partitioning and physical APFS volume management are
 not ordinary available workflows. Unsupported operations can hand off to Disk
-Utility. Intel/Universal and broader device support remain in the
+Utility. Broader device support remains in the
 [roadmap](../ROADMAP.md).
 
 ## Feedback and crash reports

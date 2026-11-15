@@ -2,6 +2,7 @@
   "schema": 1,
   "origin": "https://respawn-studios.com",
   "feedPath": "/products/traverse/direct-updates/appcast.xml",
+  "intelFeedPath": "/products/traverse/direct-updates-intel/appcast.xml",
   "publicEDKey": "MG4sBFr76ad6D4nGo+i2VuZ4hxVMEQZToBUjYyui3IA=",
   "intervalSeconds": 21600
 }

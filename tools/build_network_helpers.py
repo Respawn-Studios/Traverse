@@ -27,10 +27,12 @@ from vendor_verified_source import verify
 from bundle_helper import publish
 from distribution import helper_symbols
 from distribution import remote_editor_qa
+from build_architecture import selected
 
 RELEASE = helper_symbols.requested(os.environ)
+ARCHITECTURE = selected()
 RELEASE_TOOLING = REPO / '.build/traverse-release/tooling'
-OUTPUT = (RELEASE_TOOLING / 'smb-ordinary-helpers') if RELEASE else TOOLING / 'ordinary-helpers'
+OUTPUT = ARCHITECTURE.cache_directory((RELEASE_TOOLING / 'smb-ordinary-helpers') if RELEASE else TOOLING / 'ordinary-helpers')
 BROWSER = REPO / 'tools/smb_reader/smb2-browser'
 
 
@@ -77,7 +79,7 @@ def fingerprint(sdk):
         'common.rs', 'auth_security.rs', 'catalog/catalog.rs', 'catalog/selected_catalog.rs', 'catalog/StoreAuthority.c', 'catalog/build.rs']
         if (REPO / 'tools/smb_reader' / value).is_file()]
     sources += [REPO / 'tools/smb_resolver/main.swift', REPO / 'Vendor/smb2/PROVENANCE.json']
-    return dict(version=3, sdk=sdk, target='arm64-apple-macos15.0', resolverControls=False,
+    return dict(version=4, sdk=sdk, target=ARCHITECTURE.clang_target, resolverControls=False,
         symbols=helper_symbols.POLICY if RELEASE else None,
         compilerSHA256=digest(TOOLCHAIN / 'bin/rustc'),
         sourceSHA256={str(path.relative_to(REPO)): digest(path) for path in sources},
@@ -87,6 +89,7 @@ def fingerprint(sdk):
 def build_locked():
     verify()
     env = environment()
+    env.pop('CARGO_BUILD_TARGET', None)
     sdk = subprocess.check_output(['/usr/bin/xcrun', '--show-sdk-path'], env=env, text=True).strip()
     env['SDKROOT'] = sdk
     if RELEASE:
@@ -109,13 +112,13 @@ def build_locked():
         raise RuntimeError('Insufficient isolated network helper build headroom')
     run = str(uuid.uuid4()).upper()
     command([str(TOOLCHAIN / 'bin/cargo'), 'build', '--manifest-path', str(BROWSER / 'Cargo.toml'),
-        '--locked', '--offline', '--release', '--jobs', '4'], env, OUTPUT / ('rust-' + run + '.log'))
+        '--locked', '--offline', '--release', '--jobs', '4', *ARCHITECTURE.cargo_arguments()], env, OUTPUT / ('rust-' + run + '.log'))
     cache = directory((RELEASE_TOOLING / 'swift') if RELEASE else TOOLING / 'swift-module-cache')
     env['CLANG_MODULE_CACHE_PATH'] = str(cache)
     command(['/usr/bin/xcrun', 'swiftc', '-O', *(['-g'] if RELEASE else []), '-swift-version', '6', '-strict-concurrency=complete',
-        '-warnings-as-errors', '-sdk', sdk, '-target', 'arm64-apple-macos15.0', '-module-cache-path', str(cache),
+        '-warnings-as-errors', '-sdk', sdk, '-target', ARCHITECTURE.clang_target, '-module-cache-path', str(cache),
         str(REPO / 'tools/smb_resolver/main.swift'), '-o', str(outputs['resolver'])], env, OUTPUT / ('swift-' + run + '.log'))
-    source = ((RELEASE_TOOLING / 'rust-smb') if RELEASE else TOOLING / 'target') / 'release/macexplorer-smb-browser-qualification'
+    source = ARCHITECTURE.cargo_product((RELEASE_TOOLING / 'rust-smb') if RELEASE else TOOLING / 'target', 'macexplorer-smb-browser-qualification')
     if source.is_symlink() or not source.is_file() or source.stat().st_nlink != 1: raise RuntimeError('Unsafe browser compiler output')
     shutil.copyfile(source, outputs['browser'])
     for path in outputs.values(): path.chmod(0o755)

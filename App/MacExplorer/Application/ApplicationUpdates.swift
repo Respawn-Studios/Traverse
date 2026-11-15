@@ -343,10 +343,17 @@ extension ApplicationUpdates: SPUUpdaterDelegate {
             throw NSError(domain:"Traverse.PrivateUpdate",code:1)
         }
         #if TRAVERSE_PUBLIC_UPDATER
+        #if arch(x86_64) && TRAVERSE_LOCAL_USER_DIRECT
+        // Intel has its own exact, signed feed. Sparkle defines no Intel-only
+        // hardware token; never rely on item order in a mixed architecture feed.
+        let hardwareAdmitted = item.hardwareRequirements.isEmpty
+        #else
+        let hardwareAdmitted = item.hardwareRequirements.count == 1
+            && item.hardwareRequirements.contains("arm64") && item.arm64HardwareRequirementIsOK
+        #endif
         guard item.isMacOsUpdate, item.minimumSystemVersion == "15.0.0",
               item.minimumOperatingSystemVersionIsOK, item.maximumOperatingSystemVersionIsOK,
-              item.hardwareRequirements.count == 1, item.hardwareRequirements.contains("arm64"),
-              item.arm64HardwareRequirementIsOK,
+              hardwareAdmitted,
               item.versionString.range(of: #"^[1-9][0-9]{0,9}$"#, options: .regularExpression) != nil,
               item.releaseNotesURL?.lastPathComponent == item.versionString + ".html",
               item.fullReleaseNotesURL == nil || item.fullReleaseNotesURL == item.releaseNotesURL else {

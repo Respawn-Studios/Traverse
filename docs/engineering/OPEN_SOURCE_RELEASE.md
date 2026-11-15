@@ -68,6 +68,10 @@ public shipping case selects Developer ID, `local-user-v1`, the public updater,
 `--shipping-candidate`, and an explicit version/build. Its separate Xcode tag
 and signed `MacExplorerReleasePurpose=direct-shipping-v1` must agree with the
 saved case through archive, export, notarization, DMG and direct-feed admission.
+Select `--arch arm64` or `--arch x86_64` when preparing the case. That selection
+is immutable too: the signed app marker and observed app/helper slices must
+match before notarization and again during DMG readback. Intel is qualified for
+the direct edition; App Store/TestFlight Intel is not covered by that work.
 The existing local-review direct case and scoped public composition retain
 their separate admission boundaries. Source support alone does not qualify a
 shipping artifact; native acceptance and the applicable Apple processing and
@@ -99,6 +103,12 @@ source change does not rotate the key. Feed generation is not upload or
 publication. Keep test/local-review feeds off live routes and verify the
 delivered artifact and source URLs after a release is published.
 
+The direct ARM endpoint stays at `direct-updates/appcast.xml`. Intel uses
+`direct-updates-intel/appcast.xml`, with matching note, archive and source routes.
+This keeps existing ARM clients compatible without relying on XML item order
+or inventing an Intel hardware token Sparkle doesn't define. Each lane admits
+one matching-architecture notarized package; both use the same source kit.
+
 ## Homebrew Cask preparation
 
 After a qualified direct shipping case has prepared its signed public feed, run:
@@ -107,11 +117,20 @@ After a qualified direct shipping case has prepared its signed public feed, run:
 python3 -B tools/distribution/direct_feed.py --case RELEASE_CASE_UUID --cask
 ```
 
+For a release with both independently prepared architectures, render the one
+official recipe from the ARM case and its matching Intel case:
+
+```sh
+python3 -B tools/distribution/direct_feed.py --case ARM_CASE_UUID --cask --intel-case INTEL_CASE_UUID
+```
+
 This writes `direct-updates/traverse.rb` inside that ignored release case, using
 its exact DMG checksum, version/build and official immutable download URL. It
 retains the exact fresh direct shipping admission checks; local-review artifacts
-are refused. The recipe requires Apple Silicon and
-macOS 15 or later, following the [Homebrew Cask format](https://docs.brew.sh/Cask-Cookbook).
+are refused. A paired recipe checks that version, build, source kit and build
+input inventory agree, then uses Homebrew's `on_arm` and `on_intel` blocks to
+select the verified DMG. Both require macOS 15 or later, following the
+[Homebrew Cask format](https://docs.brew.sh/Cask-Cookbook).
 It contains no data-removal hooks or quarantine bypass. Generation neither
 publishes the artifact nor creates a tap. Before separately publishing a recipe,
 verify the official download is live and matches the recorded checksum, and
@@ -122,6 +141,12 @@ perform the applicable Homebrew review and installed acceptance.
 Retain the app and required helper dSYMs with matching binary UUIDs and
 architectures. Preserve symbol manifests alongside the exact package and rollback
 artifacts; an incremental compiler cache is not a symbol archive.
+Older `.xcarchive` bundles may be compacted with macOS metadata-preserving
+`ditto` ZIP storage after every regular member and symlink has been verified.
+Keep a locator, archive checksum and member inventory beside the case; restore
+and revalidate the archive before using a tool that expects its original path.
+The published DMG, source kit and current notarized app stay independently
+identifiable. Compaction doesn't reset a test result or execution allowance.
 
 Use `tools/distribution/symbolicate_report.py` only with an explicitly supplied
 generated or consented report and its matching binary/dSYM. Unknown images or

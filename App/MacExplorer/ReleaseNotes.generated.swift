@@ -16,6 +16,14 @@ struct TraverseReleaseNote: Identifiable, Sendable {
 
 enum TraverseReleaseNotes {
     static let all: [TraverseReleaseNote] = [
+        .init(version: "0.2.0", build: 95, state: .published,
+              date: "2026-11-15", title: "Intel Macs join the workspace",
+              summary: "The same Traverse workspace for Apple Silicon and Intel, with refreshed SSH dependencies and clearer community guides.", changes: [
+                "Separate Apple Silicon and Intel downloads use the same source and features, with macOS 15 or later required. The Intel app and its scanner, server and drive-health helpers are built for x86_64; Homebrew chooses the matching package.",
+                "Each architecture has its own signed update feed. Existing Apple Silicon installations keep their established update path, while the Intel app checks its own compatible packages.",
+                "Updated russh, Tokio and the Windows-only transitive Pageant dependency to their patched releases. Existing host-key verification, authentication limits, transfer protections and saved-version checks remain in place.",
+                "A root changelog records public releases. The Wiki expands everyday workflows and links back to the contributor build, privacy and recovery documentation."
+              ]),
         .init(version: "0.1.1", build: 94, state: .published,
               date: "2026-11-15", title: "A clearer first launch",
               summary: "A small follow-up to the first public release, with clearer update results and the optional support invitation.", changes: [

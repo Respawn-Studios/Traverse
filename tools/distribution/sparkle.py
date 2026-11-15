@@ -11,6 +11,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from distribution.traverse_packet import REPO,TOOLING,directory,audit
 from distribution import release_candidate
 from folder_services import descriptor as folder_service_descriptor
+from build_architecture import named
 
 ROOT=TOOLING/'sparkle-2.10.0'
 ARCHIVE=ROOT/'Sparkle-for-Swift-Package-Manager.zip'
@@ -51,22 +52,26 @@ def verify():
         raise RuntimeError('Updater license mismatch')
     return wanted
 
-def metadata(public=False, local_user=False, direct_shipping=False):
+def metadata(public=False, local_user=False, direct_shipping=False, architecture='arm64'):
     """Build exact updater Info metadata without fetching or unpacking code."""
     if local_user and not public:
         raise RuntimeError('Local-user updates require the separate public composition')
     if direct_shipping and not (public and local_user):
         raise RuntimeError('Direct shipping requires its own public composition')
+    arch=named(architecture)
+    if arch.name!='arm64' and not local_user:
+        raise RuntimeError('Intel updates require the direct public edition')
     wanted=inputs()
     if public:
         config=json.loads((REPO/('Distribution/DirectPublicUpdates.json' if local_user
             else 'Distribution/PublicUpdates.json')).read_bytes())
         if not isinstance(config,dict) \
-            or set(config)!={'schema','origin','feedPath','publicEDKey','intervalSeconds'} \
+            or set(config)!=({'schema','origin','feedPath','publicEDKey','intervalSeconds'} | ({'intelFeedPath'} if local_user else set())) \
             or type(config.get('schema')) is not int or config['schema']!=1 \
             or config.get('origin')!='https://respawn-studios.com' \
             or config.get('feedPath')!=('/products/traverse/direct-updates/appcast.xml' if local_user
                 else '/products/traverse/public-updates/appcast.xml') \
+            or local_user and config.get('intelFeedPath')!='/products/traverse/direct-updates-intel/appcast.xml' \
             or len(base64.b64decode(config.get('publicEDKey',''),validate=True))!=32 \
             or type(config.get('intervalSeconds')) is not int or config['intervalSeconds']!=21600:
             raise RuntimeError('Invalid public update configuration')
@@ -82,7 +87,8 @@ def metadata(public=False, local_user=False, direct_shipping=False):
         raise RuntimeError('Base Info template cannot assign a release purpose')
     if direct_shipping:
         info[release_candidate.RELEASE_PURPOSE_KEY]=release_candidate.DIRECT_SHIPPING_PURPOSE
-    info.update(SUFeedURL=config['origin']+config['feedPath'],SUPublicEDKey=config['publicEDKey'],
+    feed_path=config['intelFeedPath'] if local_user and arch.name=='x86_64' else config['feedPath']
+    info.update(SUFeedURL=config['origin']+feed_path,SUPublicEDKey=config['publicEDKey'],
         SUVerifyUpdateBeforeExtraction=True,SURequireSignedFeed=True,SUSignedFeedFailureExpirationInterval=0,
         SUEnableAutomaticChecks=False,SUAutomaticallyUpdate=False,SUAllowsAutomaticUpdates=False,
         SUScheduledCheckInterval=21600,SUEnableSystemProfiling=False,SUEnableJavaScript=False)
@@ -94,6 +100,7 @@ def metadata(public=False, local_user=False, direct_shipping=False):
             raise RuntimeError('Public update metadata inherited a private declaration')
         if local_user:
             info.update(TraverseDirectPublicUpdaterVersion=wanted['version'],
+                TraverseDirectArchitecture=arch.name,
                 TraverseDirectStorageNamespace='com.respawnstudios.traverse.direct')
         else:
             info.update(TraversePublicUpdaterVersion=wanted['version'])
@@ -105,7 +112,7 @@ def metadata(public=False, local_user=False, direct_shipping=False):
             NSServices=folder_service_descriptor('Traverse'))
     return info
 
-def prepare(fetch=False, public=False, local_user=False, direct_shipping=False):
+def prepare(fetch=False, public=False, local_user=False, direct_shipping=False, architecture='arm64'):
     if local_user and not public:
         raise RuntimeError('Local-user updates require the separate public composition')
     if direct_shipping and not (public and local_user):
@@ -133,10 +140,10 @@ def prepare(fetch=False, public=False, local_user=False, direct_shipping=False):
         directory(UNPACKED)
         subprocess.run(['/usr/bin/ditto','-x','-k',str(ARCHIVE),str(UNPACKED)],check=True,timeout=30)
     verify()
-    info=metadata(public=public,local_user=local_user,direct_shipping=direct_shipping)
-    generated=directory(TOOLING/('direct-public-shipping' if direct_shipping else
+    info=metadata(public=public,local_user=local_user,direct_shipping=direct_shipping,architecture=architecture)
+    generated=directory(named(architecture).cache_directory(TOOLING/('direct-public-shipping' if direct_shipping else
         'direct-public-updater' if local_user else
-        'public-updater' if public else 'private-updater'))/'TraverseInfo.plist'
+        'public-updater' if public else 'private-updater')))/'TraverseInfo.plist'
     generated.write_bytes(plistlib.dumps(info))
     audit();return generated
 

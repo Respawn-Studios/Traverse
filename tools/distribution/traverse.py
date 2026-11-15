@@ -35,8 +35,8 @@ RELEASE_INPUTS = (
     'Distribution/LicenseSupplements/delegate-0.13.5/LICENSE-APACHE',
     'Distribution/LicenseSupplements/delegate-0.13.5/LICENSE-MIT',
     'Distribution/LicenseSupplements/index.json',
-    'Distribution/LicenseSupplements/russh-0.64.1/LICENSE.txt',
-    'Distribution/LicenseSupplements/russh-0.64.1/PUBLISHED-COPYRIGHT-HEADERS.txt',
+    'Distribution/LicenseSupplements/russh-0.65.1/LICENSE.txt',
+    'Distribution/LicenseSupplements/russh-0.65.1/PUBLISHED-COPYRIGHT-HEADERS.txt',
     'Distribution/LicenseSupplements/russh-cryptovec-0.62.0/LICENSE.txt',
     'Distribution/LicenseSupplements/russh-cryptovec-0.62.0/PUBLISHED-COPYRIGHT-HEADERS.txt',
     'Distribution/LicenseSupplements/russh-util-0.52.0/LICENSE-2.0.txt',
@@ -123,17 +123,19 @@ def run(case, command, label, timeout=1200):
     return dict(log=str(log.relative_to(REPO)), seconds=time.monotonic()-began, actualExit=child.returncode)
 
 def project_arguments(case, channel, policy='sandbox-selected-v1', version_override=None,
-                      private_updater=False, public_updater=False, direct_shipping=False):
+                      private_updater=False, public_updater=False, direct_shipping=False, architecture='arm64'):
+    from build_architecture import named
+    arch = named(architecture)
     project = case / 'Traverse.xcodeproj'
     generate(destination=project, traverse=True, direct=channel=='developer-id',
         direct_access_qualification=policy=='local-user-v1', private_updater=private_updater,
-        public_updater=public_updater,direct_shipping=direct_shipping)
+        public_updater=public_updater,direct_shipping=direct_shipping,architecture=arch.name)
     return ['xcodebuild', '-project', str(project), '-scheme', 'Traverse', '-configuration', 'Release',
         '-destination', 'generic/platform=macOS', '-derivedDataPath', str(directory(TOOLING / 'derived')),
         '-clonedSourcePackagesDirPath', str(directory(TOOLING / 'packages')), '-skipPackageUpdates',
         '-disableAutomaticPackageResolution', '-disablePackageRepositoryCache',
         '-packageCachePath', str(directory(TOOLING / 'package-cache')), '-packageAuthorizationProvider', 'netrc',
-        '-jobs', '4', 'SWIFT_TREAT_WARNINGS_AS_ERRORS=YES', 'ARCHS=arm64',
+        '-jobs', '4', 'SWIFT_TREAT_WARNINGS_AS_ERRORS=YES', 'ARCHS='+arch.name, 'TRAVERSE_BUILD_ARCH='+arch.name,
         'COMPILER_INDEX_STORE_ENABLE=NO',
         'CLANG_MODULE_CACHE_PATH=' + str(directory(CLANG_CACHE)),
         'SWIFT_MODULE_CACHE_PATH=' + str(directory(SWIFT_CACHE))] + release_candidate.settings(version_override)
@@ -155,6 +157,7 @@ def main():
     parser.add_argument('--case'); parser.add_argument('--channel',choices=['app-store','developer-id'])
     parser.add_argument('--access-policy',choices=['sandbox-selected-v1','local-user-v1'])
     parser.add_argument('--version');parser.add_argument('--build-number')
+    parser.add_argument('--arch',choices=['arm64','x86_64'])
     parser.add_argument('--private-updater',action='store_true')
     parser.add_argument('--public-updater',action='store_true', help='Select the separate public updater composition for this case purpose.')
     purpose=parser.add_mutually_exclusive_group()
@@ -168,12 +171,13 @@ def main():
     saved=json.loads(configuration.read_bytes()) if configuration.exists() else None
     selected=release_candidate.configuration(saved,channel=args.channel,policy=args.access_policy,
         version=args.version,build=args.build_number,local=args.local_candidate,shipping=args.shipping_candidate,
-        private_updater=args.private_updater, public_updater=args.public_updater)
+        private_updater=args.private_updater, public_updater=args.public_updater,architecture=args.arch)
     release_candidate.admit_action(selected,args.action)
     channel=selected['channel'];policy=selected.get('accessPolicy','sandbox-selected-v1')
     direct_shipping=selected.get('releasePurpose')==release_candidate.DIRECT_SHIPPING_PURPOSE
     public_selected=selected.get('publicUpdater') is True
     override=selected.get('versionOverride')
+    architecture=selected.get('architecture','arm64')
     if direct_shipping and args.action=='notarize':
         raise RuntimeError('Direct shipping notarization follows local export through notarize_direct_app.py')
     if saved is None:put(configuration,selected)
@@ -185,7 +189,7 @@ def main():
         notices.verify_outputs()
     owner=REPO/'MacExplorer.xcodeproj/project.pbxproj'; owner_hash=hashlib.sha256(owner.read_bytes()).hexdigest()
     command=project_arguments(case,channel,policy,override,selected.get('privateUpdater')is True,
-        public_selected,direct_shipping) if args.action in ['prepare','archive'] else None
+        public_selected,direct_shipping,architecture) if args.action in ['prepare','archive'] else None
     if args.action=='prepare':
         report=run(case,command+['-showBuildSettings','-json'],'settings',120)
         values=json.loads((REPO/report['log']).read_bytes())
@@ -195,15 +199,16 @@ def main():
             'MAC_EXPLORER_ACCESS_POLICY','MAC_EXPLORER_TRAVERSE_BUILD','MAC_EXPLORER_DISTRIBUTION_CHANNEL']
         selected={key:app.get(key)for key in keys}
         assert selected['PRODUCT_NAME']=='Traverse' and selected['PRODUCT_BUNDLE_IDENTIFIER']=='com.respawnstudios.traverse'
-        assert selected['SRCROOT']==str(REPO) and selected['ENABLE_APP_SANDBOX']==('NO' if policy=='local-user-v1' else 'YES') and selected['ARCHS']=='arm64'
+        assert selected['SRCROOT']==str(REPO) and selected['ENABLE_APP_SANDBOX']==('NO' if policy=='local-user-v1' else 'YES') and selected['ARCHS']==architecture
         assert selected['MAC_EXPLORER_ACCESS_POLICY']==policy and selected['ENABLE_HARDENED_RUNTIME']=='YES'
         if policy=='local-user-v1' and selected['MAC_EXPLORER_TRAVERSE_BUILD']!=(
                 'developer-id-local-user-public-shipping-v1' if direct_shipping else
                 'developer-id-local-user-public-qualification-v1' if public_selected else
                 'developer-id-local-user-qualification-v1'):
             raise RuntimeError('Local-user build tag differs from its immutable case purpose')
-        if direct_shipping and selected['INFOPLIST_FILE']!=str(
-                REPO/'.build/traverse-release/tooling/direct-public-shipping/TraverseInfo.plist'):
+        from build_architecture import named
+        if direct_shipping and selected['INFOPLIST_FILE']!=str(named(architecture).cache_directory(
+                REPO/'.build/traverse-release/tooling/direct-public-shipping')/'TraverseInfo.plist'):
             raise RuntimeError('Direct shipping Info path differs from its purpose')
         release_candidate.verify_observed(dict(CFBundleShortVersionString=selected['MARKETING_VERSION'],
             CFBundleVersion=selected['CURRENT_PROJECT_VERSION']),override)

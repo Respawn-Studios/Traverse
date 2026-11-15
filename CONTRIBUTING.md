@@ -8,7 +8,8 @@ never required to use or contribute to the app.
 
 ## Build and run
 
-Development currently targets Apple Silicon and macOS 15 or later. Follow the
+The app targets Apple Silicon and Intel with macOS 15 or later. Our qualified
+build host is Apple Silicon with Xcode 27.2; Intel packages are cross-built. Follow the
 [setup guide](docs/engineering/DEVELOPMENT_SETUP.md) for Xcode, Python and the
 pinned Rust compiler and dependencies, then run from the repository root:
 
@@ -18,6 +19,8 @@ python3 -B tools/dev.py run --skip-build
 ```
 
 Use `--skip-build` only after a successful build of the current source.
+The setup guide includes `--arch x86_64`, pinned target components and the
+distinction between running the app on Intel and building it on an Intel host.
 Development uses local/ad-hoc signing and checkout-local state; release
 certificates and installed application profiles are not prerequisites.
 

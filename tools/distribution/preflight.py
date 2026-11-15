@@ -301,19 +301,23 @@ def updater_checks(app,info,expected_team,expected_channel):
             'Apple and legacy direct compositions must neither embed nor link Sparkle.')]
     if public or direct_public:
         try:
+            from build_architecture import direct_app_architecture
+            arch=direct_app_architecture(info) if direct_public else None
             values=json.loads(read(Path(__file__).resolve().parents[2]/
                 ('Distribution/DirectPublicUpdates.json' if direct_public else 'Distribution/PublicUpdates.json'),8192))
             valid_config=isinstance(values,dict) \
-                and set(values)=={'schema','origin','feedPath','publicEDKey','intervalSeconds'} \
+                and set(values)==({'schema','origin','feedPath','publicEDKey','intervalSeconds'} | ({'intelFeedPath'} if direct_public else set())) \
                 and type(values.get('schema')) is int and values['schema']==1 \
                 and values.get('origin')=='https://respawn-studios.com' \
                 and values.get('feedPath')==('/products/traverse/direct-updates/appcast.xml' if direct_public
                     else '/products/traverse/public-updates/appcast.xml') \
+                and (not direct_public or values.get('intelFeedPath')=='/products/traverse/direct-updates-intel/appcast.xml') \
                 and len(base64.b64decode(values.get('publicEDKey',''),validate=True))==32 \
                 and type(values.get('intervalSeconds')) is int and values['intervalSeconds']==21600
         except (OSError,ValueError,TypeError,KeyError):
             values={};valid_config=False
         if not valid_config:values={}
+        elif direct_public and arch.name=='x86_64':values={**values,'feedPath':values['intelFeedPath']}
     else:
         values=json.loads(read(Path(__file__).resolve().parents[2]/'Distribution/PrivateUpdates.json',8192))
         valid_config=True
@@ -441,8 +445,13 @@ def inspect(app,expected_bundle=None,expected_team=None,expected_channel='app-st
         found.append(check('runtime_links_'+file.name,links.returncode==0 and bool(paths)
             and all(p.startswith(('/System/Library/','/usr/lib/','@rpath/','@loader_path/','@executable_path/')) for p in paths),
             'No build-machine library path may be required at runtime.'))
-    found.append(check('matching_qualified_architectures',architecture_match and parent_arch=={'arm64'} and len(children)==len(helpers),
-        'The first candidate is arm64-only; every mandatory helper must match.'))
+    qualified_architecture=parent_arch=={'arm64'}
+    if info.get('MacExplorerAccessPolicy')=='local-user-v1' and info.get('TraverseDirectPublicUpdaterVersion')=='2.10.0':
+        from build_architecture import direct_app_architecture
+        try:qualified_architecture=parent_arch=={direct_app_architecture(info).name}
+        except ValueError:qualified_architecture=False
+    found.append(check('matching_qualified_architectures',architecture_match and qualified_architecture and len(children)==len(helpers),
+        'The thin app and every mandatory helper must match its qualified architecture.'))
     updater_selected=expected_channel=='developer-id' \
         and info.get('MacExplorerAccessPolicy')=='sandbox-selected-v1' \
         and ((info.get('TraversePrivateUpdaterVersion')=='2.10.0' \
