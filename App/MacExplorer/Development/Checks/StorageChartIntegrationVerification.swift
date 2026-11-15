@@ -187,6 +187,19 @@ enum StorageChartIntegrationVerification {
         try await wait("Cached Folders root was not restored") { surface.frames.last?.id == "folder-0" && !drill.loading }
         try require(result.queryWorkerLaunchCountForQualification == workersAfterFolders && accesses == scanAccesses,
             "Returning to Folders queried the catalog again or reacquired source access")
+        let stale = StorageChartQueryHold()
+        try result.installQueryReleaseHookForQualification { stale.pause() }
+        defer { stale.release.signal(); if result.activeReaderCount == 0 { try? result.installQueryReleaseHookForQualification(nil) } }
+        drill.open(.steamLibraries, title: "Superseded stored query")
+        try await wait("Superseded query was not held") { stale.entered && drill.loading }
+        drill.openRootFolder(title: "Cached folder root")
+        try require(drill.current?.target == .folder(0) && !drill.loading,
+            "Cached root did not replace the pending drill intent")
+        stale.release.signal()
+        await drill.waitUntilQueriesDrained()
+        try require(drill.current?.target == .folder(0) && drill.levels.count == 1,
+            "Older stored query replaced the cached folder root")
+        try result.installQueryReleaseHookForQualification(nil)
         StorageChartIntegration.groupSelectionForQualification.send((result.id, "Purpose"))
         try await wait("Properties Purpose root did not return") { surface.frames.last?.slices.first?.id == "steam" && !drill.loading }
         if result.supportsApplicationLayouts {

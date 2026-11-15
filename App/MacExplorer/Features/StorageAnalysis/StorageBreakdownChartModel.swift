@@ -111,8 +111,10 @@ final class StorageBreakdownChartModel: ObservableObject {
     func openRootFolder(title: String) {
         guard canBrowse, result != nil else { return }
         if let value = folderRoots[metric] {
+            // A cached root is a new navigation intent too: reject any older
+            // in-flight response before publishing it, even for direct callers.
+            reset()
             levels = [.init(target: .folder(0), title: title, value: value)]
-            loading = false; message = ""
         } else { open(.folder(0), title: title) }
     }
     func open(_ target: StoredAnalysisDrillTarget, title: String) {
