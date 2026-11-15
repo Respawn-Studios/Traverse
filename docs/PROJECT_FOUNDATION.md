@@ -5,9 +5,10 @@ modules, and a shared home for window appearance and motion. The map below
 should help you find the right place for a change without rebuilding something
 another feature already uses.
 
-Traverse is a native macOS file explorer by Respawn Studios. The current target
-is macOS 15 or later on Apple Silicon. Original project code is licensed under
-GPL-3.0-only; pinned third-party dependencies keep their own notices.
+Traverse is a native macOS file explorer by Respawn Studios. The direct edition
+supports Apple Silicon and Intel on macOS 15 or later, with a separate package
+for each architecture. Original project code is licensed under GPL-3.0-only;
+pinned third-party dependencies keep their own notices.
 
 ## Source organization
 
