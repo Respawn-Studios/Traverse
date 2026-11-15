@@ -105,6 +105,20 @@ extension TransferMetadataPolicy: Codable {
 /// Version-specific archive topology. New formats cannot borrow old inverse
 /// authority by changing an operation title or filename suffix.
 internal enum ArchiveUpdateProfile {
+    static func isUpdate(_ version: Int) -> Bool { format(version: version) != nil }
+    /// Topology only. Format-specific engine admission is still mandatory.
+    /// Keep earlier native versions here when a future writer profile changes.
+    static func isNativeUpdate(_ version: Int) -> Bool {
+        switch version { case 13, 18, 19, 20: true; default: false }
+    }
+    static func currentNativeProtocol(for format: AuthoredArchiveFormat) -> OperationCatalogProtocol {
+        switch format {
+        case .zip: .archiveNativeUpdateV13
+        case .strictPortableTAR: .tarNativeUpdateV18
+        case .strictPortableTARGzip: .tarGzipNativeUpdateV19
+        case .strictPortableTARBzip2: .tarBzip2NativeUpdateV20
+        }
+    }
     static func format(version: Int) -> AuthoredArchiveFormat? {
         switch version {
         case 5, 6, 13: .zip

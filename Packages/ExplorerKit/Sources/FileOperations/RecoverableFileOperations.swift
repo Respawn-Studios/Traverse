@@ -709,7 +709,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 // V13 generic reconciliation cannot infer an unacknowledged
                 // native mark change; only the explicit one-step action proceeds.
                 guard (record.snapshot.version != 12 || !recovering),
-                      (![13, 18, 19, 20].contains(record.snapshot.version) || !recovering || restoringInterruptedOriginalZIP) else {
+                      (!ArchiveUpdateProfile.isNativeUpdate(record.snapshot.version) || !recovering || restoringInterruptedOriginalZIP) else {
                     throw FileOperationFailure.unsupported
                 }
                 if record.nameRename != nil {
@@ -725,7 +725,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 // qualification may undo its changed backup. V6 identifies the
                 // strict cloned producer and requires that qualification before
                 // any inverse mutation. Both require the exact recorded image.
-                let archiveUpdate = [5, 6, 13, 18, 19, 20].contains(record.snapshot.version)
+                let archiveUpdate = ArchiveUpdateProfile.isUpdate(record.snapshot.version)
                 let adoptedDownload = record.snapshot.version == 7 ? record.downloadAdoption : nil
                 if record.snapshot.version == 7 {
                     guard !recovering, record.state == "committed", record.steps.count == 1,
@@ -752,7 +752,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     && record.steps[0].after.map { !record.steps[0].before.matches($0)
                         && record.steps[0].before.identity.sameObject(as: $0.identity) } == true
                 let candidateZIPPolicy: Bool
-                if [13, 18, 19, 20].contains(record.snapshot.version) {
+                if ArchiveUpdateProfile.isNativeUpdate(record.snapshot.version) {
                     candidateZIPPolicy = self.nativeArchiveUpdateEnabled(version: record.snapshot.version)
                 } else {
                     switch (record.snapshot.version, self.authoredZIPMetadataPolicy) {
@@ -763,7 +763,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 }
                 // V6 and v13 identify their producer policy. Neither may borrow
                 // the v5 inverse or another candidate's authority.
-                guard ![6, 13, 18, 19, 20].contains(record.snapshot.version) || candidateZIPPolicy else {
+                guard !(record.snapshot.version == 6 || ArchiveUpdateProfile.isNativeUpdate(record.snapshot.version)) || candidateZIPPolicy else {
                     throw FileOperationFailure.recoveryUncertain
                 }
                 guard !nativeZIPDisplacement || (!recovering && candidateZIPPolicy) else {

@@ -162,7 +162,7 @@ internal final class JournalEditSession {
         value.steps[index].after = after; changed[0].insert(index)
     }
     func qualifyRetainedArchiveOriginal() throws {
-        guard [13, 18, 19, 20].contains(value.version), value.steps.count == 1,
+        guard ArchiveUpdateProfile.isNativeUpdate(value.version), value.steps.count == 1,
               value.steps[0].after != nil, !value.steps[0].undone,
               value.steps[0].archiveOriginalRetainedQualified == nil else {
             throw FileOperationFailure.recoveryUncertain

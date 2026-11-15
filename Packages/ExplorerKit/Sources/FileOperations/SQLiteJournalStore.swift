@@ -450,7 +450,7 @@ internal final class SQLiteJournalStore {
         let record = session.snapshot
         try measureJournal(hooks.metrics, .validation) {
             try validateFiles(); try OperationJournal.validateHeader(record)
-            if [5, 6, 13, 18, 19, 20].contains(record.version) { try OperationJournal.validateArchiveUpdate(record) }
+            if ArchiveUpdateProfile.isUpdate(record.version) { try OperationJournal.validateArchiveUpdate(record) }
             if record.version == 7 { try OperationJournal.validateDownloadAdoption(record) }
             if record.version == 14 { try OperationJournal.validateReceivedPublicDownload(record) }
             if record.version == 15 { try OperationJournal.validatePublicZIPExtraction(record) }
@@ -547,7 +547,7 @@ internal final class SQLiteJournalStore {
         try measureJournal(hooks.metrics, .validation) {
             try validateFiles()
             try OperationJournal.validateHeader(record)
-            if [5, 6, 13, 18, 19, 20].contains(record.version) { try OperationJournal.validateArchiveUpdate(record) }
+            if ArchiveUpdateProfile.isUpdate(record.version) { try OperationJournal.validateArchiveUpdate(record) }
             if record.version == 7 { try OperationJournal.validateDownloadAdoption(record) }
             if record.version == 14 { try OperationJournal.validateReceivedPublicDownload(record) }
             if record.version == 15 { try OperationJournal.validatePublicZIPExtraction(record) }
@@ -754,7 +754,7 @@ internal final class SQLiteJournalStore {
             // Load/validate the complete zero-step record before offering this
             // historical hint; a summary count or disabled Restore is not proof.
             let zipReplacementNotStarted: Bool
-            if [5, 6, 13, 18, 19, 20].contains(head.version), head.operation == ArchiveUpdateProfile.title(version: head.version), head.state == "needsReview",
+            if ArchiveUpdateProfile.isUpdate(head.version), head.operation == ArchiveUpdateProfile.title(version: head.version), head.state == "needsReview",
                head.counts[0] == 0, head.counts[3] == 0 {
                 let record = try loadedRecord(id).record
                 zipReplacementNotStarted = record.steps.isEmpty && record.trashIntents.isEmpty
@@ -884,11 +884,11 @@ internal final class SQLiteJournalStore {
         if head.version == 2 || head.version == 4 {
             guard head.counts[0] == 0, head.counts[1] == 0, head.counts[3] == 0,
                   head.nameRename != nil else { throw FileOperationFailure.recoveryUncertain }
-        } else if [5, 6, 13, 18, 19, 20].contains(head.version) {
+        } else if ArchiveUpdateProfile.isUpdate(head.version) {
             guard head.operation == ArchiveUpdateProfile.title(version: head.version), head.nameRename == nil,
-                  head.counts[0] <= ([13, 18, 19, 20].contains(head.version) ? 2 : 3), head.counts[1] <= 1,
-                  head.counts[3] <= ([13, 18, 19, 20].contains(head.version) ? 0 : 1),
-                  (![13, 18, 19, 20].contains(head.version) || !["cleanupReview", "cleaned"].contains(head.state)),
+                  head.counts[0] <= (ArchiveUpdateProfile.isNativeUpdate(head.version) ? 2 : 3), head.counts[1] <= 1,
+                  head.counts[3] <= (ArchiveUpdateProfile.isNativeUpdate(head.version) ? 0 : 1),
+                  (!ArchiveUpdateProfile.isNativeUpdate(head.version) || !["cleanupReview", "cleaned"].contains(head.state)),
                   (head.counts[0] == 0 || head.counts[1] == 1) else {
                 throw FileOperationFailure.recoveryUncertain
             }

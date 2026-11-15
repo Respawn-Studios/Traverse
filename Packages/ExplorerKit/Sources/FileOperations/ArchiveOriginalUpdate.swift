@@ -145,13 +145,8 @@ extension RecoverableFileOperations {
     }
 
     internal func nativeArchiveUpdateEnabled(version: Int) -> Bool {
-        switch version {
-        case 13: nativeArchiveUpdateEnabled(for: .zip)
-        case 18: nativeArchiveUpdateEnabled(for: .strictPortableTAR)
-        case 19: nativeArchiveUpdateEnabled(for: .strictPortableTARGzip)
-        case 20: nativeArchiveUpdateEnabled(for: .strictPortableTARBzip2)
-        default: false
-        }
+        guard ArchiveUpdateProfile.isNativeUpdate(version), let format = ArchiveUpdateProfile.format(version: version) else { return false }
+        return nativeArchiveUpdateEnabled(for: format)
     }
 
     /// The original is the first observed source. Additional Add-to-ZIP roots
@@ -258,7 +253,7 @@ extension RecoverableFileOperations {
             try cancellation.check()
             let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks,
                                                cancellation: cancellation)
-            guard let record = try journal.inspectRecord(recordID), [5, 6, 13, 18, 19, 20].contains(record.version),
+            guard let record = try journal.inspectRecord(recordID), ArchiveUpdateProfile.isUpdate(record.version),
                   let first = record.steps.first, let area = record.areas.first else { return nil }
             return [first.source, area.url.appendingPathComponent("displaced"),
                     area.url.appendingPathComponent("payload")]
@@ -349,11 +344,12 @@ extension RecoverableFileOperations {
             guard !nativeOriginalUpdate || (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == plan.authoredFormat else {
                 throw FileOperationFailure.unsupported
             }
-            let protocolKind: OperationCatalogProtocol = plan.authoredFormat == .strictPortableTARBzip2 ? .tarBzip2NativeUpdateV20
-                : plan.authoredFormat == .strictPortableTARGzip ? .tarGzipNativeUpdateV19
-                : plan.authoredFormat == .strictPortableTAR ? .tarNativeUpdateV18
-                : nativeOriginalUpdate ? .archiveNativeUpdateV13
-                : strictClone ? .archiveStrictCloneV6 : .archiveUpdateV5
+            let protocolKind: OperationCatalogProtocol
+            if nativeOriginalUpdate { protocolKind = ArchiveUpdateProfile.currentNativeProtocol(for: plan.authoredFormat) }
+            else {
+                guard plan.authoredFormat == .zip else { throw FileOperationFailure.unsupported }
+                protocolKind = strictClone ? .archiveStrictCloneV6 : .archiveUpdateV5
+            }
             let record = try journal.beginArchiveUpdateEdit(protocolKind: protocolKind); active = record
             for source in plan.sources { try record.appendLocation(source) }
             try journal.save(record)
