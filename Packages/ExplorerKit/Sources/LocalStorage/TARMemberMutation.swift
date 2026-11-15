@@ -28,6 +28,7 @@ public struct TARMemberDestination: Sendable, CustomStringConvertible, CustomDeb
 /// are captured at Review; mutation authority still belongs to FileOperations.
 public enum TARMemberMutation: Sendable {
     case rename(TARMemberSelection, to: String)
+    case batchRename(TARMemberSelection, to: [String])
     case remove(TARMemberSelection)
     case duplicate(TARMemberSelection, into: TARMemberDestination?)
     case move(TARMemberSelection, into: TARMemberDestination)
@@ -39,7 +40,7 @@ public enum TARMemberMutation: Sendable {
 
     internal var binding: TARSourceBinding {
         switch self {
-        case .rename(let value, _), .remove(let value), .duplicate(let value, _), .move(let value, _), .group(let value, _): value.binding
+        case .rename(let value, _), .batchRename(let value, _), .remove(let value), .duplicate(let value, _), .move(let value, _), .group(let value, _): value.binding
         case .newFile(let value, _), .newFolder(let value, _), .add(let value, _): value.binding
         case .replace(let value, _): value.selection.binding
         }

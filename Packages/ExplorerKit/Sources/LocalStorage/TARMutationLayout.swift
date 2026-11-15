@@ -69,6 +69,18 @@ internal struct TARMutationLayout: Sendable {
             let target = Self.join(Self.parent(root.path), name)
             guard !target.utf8.elementsEqual(root.path.utf8) else { throw TARMemberEditFailure.invalidMemberName }
             try remap(selection.roots, targets: [target], duplicate: false, namespace: namespace, read: read, check: check)
+        case .batchRename(let selection, let names):
+            try validate(selection, namespace: namespace)
+            guard selection.roots.count == names.count else { throw TARArchiveFailure.invalidSelection }
+            var targets: [String] = []
+            for (root, name) in zip(selection.roots, names) {
+                try check(); try Self.validateName(name)
+                targets.append(Self.join(Self.parent(root.path), name))
+            }
+            guard zip(selection.archivePaths, targets).contains(where: { !$0.utf8.elementsEqual($1.utf8) }) else {
+                throw TARMemberEditFailure.invalidMemberName
+            }
+            try remap(selection.roots, targets: targets, duplicate: false, namespace: namespace, read: read, check: check)
         case .remove(let selection):
             try validate(selection, namespace: namespace)
             for index in originalRecords.indices {
@@ -170,10 +182,21 @@ internal struct TARMutationLayout: Sendable {
                 throw TARMemberEditFailure.conflict
             }
         }
+        // Distinct selected roots must remain distinct, including implicit
+        // directories with no own TAR record. A final catalog alone would miss
+        // two implicit trees merging when their descendants have different names.
+        let keys = targets.map(ZIPNameReservations.key)
+        for (index, key) in keys.enumerated() {
+            try check()
+            guard !keys[..<index].contains(where: { Self.covers($0, key) || Self.covers(key, $0) }) else {
+                throw TARMemberEditFailure.conflict
+            }
+        }
         for index in originalRecords.indices {
             try check(); let record = originalRecords[index]
             guard let rootIndex = roots.firstIndex(where: { Self.covers($0.path, record.path) }) else { continue }
             let path = targets[rootIndex] + record.path.dropFirst(roots[rootIndex].path.count)
+            if !duplicate, path.utf8.elementsEqual(record.path.utf8) { continue }
             let header = try TARMemberHeader.rewriting(record, path: path, read: read)
             let entry = Entry(path: path, kind: record.kind, payload: .archive(record), header: header, modification: record.modification)
             if duplicate { appended.append(entry) } else { originals[index] = entry }

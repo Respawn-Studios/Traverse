@@ -38,9 +38,12 @@ promises require separate support.
 ## TAR editing in development
 
 Plain and prepared gzip/bzip2 TAR members use the common native editor and archive
-workbench in Development builds. Rename, Remove, Duplicate, Move, Create File/New Folder,
+workbench in Development builds. Rename, batch Rename, Remove, Duplicate, Move, Create File/New Folder,
 Group and Add all use one `TARMemberMutation`, including Cut/Paste and local
 file drops. The browser seals catalog selections; the table never writes files.
+Batch Rename shares the local/ZIP naming controls and Before/After table. It
+applies a captured set simultaneously, allows name swaps, keeps unchanged raw
+records intact and refuses collisions or implicit folder-tree merges.
 Read-only and larger extraction selections keep their existing Copy route.
 `TARTextEditDocument` binds complete UTF-8 bytes to the retained catalog;
 `PreparedTARMemberMutation` streams a replacement without unpacking an editable tree.

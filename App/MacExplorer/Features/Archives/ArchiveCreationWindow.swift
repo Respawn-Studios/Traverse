@@ -89,10 +89,15 @@ enum ZIPMemberRenameFeature {
     var isMemberRename: Bool { memberEdit?.isRename == true }
     var isMemberBatchRename: Bool { memberEdit?.isBatchRename == true }
     var batchNames: [BatchRenameName] {
-        guard case .batchRename(let selected) = memberEdit else { return [] }
-        return selected.archivePaths.map { path in
+        let paths: [String], folders: [String]
+        switch memberEdit {
+        case .batchRename(let selected): paths = selected.archivePaths; folders = selected.folderPaths
+        case .tar(.batchRename(let selected, _)): paths = selected.archivePaths; folders = selected.folderPaths
+        default: return []
+        }
+        return paths.map { path in
             .init(name: path.split(separator: "/").last.map(String.init) ?? "",
-                  isDirectory: selected.folderPaths.contains(path))
+                  isDirectory: folders.contains(path))
         }
     }
     var batchRows: [BatchRenamePreviewRow] {
@@ -377,7 +382,10 @@ enum ZIPMemberRenameFeature {
                 let work = Task { [engine, sources = chosenSources, memberEdit] () async throws -> ArchiveWritePlan in
                     switch memberEdit {
                     case .tar(let mutation):
-                        let change = mutation.reviewed(name: chosenMemberName, addedSources: Array(sources.dropFirst()))
+                        let change: TARMemberMutation
+                        if case .batchRename(let selected, _) = mutation {
+                            change = .batchRename(selected, to: try chosenBatch.rule.names(for: chosenBatchNames))
+                        } else { change = mutation.reviewed(name: chosenMemberName, addedSources: Array(sources.dropFirst())) }
                         let encoding: TARCompression? = change.isCompressed && !keepCurrentTARCompression ? chosenTARCompression : nil
                         if originalUpdate { return .update(try await engine.prepareTARMemberMutationOriginal(change, compression: encoding, observing: captured)) }
                         return .create(try await engine.prepareTARMemberMutationCopy(change, outputName: chosenName, compression: encoding, observing: captured))
@@ -792,6 +800,10 @@ private struct ArchiveCreationView: View {
             VStack(alignment: .leading, spacing: 12) {
                 if model.isMemberBatchRename {
                     Text("\(model.batchNames.count.formatted()) selected items").interfaceFont(.callout).foregroundStyle(.secondary)
+                    if let covered = model.memberSelectionPreview?.covered, covered > 0 {
+                        Text("\(covered.formatted()) nested \(covered == 1 ? "item follows its folder" : "items follow their folders") and keep their names.")
+                            .interfaceFont(.caption).foregroundStyle(.secondary)
+                    }
                     BatchRenameRuleFields(options: $model.batchOptions, settings: model.settings)
                     BatchRenamePreviewTable(rows: model.batchRows, selection: $batchSelection).frame(height: 220)
                 }

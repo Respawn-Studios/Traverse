@@ -140,7 +140,6 @@ struct TARClipboardSource {
         addedSource: ArchiveAdditionInput? = nil, destinationFolder: TARFolderID? = nil) {
         let creates = action == .newFile || action == .newFolder || action == .add
         guard creates ? canCreateMember : canModifySelectedMembers,
-              action != .rename || selection.count == 1,
               action != .group || canGroupMembers,
               let session, let source, let browser else { return }
         let currentToken = token, currentPage = pageToken, ids = selection
@@ -164,7 +163,9 @@ struct TARClipboardSource {
                     switch action {
                     case .rename:
                         guard let path = selected.archivePaths.first else { throw TARArchiveFailure.invalidSelection }
-                        intent = .rename(selected, to: path.split(separator: "/").last.map(String.init) ?? "")
+                        intent = selected.archivePaths.count == 1
+                            ? .rename(selected, to: path.split(separator: "/").last.map(String.init) ?? "")
+                            : .batchRename(selected, to: [])
                     case .remove: intent = .remove(selected)
                     case .duplicate: intent = .duplicate(selected, into: nil)
                     case .group: intent = .group(selected, name: "New Folder")

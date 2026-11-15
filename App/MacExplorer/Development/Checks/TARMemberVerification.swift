@@ -75,6 +75,7 @@ import LocalStorage
         }
         let actions: [(TARBrowserModel.MutationAction, [String], String, Set<String>)] = [
             (.rename, ["Generated.json"], "Renamed.json", ["Renamed.json", "Other.json"]),
+            (.rename, ["Generated.json", "Other.json"], "", ["Batch Generated.json", "Batch Other.json"]),
             (.duplicate, ["Generated.json"], "", ["Generated.json", "Generated (1).json", "Other.json"]),
             (.remove, ["Other.json"], "", ["Generated.json"]),
             (.group, ["Generated.json", "Other.json"], "Grouped", ["Grouped", "Grouped/Generated.json", "Grouped/Other.json"]),
@@ -103,8 +104,12 @@ import LocalStorage
             } else { model.reviewMutation(action) }
             var shown = try await review()
             if !name.isEmpty { try await typeName(name, in: shown) }
+            if action == .rename, names.count > 1 {
+                try Probe.need(shown.model.isMemberBatchRename && shown.model.batchNames.count == 2, "tar-members-shared-batch-review")
+                shown.model.batchOptions.prefix = "Batch "
+            }
             try await Probe.wait("tar-members-cancel-plan") { !shown.model.isChoosing && !shown.model.isPreparing && !shown.model.previewIsPendingForVerification }
-            if action == .rename {
+            if action == .rename, names.count == 1 {
                 try await typeName("Other.json", in: shown)
                 try await Probe.wait("tar-members-conflict-refused") { !shown.model.isPreparing && !shown.model.previewIsPendingForVerification }
                 try Probe.need(!shown.model.canCreate, "tar-members-occupied-rename-enabled")
@@ -115,14 +120,16 @@ import LocalStorage
             model.reviewMutation(action, addedSource: action == .add ? .init(urls: [added]) : nil)
             shown = try await review()
             if !name.isEmpty { try await typeName(name, in: shown) }
+            if action == .rename, names.count > 1 { shown.model.batchOptions.prefix = "Batch " }
             if action == .add, TARBrowserModel.isCompressed(source) {
                 shown.model.keepsCurrentTARCompression = false
                 shown.model.tarCompression = model.formatName == "TAR.bz2" ? .bzip2Fast : .gzipFast
             }
-            if !ProcessInfo.processInfo.arguments.contains("--offscreen"), action == .group || action == .add,
+            if !ProcessInfo.processInfo.arguments.contains("--offscreen"), action == .group || action == .add || shown.model.isMemberBatchRename,
                CGPreflightScreenCaptureAccess(), let window = shown.window {
                 try await Probe.wait("tar-members-visible-review") { shown.model.canCreate }
-                try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/tar-\(action).png"))
+                let label = shown.model.isMemberBatchRename ? "batch-rename" : "\(action)"
+                try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/tar-\(label).png"))
             }
             let id = try await commit(shown)
             if action == .add, TARBrowserModel.isCompressed(source) {

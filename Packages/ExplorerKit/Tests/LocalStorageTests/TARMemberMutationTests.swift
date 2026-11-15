@@ -6,7 +6,7 @@ import Testing
 
 struct TARMemberMutationTests {
     enum Action: String, CaseIterable, Sendable {
-        case renameFile, renameFolder, removeFile, removeFolder, duplicateFile, duplicateFolder
+        case renameFile, renameFolder, batchRename, removeFile, removeFolder, duplicateFile, duplicateFolder
         case moveFile, moveFolder, group, newFile, newFolder, add
     }
     private enum Member: Equatable { case file(Data), folder }
@@ -65,6 +65,11 @@ struct TARMemberMutationTests {
         case .renameFolder:
             mutation = .rename(try await select(["Folder"], in: session), to: "日本のフォルダ")
             relocated("Folder", to: "日本のフォルダ")
+        case .batchRename:
+            let selected = try await select(["data.json", "Folder"], in: session)
+            let names = selected.archivePaths.map { $0 == "Folder" ? "Renamed Folder" : "renamed.json" }
+            mutation = .batchRename(selected, to: names)
+            relocated("Folder", to: "Renamed Folder"); relocated("data.json", to: "renamed.json")
         case .removeFile, .removeFolder:
             let path = action == .removeFile ? "data.json" : "Folder"
             mutation = .remove(try await select([path], in: session))
@@ -151,6 +156,71 @@ struct TARMemberMutationTests {
         }
         #expect(try Data(contentsOf: fixture.source) == fixture.bytes)
         #expect(try Data(contentsOf: other.source) == other.bytes)
+    }
+
+    @Test(arguments: [TARCompression.none, .gzipBalanced, .bzip2Balanced])
+    func batchSwapIsSimultaneousAndUnchangedFolderRecordsStayExact(compression: TARCompression) async throws {
+        let f = try TARTestFixture(pax: true, folderTree: true)
+        let source = try compression == .none ? f.source : compression == .gzipBalanced ? f.gzipSource() : f.bzip2Source()
+        let before = try Data(contentsOf: source), cache = f.root.appendingPathComponent("cache"), history = f.root.appendingPathComponent("history")
+        try FileManager().createDirectory(at: cache, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let pool = TARCompressedPreparationPool(cacheDirectory: cache, activity: .init()), reader = TARArchiveReader(compressedPool: pool)
+        let session = try await (compression == .none ? reader.open(source) : reader.prepareCompressed(source))
+        func flow() async throws {
+            let selected = try await select(["data.json", "other.bin", "Folder"], in: session)
+            let targets = selected.archivePaths.map { $0 == "data.json" ? "other.bin" : $0 == "other.bin" ? "data.json" : "Folder" }
+            let engine = RecoverableFileOperations(journalDirectory: history, authoredTAROriginalUpdatePolicy: .developmentNativeStage,
+                authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage, authoredTARBzip2OriginalUpdatePolicy: .developmentNativeStage)
+            let plan = try await engine.prepareTARMemberMutationOriginal(.batchRename(selected, to: targets),
+                observing: engine.observeSelection([source]))
+            let result = await engine.performArchiveOriginalUpdate(plan)
+            #expect(result.result.disposition == .succeeded)
+            let output = try compression == .none ? Data(contentsOf: source)
+                : compression == .gzipBalanced ? TARTestFixture.decodedGzip(source) : TARTestFixture.decodedBzip2(source)
+            var expected = try snapshot(f.bytes)
+            let json = expected["data.json"], binary = expected["other.bin"]
+            expected["data.json"] = binary; expected["other.bin"] = json
+            #expect(try snapshot(output) == expected)
+            func unchangedRecords(_ bytes: Data) throws -> [Data] {
+                let parsed = try TARMetadataParser.parse(length: UInt64(bytes.count), check: {}, read: {
+                    bytes.subdata(in: Int($0)..<(Int($0) + $1))
+                })
+                return parsed.records.filter { $0.path == "Folder" || $0.path.hasPrefix("Folder/") }.map {
+                    bytes.subdata(in: Int($0.extensionOffset ?? $0.headerOffset)..<Int($0.dataOffset + (($0.bytes + 511) / 512) * 512))
+                }
+            }
+            #expect(try unchangedRecords(output) == unchangedRecords(f.bytes))
+            let cold = RecoverableFileOperations(journalDirectory: history, authoredTAROriginalUpdatePolicy: .developmentNativeStage,
+                authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage, authoredTARBzip2OriginalUpdatePolicy: .developmentNativeStage)
+            #expect(await cold.undo(recordID: try #require(result.recordID)).result.disposition == .succeeded)
+            #expect(try Data(contentsOf: source) == before)
+        }
+        do { try await flow() }
+        catch { await session.close(); _ = await pool.closeAndDrain(); throw error }
+        await session.close(); #expect(await pool.closeAndDrain())
+    }
+
+    @Test func distinctImplicitFolderRootsNeverMergeAfterRenameOrMove() async throws {
+        let f = try TARTestFixture(rawMembers: TARTestFixture.member("A/Folder/first.txt", body: Data([65]))
+            + TARTestFixture.member("B/Folder/second.txt", body: Data([66]))
+            + TARTestFixture.member("Dest/", body: Data(), type: 53))
+        let session = try await TARArchiveReader().open(f.source)
+        let selected = try await select(["A", "B"], in: session)
+        let nested = try await select(["A/Folder", "B/Folder"], in: session)
+        let mutations: [TARMemberMutation] = [
+            .batchRename(selected, to: ["Together", "Together"]),
+            .batchRename(selected, to: ["together", "Together"]),
+            .move(nested, into: try await destination("Dest", in: session))
+        ]
+        for mutation in mutations {
+            #expect(throws: TARMemberEditFailure.conflict) { try PreparedTARMemberMutation(mutation, check: {}) }
+        }
+        #expect(throws: TARArchiveFailure.invalidSelection) { try PreparedTARMemberMutation(.batchRename(selected, to: ["One"]), check: {}) }
+        #expect(throws: TARMemberEditFailure.invalidMemberName) {
+            try PreparedTARMemberMutation(.batchRename(selected, to: selected.archivePaths), check: {})
+        }
+        #expect(try Data(contentsOf: f.source) == f.bytes)
+        await session.close()
     }
 
     @Test func caseOnlyRenameAndCoveredSelectionPreserveExactMemberData() async throws {

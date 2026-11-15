@@ -119,7 +119,7 @@ enum ArchiveMemberCopyEdit: Sendable {
         case .newFolder: .newFolder; case .newFile: .newFile; case .group: .group
         case .tar(let intent):
             switch intent {
-            case .rename: .rename; case .remove: .remove; case .duplicate: .duplicate
+            case .rename: .rename; case .batchRename: .batchRename; case .remove: .remove; case .duplicate: .duplicate
             case .move: .move; case .add: .add; case .newFolder: .newFolder
             case .newFile: .newFile; case .group: .group; case .replace: .textReplacement
             }

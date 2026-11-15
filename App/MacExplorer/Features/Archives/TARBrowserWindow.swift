@@ -301,7 +301,7 @@ private struct TARBrowserView:View {
         if item.action == #selector(openSelected(_:)){return model.current && !model.busy && !model.isPreparingPreview && model.selection.count==1 && (items.contains{model.selection.contains($0.id) && $0.folder != nil} || model.canPreviewSelected)}
         if item.action == #selector(previewText(_:)) { item.title = model.preferredPreview.commandTitle; return model.canPreviewSelected }
         if item.action == #selector(editText(_:)) { return model.canEditSelectedText }
-        if item.action == #selector(renameMember(_:)) { return model.canModifySelectedMembers && model.selection.count == 1 }
+        if item.action == #selector(renameMember(_:)) { return model.canModifySelectedMembers }
         if item.action == #selector(duplicateMember(_:)) || item.action == #selector(removeMember(_:)) { return model.canModifySelectedMembers }
         if item.action == #selector(groupMembers(_:)) { return model.canGroupMembers }
         if let action = item.action, [#selector(createMember(_:)), #selector(createFolder(_:)), #selector(addMembers(_:))].contains(action) { return model.canCreateMember }

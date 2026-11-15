@@ -6,7 +6,7 @@ import LocalStorage
 extension TARMemberMutation {
     var memberSelection: TARMemberSelection? {
         switch self {
-        case .rename(let v, _), .remove(let v), .duplicate(let v, _), .move(let v, _), .group(let v, _): v
+        case .rename(let v, _), .batchRename(let v, _), .remove(let v), .duplicate(let v, _), .move(let v, _), .group(let v, _): v
         default: nil
         }
     }

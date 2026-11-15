@@ -217,7 +217,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         return switch model { case .zip(let m, _): m.canExtractSelected; case .tar(let m, _): m.canExtract && m.selectedSupported; case nil: false }
     }
     var canRenameInCopy: Bool {
-        if case .tar(let model, _) = model { return model.canModifySelectedMembers && model.selection.count == 1 }
+        if case .tar(let model, _) = model { return model.canModifySelectedMembers }
         if case .zip(let model, _) = model { return model.canRenameMemberInCopy }
         return false
     }

@@ -9,7 +9,7 @@ Earlier private-beta version numbers belong to a separate release history.
 ### In development
 
 - Plain and prepared gzip/bzip2 TAR member editing through the shared archive workbench and native
-  editor: Rename, Remove, Duplicate, Move, Add, Create File/Folder, Group and
+  editor: Rename, batch Rename, Remove, Duplicate, Move, Add, Create File/Folder, Group and
   Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo.
   This remains a development feature pending distribution qualification.
 - TAR.gz and TAR.bz2 creation through the shared archive publisher, with
