@@ -88,6 +88,10 @@ final class BrowserWorkspaceController: NSViewController {
     var hasPaneTransitionForVerification: Bool { paneTransition != nil }
     var hasSidebarAnimationForVerification: Bool { sidebarSplit?.isAnimating == true }
     var paneTransitionOriginForVerification: WorkspacePaneTransition.Origin? { paneTransition?.origin }
+    var paneTransitionFramesForVerification: [UUID: WorkspacePaneTransition.Frame] { paneTransition?.frames ?? [:] }
+    var paneTransitionHasOpaqueBackdropForVerification: Bool {
+        paneTransition?.subviews.contains { ($0.layer?.backgroundColor?.alpha ?? 0) > 0 } ?? false
+    }
     var queuePresentationPendingForVerification: Bool {
         queuePresentation?.isPendingForVerification == true
             || browsers.values.contains { $0.queueRevisionCallbacksPendingForVerification > 0 }
@@ -842,7 +846,7 @@ final class BrowserWorkspaceController: NSViewController {
         if let window = view.window, let screen = window.screen {
             let chromeHeight = window.frame.height - window.contentLayoutRect.height
             guard Self.fits(minimum: NSSize(width: minimum.width + sidebarReservation + (preview.isEnabled ? 301 : 0),
-                                           height: minimum.height + 40 + (primaryBrowser.settings.showsPathBar ? 26 : 0) + chromeHeight),
+                                           height: minimum.height + InterfaceMetrics.points(40 + (primaryBrowser.settings.showsPathBar ? 26 : 0)) + chromeHeight),
                             in: screen.visibleFrame.size) else { return false }
         }
         return Self.fits(minimum: minimum, in: paneTreeHost.bounds.size)
@@ -858,7 +862,7 @@ final class BrowserWorkspaceController: NSViewController {
         // Reserve the expanded operation row even while it is hidden so a job
         // starting at minimum size cannot shrink the smallest pane below its limit.
         return NSSize(width: max(820, minimum.width + sidebar + (previewEnabled ? 301 : 0)),
-                      height: max(500, minimum.height + 40 + (primaryBrowser.settings.showsPathBar ? 26 : 0)))
+                      height: max(500, minimum.height + InterfaceMetrics.points(40 + (primaryBrowser.settings.showsPathBar ? 26 : 0))))
     }
     private func enforceWindowMinimum(grow: Bool) {
         guard let window = view.window else { return }

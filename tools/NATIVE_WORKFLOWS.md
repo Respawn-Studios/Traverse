@@ -19,6 +19,7 @@ and choose the check that exercises the changed route. See the
 | Support report review | `native-check support-details` |
 | Shared tool windows | `native-check tool-windows` |
 | Settings, Help, Properties and Analyzer opening/closing | `native-check window-lifecycle` |
+| Pane motion, geometry and authenticated tab routing | `native-check pane-motion` |
 | Remote metadata | `native-check connection-metadata --connection-phase find` or `viewport` |
 
 Run entries through `python3 -B tools/dev.py`. Use each entry's help for accepted

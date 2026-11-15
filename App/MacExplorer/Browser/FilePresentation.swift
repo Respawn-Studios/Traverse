@@ -78,7 +78,8 @@ protocol FileColumnSizingTable: AnyObject {
     func fit(_ table: NSTableView) {
         guard !applying, !trackingHeader, let scroll = table.enclosingScrollView,
               let name = table.tableColumns.first(where: { $0.identifier.rawValue == "name" }), !name.isHidden else { return }
-        let viewport = scroll.contentSize.width, scale = InterfaceMetrics.scale
+        // Fit the columns against the current native clip allocation.
+        let viewport = scroll.contentView.bounds.width, scale = InterfaceMetrics.scale
         guard viewport > 0, scale > 0 else { return }
         applying = true; defer { applying = false }
         table.columnAutoresizingStyle = .noColumnAutoresizing
@@ -123,8 +124,8 @@ protocol FileColumnSizingTable: AnyObject {
         }
         let otherWidth = others.reduce(CGFloat.zero) { $0 + $1.width }
         assign(name, userWidths[name.identifier].map { $0 * scale } ?? (viewport - otherWidth - spacing))
-        let width = max(viewport, visible.reduce(CGFloat.zero) { $0 + $1.width } + spacing)
-        if abs(table.frame.width - width) > 0.5 { table.setFrameSize(.init(width: width, height: table.frame.height)) }
+        // NSTableView owns its document extent from these columns. Assigning
+        // its frame here fights native minimum-width rounding during layout.
     }
 
     func beginHeaderInteraction(_ table: NSTableView) -> [NSUserInterfaceItemIdentifier: CGFloat]? {

@@ -30,7 +30,7 @@ private final class WorkspaceFixtureTabDrag: NSObject, NSDraggingInfo {
 
 @MainActor
 enum WorkspaceNavigationVerification {
-    static func run(in testRoot: URL) async throws -> [String] {
+    static func run(in testRoot: URL, settings inheritedSettings: BrowserSettings? = nil) async throws -> [String] {
         guard let declared = ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"],
               testRoot.standardizedFileURL == URL(fileURLWithPath: declared, isDirectory: true).standardizedFileURL,
               testRoot.standardizedFileURL == testRoot.resolvingSymlinksInPath().standardizedFileURL else {
@@ -50,7 +50,7 @@ enum WorkspaceNavigationVerification {
             try Data("generated workspace A".utf8).write(to: firstFile, options: .withoutOverwriting)
             try Data("generated workspace B".utf8).write(to: secondFile, options: .withoutOverwriting)
         }.value
-        let settings = BrowserSettings(persist: false)
+        let settings = inheritedSettings ?? BrowserSettings(persist: false)
         settings.autoRefreshFolders = false
         settings.reviewsRecoveryAtStartup = false
         settings.showsDockProgress = false
@@ -125,9 +125,10 @@ enum WorkspaceNavigationVerification {
         try verifyGeometry(workspace, stage: "ancestor layout after initial pane allocation")
         // Only explicit foreground substantial qualification orders this owned
         // native window. Offscreen runs never create popup/input success claims.
-        let visibleFilterQualification = ProcessInfo.processInfo.arguments.contains("--check-substantial")
+        let visibleFilterQualification = (ProcessInfo.processInfo.arguments.contains("--check-substantial")
+            || ProcessInfo.processInfo.arguments.contains("pane-motion"))
             && !ProcessInfo.processInfo.arguments.contains("--offscreen")
-        if visibleFilterQualification { window.makeKeyAndOrderFront(nil) }
+        if visibleFilterQualification { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
         workspace.startBrowser(primary)
         try await waitUntil("Initial generated pane listing") { primary.rowsByURL[firstFile] != nil && !primary.isLoading && primary.orderingTask == nil }
         var checks: [String] = []
@@ -144,6 +145,20 @@ enum WorkspaceNavigationVerification {
         let didSplit = workspace.splitActive(at: .trailing)
         let geometry = "window=\(window.contentView?.bounds.size ?? .zero), workspace=\(workspace.view.bounds.size), tree=\(workspace.paneTreeHost.bounds.size), primaryHost=\(workspace.paneHosts[primary.paneID]?.bounds.size ?? .zero), screen=\(window.screen?.visibleFrame.size ?? .zero), canChange=\(workspace.canChangePaneLayout), primaryBusy=\(primary.hasPendingFileOperation), suspended=\(primary.isBrowserSuspended)"
         try require(didSplit, "Two-pane split failed in an adequately sized window: " + geometry)
+        let paneMotion = visibleFilterQualification && settings.motion.allows(.panes)
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if paneMotion {
+            guard let picture = workspace.paneTransitionFramesForVerification[primary.paneID]?.image,
+                  let bitmap = picture.representations.first as? NSBitmapImageRep,
+                  let empty = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2) else {
+                throw UIVerification.Failure(message: "Native pane transition picture missing")
+            }
+            if primary.contentSurface?.isUsingOpaqueSurface == false {
+                try require(empty.alphaComponent < 0.02, "Pane transition captured an opaque material backplate")
+            }
+            try require(!workspace.paneTransitionHasOpaqueBackdropForVerification,
+                "Pane transition painted an opaque background over native material")
+        }
         let peer = workspace.activeBrowser
         try require(workspace.paneHosts.values.filter(\.showsFocusOutline).count == 1
                     && workspace.paneHosts[peer.paneID]?.showsFocusOutline == true,
@@ -296,7 +311,14 @@ enum WorkspaceNavigationVerification {
         try require(host.proposedEdge == nil, "Movement into an unregistered area retained snap authority")
         try require(host.draggingUpdated(authenticated) == .move && host.proposedEdge == .bottom,
                     "Leaving and re-entering a valid edge lost the current snap session")
+        let untouched = workspace.paneHosts[primary.paneID]!
+        let untouchedFrame = untouched.convert(untouched.bounds, to: workspace.paneTreeHost)
         try require(host.performDragOperation(authenticated), "Authenticated edge drop failed")
+        if paneMotion {
+            try require(untouched.convert(untouched.bounds, to: workspace.paneTreeHost) == untouchedFrame
+                && workspace.paneTransitionFramesForVerification[primary.paneID] == nil,
+                "Splitting another pane repainted an unchanged pane")
+        }
         let moved = workspace.activeBrowser
         moved.permitsBackgroundVerification = true
         try require(workspace.browsers.count == 3 && moved.tabs[0].id == history.id && moved.tabs[0].canGoBack && moved.tabs[0].canGoForward,

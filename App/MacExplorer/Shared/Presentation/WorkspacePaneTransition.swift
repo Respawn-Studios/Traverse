@@ -49,14 +49,20 @@ final class WorkspacePaneTransition: NSView {
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { completion(); return }
         self.completion = completion
         frame = parent.bounds; autoresizingMask = [.width, .height]
+        wantsLayer = true; layer?.isOpaque = false; layer?.backgroundColor = NSColor.clear.cgColor
         let final = hosts.mapValues { $0.convert($0.bounds, to: parent) }
+        let closing = frames.keys.contains { hosts[$0] == nil }
+        // Do not dissolve a still pane merely because its neighbour changed.
+        // Its native material and current contents can remain on screen.
+        frames = frames.filter { final[$0.key] != $0.value.rect }
+        if frames.isEmpty, origin == nil { finish(); return }
         // Survivors keep the calm frame motion. An arriving pane uses a curved
         // reveal from the tab/drop position; neither path scales live text.
         var targets: [(PaneTransitionClip, NSRect)] = []
         for (id, from) in frames {
             let clip = PaneTransitionClip(frame: from.rect)
             clip.wantsLayer = true; clip.layer?.masksToBounds = true
-            clip.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            clip.layer?.isOpaque = false; clip.layer?.backgroundColor = NSColor.clear.cgColor
             let image = NSImageView(frame: NSRect(origin: .zero, size: from.rect.size))
             image.image = from.image; image.imageScaling = .scaleNone; image.imageAlignment = .alignTopLeft
             clip.addSubview(image); addSubview(clip)
@@ -80,7 +86,7 @@ final class WorkspacePaneTransition: NSView {
         // follow the moving divider, then dissolve into the live final layout.
         // New content is revealed underneath, without snapshotting an empty
         // newly created pane before its listing arrives.
-        let duration = (frames.count > hosts.count ? 0.39 : 0.48) * mode.durationScale
+        let duration = (closing ? 0.39 : 0.48) * mode.durationScale
         if mode == .full, let origin, let arrivingPaneID, let host = hosts[arrivingPaneID], let destination = final[arrivingPaneID] {
             let start = origin.dropFrame.map { NSPoint(x: $0.midX, y: $0.midY) } ?? edgePoint(origin.edge, in: destination)
             let seed = host.convert(start, from: parent)

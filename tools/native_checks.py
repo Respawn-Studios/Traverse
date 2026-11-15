@@ -376,6 +376,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         "help-motion": ("help-form-motion-v1", "--check-help-motion", "native-help-motion.json"),
         "tool-windows": ("motion-audit", "--check-development-motion", "native.json"),
         "window-lifecycle": ("motion-audit", "--check-development-motion", "native.json"),
+        "pane-motion": ("motion-audit", "--check-development-motion", "native.json"),
         "storage-chart": ("motion-audit", "--check-development-motion", "native.json"),
         "server-prompts": ("motion-audit", "--check-development-motion", "native.json"),
         "sftp-profiles": ("motion-audit", "--check-development-motion", "native.json"),
@@ -703,8 +704,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             command.append("--remote-cut-flow")
     if feature == "smb-transfer-menus":
         command += ["--smb-download-scenario", "menus", "--generated-port", "10445"]
-    if feature in ("tool-windows", "window-lifecycle", "server-prompts", "sftp-profiles"):
-        surface = {"tool-windows": "tools", "window-lifecycle": "window-lifecycle", "server-prompts": "ssh-prompts", "sftp-profiles": "ssh"}[feature]
+    if feature in ("tool-windows", "window-lifecycle", "pane-motion", "server-prompts", "sftp-profiles"):
+        surface = {"tool-windows": "tools", "window-lifecycle": "window-lifecycle", "pane-motion": "pane-motion", "server-prompts": "ssh-prompts", "sftp-profiles": "ssh"}[feature]
         command += ["--motion-surface", surface]
     if feature == "storage-chart":
         command += ["--motion-surface", "chart"]
@@ -750,7 +751,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command.append("--clipboard-copy-members")
     if large_interface:
         command.append("--large-interface")
-    if feature in ("settings-motion", "help-motion", "tool-windows", "window-lifecycle", "server-prompts", "sftp-profiles", "storage-chart"):
+    if feature in ("settings-motion", "help-motion", "tool-windows", "window-lifecycle", "pane-motion", "server-prompts", "sftp-profiles", "storage-chart"):
         command += ["--motion-mode", motion_mode]
         if large_interface:
             command += ["--motion-large", "--motion-light"]
