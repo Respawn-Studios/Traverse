@@ -22,8 +22,8 @@ import AppKit
     init(owner: ArchiveTabController, source: ZIPClipboardSource, operation: TransferClipboardFeedback.Intent) {
         archiveOwner = owner; self.source = .zip(source); self.operation = operation
     }
-    init(owner: ArchiveTabController, source: TARClipboardSource) {
-        archiveOwner = owner; self.source = .tar(source); operation = .copy
+    init(owner: ArchiveTabController, source: TARClipboardSource, operation: TransferClipboardFeedback.Intent) {
+        archiveOwner = owner; self.source = .tar(source); self.operation = operation
     }
 
     var isAlive: Bool {
@@ -99,7 +99,11 @@ import AppKit
             return operation == .copy && browser.canPasteArchiveIntoLocalFolder
                 && archiveOwner?.canExportClipboard(source) == true
         case .tar(let source):
-            return browser.canPasteArchiveIntoLocalFolder && archiveOwner?.canExportClipboard(source) == true
+            if browser.currentArchive === archiveOwner {
+                return archiveOwner?.canPasteMembers(source, operation: operation) == true
+            }
+            return operation == .copy && browser.canPasteArchiveIntoLocalFolder
+                && archiveOwner?.canExportClipboard(source) == true
         }
     }
 
@@ -107,7 +111,8 @@ import AppKit
         switch source {
         case .zip: operation == .move ? "Paste the cut items in another folder in this ZIP tab."
             : "Paste the copied items in this ZIP or an available local folder."
-        case .tar: "Paste the copied items in an available local folder."
+        case .tar: operation == .move ? "Paste the cut items in another folder in this TAR tab."
+            : "Paste the copied items in this TAR or an available local folder."
         case .sftp, .smb: "Paste this item in a folder in its original server tab."
         }
     }
@@ -335,7 +340,11 @@ import AppKit
                 if currentArchive === owner { owner.pasteMembers(source, context: context) }
                 else { owner.exportClipboard(source, context: context, to: self) }
             }
-        case .tar(let source): context.intent.archiveOwner?.exportClipboard(source, context: context, to: self)
+        case .tar(let source):
+            if let owner = context.intent.archiveOwner {
+                if currentArchive === owner { owner.pasteMembers(source, context: context) }
+                else { owner.exportClipboard(source, context: context, to: self) }
+            }
         }
         return true
     }

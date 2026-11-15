@@ -221,7 +221,8 @@ enum ZIPRootExtractionPreparation {
         #endif
         let enabled = switch purpose {
         case .extract: ArchiveMemberDragActivation.available && info.draggingSourceOperationMask.contains(.copy)
-        case .moveWithinArchive: ZIPOriginalUpdateFeature.available && info.draggingSourceOperationMask.contains(.move)
+        case .moveWithinArchive: (ZIPOriginalUpdateFeature.available || TARArchiveEditingFeature.available)
+            && info.draggingSourceOperationMask.contains(.move)
         }
         guard enabled else { return nil }
         #if DEBUG
@@ -245,6 +246,7 @@ enum ZIPRootExtractionPreparation {
             switch purpose {
             case .extract: active.offer.canExtract
             case .moveWithinArchive: active.offer.model?.canMoveMembers(active.offer.ids) == true
+                || active.offer.tarModel?.canMoveMembers(active.offer.tarIDs) == true
             }
         }
         guard eligible() else { return nil }

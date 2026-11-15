@@ -28,6 +28,8 @@ internal struct TARParsedDirectory: Sendable {
     let witness: Data
     let metadataBytes: Int
     let logicalBytes: UInt64
+    var endOffset: UInt64 = 0
+    var physicalRecords: Int = 0
 }
 
 /// Plain-TAR structure only. The read closure is positioned and bounded: no
@@ -69,7 +71,8 @@ internal enum TARMetadataParser {
                     trailing += UInt64(count)
                 }
                 try check()
-                return .init(records: records, witness: Data(witness.finalize()), metadataBytes: metadataBytes, logicalBytes: logical)
+                return .init(records: records, witness: Data(witness.finalize()), metadataBytes: metadataBytes,
+                    logicalBytes: logical, endOffset: cursor, physicalRecords: physical)
             }
             if cursor == 0, header.starts(with: [0x1f,0x8b]) { throw TARArchiveFailure.compressed }
             physical += 1

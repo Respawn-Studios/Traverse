@@ -7,51 +7,7 @@ import Foundation
 import Testing
 
 struct TARTextEditTests {
-    private struct Fixture {
-        let root: URL, source: URL, bytes: Data
-        init(pax: Bool = false, link: Bool = false) throws {
-            root = try LocalStorageTestFixtures.directory()
-            source = root.appendingPathComponent("Source.tar")
-            var result = Data()
-            if pax {
-                let payload = TARMemberHeader.attribute("uid", "123456789")
-                    + TARMemberHeader.attribute("uname", "original owner")
-                    + TARMemberHeader.attribute("size", "3")
-                    + TARMemberHeader.attribute("atime", "1700000000.125")
-                result += Self.member("PaxHeader", body: payload, type: 120)
-            }
-            result += Self.member("data.json", body: Data("{}\n".utf8), declaredSize: pax ? 0 : nil)
-            result += Self.member("other.bin", body: Data([0, 1, 2, 3, 0, 255]))
-            result += Self.member("empty/", body: Data(), type: 53)
-            if link { result += Self.member("link", body: Data(), type: 50) }
-            result += Data(repeating: 0, count: 1024)
-            bytes = result
-            try result.write(to: source, options: .withoutOverwriting)
-        }
-        static func member(_ name: String, body: Data, type: UInt8 = 48, declaredSize: UInt64? = nil) -> Data {
-            var header = Data(repeating: 0, count: 512)
-            func text(_ value: String, at offset: Int) { header.replaceSubrange(offset..<(offset + value.utf8.count), with: value.utf8) }
-            text(name, at: 0); text("0000751\0", at: 100); text("0000173\0", at: 108); text("0000710\0", at: 116)
-            try! TARMemberHeader.setOctal(declaredSize ?? UInt64(body.count), in: &header, range: 124..<136)
-            text("14524770400\0", at: 136); header[156] = type
-            text("ustar\0", at: 257); text("00", at: 263)
-            text("retained-user", at: 265); text("retained-group", at: 297)
-            text("0000000\0", at: 329); text("0000000\0", at: 337)
-            TARMemberHeader.checksum(&header)
-            return header + body + Data(repeating: 0, count: (512 - body.count % 512) % 512)
-        }
-        func document() async throws -> TARTextEditDocument {
-            let reader = TARArchiveReader(), session = try await reader.open(source)
-            let page = try await session.page(in: session.root)
-            let member = try #require(page.items.first { $0.name == "data.json" })
-            return try await reader.openTextForEdit(session.selectionForTextPreview(member.id))
-        }
-        func output() throws -> (URL, Int32) {
-            let url = root.appendingPathComponent("Edited.tar")
-            let fd = open(url.path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            try #require(fd >= 0); return (url, fd)
-        }
-    }
+    private typealias Fixture = TARTestFixture
     private func parsed(_ bytes: Data) throws -> TARParsedDirectory {
         try TARMetadataParser.parse(length: UInt64(bytes.count), check: {}, read: {
             bytes.subdata(in: Int($0)..<(Int($0) + $1))
@@ -61,7 +17,7 @@ struct TARTextEditTests {
     @Test(arguments: [false, true]) func preservesRawMetadataAndUnchangedMembers(pax: Bool) async throws {
         let fixture = try Fixture(pax: pax), document = try await fixture.document()
         let edited = try TextDocumentValue.edited("{\n    \"value\": 42\n}\n", format: document.contents.format)
-        let producer = try PreparedTARTextEdit(document, contents: edited, check: {})
+        let producer = try PreparedTARMemberMutation(document, contents: edited, check: {})
         let (output, fd) = try fixture.output(); defer { close(fd) }
         let receipt = try producer.produce(into: fd, check: {}, progress: { _, _ in })
         let bytes = try Data(contentsOf: output), before = try parsed(fixture.bytes), after = try parsed(bytes)
@@ -88,10 +44,10 @@ struct TARTextEditTests {
     @Test func rejectsStaleSourceAndUnsupportedMemberTypes() async throws {
         let linked = try Fixture(link: true), linkedDocument = try await linked.document()
         #expect(throws: TARMemberEditFailure.unsupportedArchive) {
-            try PreparedTARTextEdit(linkedDocument, contents: linkedDocument.contents, check: {})
+            try PreparedTARMemberMutation(linkedDocument, contents: linkedDocument.contents, check: {})
         }
         let fixture = try Fixture(), document = try await fixture.document()
-        let producer = try PreparedTARTextEdit(document, contents: document.contents, check: {})
+        let producer = try PreparedTARMemberMutation(document, contents: document.contents, check: {})
         try Data("changed".utf8).write(to: fixture.source)
         #expect(throws: FileOperationFailure.sourceChanged) { try producer.validate(check: {}) }
     }
@@ -103,11 +59,11 @@ struct TARTextEditTests {
             var byte: UInt8 = 255
             guard pwrite(fd, &byte, 1, 0) == 1 else { throw FileOperationFailure.ioFailure }
         }
-        let producer = try PreparedTARTextEdit(document, contents: document.contents, check: {}, hooks: hooks)
+        let producer = try PreparedTARMemberMutation(document, contents: document.contents, check: {}, hooks: hooks)
         let (_, fd) = try fixture.output(); defer { close(fd) }
         #expect(throws: (any Error).self) { try producer.produce(into: fd, check: {}, progress: { _, _ in }) }
         let cancelled = try Fixture(), original = try await cancelled.document()
-        let second = try PreparedTARTextEdit(original, contents: original.contents, check: {})
+        let second = try PreparedTARMemberMutation(original, contents: original.contents, check: {})
         let (output, other) = try cancelled.output(); defer { close(other) }
         #expect(throws: CancellationError.self) {
             try second.produce(into: other, check: { throw CancellationError() }, progress: { _, _ in })

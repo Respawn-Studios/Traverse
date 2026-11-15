@@ -35,11 +35,15 @@ source access and prepared-copy leases through drain and the volume/Quit barrier
 A prepared spool path is never operation authority. Compressed-TAR rewriting
 and creation, nesting and outgoing TAR promises require separate support.
 
-## TAR text editing in development
+## TAR editing in development
 
-Plain TAR members can use the common native editor in Development builds.
+Plain TAR members can use the common native editor and archive workbench in
+Development builds. Rename, Remove, Duplicate, Move, Create File/New Folder,
+Group and Add all use one `TARMemberMutation`, including Cut/Paste and local
+file drops. The browser seals catalog selections; the table never writes files.
+Read-only and larger extraction selections keep their existing Copy route.
 `TARTextEditDocument` binds complete UTF-8 bytes to the retained catalog;
-`PreparedTARTextEdit` streams a replacement without unpacking an editable tree.
+`PreparedTARMemberMutation` streams a replacement without unpacking an editable tree.
 Unchanged entries retain their original bytes, headers and local PAX records.
 The edited member keeps ownership names, mode and unrelated PAX fields; its
 header and any PAX size override are updated together. Links, special members,

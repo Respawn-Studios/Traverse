@@ -65,6 +65,9 @@ enum ZIPMemberRenameFeature {
     @Published private(set) var preparedAdditions: [ArchiveAddedItemPreview] = []
     private let memberEdit: ArchiveMemberCopyEdit?
     var isMemberCopy: Bool { memberEdit != nil }
+    var formatName: String { memberEdit?.formatName ?? outputFormat.rawValue.uppercased() }
+    var memberSelectionPreview: (paths: [String], folders: [String], covered: Int)? { memberEdit?.selectionPreview }
+    var isMemberGrouping: Bool { memberEdit?.isGrouping == true }
     var isMemberRename: Bool { memberEdit?.isRename == true }
     var isMemberBatchRename: Bool { memberEdit?.isBatchRename == true }
     var batchNames: [BatchRenameName] {
@@ -106,10 +109,10 @@ enum ZIPMemberRenameFeature {
     var additionExplanation: String {
         if additionCollisions == .replaceFiles {
             return "Matching files use the added files’ contents, dates and permissions. Folders are never merged; local items stay unchanged."
-                + (updatesOriginal ? "" : " Your original ZIP stays unchanged.")
+                + (updatesOriginal ? "" : " Your original archive stays unchanged.")
         }
-        return "Existing ZIP items and local originals stay unchanged. Names already in use get a number."
-            + (updatesOriginal ? "" : " Your original ZIP stays unchanged.")
+        return "Existing archive items and local originals stay unchanged. Names already in use get a number."
+            + (updatesOriginal ? "" : " Your original archive stays unchanged.")
     }
     var addedNames: [String] {
         preparedAdditions.isEmpty ? addedSources.map(\.lastPathComponent) : preparedAdditions.map(additionLabel)
@@ -123,6 +126,8 @@ enum ZIPMemberRenameFeature {
         switch memberEdit {
         case .add(let selected), .newFolder(let selected), .newFile(let selected):
             selected.virtualFolder.isEmpty ? selected.archiveURL.lastPathComponent : selected.virtualFolder
+        case .tar(let selected):
+            selected.folderPath.isEmpty ? selected.archiveURL.lastPathComponent : selected.folderPath
         case .group(let selected):
             selected.archivePaths.first.map { String($0.split(separator: "/").dropLast().joined(separator: "/")) }
                 .flatMap { $0.isEmpty ? nil : $0 } ?? selected.archiveURL.lastPathComponent
@@ -130,39 +135,43 @@ enum ZIPMemberRenameFeature {
         }
     }
     var isDirectoryRename: Bool {
-        if case .rename(let selected) = memberEdit { selected.isDirectory } else { false }
+        switch memberEdit {
+        case .rename(let selected): selected.isDirectory
+        case .tar(.rename(let selected, _)): selected.folderPaths.count == 1
+        default: false
+        }
     }
     var memberPath: String? { isMemberRename ? memberEdit?.paths.first : nil }
     var removedPaths: [String] { isMemberRemoval ? memberEdit?.paths ?? [] : [] }
     var removedFolderPaths: [String] {
-        if case .remove(let selected) = memberEdit { selected.folderPaths } else { [] }
+        isMemberRemoval ? memberEdit?.selectionPreview?.folders ?? [] : []
     }
     var coveredRemovedSelections: Int {
-        if case .remove(let selected) = memberEdit { selected.coveredSelectionCount } else { 0 }
+        isMemberRemoval ? memberEdit?.selectionPreview?.covered ?? 0 : 0
     }
     var title: String {
-        if groupedSelection != nil { return updatesOriginal ? "New Folder with Selection" : "Group in ZIP Copy" }
-        if isMemberBatchRename { return updatesOriginal ? "Rename Items in ZIP" : "Rename Items in ZIP Copy" }
+        if isMemberGrouping { return updatesOriginal ? "New Folder with Selection" : "Group in \(formatName) Copy" }
+        if isMemberBatchRename { return updatesOriginal ? "Rename Items in \(formatName)" : "Rename Items in \(formatName) Copy" }
         if isMemberDuplicate {
-            if copyDestination != nil { return updatesOriginal ? "Copy in ZIP" : "Copy in ZIP Copy" }
-            return updatesOriginal ? "Duplicate in ZIP" : "Duplicate in ZIP Copy"
+            if copyDestination != nil { return updatesOriginal ? "Copy in \(formatName)" : "Copy in \(formatName) Copy" }
+            return updatesOriginal ? "Duplicate in \(formatName)" : "Duplicate in \(formatName) Copy"
         }
-        if isMemberMove { return updatesOriginal ? "Move in ZIP" : "Move in ZIP Copy" }
-        if isMemberNewFolder { return updatesOriginal ? "New Folder in ZIP" : "New Folder in ZIP Copy" }
-        if isMemberNewFile { return updatesOriginal ? "Create File in ZIP" : "Create File in ZIP Copy" }
-        if updatesOriginal { return isMemberAddition ? "Add to ZIP" : isMemberRemoval ? "Remove from ZIP" : "Rename in ZIP" }
-        return isMemberAddition ? "Add to ZIP Copy" : isMemberRemoval ? "Remove from ZIP Copy" : isMemberRename ? "Rename in ZIP Copy" : "Create \(outputFormat.rawValue.uppercased())"
+        if isMemberMove { return updatesOriginal ? "Move in \(formatName)" : "Move in \(formatName) Copy" }
+        if isMemberNewFolder { return updatesOriginal ? "New Folder in \(formatName)" : "New Folder in \(formatName) Copy" }
+        if isMemberNewFile { return updatesOriginal ? "Create File in \(formatName)" : "Create File in \(formatName) Copy" }
+        if updatesOriginal { return isMemberAddition ? "Add to \(formatName)" : isMemberRemoval ? "Remove from \(formatName)" : "Rename in \(formatName)" }
+        return isMemberAddition ? "Add to \(formatName) Copy" : isMemberRemoval ? "Remove from \(formatName) Copy" : isMemberRename ? "Rename in \(formatName) Copy" : "Create \(outputFormat.rawValue.uppercased())"
     }
     var createTitle: String {
         if updatesOriginal {
             if isMemberBatchRename { return "Rename Items" }
-            if groupedSelection != nil { return "Create Folder" }
+            if isMemberGrouping { return "Create Folder" }
             if isMemberNewFile { return "Create File" }
             if isMemberDuplicate { return copyDestination == nil ? "Duplicate" : "Copy" }
             if isMemberMove { return "Move" }
-            return "Update ZIP"
+            return "Update \(formatName)"
         }
-        return isMemberCopy ? "Save ZIP Copy" : "Create \(outputFormat.rawValue.uppercased())"
+        return isMemberCopy ? "Save \(formatName) Copy" : "Create \(outputFormat.rawValue.uppercased())"
     }
     var offersOutputFormats: Bool {
         !isMemberCopy && !GeneratedSandboxReview.nativeTARCreateAdmitted && AppFeatureAvailability.allows(.tarCreation)
@@ -181,7 +190,11 @@ enum ZIPMemberRenameFeature {
     }
     var copyDestination: String? {
         if case .duplicate(_, let folder) = memberEdit { return folder?.virtualFolder }
+        if case .tar(.duplicate(_, let folder)) = memberEdit { return folder?.virtualFolder }
         return nil
+    }
+    var moveDestinationPath: String? {
+        switch memberEdit { case .move(_, let folder): folder.virtualFolder; case .tar(.move(_, let folder)): folder.virtualFolder; default: nil }
     }
     var moveSelection: (items: ZIPMemberSetSelection, folder: String)? {
         if case .move(let selection, let folder) = memberEdit { return (selection, folder.virtualFolder) }
@@ -234,7 +247,7 @@ enum ZIPMemberRenameFeature {
         self.sources = chosenSources
         parent = chosenSources[0].deletingLastPathComponent()
         if let memberEdit {
-            name = memberEdit.archiveURL.deletingPathExtension().lastPathComponent + "-edited.zip"
+            name = memberEdit.archiveURL.deletingPathExtension().lastPathComponent + "-edited." + memberEdit.formatName.lowercased()
         } else if nativeTARReview {
             name = sources.count == 1 ? sources[0].lastPathComponent + ".tar" : "Archive.tar"
         } else { name = sources.count == 1 ? sources[0].lastPathComponent + ".zip" : "Archive.zip" }
@@ -242,9 +255,10 @@ enum ZIPMemberRenameFeature {
         if case .rename(let selected) = memberEdit { memberName = selected.currentName }
         if memberEdit?.isNewFolder == true { memberName = "New Folder" }
         if case .newFile = memberEdit { memberName = "New File.txt" }
+        if case .tar(let mutation) = memberEdit { memberName = mutation.draftName }
         changes = Publishers.Merge(coordinator.objectWillChange, coordinator.transfers.objectWillChange)
             .receive(on: RunLoop.main).sink { [weak self] _ in self?.objectWillChange.send() }
-        if nativeTARReview { outputFormat = .tar }
+        if nativeTARReview || memberEdit?.formatName == "TAR" { outputFormat = .tar }
     }
     func requestPreview() {
         requestPreview(debounced: true)
@@ -254,7 +268,7 @@ enum ZIPMemberRenameFeature {
         generation = UUID(); pending = true; debouncesPreview = debounced; plan = nil; summary = nil; preparedAdditions = []; previewWork?.cancel()
         offersFinderFallback = false
         if isMemberAddition, sources.count == 1 {
-            pending = false; notice = "Choose files or folders to add. Existing ZIP items will be kept."; return
+            pending = false; notice = "Choose files or folders to add. Existing archive items will be kept."; return
         }
         notice = "Checking the selection and destination…"
         if prepareWork == nil { prepareWork = Task { [self] in await previewLoop() } }
@@ -298,7 +312,7 @@ enum ZIPMemberRenameFeature {
             guard token == generation else { continue }
             if case .rename(let selected) = memberEdit,
                chosenMemberName.isEmpty || chosenMemberName.utf8.elementsEqual(selected.currentName.utf8) {
-                notice = originalUpdate ? "Enter a new name for this item." : "Enter a new name for this item. The changed archive will be saved as a separate ZIP."; continue
+                notice = originalUpdate ? "Enter a new name for this item." : "Enter a new name for this item. The changed archive will be saved as a separate archive."; continue
             }
             if isMemberBatchRename {
                 do {
@@ -336,6 +350,10 @@ enum ZIPMemberRenameFeature {
                 if originalUpdate { try await requireUnreferencedOriginal(retaining: access) }
                 let work = Task { [engine, sources = chosenSources, memberEdit] () async throws -> ArchiveWritePlan in
                     switch memberEdit {
+                    case .tar(let mutation):
+                        let change = mutation.reviewed(name: chosenMemberName, addedSources: Array(sources.dropFirst()))
+                        if originalUpdate { return .update(try await engine.prepareTARMemberMutationOriginal(change, observing: captured)) }
+                        return .create(try await engine.prepareTARMemberMutationCopy(change, outputName: chosenName, observing: captured))
                     case .batchRename(let selected):
                         let names = try chosenBatch.rule.names(for: chosenBatchNames)
                         if originalUpdate {
@@ -421,7 +439,7 @@ enum ZIPMemberRenameFeature {
                     notice = originalUpdate ? "Ready to create “\(chosenMemberName)”."
                         : "Ready to create “\(chosenMemberName)” in “\(prepared.destination.lastPathComponent)”."
                 } else {
-                    notice = originalUpdate ? "Ready to update “\(prepared.destination.lastPathComponent)”. The earlier ZIP is kept for Undo."
+                    notice = originalUpdate ? "Ready to update “\(prepared.destination.lastPathComponent)”. The earlier archive is kept for Undo."
                         : "Ready to create “\(prepared.destination.lastPathComponent)”. Originals stay untouched."
                 }
                 ApplicationDiagnostics.shared.event(.archiveCreate, .completed, trace: diagnostic, count: UInt64(prepared.files))
@@ -430,7 +448,7 @@ enum ZIPMemberRenameFeature {
                     trace: diagnostic, error: DiagnosticErrors.project(error))
                 if !closed, token == generation {
                     notice = originalUpdate && (error as? FileOperationFailure) == .unsupported
-                        ? "Update ZIP is unavailable for this file. Save a ZIP copy instead." : Self.message(error)
+                        ? "Update \(formatName) is unavailable for this file. Save an archive copy instead." : Self.message(error)
                     offersFinderFallback = !isMemberCopy && (error is ZIPCreationFailure || error is ZIPExtractionFailure || error is ZIPArchiveFailure || error is TARCreationFailure)
                 }
             }
@@ -455,9 +473,9 @@ enum ZIPMemberRenameFeature {
         choiceWork = Task { [self] in
             defer { sourcePanel = nil; choiceWork = nil; isChoosing = false }
             let panel = NSOpenPanel()
-            panel.title = updatesOriginal ? "Add to ZIP" : "Add to ZIP Copy"; panel.prompt = "Add Items"
-            panel.message = updatesOriginal ? "Choose files or folders to add. Review the ZIP update before saving; local items stay unchanged."
-                : "Choose files or folders to add. The original ZIP and selected items stay unchanged."
+            panel.title = updatesOriginal ? "Add to \(formatName)" : "Add to \(formatName) Copy"; panel.prompt = "Add Items"
+            panel.message = updatesOriginal ? "Choose files or folders to add. Review the archive update before saving; local items stay unchanged."
+                : "Choose files or folders to add. The original archive and selected items stay unchanged."
             panel.canChooseFiles = true; panel.canChooseDirectories = true
             panel.allowsMultipleSelection = true; panel.resolvesAliases = false
             sourcePanel = panel
@@ -507,7 +525,7 @@ enum ZIPMemberRenameFeature {
               !selected.isEmpty, selected.count <= 511, selected.allSatisfy(\.isFileURL),
               let archive = memberEdit?.archiveURL, !selected.contains(archive),
               Set(selected).count == selected.count else {
-            notice = "Choose up to 511 different local files or folders. Leave the source ZIP out of the selection."; return
+            notice = "Choose up to 511 different local files or folders. Leave the source archive out of the selection."; return
         }
         let access = await Task.detached(priority: .userInitiated) {
             FileAccessLifetimes(leases: selected.map { FolderAccessLease(url: $0, backend: SystemFolderAccessBackend()) })
@@ -531,14 +549,14 @@ enum ZIPMemberRenameFeature {
                 let model = AnalysisFolderPickerModel(initialDirectory: parent, volumes: browser.volumes,
                     access: chooser, showsHidden: settings.showsHiddenFiles)
                 let picker = AnalysisFolderPickerController(model: model, settings: settings, style: settings.analysisFolderPicker,
-                    title: "Choose ZIP Destination")
+                    title: "Choose Archive Destination")
                 customPicker = picker; selected = await picker.choose(in: window); customPicker = nil
             }
             guard !closed, !Task.isCancelled, let selected else { return }
             if isMemberCopy {
                 guard selected.standardizedFileURL == parent.standardizedFileURL else {
-                    notice = updatesOriginal ? "Choose the folder shown above to allow this ZIP update."
-                        : "Choose the folder shown above to allow a ZIP copy beside the original."; return
+                    notice = updatesOriginal ? "Choose the folder shown above to allow this archive update."
+                        : "Choose the folder shown above to allow an archive copy beside the original."; return
                 }
                 requestPreview(); return
             }
@@ -547,9 +565,9 @@ enum ZIPMemberRenameFeature {
     }
     func create() {
         guard canCreate, let browser, let plan, browser.recoverableFileOperations === engine,
-              browser.operationTask == nil, browser.startOperationPresentation(updatesOriginal ? "Updating ZIP…" : isMemberCopy ? "Saving ZIP copy…" : "Creating \(outputFormat.rawValue.uppercased())…") else { return }
+              browser.operationTask == nil, browser.startOperationPresentation(updatesOriginal ? "Updating \(formatName)…" : isMemberCopy ? "Saving \(formatName) copy…" : "Creating \(outputFormat.rawValue.uppercased())…") else { return }
         isRunning = true; self.plan = nil
-        notice = updatesOriginal ? "Preparing and verifying the updated ZIP…" : isMemberCopy ? "Creating and checking the ZIP copy…" : "Creating and verifying the \(outputFormat.rawValue.uppercased())…"
+        notice = updatesOriginal ? "Preparing and verifying the updated archive…" : isMemberCopy ? "Creating and checking the archive copy…" : "Creating and verifying the \(outputFormat.rawValue.uppercased())…"
         let access = lifetime
         let createdPath: String?
         if case .newFile(let selection) = memberEdit {
@@ -558,6 +576,9 @@ enum ZIPMemberRenameFeature {
             createdPath = (selection.virtualFolder.isEmpty ? "" : selection.virtualFolder + "/") + memberName
         } else if let selected = groupedSelection, let first = selected.archivePaths.first {
             let prefix = first.split(separator: "/").dropLast().joined(separator: "/")
+            createdPath = (prefix.isEmpty ? "" : prefix + "/") + memberName
+        } else if case .tar(let mutation) = memberEdit, isMemberCreation {
+            let prefix = mutation.folderPath
             createdPath = (prefix.isEmpty ? "" : prefix + "/") + memberName
         } else { createdPath = nil }
         let work = Task { [self, browser] in
@@ -578,7 +599,7 @@ enum ZIPMemberRenameFeature {
                 let result = await plan.perform(using: engine, progress: browser.operationProgressSink)
                 outcome = result.recordID == nil && result.result.disposition != .succeeded ? nil : result
                 notice = result.result.disposition == .succeeded ? (updatesOriginal
-                    ? "Updated “\(plan.destination.lastPathComponent)”. The earlier ZIP is kept for Undo."
+                    ? "Updated “\(plan.destination.lastPathComponent)”. The earlier archive is kept for Undo."
                     : "Created “\(plan.destination.lastPathComponent)”. Originals are unchanged.")
                     : result.recordID != nil ? "The archive operation did not finish. Retained work is protected; View Results shows the exact operation."
                     : OperationResultDescription(result: result.result).summary
@@ -590,7 +611,7 @@ enum ZIPMemberRenameFeature {
     }
     func undo() {
         guard canUndo, let browser, let id = outcome?.recordID, browser.recoverableFileOperations === engine,
-              browser.startOperationPresentation(updatesOriginal ? "Undoing ZIP update…" : "Undoing \(outputFormat.rawValue.uppercased()) creation…") else { return }
+              browser.startOperationPresentation(updatesOriginal ? "Undoing \(formatName) update…" : "Undoing \(outputFormat.rawValue.uppercased()) creation…") else { return }
         undoAttempted = true; isRunning = true; notice = "Checking the archive before Undo…"
         let access = lifetime
         let work = Task { [self, browser] in
@@ -606,7 +627,7 @@ enum ZIPMemberRenameFeature {
             }
             let result = await engine.undo(recordID: id, progress: browser.operationProgressSink); undoOutcome = result
             notice = result.result.disposition == .succeeded ? (updatesOriginal
-                ? "The earlier ZIP is restored. The edited version remains in recovery."
+                ? "The earlier archive is restored. The edited version remains in recovery."
                 : "\(outputFormat.rawValue.uppercased()) creation undone. Its unchanged archive is retained in recovery; originals are untouched.")
                 : "Undo could not finish. Changed or uncertain items are preserved; View Results has the details."
             publish(result, browser: browser)
@@ -664,6 +685,8 @@ enum ZIPMemberRenameFeature {
         if let failure = error as? BatchRenameValidation { return failure.message }
         if let failure = error as? TARCreationFailure { return failure.userMessage }
         if let refusal = error as? ArchiveOriginalReferences.Failure { return refusal.message }
+        if let failure = error as? TARMemberEditFailure { return failure.userMessage }
+        if error is TARArchiveFailure { return TARBrowserModel.message(error) }
         if let failure = error as? ZIPMemberNewFolderFailure { return failure.userMessage }
         if let failure = error as? ZIPMemberAdditionFailure { return failure.userMessage }
         if let failure = error as? ZIPMemberRemovalFailure { return failure.userMessage }
@@ -721,16 +744,18 @@ private struct ArchiveCreationView: View {
                         .disabled(!model.canReview).accessibilityIdentifier("zip-copy-choose-items")
                 }
                 if !model.addedSources.isEmpty {
-                    Picker("Existing names", selection: $model.additionCollisions) {
-                        Text("Keep Both").tag(ZIPMemberAdditionCollisionPolicy.keepBoth)
-                        Text("Replace Files").tag(ZIPMemberAdditionCollisionPolicy.replaceFiles)
-                    }.pickerStyle(.segmented).disabled(!model.canReview)
+                    if model.outputFormat == .zip {
+                        Picker("Existing names", selection: $model.additionCollisions) {
+                            Text("Keep Both").tag(ZIPMemberAdditionCollisionPolicy.keepBoth)
+                            Text("Replace Files").tag(ZIPMemberAdditionCollisionPolicy.replaceFiles)
+                        }.pickerStyle(.segmented).disabled(!model.canReview)
+                    }
                     ArchiveCopyMemberList(paths: model.addedNames,
                         folderPaths: model.addedFolderNames,
                         coveredSelectionCount: 0, title: model.additionReviewTitle,
                         accessibilityID: "zip-copy-added-members")
                     if model.preparedAdditions.contains(where: \.renamed) {
-                        Text("Names already in use get a number. The existing items stay in the ZIP.")
+                        Text("Names already in use get a number. The existing items stay in the archive.")
                             .interfaceFont(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -754,6 +779,7 @@ private struct ArchiveCreationView: View {
                         .focused($memberNameFocused).accessibilityIdentifier("zip-member-new-name")
                         .help(model.isMemberNewFile ? "Include a file extension, such as notes.txt or settings.json. The new file starts empty."
                             : model.isMemberNewFolder ? "Choose an unused folder name without / or other folder separators."
+                            : model.outputFormat == .tar ? "Use a name without folder separators. Unicode names are supported."
                             : "Use a name without folder separators. Some older ZIPs require basic Latin characters, numbers and punctuation.")
                 }
                 if !model.updatesOriginal {
@@ -777,7 +803,7 @@ private struct ArchiveCreationView: View {
                 if !model.isMemberCreation && !model.isMemberDuplicate && !model.isMemberMove && !model.isMemberBatchRename {
                     Group {
                         if let summary = model.summary {
-                            Text("\(model.updatesOriginal ? "Updated ZIP" : model.isMemberCopy ? "New copy" : "Selection"): \(summary.files.formatted()) \(summary.files == 1 ? "file" : "files") · \(summary.folders.formatted()) \(summary.folders == 1 ? "folder" : "folders") · \(ArchiveBrowserModel.size(summary.bytes))")
+                            Text("\(model.updatesOriginal ? "Updated \(model.formatName)" : model.isMemberCopy ? "New copy" : "Selection"): \(summary.files.formatted()) \(summary.files == 1 ? "file" : "files") · \(summary.folders.formatted()) \(summary.folders == 1 ? "folder" : "folders") · \(ArchiveBrowserModel.size(summary.bytes))")
                         } else { Text(" ") }
                     }.interfaceFont(.callout).foregroundStyle(.secondary)
                         .frame(minHeight: 20, alignment: .leading)
@@ -787,11 +813,11 @@ private struct ArchiveCreationView: View {
                 ArchiveCopyMemberList(paths: model.removedPaths, folderPaths: model.removedFolderPaths,
                     coveredSelectionCount: model.coveredRemovedSelections)
                 if let summary = model.summary, summary.files == 0, summary.folders == 0 {
-                    Text(model.updatesOriginal ? "The ZIP will be empty after this update." : "The new ZIP will be empty.").interfaceFont(.callout.weight(.semibold))
+                    Text(model.updatesOriginal ? "The \(model.formatName) will be empty after this update." : "The new archive will be empty.").interfaceFont(.callout.weight(.semibold))
                 }
             }
-            if let selection = model.duplicateSelection {
-                let count = selection.archivePaths.count
+            if model.isMemberDuplicate, let selection = model.memberSelectionPreview {
+                let count = selection.paths.count
                 let copying = model.copyDestination != nil
                 if let path = model.copyDestination {
                     let folder = path.isEmpty ? "Archive root" : path
@@ -799,23 +825,23 @@ private struct ArchiveCreationView: View {
                         .interfaceFont(.callout).foregroundStyle(.secondary)
                         .lineLimit(2).truncationMode(.middle).help(folder)
                 }
-                ArchiveCopyMemberList(paths: selection.archivePaths, folderPaths: selection.folderPaths,
-                    coveredSelectionCount: selection.coveredSelectionCount,
+                ArchiveCopyMemberList(paths: selection.paths, folderPaths: selection.folders,
+                    coveredSelectionCount: selection.covered,
                     title: "\(count.formatted()) \(count == 1 ? "item" : "items") to \(copying ? "copy" : "duplicate")",
                     accessibilityID: "zip-copy-duplicate-members")
             }
-            if let move = model.moveSelection {
-                let folder = move.folder.isEmpty ? "Archive root" : move.folder
+            if model.isMemberMove, let selection = model.memberSelectionPreview, let path = model.moveDestinationPath {
+                let folder = path.isEmpty ? "Archive root" : path
                 Label("Move into \(folder)", systemImage: "folder")
                     .interfaceFont(.callout).foregroundStyle(.secondary)
                     .lineLimit(2).truncationMode(.middle).help(folder)
-                ArchiveCopyMemberList(paths: move.items.archivePaths, folderPaths: move.items.folderPaths,
-                    coveredSelectionCount: move.items.coveredSelectionCount, title: "Items to move",
+                ArchiveCopyMemberList(paths: selection.paths, folderPaths: selection.folders,
+                    coveredSelectionCount: selection.covered, title: "Items to move",
                     accessibilityID: "zip-move-members")
             }
-            if let selected = model.groupedSelection {
-                ArchiveCopyMemberList(paths: selected.archivePaths, folderPaths: selected.folderPaths,
-                    coveredSelectionCount: selected.coveredSelectionCount,
+            if model.isMemberGrouping, let selected = model.memberSelectionPreview {
+                ArchiveCopyMemberList(paths: selected.paths, folderPaths: selected.folders,
+                    coveredSelectionCount: selected.covered,
                     title: "Items for the new folder", accessibilityID: "zip-group-members")
             }
             if model.offersOutputFormats {
@@ -832,44 +858,45 @@ private struct ArchiveCreationView: View {
             Text(model.notice).interfaceFont(.callout).textSelection(.enabled).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             Text(model.isMemberBatchRename ? (model.updatesOriginal
                 ? "Folders keep all their contents. One Undo restores every earlier name; existing names are never merged or replaced."
-                : "The ZIP copy has the reviewed names. Folders keep their contents and your original stays unchanged.")
+                : "The archive copy has the reviewed names. Folders keep their contents and your original stays unchanged.")
                 : model.isMemberMove ? (model.updatesOriginal
                 ? "Undo restores the items to their earlier locations."
-                : "The new ZIP has the moved items. Your original ZIP stays unchanged.")
+                : "The new archive has the moved items. Your original archive stays unchanged.")
                 : model.isMemberDuplicate ? (model.updatesOriginal
-                ? "Selected folders are copied with their contents. Undo restores the earlier ZIP."
-                : "Selected folders are copied with their contents. Your original ZIP stays unchanged.")
+                ? "Selected folders are copied with their contents. Undo restores the earlier archive."
+                : "Selected folders are copied with their contents. Your original archive stays unchanged.")
                 : model.isMemberNewFile ? (model.updatesOriginal
-                ? "The new file starts empty. Other items in the ZIP are kept, and Undo restores the earlier ZIP."
-                : "The new ZIP copy includes this empty file. Your original ZIP and all existing items stay unchanged.")
-                : model.groupedSelection != nil ? (model.updatesOriginal
-                ? "These items move into the new folder together. Existing folders are never merged; one Undo restores the earlier ZIP."
-                : "The ZIP copy groups these items in the new folder. Your original ZIP stays unchanged.")
+                ? "The new file starts empty. Other items in the archive are kept, and Undo restores the earlier archive."
+                : "The new archive copy includes this empty file. Your original archive and all existing items stay unchanged.")
+                : model.isMemberGrouping ? (model.updatesOriginal
+                ? "These items move into the new folder together. Existing folders are never merged; one Undo restores the earlier archive."
+                : "The archive copy groups these items in the new folder. Your original archive stays unchanged.")
                 : model.isMemberNewFolder ? (model.updatesOriginal
-                ? "The new folder starts empty. Other items in the ZIP are kept, and Undo restores the earlier ZIP."
-                : "The new ZIP copy includes this empty folder. Your original ZIP and all existing items stay unchanged.")
+                ? "The new folder starts empty. Other items in the archive are kept, and Undo restores the earlier archive."
+                : "The new archive copy includes this empty folder. Your original archive and all existing items stay unchanged.")
                 : model.updatesOriginal ? (model.isMemberAddition
                 ? model.additionExplanation
-                : model.isMemberRemoval ? "These items and everything inside each selected folder are removed from this ZIP. The earlier ZIP is kept for Undo."
-                : "This item keeps its contents under its new name. The earlier ZIP is kept for Undo.")
+                : model.isMemberRemoval ? "These items and everything inside each selected folder are removed from this archive. The earlier archive is kept for Undo."
+                : "This item keeps its contents under its new name. The earlier archive is kept for Undo.")
                 : model.isMemberAddition ? model.additionExplanation
                 : model.isMemberRemoval ? (model.removedFolderPaths.isEmpty
-                    ? "Your original ZIP stays unchanged. The new copy leaves out the selected files. Folders that existed only through these files may also disappear from the copy; stored empty folders are kept."
-                    : "Your original ZIP stays unchanged. The new copy leaves out these items, including everything inside each selected folder. Other items are kept.")
-                : model.isDirectoryRename ? "Your original ZIP stays unchanged. The new copy keeps this folder and everything inside it together, with its new name. Other items are kept."
-                : model.isMemberRename ? "Your original ZIP stays unchanged. The new copy keeps this item in the same folder with its new name. Archives that cannot be copied safely are left untouched."
+                    ? "Your original archive stays unchanged. The new copy leaves out the selected files. Folders that existed only through these files may also disappear from the copy; stored empty folders are kept."
+                    : "Your original archive stays unchanged. The new copy leaves out these items, including everything inside each selected folder. Other items are kept.")
+                : model.isDirectoryRename ? "Your original archive stays unchanged. The new copy keeps this folder and everything inside it together, with its new name. Other items are kept."
+                : model.isMemberRename ? "Your original archive stays unchanged. The new copy keeps this item in the same folder with its new name. Archives that cannot be copied safely are left untouched."
                 : model.outputFormat == .tar ? "Uncompressed TAR with portable names, contents, dates and basic permissions. Your originals stay unchanged."
                 : "Standard ZIP for sharing between devices.")
                 .interfaceFont(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                .help(model.updatesOriginal ? "The updated ZIP is checked before it replaces the original. The earlier ZIP is kept for Undo."
-                    : model.isMemberRemoval ? "Every original file is checked before saving. Items inside a selected folder are included in that selection; the review lists each selected root once."
+                .help(model.updatesOriginal ? "The updated archive is checked before it replaces the original. The earlier archive is kept for Undo."
+                    : model.isMemberRemoval ? "The archive source and output are checked before saving. Items inside a selected folder are included in that selection; the review lists each selected root once."
+                    : model.isMemberCopy ? "Unchanged entries keep their original metadata. Added local items use portable contents, dates and basic permissions; unsupported Mac-specific data is refused."
                     : "The archive keeps names, file contents, basic dates and permissions. Ownership, Finder tags and other Mac-specific metadata are excluded. Items with resource-fork data are refused, and your originals stay unchanged.")
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private var completedActions: some View {
         Group {
             Button("View Results…", action: model.viewResults).disabled(!model.canViewResults)
-            Button(model.updatesOriginal ? "Undo ZIP Update" : model.isMemberCopy ? "Undo Copy" : "Undo \(model.outputFormat.rawValue.uppercased()) Creation", action: model.undo).disabled(!model.canUndo)
+            Button(model.updatesOriginal ? "Undo \(model.formatName) Update" : model.isMemberCopy ? "Undo Copy" : "Undo \(model.outputFormat.rawValue.uppercased()) Creation", action: model.undo).disabled(!model.canUndo)
             if model.undoOutcome == nil, model.outcome?.result.disposition == .succeeded { Button("Show in Explorer", action: model.showInExplorer) }
         }
     }
@@ -883,7 +910,7 @@ private struct ArchiveCreationView: View {
             Button("Stop", action: model.stop)
         } else if model.outcome == nil {
             if model.updatesOriginal {
-                Button("Save ZIP Copy Instead…", action: model.saveCopyInstead).disabled(!model.canReview)
+                Button("Save \(model.formatName) Copy Instead…", action: model.saveCopyInstead).disabled(!model.canReview)
             }
             if model.plan == nil, !model.isPreparing {
                 Button("Review Again", action: model.reviewAgain).disabled(!model.canReview)
@@ -936,7 +963,7 @@ private struct ArchiveCreationView: View {
         guard ArchiveCreationActivation.available, retirement == nil, browser.canStartArchiveCreation, !sources.isEmpty, sources.count <= 512,
               memberEdit == nil || memberEdit?.available == true,
               !automatic || memberEdit == nil && !GeneratedSandboxReview.nativeTARCreateAdmitted,
-              !updateOriginal || memberEdit != nil && ZIPOriginalUpdateFeature.available,
+              !updateOriginal || memberEdit?.canUpdateOriginal == true,
               let engine = browser.recoverableFileOperations else { return }
         if let controller {
             if controller.model.isRunning { controller.window?.makeKeyAndOrderFront(nil); return }

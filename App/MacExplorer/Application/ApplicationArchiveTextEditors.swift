@@ -14,7 +14,7 @@ enum ZIPTextEditorFeature {
     }
 }
 
-enum TARTextEditorFeature {
+enum TARArchiveEditingFeature {
     static var available: Bool {
         AppFeatureAvailability.policy.edition == .development && TARBrowseFeature.available
             && !GeneratedSandboxReview.admitted
@@ -23,7 +23,7 @@ enum TARTextEditorFeature {
 
 @MainActor extension BrowserViewController {
     var canOpenTARTextEditor: Bool {
-        TARTextEditorFeature.available && !isBrowserSuspended
+        TARArchiveEditingFeature.available && !isBrowserSuspended
             && !isReadOnlyFileSession && recoverableFileOperations != nil
     }
     var canOpenZIPTextEditor: Bool {

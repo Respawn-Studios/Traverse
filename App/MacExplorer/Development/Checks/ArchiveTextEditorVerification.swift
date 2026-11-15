@@ -8,8 +8,8 @@ import LocalStorage
 /// check. It uses the real browser/ZIP reader/producer/journal and no new target.
 @MainActor enum ArchiveTextEditorVerification {
     struct Failure: Error { let stage: String }
-    private static func need(_ value: Bool, _ stage: String) throws { if !value { throw Failure(stage: stage) } }
-    private static func wait(_ stage: String, _ ready: () -> Bool) async throws {
+    static func need(_ value: Bool, _ stage: String) throws { if !value { throw Failure(stage: stage) } }
+    static func wait(_ stage: String, _ ready: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(10)
         while !ready() { try need(.now < deadline, stage); try await Task.sleep(for: .milliseconds(10)) }
     }
@@ -50,7 +50,7 @@ import LocalStorage
             "accepted-close-inside-perform-close-must-acknowledge-once")
     }
     private static func createFile(source: URL, browser: BrowserViewController,
-                                   cold: RecoverableFileOperations, root: URL) async throws -> String {
+                                   cold: RecoverableFileOperations, root: URL, tar: Bool = false) async throws -> String {
         let before = try await Task.detached { try Data(contentsOf: source) }.value
         browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.focusBrowserContent()
         browser.openSelection(nil)
@@ -64,7 +64,7 @@ import LocalStorage
         browser.createTextFile(nil)
         try await wait("zip-new-file-review") { ApplicationArchiveCreation.shared.controller != nil }
         guard let creation = ApplicationArchiveCreation.shared.controller,
-              let model = browser.currentArchive?.zipModelForVerification else { throw Failure(stage: "zip-new-file-review-missing") }
+              let archive = browser.currentArchive else { throw Failure(stage: "archive-new-file-review-missing") }
         creation.model.memberName = "Created.json"
         try await wait("zip-new-file-plan") { !creation.model.isPreparing && !creation.model.previewIsPendingForVerification }
         try need(creation.model.isMemberNewFile && creation.model.canCreate
@@ -81,8 +81,13 @@ import LocalStorage
         guard let doc = editors.archiveDocumentForVerification(source: source, path: "Created.json") else {
             throw Failure(stage: "zip-new-file-auto-editor-missing")
         }
-        try need(doc.opened.contents.text.isEmpty && model.visibleItems.contains { $0.name == "Created.json" && $0.logicalBytes == 0 }
-            && model.selection.count == 1, "zip-new-file-fresh-row-and-empty-text")
+        let rowReady: Bool
+        if tar, let model = archive.tarModelForVerification {
+            rowReady = model.items.contains { $0.name == "Created.json" && $0.logicalBytes == 0 } && model.selection.count == 1
+        } else if let model = archive.zipModelForVerification {
+            rowReady = model.visibleItems.contains { $0.name == "Created.json" && $0.logicalBytes == 0 } && model.selection.count == 1
+        } else { rowReady = false }
+        try need(doc.opened.contents.text.isEmpty && rowReady, "archive-new-file-fresh-row-and-empty-text")
         edit("{\"created\":true}\n", in: doc); doc.window.saveButton.performClick(nil)
         try await wait("zip-new-file-editor-save") { !doc.isBusy && !doc.isDirty && doc.latestRecordID != nil }
         guard let saved = doc.latestRecordID else { throw Failure(stage: "zip-new-file-save-record") }
@@ -97,7 +102,7 @@ import LocalStorage
         await ApplicationArchiveCreation.shared.closeAndDrain()
         browser.navigate(to: .directory(source.deletingLastPathComponent()))
         try await wait("zip-new-file-return-browser") { !browser.isLoading && browser.rowsByURL[source] != nil }
-        return "File → Create File inside the ordinary ZIP cancels without change, creates a fresh empty member, selects its live row and opens the native editor automatically; Save, cold Save Undo and creation Undo restore the exact original ZIP"
+        return "File → Create File inside the ordinary archive cancels without change, creates a fresh empty member, selects its live row and opens the native editor automatically; Save, cold Save Undo and creation Undo restore the exact original archive"
     }
     private static func extractFile(source: URL, member: URL, expected: String,
                                     browser: BrowserViewController, root: URL) async throws -> String {
@@ -287,7 +292,8 @@ import LocalStorage
                 authoredTAROriginalUpdatePolicy: tar ? .developmentNativeStage : .held)
             let restored = await cold.undo(recordID: secondRecord)
             let afterUndo = try await Task.detached { try Data(contentsOf: source) }.value
-            try need(restored.result.disposition == .succeeded && afterUndo == firstBytes, "archive-editor-cold-undo-not-exact")
+            try need(restored.result.disposition == .succeeded && afterUndo == firstBytes,
+                "archive-editor-cold-undo-not-exact: \(restored.result.disposition), \(restored.result.items.map(\.status)), bytesEqual=\(afterUndo == firstBytes)")
             let refused = "{\"generated\":\"keep this unsaved draft\"}\n"
             edit(refused, in: doc); doc.window.saveButton.performClick(nil)
             try await wait("archive-editor-conflict-drain") { !doc.isBusy }
@@ -328,6 +334,8 @@ import LocalStorage
                 "A drained feature's accepted close acknowledges native willClose exactly once inside performClose without a deferred fade or implicit AppKit animation"]
             if tar {
                 checks.append("Plain TAR shares native editor preferences, Save/Reload, metadata-preserving copy, and independent v18 original-update/cold Undo admission")
+                checks.append(try await createFile(source: source, browser: browser, cold: cold, root: root, tar: true))
+                checks += try await TARMemberVerification.check(source: source, browser: browser, cold: cold, root: root)
             } else if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
                 checks += try await interruptedRestore(source: source, browser: browser, engine: engine, root: root)
             } else {

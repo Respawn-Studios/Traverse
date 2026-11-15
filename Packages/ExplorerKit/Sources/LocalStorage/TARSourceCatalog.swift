@@ -23,7 +23,8 @@ internal enum TARSourceCatalog {
         let parsed=try TARMetadataParser.parse(length:UInt64(source.observed.size),limits:parserLimits,check:check,read:{offset,size in
             let data=try source.read(offset,size,maximum:65_536,check:check);try didRead?(offset,size);return data
         })
-        let complete=TARParsedDirectory(records:parsed.records,witness:parsed.witness,metadataBytes:parsed.metadataBytes+count,logicalBytes:parsed.logicalBytes)
+        let complete=TARParsedDirectory(records:parsed.records,witness:parsed.witness,metadataBytes:parsed.metadataBytes+count,
+            logicalBytes:parsed.logicalBytes,endOffset:parsed.endOffset,physicalRecords:parsed.physicalRecords)
         try check();try source.validate();return complete
     }
 }

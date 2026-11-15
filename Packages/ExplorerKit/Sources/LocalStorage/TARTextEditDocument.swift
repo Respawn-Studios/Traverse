@@ -24,23 +24,35 @@ public struct TARTextEditDocument: Sendable, CustomStringConvertible, CustomDebu
 }
 
 public enum TARMemberEditFailure: Error, Equatable, Sendable {
-    case compressedArchive, unsupportedArchive, invalidName, sourceChanged, contentMismatch, limitReached
+    case compressedArchive, unsupportedArchive, invalidName, invalidMemberName, conflict, invalidDestination
+    case sourceChanged, contentMismatch, limitReached
     public var userMessage: String {
         switch self {
         case .compressedArchive: "This compressed TAR can be browsed and extracted. Editing it is not available yet."
         case .unsupportedArchive: "This TAR contains metadata or member types that Traverse cannot safely rewrite. The original is unchanged."
         case .invalidName: "Choose a new TAR filename ending in .tar. Existing files will be kept."
+        case .invalidMemberName: "Use a single file or folder name without slashes, backslashes or control characters."
+        case .conflict: "That name is already in the archive. Nothing was replaced."
+        case .invalidDestination: "Choose another folder in this same archive. A folder cannot be moved inside itself."
         case .sourceChanged: "The TAR changed. Reload it, or save the visible text as a separate file."
         case .contentMismatch: "The edited TAR did not verify. It was not published; the original is unchanged."
         case .limitReached: "This TAR edit exceeds the supported size or time limit. The original is unchanged."
         }
     }
     internal static func operationError(_ error: Error) -> Error {
+        if let value = error as? ZIPCreationFailure {
+            return switch value {
+            case .sourceChanged: FileOperationFailure.sourceChanged
+            case .contentMismatch: FileOperationFailure.copyContentMismatch
+            default: FileOperationFailure.unsupported
+            }
+        }
         guard let value = error as? Self else { return error }
         return switch value {
         case .sourceChanged: FileOperationFailure.sourceChanged
         case .contentMismatch: FileOperationFailure.copyContentMismatch
-        case .invalidName: FileOperationFailure.invalidRequest
+        case .invalidName, .invalidMemberName, .invalidDestination: FileOperationFailure.invalidRequest
+        case .conflict: FileOperationFailure.conflict
         case .compressedArchive, .unsupportedArchive, .limitReached: FileOperationFailure.unsupported
         }
     }
@@ -51,7 +63,7 @@ extension RecoverableFileOperations {
         contents: TextDocumentValue, observing source: FileOperationSelection) async throws -> ArchiveUpdatePlan {
         try await prepareArchiveOriginalUpdate(sources: [document.archiveURL], original: document.archiveURL,
             observing: source, authoredFormat: .strictPortableTAR) { check in
-            try PreparedTARTextEdit(document, contents: contents, check: check, updatesOriginal: true)
+            try PreparedTARMemberMutation(document, contents: contents, check: check, updatesOriginal: true)
         }
     }
     public func prepareTARMemberTextReplacementCopy(_ document: TARTextEditDocument,
@@ -70,7 +82,7 @@ extension RecoverableFileOperations {
         return try await prepareArchiveCreation(sources: [document.archiveURL],
             parent: document.archiveURL.deletingLastPathComponent(), name: outputName,
             observing: source, authoredFormat: .strictPortableTAR) { check in
-            try PreparedTARTextEdit(document, contents: contents, check: check, hooks: hooks)
+            try PreparedTARMemberMutation(document, contents: contents, check: check, hooks: hooks)
         }
     }
 }

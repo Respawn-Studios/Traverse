@@ -4,6 +4,17 @@ Public Traverse releases live here. Each download also has its own notes on
 [GitHub Releases](https://github.com/Respawn-Studios/Traverse/releases).
 Earlier private-beta version numbers belong to a separate release history.
 
+## Unreleased
+
+### In development
+
+- Plain TAR member editing through the shared archive workbench and native
+  editor: Rename, Remove, Duplicate, Move, Add, Create File/Folder, Group and
+  Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo.
+  This remains a development feature pending distribution qualification.
+- Benchmark block-size and file-cache options, with requested and actual cache
+  behavior recorded in results and exports.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added

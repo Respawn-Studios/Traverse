@@ -192,7 +192,7 @@ extension RecoverableFileOperations {
 
 /// POSIX ustar with local PAX path/mtime records where the fixed fields cannot
 /// represent a name or timestamp. Ownership names and private metadata are omitted.
-private struct TARCreationHeader: Sendable {
+internal struct TARCreationHeader: Sendable {
     let encoded: Data
     let modification: Date
     let hasPAX: Bool
@@ -200,7 +200,12 @@ private struct TARCreationHeader: Sendable {
 
     init(_ node: ZIPCreationInventory.Node, index: Int) throws {
         let stamp = node.stamp
-        let seconds = stamp.modifiedSeconds, nanos = stamp.modifiedNanoseconds
+        try self.init(path: node.path, directory: stamp.directory,
+            bytes: stamp.directory ? 0 : UInt64(stamp.size), mode: UInt64(stamp.mode & 0o777),
+            seconds: stamp.modifiedSeconds, nanos: stamp.modifiedNanoseconds, index: index)
+    }
+    init(path: String, directory: Bool, bytes: UInt64 = 0, mode: UInt64 = 0o644,
+        seconds: Int, nanos: Int = 0, index: Int) throws {
         guard (0..<1_000_000_000).contains(nanos) else { throw TARCreationFailure.unsupportedSource }
         let timestamp = Self.timestamp(seconds, nanos)
         guard let parsedTime = Double(timestamp), let recorded = ArchiveMemberModification.unix(parsedTime) else {
@@ -208,14 +213,14 @@ private struct TARCreationHeader: Sendable {
         }
         modification = recorded.date
         var attributes = Data()
-        let name = node.name
+        let name = path + (directory ? "/" : "")
         let fields = Self.ustarName(name)
         if fields == nil { attributes += Self.attribute("path", name) }
         if nanos != 0 || seconds < 0 || seconds > 8_589_934_591 { attributes += Self.attribute("mtime", timestamp) }
         let headerName = fields ?? ("TraverseItem-\(index)", "")
         let header = try Self.header(name: headerName.0, prefix: headerName.1,
-            mode: UInt64(stamp.mode & 0o777), bytes: stamp.directory ? 0 : UInt64(stamp.size),
-            modified: UInt64(clamping: seconds), kind: stamp.directory ? 53 : 48)
+            mode: mode, bytes: directory ? 0 : bytes,
+            modified: UInt64(clamping: seconds), kind: directory ? 53 : 48)
         hasPAX = !attributes.isEmpty
         if attributes.isEmpty { encoded = header }
         else {
@@ -228,7 +233,7 @@ private struct TARCreationHeader: Sendable {
         }
     }
 
-    private static func ustarName(_ name: String) -> (String, String)? {
+    static func ustarName(_ name: String) -> (String, String)? {
         guard name.utf8.allSatisfy({ $0 < 128 }) else { return nil }
         if name.utf8.count <= 100 { return (name, "") }
         for split in name.indices.reversed() where name[split] == "/" {
@@ -253,7 +258,7 @@ private struct TARCreationHeader: Sendable {
         return Data(String(length).utf8) + body
     }
 
-    private static func header(name: String, prefix: String, mode: UInt64, bytes: UInt64,
+    static func header(name: String, prefix: String, mode: UInt64, bytes: UInt64,
                                modified: UInt64, kind: UInt8) throws -> Data {
         var header = Data(repeating: 0, count: 512)
         func text(_ value: String, at offset: Int, width: Int) throws {

@@ -98,6 +98,7 @@ enum ArchiveWritePlan: Sendable {
 /// The creation review receives a sealed intent from a live archive session.
 /// Displayed member names never become local file paths or operation authority.
 enum ArchiveMemberCopyEdit: Sendable {
+    enum Kind: Equatable, Sendable { case rename, batchRename, remove, duplicate, move, add, newFolder, newFile, group, textReplacement }
     case rename(ZIPMemberRenameSelection)
     case batchRename(ZIPMemberSetSelection)
     case remove(ZIPMemberSetSelection)
@@ -107,12 +108,30 @@ enum ArchiveMemberCopyEdit: Sendable {
     case newFolder(ZIPMemberAdditionSelection)
     case newFile(ZIPMemberAdditionSelection)
     case group(ZIPMemberSetSelection)
+    case tar(TARMemberMutation)
+
+    var formatName: String { if case .tar = self { "TAR" } else { "ZIP" } }
+    var canUpdateOriginal: Bool { if case .tar = self { TARArchiveEditingFeature.available } else { ZIPOriginalUpdateFeature.available } }
+    var kind: Kind {
+        switch self {
+        case .rename: .rename; case .batchRename: .batchRename; case .remove: .remove
+        case .duplicate: .duplicate; case .move: .move; case .add: .add
+        case .newFolder: .newFolder; case .newFile: .newFile; case .group: .group
+        case .tar(let intent):
+            switch intent {
+            case .rename: .rename; case .remove: .remove; case .duplicate: .duplicate
+            case .move: .move; case .add: .add; case .newFolder: .newFolder
+            case .newFile: .newFile; case .group: .group; case .replace: .textReplacement
+            }
+        }
+    }
 
     var archiveURL: URL {
         switch self {
         case .rename(let value): value.archiveURL
         case .remove(let value), .duplicate(let value, _), .move(let value, _), .batchRename(let value), .group(let value): value.archiveURL
         case .add(let value), .newFolder(let value), .newFile(let value): value.archiveURL
+        case .tar(let value): value.archiveURL
         }
     }
     var paths: [String] {
@@ -120,17 +139,26 @@ enum ArchiveMemberCopyEdit: Sendable {
         case .rename(let value): [value.archivePath]
         case .remove(let value), .duplicate(let value, _), .move(let value, _), .batchRename(let value), .group(let value): value.archivePaths
         case .add(let value), .newFolder(let value), .newFile(let value): value.virtualFolder.isEmpty ? [] : [value.virtualFolder]
+        case .tar(let value): value.memberSelection?.archivePaths ?? value.destination.map { $0.virtualFolder.isEmpty ? [] : [$0.virtualFolder] } ?? []
         }
     }
-    var isRename: Bool { if case .rename = self { true } else { false } }
-    var isBatchRename: Bool { if case .batchRename = self { true } else { false } }
-    var isRemoval: Bool { if case .remove = self { true } else { false } }
-    var isDuplicate: Bool { if case .duplicate = self { true } else { false } }
-    var isMove: Bool { if case .move = self { true } else { false } }
-    var isAddition: Bool { if case .add = self { true } else { false } }
-    var isNewFolder: Bool { if case .newFolder = self { true } else { isGrouping } }
-    var isGrouping: Bool { if case .group = self { true } else { false } }
-    var isNewFile: Bool { if case .newFile = self { true } else { false } }
+    var isRename: Bool { kind == .rename }
+    var isBatchRename: Bool { kind == .batchRename }
+    var isRemoval: Bool { kind == .remove }
+    var isDuplicate: Bool { kind == .duplicate }
+    var isMove: Bool { kind == .move }
+    var isAddition: Bool { kind == .add }
+    var isNewFolder: Bool { kind == .newFolder || isGrouping }
+    var isGrouping: Bool { kind == .group }
+    var isNewFile: Bool { kind == .newFile }
+    var selectionPreview: (paths: [String], folders: [String], covered: Int)? {
+        switch self {
+        case .remove(let s), .duplicate(let s, _), .move(let s, _), .group(let s), .batchRename(let s):
+            (s.archivePaths, s.folderPaths, s.coveredSelectionCount)
+        case .tar(let intent): intent.memberSelection.map { ($0.archivePaths, $0.folderPaths, $0.coveredSelectionCount) }
+        default: nil
+        }
+    }
     var available: Bool {
         switch self {
         case .rename(let value): value.isDirectory ? ZIPMemberRenameFeature.directoriesAvailable : ZIPMemberRenameFeature.available
@@ -139,6 +167,7 @@ enum ArchiveMemberCopyEdit: Sendable {
             value.folderPaths.isEmpty ? ZIPMemberRenameFeature.available : ZIPMemberRenameFeature.directoriesAvailable
         case .add: ZIPMemberAdditionFeature.available
         case .newFolder, .newFile: ZIPMemberCreationFeature.available
+        case .tar: TARArchiveEditingFeature.available && kind != .textReplacement
         }
     }
 }

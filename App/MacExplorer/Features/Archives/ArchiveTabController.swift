@@ -91,8 +91,13 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     let tabID: UUID
     let source: URL
     let format: ArchiveFormat
+    private var allowsOriginalMutation: Bool {
+        format == .tar ? TARArchiveEditingFeature.available && !TARBrowserModel.isCompressed(source)
+            : ZIPOriginalUpdateFeature.available
+    }
     var isReadOnly: Bool {
-        format != .zip || !(ZIPOriginalUpdateFeature.available || ZIPTextEditorFeature.available
+        if format == .tar { return !allowsOriginalMutation }
+        return format != .zip || !(ZIPOriginalUpdateFeature.available || ZIPTextEditorFeature.available
             || ZIPMemberRenameFeature.available)
     }
     let view = NSView()
@@ -212,6 +217,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         return switch model { case .zip(let m, _): m.canExtractSelected; case .tar(let m, _): m.canExtract && m.selectedSupported; case nil: false }
     }
     var canRenameInCopy: Bool {
+        if case .tar(let model, _) = model { return model.canModifySelectedMembers && model.selection.count == 1 }
         if case .zip(let model, _) = model { return model.canRenameMemberInCopy }
         return false
     }
@@ -219,7 +225,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         guard isPresented else { return false }
         switch model {
         case .zip(let model, _): return model.canCaptureClipboardMembers(operation)
-        case .tar(let model, _): return operation == .copy && model.canCaptureClipboardMembers
+        case .tar(let model, _): return model.canCaptureClipboardMembers(operation)
         case nil: return false
         }
     }
@@ -232,7 +238,9 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
                 if let self { publish(.init(owner: self, source: source, operation: operation)) }
             }
         case .tar(let model, _):
-            if let source = model.captureClipboardMembers() { publish(.init(owner: self, source: source)) }
+            model.captureClipboardMembers(operation) { [weak self] source in
+                if let self { publish(.init(owner: self, source: source, operation: operation)) }
+            }
         case nil: break
         }
     }
@@ -268,6 +276,14 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         guard isPresented, case .tar(let model, _) = model else { return false }
         return model.matchesClipboardSelection(source)
     }
+    func canPasteMembers(_ source: TARClipboardSource, operation: TransferClipboardFeedback.Intent) -> Bool {
+        guard isPresented, case .tar(let model, _) = model else { return false }
+        return model.canPasteMembers(source, operation: operation)
+    }
+    func pasteMembers(_ source: TARClipboardSource, context: ScopedItemPaste) {
+        guard isPresented, case .tar(let model, _) = model else { return }
+        model.pasteMembers(source, context: context)
+    }
     func canExportClipboard(_ source: TARClipboardSource) -> Bool {
         guard !isClosed, case .tar(let model, _) = model else { return false }
         return model.canExportClipboard(source)
@@ -277,68 +293,87 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         model.exportClipboard(source, context: context, to: target)
     }
     func renameSelectionInCopy() {
-        guard isPresented, case .zip(let model, _) = model else { return }
-        model.renameMemberInCopy(model.selection)
+        guard isPresented else { return }
+        switch model { case .zip(let m, _): m.renameMemberInCopy(m.selection); case .tar(let m, _): m.reviewMutation(.rename, updateOriginal: false); case nil: break }
     }
     func renameSelection() {
-        guard isPresented, case .zip(let model, _) = model else { return }
-        model.renameMemberInCopy(model.selection, updateOriginal: ZIPOriginalUpdateFeature.available)
+        guard isPresented else { return }
+        switch model {
+        case .zip(let m, _): m.renameMemberInCopy(m.selection, updateOriginal: ZIPOriginalUpdateFeature.available)
+        case .tar(let m, _): m.reviewMutation(.rename)
+        case nil: break
+        }
     }
     var canDuplicate: Bool {
         if case .zip(let model, _) = model { return model.canDuplicateMembers }
+        if case .tar(let model, _) = model { return model.canModifySelectedMembers }
         return false
     }
     func duplicateSelection() {
-        guard isPresented, case .zip(let model, _) = model else { return }
-        model.duplicateMembers(model.selection, updateOriginal: ZIPOriginalUpdateFeature.available)
+        guard isPresented else { return }
+        switch model { case .zip(let m, _): m.duplicateMembers(m.selection, updateOriginal: ZIPOriginalUpdateFeature.available); case .tar(let m, _): m.reviewMutation(.duplicate); case nil: break }
     }
     var canRemoveFromCopy: Bool {
         if case .zip(let model, _) = model { return model.canRemoveMembersInCopy }
+        if case .tar(let model, _) = model { return model.canModifySelectedMembers }
         return false
     }
     func removeSelectionFromCopy() {
-        guard isPresented, case .zip(let model, _) = model else { return }
-        model.removeMembersInCopy(model.selection)
+        guard isPresented else { return }
+        switch model { case .zip(let m, _): m.removeMembersInCopy(m.selection); case .tar(let m, _): m.reviewMutation(.remove, updateOriginal: false); case nil: break }
     }
     func removeSelection() {
-        guard isPresented, ZIPOriginalUpdateFeature.available, case .zip(let model, _) = model else { return }
-        model.removeMembersInCopy(model.selection, updateOriginal: true)
+        guard isPresented else { return }
+        switch model {
+        case .zip(let m, _) where ZIPOriginalUpdateFeature.available: m.removeMembersInCopy(m.selection, updateOriginal: true)
+        case .tar(let m, _): m.reviewMutation(.remove)
+        default: break
+        }
     }
     var canCreateFolder: Bool {
         if case .zip(let model, _) = model { return model.canCreateFolderInZIP }
+        if case .tar(let model, _) = model { return model.canCreateMember }
         return false
     }
     func createFolder() {
-        guard isPresented, case .zip(let model, _) = model else { return }
-        _ = model.createFolderInZIP(updateOriginal: ZIPOriginalUpdateFeature.available)
+        guard isPresented else { return }
+        switch model { case .zip(let m, _): _ = m.createFolderInZIP(updateOriginal: ZIPOriginalUpdateFeature.available); case .tar(let m, _): m.reviewMutation(.newFolder); case nil: break }
     }
     var canGroupSelection: Bool {
         if isPresented, case .zip(let model, _) = model { return model.canGroupSelection }
+        if isPresented, case .tar(let model, _) = model { return model.canGroupMembers }
         return false
     }
     func groupSelection() {
-        guard canGroupSelection, case .zip(let model, _) = model else { return }
-        model.groupSelection(updateOriginal: ZIPOriginalUpdateFeature.available)
+        guard canGroupSelection else { return }
+        switch model { case .zip(let m, _): m.groupSelection(updateOriginal: ZIPOriginalUpdateFeature.available); case .tar(let m, _): m.reviewMutation(.group); case nil: break }
     }
     var canCreateFile: Bool {
         if case .zip(let model, _) = model { return model.canCreateFileInZIP }
+        if case .tar(let model, _) = model { return model.canCreateMember }
         return false
     }
     func createFile() {
-        guard isPresented, case .zip(let model, _) = model else { return }
-        _ = model.createFileInZIP(updateOriginal: ZIPOriginalUpdateFeature.available)
+        guard isPresented else { return }
+        switch model { case .zip(let m, _): _ = m.createFileInZIP(updateOriginal: ZIPOriginalUpdateFeature.available); case .tar(let m, _): m.reviewMutation(.newFile); case nil: break }
     }
     var canAddCopiedFiles: Bool {
         if isPresented, case .zip(let model, _) = model { return model.canAddMembersInCopy }
+        if isPresented, case .tar(let model, _) = model { return model.canCreateMember }
         return false
     }
     @discardableResult func addCopiedFiles(_ input: ArchiveAdditionInput) -> Bool {
-        guard isPresented, case .zip(let model, _) = model else { return false }
-        return model.addCopiedFiles(input, updateOriginal: ZIPOriginalUpdateFeature.available)
+        guard isPresented else { return false }
+        switch model {
+        case .zip(let m, _): return m.addCopiedFiles(input, updateOriginal: ZIPOriginalUpdateFeature.available)
+        case .tar(let m, _) where m.canCreateMember:
+            m.reviewMutation(.add, addedSource: input); return true
+        default: return false
+        }
     }
 
     private func buildView() {
-        caption.stringValue = isReadOnly ? format.rawValue.uppercased() + " · Read-only" : "ZIP Archive"
+        caption.stringValue = format.rawValue.uppercased() + (isReadOnly ? " · Read-only" : " Archive")
         InterfaceMetrics.setFont(caption, base: .systemFont(ofSize: 12, weight: .medium))
         caption.textColor = .secondaryLabelColor
         caption.lineBreakMode = .byTruncatingTail
@@ -370,36 +405,37 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         for (title, action) in [("Preview Text", #selector(previewText(_:))), ("Preview as Hex", #selector(previewHex(_:)))] {
             let item=NSMenuItem(title:title,action:action,keyEquivalent:"");item.target=self;actions.menu?.addItem(item)
         }
-        if format == .zip && ZIPTextEditorFeature.available || format == .tar && TARTextEditorFeature.available {
+        if format == .zip && ZIPTextEditorFeature.available || format == .tar && allowsOriginalMutation {
             let item = NSMenuItem(title: "Edit in Traverse", action: #selector(editText(_:)), keyEquivalent: "")
             item.target = self; actions.menu?.addItem(item)
         }
         actions.controlSize = .small; actions.setAccessibilityLabel("Archive actions")
-        if format == .zip, ZIPMemberCreationFeature.available {
-            let file = NSMenuItem(title: "Create File in ZIP…", action: #selector(createZIPFile(_:)), keyEquivalent: "")
+        if format == .zip && ZIPMemberCreationFeature.available || format == .tar && allowsOriginalMutation {
+            let file = NSMenuItem(title: "Create File in \(format.rawValue.uppercased())…", action: #selector(createZIPFile(_:)), keyEquivalent: "")
             file.target = self; actions.menu?.addItem(file)
-            let item = NSMenuItem(title: "New Folder in ZIP…", action: #selector(createZIPFolder(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: "New Folder in \(format.rawValue.uppercased())…", action: #selector(createZIPFolder(_:)), keyEquivalent: "")
             item.target = self; actions.menu?.addItem(item)
             let group = NSMenuItem(title: "New Folder with Selection…", action: #selector(groupZIPSelection(_:)), keyEquivalent: "")
             group.target = self; actions.menu?.addItem(group)
         }
-        if format == .zip, ZIPOriginalUpdateFeature.available {
-            for (title, action) in [("Rename in ZIP…", #selector(renameOriginal(_:))),
-                ("Remove from ZIP…", #selector(removeOriginal(_:))), ("Add to ZIP…", #selector(addOriginal(_:)))] {
+        if allowsOriginalMutation {
+            let label = format.rawValue.uppercased()
+            for (title, action) in [("Rename in \(label)…", #selector(renameOriginal(_:))),
+                ("Remove from \(label)…", #selector(removeOriginal(_:))), ("Add to \(label)…", #selector(addOriginal(_:)))] {
                 let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
                 item.target = self; actions.menu?.addItem(item)
             }
         }
-        if format == .zip, ZIPMemberRenameFeature.available {
-            let item = NSMenuItem(title: "Rename in ZIP Copy…", action: #selector(renameInCopy(_:)), keyEquivalent: "")
+        if format == .zip && ZIPMemberRenameFeature.available || format == .tar && allowsOriginalMutation {
+            let item = NSMenuItem(title: "Rename in \(format.rawValue.uppercased()) Copy…", action: #selector(renameInCopy(_:)), keyEquivalent: "")
             item.target = self; actions.menu?.addItem(item)
         }
-        if format == .zip, ZIPMemberRemovalFeature.available {
-            let item = NSMenuItem(title: "Remove from ZIP Copy…", action: #selector(removeFromCopy(_:)), keyEquivalent: "")
+        if format == .zip && ZIPMemberRemovalFeature.available || format == .tar && allowsOriginalMutation {
+            let item = NSMenuItem(title: "Remove from \(format.rawValue.uppercased()) Copy…", action: #selector(removeFromCopy(_:)), keyEquivalent: "")
             item.target = self; actions.menu?.addItem(item)
         }
-        if format == .zip, ZIPMemberAdditionFeature.available {
-            let item = NSMenuItem(title: "Add to ZIP Copy…", action: #selector(addToCopy(_:)), keyEquivalent: "")
+        if format == .zip && ZIPMemberAdditionFeature.available || format == .tar && allowsOriginalMutation {
+            let item = NSMenuItem(title: "Add to \(format.rawValue.uppercased()) Copy…", action: #selector(addToCopy(_:)), keyEquivalent: "")
             item.target = self; actions.menu?.addItem(item)
         }
         progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
@@ -504,9 +540,18 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
             let m = TARBrowserModel(settings: browser.settings,
                 reader: ApplicationCompressedArchives.shared.reader(excluding: excluded))
             let rows = TARMetadataRows(model: m); rows.animatesNewRows = false
+            rows.onCut = { [weak self] in self?.browser?.cutFileURLs(nil) }
             rows.onCopyMembers = { [weak self] in self?.browser?.copyFileURLs(nil) }
-            rows.canCopyMembers = { [weak self] in self?.browser?.canCaptureArchiveClipboard(.copy) == true }
-            rows.table.onCopy = rows.onCopyMembers
+            rows.canCaptureClipboard = { [weak self] in self?.browser?.canCaptureArchiveClipboard($0) == true }
+            rows.onPaste = { [weak self] in self?.browser?.pasteFileURLs(nil) }
+            rows.canPaste = { [weak self] in self?.browser?.commandEnabled(#selector(BrowserViewController.pasteFileURLs(_:))) == true }
+            rows.isCut = { [weak self, weak m] id in
+                guard let self, let m, let intent = self.browser?.clipboardState.scopedItem,
+                      intent.operation == .move, intent.archiveOwner === self,
+                      case .tar(let source) = intent.source else { return false }
+                return m.showsCut(source) && source.ids.contains(id)
+            }
+            rows.table.onCut = rows.onCut; rows.table.onCopy = rows.onCopyMembers; rows.table.onPaste = rows.onPaste
             rows.embeddedShortcut = { [weak self] in self?.shortcut($0) == true }
             m.embeddedNavigate = { [weak self] in self?.navigate($0, state: $1) }
             m.embeddedBack = { [weak self] in self?.browser?.goBack(nil) }
@@ -649,7 +694,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
             if newlyShowingPreparation, let preparationView { ToolContentMotion.reveal(preparationView) }
             if newlyShowingRows { ToolContentMotion.reveal(rows.fileScrollView.contentView) }
             caption.stringValue = m.compressedSizeDescription ?? (m.isCompressedSource ? "TAR · gzip · Read-only"
-                : m.allowsTextEditing ? "TAR · Text editing" : "TAR · Read-only")
+                : m.allowsTextEditing ? "TAR · Editing" : "TAR · Read-only")
             caption.toolTip = m.compressedSizeDescription.map { $0 + "\nArchive is the original gzip size. Prepared TAR includes headers and padding. Files is the sum of recorded member sizes." }
                 ?? ArchiveBrowsingGuidance.contentHelp
             rows.update(m, settings: browser.settings, glassOverride: glass, showsOnlyCurrent: true)
@@ -756,9 +801,13 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     @objc private func removeOriginal(_ sender: Any?) { removeSelection() }
     @objc private func addOriginal(_ sender: Any?) {
         if isPresented, case .zip(let model, _) = model, ZIPOriginalUpdateFeature.available { model.addMembersInCopy(updateOriginal: true) }
+        if isPresented, case .tar(let model, _) = model { model.reviewMutation(.add) }
     }
     @objc private func removeFromCopy(_ sender: Any?) { removeSelectionFromCopy() }
-    @objc private func addToCopy(_ sender: Any?) { if case .zip(let model, _) = model { model.addMembersInCopy() } }
+    @objc private func addToCopy(_ sender: Any?) {
+        if case .zip(let model, _) = model { model.addMembersInCopy() }
+        if case .tar(let model, _) = model { model.reviewMutation(.add, updateOriginal: false) }
+    }
     @objc private func stopArchive(_ sender: Any?) { stop() }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard !isClosed, browser?.isBrowserSuspended == false else { return false }
@@ -776,11 +825,11 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         case #selector(extractSelected(_:)): canExtractSelected
         case #selector(extractAll(_:)): canExtract
         case #selector(renameInCopy(_:)): canRenameInCopy
-        case #selector(renameOriginal(_:)): ZIPOriginalUpdateFeature.available && canRenameInCopy
-        case #selector(removeOriginal(_:)): ZIPOriginalUpdateFeature.available && canRemoveFromCopy
-        case #selector(addOriginal(_:)): if case .zip(let model, _) = model { ZIPOriginalUpdateFeature.available && model.canAddMembersInCopy } else { false }
+        case #selector(renameOriginal(_:)): allowsOriginalMutation && canRenameInCopy
+        case #selector(removeOriginal(_:)): allowsOriginalMutation && canRemoveFromCopy
+        case #selector(addOriginal(_:)): canAddCopiedFiles
         case #selector(removeFromCopy(_:)): canRemoveFromCopy
-        case #selector(addToCopy(_:)): if case .zip(let model, _) = model { model.canAddMembersInCopy } else { false }
+        case #selector(addToCopy(_:)): canAddCopiedFiles
         case #selector(previewText(_:)), #selector(previewHex(_:)): canPreview
         case #selector(editText(_:)):
             switch model { case .zip(let m, _): m.canEditSelectedText; case .tar(let m, _): m.canEditSelectedText; case nil: false }

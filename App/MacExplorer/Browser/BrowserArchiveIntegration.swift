@@ -130,7 +130,7 @@ extension BrowserViewController {
         let tab = activeID, visit = sessionID
         guard let capture = state.readFiles(allowOwnedCopy: false), (1...511).contains(capture.urls.count),
               capture.urls.allSatisfy(\.isFileURL), capture.isCurrent(on: board) else {
-            status.stringValue = "Copy up to 511 local files or folders to paste into this ZIP."
+            status.stringValue = "Copy up to 511 local files or folders to paste into this archive."
             return
         }
         let input = ArchiveAdditionInput(urls: capture.urls, isCurrent: { [weak self, weak owner] in

@@ -130,6 +130,17 @@ public actor TARArchiveSession {
         }
         return .init(binding:binding,roots:roots,wholeArchive:false)
     }
+    public func selectionForMemberChanges(_ ids: Set<TARItemID>) throws -> TARMemberSelection {
+        guard !isCompressed, (1...128).contains(ids.count) else { throw TARArchiveFailure.invalidSelection }
+        let selected = try selectionForExtraction(ids)
+        return .init(binding: selected.binding, roots: selected.roots,
+            coveredSelectionCount: ids.count - selected.roots.count)
+    }
+    public func destinationForMemberChanges(_ folder: TARFolderID) throws -> TARMemberDestination {
+        guard !isCompressed, let binding else { throw TARArchiveFailure.unsupported }
+        let path = try folderPath(of: folder)
+        return .init(binding: binding, virtualFolder: path.joined(separator: "/"))
+    }
     public func selectionForWholeExtraction()throws->TARExtractionSelection{
         guard storage != nil else{throw TARArchiveFailure.closed}
         guard let binding else{throw TARArchiveFailure.invalidSelection}

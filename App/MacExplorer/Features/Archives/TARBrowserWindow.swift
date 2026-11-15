@@ -92,8 +92,13 @@ private struct TARBrowserView:View {
     var fileScrollView:NSScrollView {scroll}
     var animatesNewRows = true
     var embeddedShortcut:((NSEvent)->Bool)?
+    var onCut: (() -> Void)?
     var onCopyMembers: (() -> Void)?
-    var canCopyMembers: (() -> Bool)?
+    var canCaptureClipboard: ((TransferClipboardFeedback.Intent) -> Bool)?
+    var isCut: ((TARItemID) -> Bool)?
+    var onPaste: (() -> Void)?
+    var canPaste: (() -> Bool)?
+    private var acceptedFileDrop: LocalFileDropKey?
     private weak var model:TARBrowserModel?
     private var items=[TARArchiveItem](),updating=false,shownLocation=false
     #if DEBUG
@@ -110,9 +115,14 @@ private struct TARBrowserView:View {
         }
         table.headerView=FileTableHeaderView(frame:.init(x:0,y:0,width:800,height:28))
         table.columnAutoresizingStyle = .noColumnAutoresizing;table.dataSource=self;table.delegate=self;table.allowsMultipleSelection=true
-        table.setDraggingSourceOperationMask(.copy, forLocal: true)
+        if TARArchiveEditingFeature.available { table.registerForDraggedTypes([.fileURL, ArchiveMemberDragSource.pasteboardType]) }
+        table.setDraggingSourceOperationMask(TARArchiveEditingFeature.available ? [.copy, .move] : .copy, forLocal: true)
         table.setDraggingSourceOperationMask([], forLocal: false)
         table.target=self;table.doubleAction = #selector(openSelected(_:));table.onOpen={[weak self]in self?.model?.openSelection()}
+        table.onRename = { [weak self] in self?.model?.reviewMutation(.rename) }
+        table.nameClickRenameEnabled = { [weak model] in
+            model?.settings.renamesSelectedNameOnClick == true && model?.canModifySelectedMembers == true && model?.selection.count == 1
+        }
         table.onBack={[weak self]in self?.model?.back()};table.commandValidation={_ in false}
         table.onPreview = { [weak self] in self?.model?.previewSelected() }
         table.onUp = { [weak self] in self?.model?.up() }
@@ -128,12 +138,22 @@ private struct TARBrowserView:View {
         }
         table.setAccessibilityLabel("TAR archive members. Open folders or preview selected files.")
         let menu=NSMenu();menu.addItem(withTitle:"Open",action:#selector(openSelected(_:)),keyEquivalent:"").target=self
-        if TARTextEditorFeature.available {
+        if TARArchiveEditingFeature.available {
             menu.addItem(withTitle: "Edit in Traverse", action: #selector(editText(_:)), keyEquivalent: "").target = self
         }
         menu.addItem(withTitle:"Preview Text",action:#selector(previewText(_:)),keyEquivalent:"").target=self
         menu.addItem(withTitle:"Preview as Hex",action:#selector(previewHex(_:)),keyEquivalent:"").target=self
+        if TARArchiveEditingFeature.available { menu.addItem(withTitle: "Cut", action: #selector(cutMembers(_:)), keyEquivalent: "").target = self }
         menu.addItem(withTitle: "Copy", action: #selector(copyMembers(_:)), keyEquivalent: "").target = self
+        if TARArchiveEditingFeature.available { menu.addItem(withTitle: "Paste", action: #selector(pasteMembers(_:)), keyEquivalent: "").target = self }
+        if TARArchiveEditingFeature.available {
+            for (title, action) in [("Duplicate", #selector(duplicateMember(_:))), ("Rename…", #selector(renameMember(_:))),
+                ("Remove from Archive…", #selector(removeMember(_:))), ("New Folder with Selection…", #selector(groupMembers(_:))),
+                ("Create File…", #selector(createMember(_:))), ("New Folder…", #selector(createFolder(_:))),
+                ("Add Files…", #selector(addMembers(_:)))] {
+                menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+            }
+        }
         menu.addItem(withTitle:"Extract Selected…",action:#selector(extractSelected(_:)),keyEquivalent:"").target=self
         menu.addItem(withTitle:"Properties…",action:#selector(showMemberProperties(_:)),keyEquivalent:"").target=self
         table.menu=menu
@@ -141,7 +161,9 @@ private struct TARBrowserView:View {
             guard let self else { return nil }
             return NativeContextMenu.arrange(table.menu,
                 groups: [[#selector(openSelected(_:)), #selector(editText(_:)), #selector(previewText(_:)), #selector(previewHex(_:))],
-                         [#selector(copyMembers(_:)), #selector(extractSelected(_:)), #selector(showMemberProperties(_:))]],
+                         [#selector(cutMembers(_:)), #selector(copyMembers(_:)), #selector(pasteMembers(_:)), #selector(duplicateMember(_:)), #selector(renameMember(_:)), #selector(removeMember(_:))],
+                         [#selector(groupMembers(_:)), #selector(createMember(_:)), #selector(createFolder(_:)), #selector(addMembers(_:))],
+                         [#selector(extractSelected(_:)), #selector(showMemberProperties(_:))]],
                 allows: validateMenuItem)
         }
         scroll.documentView=table;scroll.hasVerticalScroller=true;scroll.hasHorizontalScroller=true;scroll.autohidesScrollers=true
@@ -152,7 +174,7 @@ private struct TARBrowserView:View {
     }
     required init?(coder:NSCoder){nil}
     override func layout() { super.layout(); table.columnSizing.fit(table) }
-    func retire(){memberDragSource?.retire();memberDragSource=nil;table.memberDragSource=nil;table.marquee?.cancel(restore:false);table.marquee=nil;table.onOpen=nil;table.onBack=nil;table.onUp=nil;table.onPreview=nil;table.onShortcut=nil;table.onCopy=nil;table.contextMenuProvider=nil;onCopyMembers=nil;canCopyMembers=nil;model=nil}
+    func retire(){memberDragSource?.retire();memberDragSource=nil;table.memberDragSource=nil;table.marquee?.cancel(restore:false);table.marquee=nil;table.onOpen=nil;table.onBack=nil;table.onUp=nil;table.onPreview=nil;table.onRename=nil;table.nameClickRenameEnabled=nil;table.onShortcut=nil;table.onCopy=nil;table.onCut=nil;table.onPaste=nil;table.contextMenuProvider=nil;onCut=nil;onCopyMembers=nil;canCaptureClipboard=nil;isCut=nil;onPaste=nil;canPaste=nil;model=nil}
     func update(_ model:TARBrowserModel,settings:BrowserSettings,glassOverride:Bool?=nil,showsOnlyCurrent:Bool=false) {
         updating=true;defer{updating=false}
         table.behavior = settings.behavior
@@ -175,6 +197,38 @@ private struct TARBrowserView:View {
         if table.sortDescriptors != desired{table.sortDescriptors=desired;table.headerView?.needsDisplay=true}
     }
     func numberOfRows(in tableView:NSTableView)->Int{items.count}
+    private func dropFolder(at row: Int, operation: NSTableView.DropOperation) -> TARFolderID? {
+        operation == .on && items.indices.contains(row) ? items[row].folder : nil
+    }
+    func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
+        proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
+        guard let model else { return [] }
+        let folder = dropFolder(at: row, operation: operation)
+        if let source = info.draggingSource as? ArchiveMetadataTable {
+            guard source === table, let folder,
+                  let offer = ArchiveMemberDragSource.capture(info, for: .moveWithinArchive),
+                  model.canMoveMembers(offer.tarIDs, into: folder) else { return [] }
+            tableView.setDropRow(row, dropOperation: .on); return .move
+        }
+        guard model.canAddLocalFiles(to: folder),
+              let source = BrowserDragDropController.captureLocalFileDropSource(info), source.key != acceptedFileDrop else { return [] }
+        tableView.setDropRow(folder == nil ? -1 : row, dropOperation: .on); return .copy
+    }
+    func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
+        dropOperation operation: NSTableView.DropOperation) -> Bool {
+        guard let model else { return false }
+        let folder = dropFolder(at: row, operation: operation)
+        if let source = info.draggingSource as? ArchiveMetadataTable {
+            guard source === table, let folder,
+                  let offer = ArchiveMemberDragSource.capture(info, for: .moveWithinArchive),
+                  model.canMoveMembers(offer.tarIDs, into: folder) else { return false }
+            return ArchiveMemberDragSource.admit(offer) { model.moveMembers(offer, into: folder) }
+        }
+        guard model.canAddLocalFiles(to: folder),
+              let source = BrowserDragDropController.captureLocalFileDropSource(info), source.key != acceptedFileDrop,
+              model.addLocalFiles(source, to: folder) else { return false }
+        acceptedFileDrop = source.key; return true
+    }
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
         guard let model, items.indices.contains(row), model.selection.contains(items[row].id),
               items.map(\.id) == model.items.map(\.id) else { return nil }
@@ -205,6 +259,7 @@ private struct TARBrowserView:View {
         }
         switch key.rawValue {
         case "name":
+            cell.alphaValue = isCut?(item.id) == true ? 0.55 : 1
             cell.textField?.stringValue=item.name;cell.textField?.textColor = .labelColor
             let kind = item.kind == .directory ? "directory" : item.kind == .file ? "file" : "symbolicLink"
             cell.imageView?.image = BrowserCellSymbols.image(FileIconRole.classify(name: item.name, kind: kind))
@@ -228,8 +283,17 @@ private struct TARBrowserView:View {
     @objc private func openSelected(_ sender:Any?){model?.openSelection()}
     @objc private func previewText(_ sender:Any?){model?.previewSelected()}
     @objc private func editText(_ sender: Any?) { model?.editSelectedText() }
+    @objc private func duplicateMember(_ sender: Any?) { model?.reviewMutation(.duplicate) }
+    @objc private func renameMember(_ sender: Any?) { model?.reviewMutation(.rename) }
+    @objc private func removeMember(_ sender: Any?) { model?.reviewMutation(.remove) }
+    @objc private func groupMembers(_ sender: Any?) { model?.reviewMutation(.group) }
+    @objc private func createMember(_ sender: Any?) { model?.reviewMutation(.newFile) }
+    @objc private func createFolder(_ sender: Any?) { model?.reviewMutation(.newFolder) }
+    @objc private func addMembers(_ sender: Any?) { model?.reviewMutation(.add) }
     @objc private func previewHex(_ sender:Any?){model?.previewSelectedAsBytes()}
-    @objc private func copyMembers(_ sender: Any?) { if canCopyMembers?() == true { onCopyMembers?() } }
+    @objc private func cutMembers(_ sender: Any?) { if canCaptureClipboard?(.move) == true { onCut?() } }
+    @objc private func copyMembers(_ sender: Any?) { if canCaptureClipboard?(.copy) == true { onCopyMembers?() } }
+    @objc private func pasteMembers(_ sender: Any?) { if canPaste?() == true { onPaste?() } }
     @objc private func extractSelected(_ sender:Any?){model?.extract(selected:true)}
     @objc private func showMemberProperties(_ sender: Any?) { model?.showMemberProperties(relativeTo: window) }
     func validateMenuItem(_ item:NSMenuItem)->Bool {
@@ -237,8 +301,14 @@ private struct TARBrowserView:View {
         if item.action == #selector(openSelected(_:)){return model.current && !model.busy && !model.isPreparingPreview && model.selection.count==1 && (items.contains{model.selection.contains($0.id) && $0.folder != nil} || model.canPreviewSelected)}
         if item.action == #selector(previewText(_:)) { item.title = model.preferredPreview.commandTitle; return model.canPreviewSelected }
         if item.action == #selector(editText(_:)) { return model.canEditSelectedText }
+        if item.action == #selector(renameMember(_:)) { return model.canModifySelectedMembers && model.selection.count == 1 }
+        if item.action == #selector(duplicateMember(_:)) || item.action == #selector(removeMember(_:)) { return model.canModifySelectedMembers }
+        if item.action == #selector(groupMembers(_:)) { return model.canGroupMembers }
+        if let action = item.action, [#selector(createMember(_:)), #selector(createFolder(_:)), #selector(addMembers(_:))].contains(action) { return model.canCreateMember }
         if item.action == #selector(previewHex(_:)){return model.canPreviewSelected}
-        if item.action == #selector(copyMembers(_:)) { return canCopyMembers?() == true }
+        if item.action == #selector(cutMembers(_:)) { return canCaptureClipboard?(.move) == true }
+        if item.action == #selector(copyMembers(_:)) { return canCaptureClipboard?(.copy) == true }
+        if item.action == #selector(pasteMembers(_:)) { return canPaste?() == true }
         if item.action == #selector(showMemberProperties(_:)) { return model.observedMember != nil }
         return item.action == #selector(extractSelected(_:)) && model.canExtract && model.selectedSupported
     }

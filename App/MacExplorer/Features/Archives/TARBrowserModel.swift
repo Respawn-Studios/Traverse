@@ -6,8 +6,10 @@ import LocalStorage
 struct TARClipboardSource {
     let archiveURL: URL
     let generation: UUID
+    let folder: TARFolderID
     let ids: Set<TARItemID>
     let paths: [String]
+    let memberSelection: TARMemberSelection?
 }
 
 /// A concrete TAR owner. It shares Explorer presentation and the existing
@@ -53,6 +55,7 @@ struct TARClipboardSource {
     private var readTask:Task<TARArchiveSession,Error>?,queryTask:Task<Page,Error>?
     private var work:Task<Void,Never>?,filterWork:Task<Void,Never>?,selectionWork:Task<Void,Never>?
     private var isPreparingDrag = false
+    private var createdMemberToReveal: (archive: URL, path: String)?
     private struct Open {let source:URL;weak var browser:BrowserViewController?;let token:UUID;let preparesCompressed:Bool}
     private struct Visit {let folder:TARFolderID;var query="",scope=ArchiveNameScope.folder,order=TARArchiveOrder(),offset=0}
     private struct Pending {let visit:Visit;let token:UUID;var selected:TARItemID?}
@@ -122,6 +125,99 @@ struct TARClipboardSource {
             }
         }
     }
+    enum MutationAction: Equatable { case rename, remove, duplicate, group, newFile, newFolder, add }
+    var canModifyMembers: Bool {
+        allowsTextEditing && permitsEmbeddedAction && current && !busy && !isPreviewing && !isPreparingPreview
+            && !closed && !suspended && !ApplicationFileActivity.gate.isClosed && browser?.canStartArchiveCreation == true
+    }
+    var canModifySelectedMembers: Bool { canModifyMembers && selectedSupported && selection.count <= 128 }
+    var canCreateMember: Bool { canModifyMembers && query.isEmpty && scope == .folder && breadcrumbs.last != nil }
+    var canGroupMembers: Bool { canCreateMember && canModifySelectedMembers }
+    func reviewMutation(_ action: MutationAction, updateOriginal: Bool = true,
+        addedSource: ArchiveAdditionInput? = nil, destinationFolder: TARFolderID? = nil) {
+        let creates = action == .newFile || action == .newFolder || action == .add
+        guard creates ? canCreateMember : canModifySelectedMembers,
+              action != .rename || selection.count == 1,
+              action != .group || canGroupMembers,
+              let session, let source, let browser else { return }
+        let currentToken = token, currentPage = pageToken, ids = selection
+        let folder = destinationFolder ?? breadcrumbs.last?.folder
+        isPreparingPreview = true
+        selectionWork = Task { [self] in
+            defer { selectionWork = nil; isPreparingPreview = false }
+            do {
+                let intent: TARMemberMutation
+                if creates {
+                    guard let folder else { throw TARArchiveFailure.invalidSelection }
+                    let destination = try await session.destinationForMemberChanges(folder)
+                    switch action {
+                    case .newFile: intent = .newFile(destination, name: "New File.txt")
+                    case .newFolder: intent = .newFolder(destination, name: "New Folder")
+                    case .add: intent = .add(destination, sources: [])
+                    default: throw TARArchiveFailure.invalidSelection
+                    }
+                } else {
+                    let selected = try await session.selectionForMemberChanges(ids)
+                    switch action {
+                    case .rename:
+                        guard let path = selected.archivePaths.first else { throw TARArchiveFailure.invalidSelection }
+                        intent = .rename(selected, to: path.split(separator: "/").last.map(String.init) ?? "")
+                    case .remove: intent = .remove(selected)
+                    case .duplicate: intent = .duplicate(selected, into: nil)
+                    case .group: intent = .group(selected, name: "New Folder")
+                    default: throw TARArchiveFailure.invalidSelection
+                    }
+                }
+                guard !Task.isCancelled, permitsEmbeddedAction, !closed, !suspended,
+                      currentToken == token, currentPage == pageToken, !browser.isBrowserSuspended,
+                      addedSource?.isCurrent() != false else { return }
+                ApplicationArchiveCreation.shared.show(sources: [source], from: browser, memberEdit: .tar(intent),
+                    updateOriginal: updateOriginal, addedSource: addedSource, onMemberCreated: { [weak self] archive, path in
+                        self?.createdMemberToReveal = (archive, path); self?.revealCreatedMemberIfReady()
+                    })
+            } catch { if !closed, !Task.isCancelled, currentToken == token { notice = ArchiveCreationModel.message(error) } }
+        }
+    }
+    func canAddLocalFiles(to folder: TARFolderID?) -> Bool {
+        canCreateMember && (folder == nil || items.contains { $0.folder == folder })
+    }
+    @discardableResult func addLocalFiles(_ input: LocalFileDropSource, to folder: TARFolderID?) -> Bool {
+        guard canAddLocalFiles(to: folder) else { return false }
+        reviewMutation(.add, addedSource: .init(urls: input.urls, access: input.access), destinationFolder: folder)
+        return true
+    }
+    func canMoveMembers(_ ids: Set<TARItemID>, into folder: TARFolderID? = nil) -> Bool {
+        canGroupMembers && selection == ids && (folder == nil || items.contains { $0.folder == folder && !ids.contains($0.id) })
+    }
+    @discardableResult func moveMembers(_ offer: ArchiveMemberDragOffer, into folder: TARFolderID) -> Bool {
+        guard isCurrentMemberDrag(offer), canMoveMembers(offer.tarIDs, into: folder),
+              let session, let source, let browser else { return false }
+        let generation = token, page = pageToken
+        isPreparingPreview = true
+        selectionWork = Task { [self] in
+            defer { selectionWork = nil; isPreparingPreview = false }
+            do {
+                let selected = try await session.selectionForMemberChanges(offer.tarIDs)
+                let destination = try await session.destinationForMemberChanges(folder)
+                guard !Task.isCancelled, permitsEmbeddedAction, !closed, !suspended,
+                      token == generation, pageToken == page, !browser.isBrowserSuspended,
+                      !ApplicationFileActivity.gate.isClosed else { return }
+                ApplicationArchiveCreation.shared.show(sources: [source], from: browser,
+                    memberEdit: .tar(.move(selected, into: destination)), updateOriginal: true)
+            } catch { if !Task.isCancelled, !closed, token == generation { notice = ArchiveCreationModel.message(error) } }
+        }
+        return true
+    }
+    private func revealCreatedMemberIfReady() {
+        guard let created = createdMemberToReveal, current, !busy, !closed, !suspended else { return }
+        createdMemberToReveal = nil
+        guard permitsEmbeddedAction, source == created.archive,
+              let item = items.first(where: { $0.path.utf8.elementsEqual(created.path.utf8) }) else { return }
+        selection = [item.id]
+        if canEditSelectedText, settings.editorPreferences.route(forFilename: item.name, command: .ordinaryOpen) == .traverse {
+            editSelectedText()
+        }
+    }
     var preferredPreview: ArchivePreviewMode { .preferred(for: items.first { selection.contains($0.id) }?.name) }
     var isCompressedSource: Bool { source.map(Self.isCompressed) ?? false }
     var showsCompressedPreparation: Bool {
@@ -184,11 +280,33 @@ struct TARClipboardSource {
     var canCaptureClipboardMembers: Bool {
         SelectedArchiveExtractionActivation.available && canExtract && selectedSupported && session != nil
     }
-
-    func captureClipboardMembers() -> TARClipboardSource? {
-        guard canCaptureClipboardMembers, let source else { return nil }
-        return .init(archiveURL: source, generation: token, ids: selection,
-                     paths: items.filter { selection.contains($0.id) }.map(\.path))
+    func canCaptureClipboardMembers(_ operation: TransferClipboardFeedback.Intent) -> Bool {
+        if operation == .move { return canGroupMembers }
+        return canModifySelectedMembers || canCaptureClipboardMembers
+    }
+    func captureClipboardMembers(_ operation: TransferClipboardFeedback.Intent,
+        _ publish: @escaping @MainActor (TARClipboardSource) -> Void) {
+        guard canCaptureClipboardMembers(operation), let source, let session,
+              let folder = breadcrumbs.last?.folder else { return }
+        let generation = token, page = pageToken, ids = selection
+        let paths = items.filter { ids.contains($0.id) }.map(\.path)
+        guard paths.count == ids.count else { return }
+        if operation == .copy && !canModifySelectedMembers {
+            publish(.init(archiveURL: source, generation: generation, folder: folder,
+                ids: ids, paths: paths, memberSelection: nil))
+            return
+        }
+        isPreparingPreview = true
+        selectionWork = Task { [self] in
+            defer { selectionWork = nil; isPreparingPreview = false }
+            do {
+                let chosen = try await session.selectionForMemberChanges(ids)
+                guard !Task.isCancelled, permitsEmbeddedAction, !closed, !suspended,
+                      token == generation, pageToken == page, selection == ids else { return }
+                publish(.init(archiveURL: source, generation: generation, folder: folder,
+                    ids: ids, paths: paths, memberSelection: chosen))
+            } catch { if !Task.isCancelled, !closed, token == generation { notice = ArchiveCreationModel.message(error) } }
+        }
     }
 
     func retainsClipboard(_ copied: TARClipboardSource) -> Bool {
@@ -197,6 +315,36 @@ struct TARClipboardSource {
 
     func matchesClipboardSelection(_ copied: TARClipboardSource) -> Bool {
         permitsEmbeddedAction && current && retainsClipboard(copied) && selection == copied.ids
+    }
+
+    func showsCut(_ copied: TARClipboardSource) -> Bool {
+        retainsClipboard(copied) && current && (archiveSearch || breadcrumbs.last?.folder == copied.folder)
+    }
+    func canPasteMembers(_ copied: TARClipboardSource, operation: TransferClipboardFeedback.Intent) -> Bool {
+        guard retainsClipboard(copied), let selected = copied.memberSelection, canCreateMember,
+              operation == .copy || breadcrumbs.last?.folder != copied.folder else { return false }
+        let path = breadcrumbs.dropFirst().map(\.name)
+        return !selected.folderPaths.contains { path.starts(with: $0.split(separator: "/").map(String.init)) }
+    }
+    func pasteMembers(_ copied: TARClipboardSource, context: ScopedItemPaste) {
+        guard context.isCurrent(), canPasteMembers(copied, operation: context.intent.operation),
+              let selected = copied.memberSelection, let folder = breadcrumbs.last?.folder,
+              let session, let source, let browser else { return }
+        let generation = token, page = pageToken
+        isPreparingPreview = true
+        selectionWork = Task { [self] in
+            defer { selectionWork = nil; isPreparingPreview = false }
+            do {
+                let destination = try await session.destinationForMemberChanges(folder)
+                let mutation: TARMemberMutation = context.intent.operation == .move
+                    ? .move(selected, into: destination) : .duplicate(selected, into: destination)
+                guard !Task.isCancelled, permitsEmbeddedAction, !closed, !suspended,
+                      token == generation, pageToken == page, context.isCurrent(), !browser.isBrowserSuspended,
+                      !ApplicationFileActivity.gate.isClosed else { return }
+                ApplicationArchiveCreation.shared.show(sources: [source], from: browser, memberEdit: .tar(mutation),
+                    updateOriginal: true, onOriginalUpdated: { context.finish(confirmed: true) })
+            } catch { if !Task.isCancelled, !closed, token == generation { notice = ArchiveCreationModel.message(error) } }
+        }
     }
 
     func canExportClipboard(_ copied: TARClipboardSource) -> Bool {
@@ -289,6 +437,7 @@ struct TARClipboardSource {
     }
     func open(_ url:URL,from browser:BrowserViewController,reviewExtraction:Bool=false,preparesCompressed:Bool=false) {
         guard !closed,!suspended else{return}
+        if source != url { createdMemberToReveal = nil }
         textPreview.stop(closeWindow:true)
         token=UUID();pageToken=UUID();self.browser=browser;source=url
         opensExtractionReview=reviewExtraction
@@ -310,6 +459,7 @@ struct TARClipboardSource {
             work=nil;readTask=nil;queryTask=nil;busy=false
             if opensExtractionReview,current,!closed,!suspended{opensExtractionReview=false;extract(selected:false)}
             if !closed,!suspended,desiredOpen != nil || desiredEmbedded != nil || desiredEmbeddedNavigation != nil || desiredPage != nil{start()}
+            revealCreatedMemberIfReady()
         }
         while !closed && !suspended && !Task.isCancelled {
             if let request=desiredOpen {
@@ -492,7 +642,7 @@ struct TARClipboardSource {
             }catch{if !closed,currentToken==token{notice=Self.message(error)}}
         }
     }
-    func stop(){token=UUID();pageToken=UUID();desiredOpen=nil;desiredPage=nil;desiredEmbedded=nil;desiredEmbeddedNavigation=nil;work?.cancel();readTask?.cancel();queryTask?.cancel();filterWork?.cancel();selectionWork?.cancel();textPreview.stop();current=false;requiresPreparation = CompressedTARFeature.available && isCompressedSource;notice="Stopped. Refresh the archive when you’re ready."}
+    func stop(){createdMemberToReveal=nil;token=UUID();pageToken=UUID();desiredOpen=nil;desiredPage=nil;desiredEmbedded=nil;desiredEmbeddedNavigation=nil;work?.cancel();readTask?.cancel();queryTask?.cancel();filterWork?.cancel();selectionWork?.cancel();textPreview.stop();current=false;requiresPreparation = CompressedTARFeature.available && isCompressedSource;notice="Stopped. Refresh the archive when you’re ready."}
     func suspend(){suspended=true;stop();textPreview.prepareForVolumeQuiescence()}
     func resume(){suspended=false;textPreview.resumeAfterVolumeQuiescence();notice="Refresh to read this archive again."}
     func drain()async {
