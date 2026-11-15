@@ -330,7 +330,7 @@ private struct TARBrowserView:View {
     required init?(coder:NSCoder){nil}
     func windowWillClose(_ notification:Notification){onClose?()}
 }
-@MainActor private final class TARBrowserWindow:NSWindow {
+@MainActor private final class TARBrowserWindow:ToolMotionWindow {
     override func performKeyEquivalent(with event:NSEvent)->Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,event.charactersIgnoringModifiers?.lowercased()=="f",let content=contentView {
             var pending=[content],count=0

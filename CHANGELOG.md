@@ -49,6 +49,8 @@ Earlier private-beta version numbers belong to a separate release history.
   groups, drilling into a slice or going Back. Repeated groups reuse stored totals.
 - Settings, What's New, Properties and Analyzer share native opening and closing
   transitions. Discarding an unsaved Properties draft follows the same close flow.
+- Separate ZIP and TAR browser windows follow the same motion preferences,
+  including an interrupted Close and reopening the existing window.
 
 ## [0.2.0] - 2026-11-15
 

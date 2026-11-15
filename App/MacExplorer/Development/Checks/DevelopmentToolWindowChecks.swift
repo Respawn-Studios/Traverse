@@ -217,6 +217,8 @@ import Foundation
         let preferences = BrowserSettingsWindow.make(BrowserSettingsView(settings: settings))
         let analysis = StorageAnalysisWindowController(onChooseFolder: {}, onRefresh: {}, onStop: {}, onAppStorage: {})
         let properties = FilePropertiesWindowController(settings: settings, copyPaths: { _ in })
+        let zip = ArchiveBrowserWindowController(model: .init(settings: settings, reader: .init()))
+        let tar = TARBrowserWindowController(model: .init(settings: settings, reader: .init()))
         let help = TraverseHelpController.shared
         var windows: [NSWindow] = [preferences]
         var stage = "startup", passed = false
@@ -236,7 +238,9 @@ import Foundation
             ("Settings", { preferences.makeKeyAndOrderFront(nil); return preferences }),
             ("What's New", { help.showForMotionVerification(.whatsNew, settings: settings); return help.window }),
             ("Properties", { properties.show(urls: [root.appendingPathComponent("source/Upload.txt")]); return properties.window }),
-            ("Analyzer", { analysis.applyToolStyle(settings); analysis.showWindow(nil); return analysis.window })
+            ("Analyzer", { analysis.applyToolStyle(settings); analysis.showWindow(nil); return analysis.window }),
+            ("ZIP Browser", { zip.showWindow(nil); zip.window?.makeKeyAndOrderFront(nil); return zip.window }),
+            ("TAR Browser", { tar.showWindow(nil); tar.window?.makeKeyAndOrderFront(nil); return tar.window })
         ]
         NSApplication.shared.activate(ignoringOtherApps: true)
         for mode in BrowserMotionMode.allCases {
