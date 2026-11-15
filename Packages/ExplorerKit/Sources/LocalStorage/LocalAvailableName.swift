@@ -12,7 +12,8 @@ public enum LocalAvailableName {
     private static let queue = DispatchQueue(label: "MacExplorer.LocalAvailableName", qos: .userInitiated)
 
     /// `preferredName` includes the final extension. Passing `extension: "zip"`
-    /// numbers `notes.txt.zip` as `notes.txt 2.zip`; nil numbers the whole name.
+    /// numbers `notes.txt.zip` as `notes.txt 2.zip`; `"tar.gz"` keeps the
+    /// compound suffix together. Nil numbers the whole name.
     /// Checks at most 1,024 candidates using the filesystem's own name lookup.
     public static func available(in directory: URL, preferredName: String,
                                  `extension` filenameExtension: String? = nil) async throws -> String {
@@ -38,7 +39,8 @@ public enum LocalAvailableName {
         guard directory.isFileURL, valid(preferredName) else { throw Failure.invalidName }
         let suffix: String
         if let filenameExtension {
-            guard valid(filenameExtension), !filenameExtension.contains("."),
+            guard !filenameExtension.isEmpty, valid(filenameExtension),
+                  filenameExtension.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({ !$0.isEmpty }),
                   preferredName.lowercased().hasSuffix("." + filenameExtension.lowercased()),
                   preferredName.count > filenameExtension.count + 1 else { throw Failure.invalidName }
             suffix = String(preferredName.suffix(filenameExtension.count + 1))

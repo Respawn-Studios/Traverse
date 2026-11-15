@@ -28,6 +28,28 @@ import Testing
                 == (occupied ? "photos 2.zip" : "photos.zip"))
     }
 
+    @Test func compoundArchiveSuffixesStayTogetherWhenNumbered() async throws {
+        let root = try LocalStorageTestFixtures.directory()
+        defer { try? FileManager().removeItem(at: root) }
+        try Data().write(to: root.appendingPathComponent("notes.txt.tar.gz"), options: .withoutOverwriting)
+        try FileManager().createDirectory(at: root.appendingPathComponent("notes.txt 2.tar.gz"), withIntermediateDirectories: false)
+        #expect(try await LocalAvailableName.available(in: root, preferredName: "notes.txt.tar.gz", extension: "tar.gz")
+                == "notes.txt 3.tar.gz")
+        try Data().write(to: root.appendingPathComponent("notes.txt.tar.bz2"), options: .withoutOverwriting)
+        #expect(try await LocalAvailableName.available(in: root, preferredName: "notes.txt.tar.bz2", extension: "tar.bz2")
+                == "notes.txt 2.tar.bz2")
+    }
+
+    @Test func ambiguousOrUnsafeCompoundExtensionsAreRefused() async throws {
+        let root = try LocalStorageTestFixtures.directory()
+        defer { try? FileManager().removeItem(at: root) }
+        for value in ["", ".tar.gz", "tar.", "tar..gz", "tar.gz.", "tar/gz", "tar:gz", "tar\0gz"] {
+            await #expect(throws: LocalAvailableName.Failure.invalidName) {
+                try await LocalAvailableName.available(in: root, preferredName: "notes.txt.tar.gz", extension: value)
+            }
+        }
+    }
+
     @Test func errorsAndCancellationDoNotBecomeFalseAbsence() async throws {
         let root = try LocalStorageTestFixtures.directory()
         defer { try? FileManager().removeItem(at: root) }

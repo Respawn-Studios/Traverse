@@ -18,10 +18,20 @@ enum ArchiveCreationActivation {
     }
 }
 
-enum ArchiveCreationFormat: String, Sendable {
+enum ArchiveCreationFormat: String, Codable, CaseIterable, Sendable {
     case zip, tar, tarGzip = "tar.gz", tarBzip2 = "tar.bz2"
     var displayName: String {
         switch self { case .tarGzip: "TAR.gz"; case .tarBzip2: "TAR.bz2"; default: rawValue.uppercased() }
+    }
+    @MainActor var availableForQuickAction: Bool {
+        guard !GeneratedSandboxReview.nativeTARCreateAdmitted else { return false }
+        switch self {
+        case .zip: return true
+        case .tar: return AppFeatureAvailability.policy.edition == .development
+            && AppFeatureAvailability.allows(.tarCreation)
+        case .tarGzip: return AppFeatureAvailability.allows(.tarCreation) && TARGzipCreationFeature.available
+        case .tarBzip2: return AppFeatureAvailability.allows(.tarCreation) && TARBzip2Feature.available
+        }
     }
 }
 enum TARGzipCreationFeature {
@@ -236,7 +246,7 @@ enum ZIPMemberRenameFeature {
     private let onOriginalUpdated: (() -> Void)?
     private let chooser = FolderAccessController(stateDirectory: nil)
     private var customPicker: AnalysisFolderPickerController?
-    private let automatic: Bool
+    private let automaticFormat: ArchiveCreationFormat?
     private let initiatingTab: UUID, initiatingVisit: UUID
     private let initiatingDirectory: URL?
     private var automaticNameRequested = false, installingAutomaticName = false, debouncesPreview = true
@@ -261,8 +271,8 @@ enum ZIPMemberRenameFeature {
     init(sources: [URL], browser: BrowserViewController, engine: RecoverableFileOperations,
          memberEdit: ArchiveMemberCopyEdit? = nil, updateOriginal: Bool = false,
          onMemberCreated: ((URL, String) -> Void)? = nil, onOriginalUpdated: (() -> Void)? = nil,
-         automatic: Bool = false) {
-        self.automatic = automatic
+         automaticFormat: ArchiveCreationFormat? = nil) {
+        self.automaticFormat = automaticFormat
         initiatingTab = browser.activeID; initiatingVisit = browser.sessionID
         initiatingDirectory = browser.location.directoryURL
         let nativeTARReview = memberEdit == nil && GeneratedSandboxReview.nativeTARCreateAdmitted
@@ -277,7 +287,10 @@ enum ZIPMemberRenameFeature {
             name = ArchiveActionNames.editedCopyName(memberEdit.archiveURL)
         } else if nativeTARReview {
             name = sources.count == 1 ? sources[0].lastPathComponent + ".tar" : "Archive.tar"
-        } else { name = sources.count == 1 ? sources[0].lastPathComponent + ".zip" : "Archive.zip" }
+        } else {
+            let format = automaticFormat ?? .zip
+            name = (sources.count == 1 ? sources[0].lastPathComponent : "Archive") + "." + format.rawValue
+        }
         self.browser = browser; self.engine = engine; coordinator = browser.operationCoordinator; settings = browser.settings
         if case .rename(let selected) = memberEdit { memberName = selected.currentName }
         if memberEdit?.isNewFolder == true { memberName = "New Folder" }
@@ -288,6 +301,10 @@ enum ZIPMemberRenameFeature {
         if nativeTARReview || memberEdit?.formatName == "TAR" { outputFormat = .tar }
         if memberEdit?.formatName == "TAR.gz" { outputFormat = .tarGzip }
         if memberEdit?.formatName == "TAR.bz2" { outputFormat = .tarBzip2; tarCompression = .bzip2Balanced }
+        if let automaticFormat {
+            outputFormat = automaticFormat
+            if automaticFormat == .tarBzip2 { tarCompression = .bzip2Balanced }
+        }
     }
     func requestPreview() {
         requestPreview(debounced: true)
@@ -314,7 +331,8 @@ enum ZIPMemberRenameFeature {
     }
     var automaticActionSucceeded: Bool { outcome?.result.disposition == .succeeded }
     func prepareAutomaticAction() async -> Bool {
-        guard automatic, !isMemberCopy, outputFormat == .zip, automaticActionCanSubmit else { return false }
+        guard let automaticFormat, !isMemberCopy, outputFormat == automaticFormat,
+              automaticFormat.availableForQuickAction, automaticActionCanSubmit else { return false }
         automaticNameRequested = true
         requestPreview(debounced: false)
         let token = generation
@@ -1020,10 +1038,14 @@ private struct ArchiveCreationView: View {
     func show(sources: [URL], from browser: BrowserViewController, memberEdit: ArchiveMemberCopyEdit? = nil,
               updateOriginal: Bool = false, addedSource: ArchiveAdditionInput? = nil,
               onMemberCreated: ((URL, String) -> Void)? = nil, onOriginalUpdated: (() -> Void)? = nil,
-              automatic: Bool = false) {
+              automaticFormat: ArchiveCreationFormat? = nil) {
+        let quickAllowed = automaticFormat.map {
+            memberEdit == nil && $0.availableForQuickAction && browser.canCreateZIP
+                && browser.orderedSelectedURLs == sources
+        } ?? true
         guard ArchiveCreationActivation.available, retirement == nil, browser.canStartArchiveCreation, !sources.isEmpty, sources.count <= 512,
               memberEdit == nil || memberEdit?.available == true,
-              !automatic || memberEdit == nil && !GeneratedSandboxReview.nativeTARCreateAdmitted,
+              quickAllowed,
               !updateOriginal || memberEdit?.canUpdateOriginal == true,
               let engine = browser.recoverableFileOperations else { return }
         if let controller {
@@ -1033,13 +1055,13 @@ private struct ArchiveCreationView: View {
                 guard let browser, !browser.isBrowserSuspended else { return }
                 show(sources: sources, from: browser, memberEdit: memberEdit, updateOriginal: updateOriginal,
                      addedSource: addedSource, onMemberCreated: onMemberCreated, onOriginalUpdated: onOriginalUpdated,
-                     automatic: automatic)
+                     automaticFormat: automaticFormat)
             }
             return
         }
         let model = ArchiveCreationModel(sources: sources, browser: browser, engine: engine,
             memberEdit: memberEdit, updateOriginal: updateOriginal, onMemberCreated: onMemberCreated,
-            onOriginalUpdated: onOriginalUpdated, automatic: automatic)
+            onOriginalUpdated: onOriginalUpdated, automaticFormat: automaticFormat)
         let created = ArchiveCreationWindowController(model: model)
         created.onClose = { [weak self, weak model] in
             guard let self, let model else { return }
@@ -1049,8 +1071,8 @@ private struct ArchiveCreationView: View {
         controller = created
         if browser.isControlledVerification { created.window?.setFrameOrigin(.init(x: -12000, y: -12000)) }
         else if let window = created.window { ToolWindowChrome.position(window, relativeTo: browser.view.window) }
-        if automatic {
-            browser.status.stringValue = "Preparing ZIP…"
+        if let automaticFormat {
+            browser.status.stringValue = "Preparing \(automaticFormat.displayName)…"
             automaticCreation = Task { [self, created] in
                 defer { automaticCreation = nil }
                 await ArchiveAutomaticAction.run(model, isCurrent: { [weak self, weak created] in
@@ -1091,8 +1113,12 @@ private struct ArchiveCreationView: View {
     @objc func createZIP(_ sender: Any?) {
         if canCreateZIP { ApplicationArchiveCreation.shared.show(sources: orderedSelectedURLs, from: self) }
     }
-    var canCompressSelection: Bool { canCreateZIP && !GeneratedSandboxReview.nativeTARCreateAdmitted }
+    var quickCompressionCommandTitle: String { "Compress to \(settings.quickCompressionFormat.displayName)" }
+    var canCompressSelection: Bool { canCreateZIP && settings.quickCompressionFormat.availableForQuickAction }
     @objc func compressSelection(_ sender: Any?) {
-        if canCompressSelection { ApplicationArchiveCreation.shared.show(sources: orderedSelectedURLs, from: self, automatic: true) }
+        if canCompressSelection {
+            ApplicationArchiveCreation.shared.show(sources: orderedSelectedURLs, from: self,
+                automaticFormat: settings.quickCompressionFormat)
+        }
     }
 }

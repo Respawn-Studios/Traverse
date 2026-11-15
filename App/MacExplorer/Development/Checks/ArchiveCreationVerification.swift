@@ -1072,7 +1072,8 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
             explicitReviewRefresh = true
         }
         let directActions = !scale && !drive && !tar
-            ? try await runDirectActions(browser: browser, source: sources[1], engine: engine) : false
+            ? try await runDirectActions(browser: browser, source: sources[1], engine: engine,
+                markedSource: markedSource) : false
         try await wait { ApplicationFileActivity.gate.activeCount == 0 && browser.operationCoordinator.inspectionCount == 0 }
         try UIVerification.require(try await hashes(sources) == before, "ZIP creation or Undo changed the sources")
         let peak = peakResident(), added = peak > baseline ? peak - baseline : 0
@@ -1093,7 +1094,8 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
     /// Reuses the ordinary commands and both workbenches. Existing destinations
     /// exercise Keep Both; the actual producers still own exclusive publication.
     private static func runDirectActions(browser: BrowserViewController, source: URL,
-                                         engine: RecoverableFileOperations) async throws -> Bool {
+                                         engine: RecoverableFileOperations, markedSource: Bool) async throws -> Bool {
+        try verifyQuickCompressionPreferences(browser.settings)
         let parent = source.deletingLastPathComponent()
         let occupiedZIP = parent.appendingPathComponent(source.lastPathComponent + ".zip")
         let marker = Data("Existing generated output stays unchanged.".utf8)
@@ -1102,7 +1104,9 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
         try await wait { !browser.isLoading && browser.orderingTask == nil && browser.rowsByURL[source] != nil && browser.canStartArchiveCreation }
         browser.reloadFileRows(preserving: [source])
         let menu = BrowserMenus.fileContextMenu(target: browser)
-        try UIVerification.require(menu.items.contains { $0.action == #selector(BrowserViewController.compressSelection(_:)) && !$0.title.hasSuffix("…") }
+        try UIVerification.require(browser.quickCompressionCommandTitle == "Compress to ZIP"
+            && menu.items.contains { $0.action == #selector(BrowserViewController.compressSelection(_:))
+                && $0.title == browser.quickCompressionCommandTitle }
             && menu.items.contains { $0.action == #selector(BrowserViewController.createZIP(_:)) && $0.title.hasSuffix("…") },
             "Direct Compress and its options are not available together")
         browser.compressSelection(nil)
@@ -1150,7 +1154,100 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
         try UIVerification.require(extractionUndo.result.disposition == .succeeded && creationUndo.result.disposition == .succeeded
             && preserved && !FileManager().fileExists(atPath: extracted.path) && !FileManager().fileExists(atPath: archive.path),
             "Direct archive Undo changed an existing destination or failed")
+        if !markedSource {
+            try await verifyQuickTARFormats(browser: browser, source: source, engine: engine, marker: marker)
+        }
         return true
+    }
+
+    private static func verifyQuickCompressionPreferences(_ settings: BrowserSettings) throws {
+        guard var saved = try JSONSerialization.jsonObject(with: settings.encodedSnapshot()) as? [String: Any] else {
+            throw UIVerification.Failure(message: "Quick Compress preferences did not encode")
+        }
+        try UIVerification.require(saved["version"] as? Int == BrowserSettings.preferencesVersion
+            && saved["quickCompressionFormat"] as? String == "zip", "Quick Compress default is not ZIP")
+        saved["version"] = BrowserSettings.preferencesVersion - 1
+        saved.removeValue(forKey: "quickCompressionFormat")
+        let older = BrowserSettings(persist: false, restoredData: try JSONSerialization.data(withJSONObject: saved))
+        try UIVerification.require(older.quickCompressionFormat == .zip && older.preferencesPersistenceStatus.isEmpty,
+            "Older saved preferences did not retain ZIP as the quick default")
+        saved["version"] = BrowserSettings.preferencesVersion
+        saved["quickCompressionFormat"] = "tar.gz"
+        let chosen = BrowserSettings(persist: false, restoredData: try JSONSerialization.data(withJSONObject: saved))
+        try UIVerification.require(chosen.quickCompressionFormat == .tarGzip && chosen.preferencesPersistenceStatus.isEmpty,
+            "A saved quick format was not restored")
+        chosen.quickCompressionFormat = .tarBzip2
+        let roundTrip = BrowserSettings(persist: false, restoredData: try chosen.encodedSnapshot())
+        try UIVerification.require(roundTrip.quickCompressionFormat == .tarBzip2,
+            "A changed quick format was not encoded and restored")
+        saved["quickCompressionFormat"] = "unknown"
+        let unknown = BrowserSettings(persist: false, restoredData: try JSONSerialization.data(withJSONObject: saved))
+        saved["quickCompressionFormat"] = "zip"
+        saved["version"] = BrowserSettings.preferencesVersion + 1
+        let newer = BrowserSettings(persist: false, restoredData: try JSONSerialization.data(withJSONObject: saved))
+        try UIVerification.require([unknown, newer].allSatisfy {
+            $0.quickCompressionFormat == .zip && $0.preferencesPersistenceStatus.contains("preserved")
+        }, "Unknown or newer quick preferences were silently accepted")
+    }
+
+    /// Generated, unmarked sources exercise the same one-click owner and
+    /// collision/Undo path for each TAR encoder, without a second producer.
+    private static func verifyQuickTARFormats(browser: BrowserViewController, source: URL,
+                                               engine: RecoverableFileOperations, marker: Data) async throws {
+        let settings = browser.settings
+        defer { settings.quickCompressionFormat = .zip }
+        let parent = source.deletingLastPathComponent()
+        for format in [ArchiveCreationFormat.tar, .tarGzip, .tarBzip2] {
+            try UIVerification.require(format.availableForQuickAction, "Quick TAR format was unavailable in Development")
+            settings.quickCompressionFormat = format
+            let occupied = parent.appendingPathComponent(source.lastPathComponent + "." + format.rawValue)
+            try await Task.detached { try marker.write(to: occupied, options: .withoutOverwriting) }.value
+            browser.loadLocation()
+            try await wait { !browser.isLoading && browser.orderingTask == nil
+                && browser.rowsByURL[source] != nil && browser.canStartArchiveCreation }
+            browser.reloadFileRows(preserving: [source])
+            try UIVerification.require(browser.canCompressSelection, "Quick TAR selection was not admitted")
+            let menu = BrowserMenus.fileContextMenu(target: browser)
+            try UIVerification.require(menu.items.contains {
+                $0.action == #selector(BrowserViewController.compressSelection(_:))
+                    && $0.title == "Compress to " + format.displayName
+            }, "Quick Compress menu did not show the selected TAR format")
+            browser.compressSelection(nil)
+            guard let creation = ApplicationArchiveCreation.shared.controller else {
+                throw UIVerification.Failure(message: "Quick TAR did not retain its workbench")
+            }
+            try await wait { creation.model.outcome != nil && !creation.model.isRunning && browser.operationTask == nil }
+            try UIVerification.require(creation.model.outcome?.result.disposition == .succeeded,
+                "Quick TAR did not complete: " + creation.model.notice)
+            await ApplicationArchiveCreation.shared.closeAndDrain()
+            let archive = parent.appendingPathComponent(source.lastPathComponent + " 2." + format.rawValue)
+            let prefix = try await Task.detached { () throws -> Data in
+                let handle = try FileHandle(forReadingFrom: archive)
+                defer { try? handle.close() }
+                var bytes = Data()
+                while bytes.count < 262 {
+                    let next = try handle.read(upToCount: 262 - bytes.count) ?? Data()
+                    if next.isEmpty { break }
+                    bytes.append(next)
+                }
+                return bytes
+            }.value
+            let matchesFormat: Bool = switch format {
+            case .tar: prefix.count == 262 && Data(prefix[257..<262]) == Data("ustar".utf8)
+            case .tarGzip: prefix.starts(with: Data([0x1f, 0x8b]))
+            case .tarBzip2: prefix.starts(with: Data("BZh".utf8))
+            case .zip: false
+            }
+            try UIVerification.require(creation.model.outputFormat == format
+                && creation.model.name == archive.lastPathComponent && matchesFormat,
+                "Quick TAR used the wrong output format or collision name")
+            let id = try requireID(creation.model.outcome)
+            let undone = await engine.undo(recordID: id)
+            let occupiedPreserved = try await Task.detached { try Data(contentsOf: occupied) == marker }.value
+            try UIVerification.require(undone.result.disposition == .succeeded && occupiedPreserved
+                && !FileManager().fileExists(atPath: archive.path),
+                "Quick TAR Undo changed an occupied destination or left its output")
+        }
     }
 
     private static func runMarkedColdUndo(root: URL, browser: BrowserViewController, tar: Bool,

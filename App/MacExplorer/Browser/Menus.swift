@@ -93,7 +93,7 @@ enum BrowserMenus {
                 section.addItem(item("Browse Archive…", #selector(BrowserViewController.browseZIP(_:)), target: target))
                 section.addItem(item("Extract to New Folder", #selector(BrowserViewController.extractArchiveDirect(_:)), target: target))
                 section.addItem(item("Extract…", #selector(BrowserViewController.extractArchive(_:)), target: target))
-                section.addItem(item("Compress to ZIP", #selector(BrowserViewController.compressSelection(_:)), target: target))
+                section.addItem(item(target.quickCompressionCommandTitle, #selector(BrowserViewController.compressSelection(_:)), target: target))
                 section.addItem(item(ArchiveCreationActivation.commandTitle, #selector(BrowserViewController.createZIP(_:)), target: target))
             }
             addSection("Transfers", to: menu) { section in
@@ -322,7 +322,7 @@ enum BrowserMenus {
             command("Quick Look", #selector(BrowserViewController.showQuickLook(_:))),
             command(ArchiveActionNames.extractionTitle(for: target.selectedArchiveURL), #selector(BrowserViewController.extractArchiveDirect(_:))),
             command("Extract…", #selector(BrowserViewController.extractArchive(_:))),
-            command("Compress to ZIP", #selector(BrowserViewController.compressSelection(_:))),
+            command(target.quickCompressionCommandTitle, #selector(BrowserViewController.compressSelection(_:))),
             command(ArchiveCreationActivation.commandTitle, #selector(BrowserViewController.createZIP(_:))),
             command("Pin Folder", #selector(BrowserViewController.toggleSelectedFolderPin(_:)))]
         group(tools)

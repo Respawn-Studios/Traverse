@@ -12,3 +12,9 @@ Public update checks use the separate default-off `publicAutomaticUpdateChecks`
 preference. They never inherit the private beta's existing automatic-check or
 saved-invitation choice. The same setup and Help views bind the correct choice;
 `ApplicationUpdates` owns its lifecycle rather than the settings form.
+
+Operations stores `quickCompressionFormat` in the versioned settings snapshot.
+Older snapshots default to ZIP. Unknown values and newer snapshots stay
+preserved rather than being overwritten. The command captures its format before
+preparation and checks edition availability again before publishing; an
+unavailable saved format never silently turns into another archive type.

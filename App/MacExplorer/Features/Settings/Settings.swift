@@ -77,7 +77,7 @@ enum BrowserNewTabDestination: String, CaseIterable, Codable, Identifiable {
 
 @MainActor
 final class BrowserSettings: ObservableObject {
-    nonisolated static let preferencesVersion = 20
+    nonisolated static let preferencesVersion = 21
     @Published private(set) var editorPreferences = EditorPreferences() { didSet { save() } }
     func updateEditorPreferences(_ value: EditorPreferences) {
         guard value.isValid else { return }
@@ -87,6 +87,7 @@ final class BrowserSettings: ObservableObject {
     @Published private(set) var previousFolderApplication: URL?
     @Published var newTabDestination = BrowserNewTabDestination.computer { didSet { save() } }
     @Published var opensArchivesInTraverse = true { didSet { save() } }
+    @Published var quickCompressionFormat = ArchiveCreationFormat.zip { didSet { save() } }
     @Published var alwaysReviewArchiveCopies = false { didSet { save() } }
     @Published var asksBeforeMovingToTrash = false { didSet { save() } }
     @Published var diagnosticHistoryEnabled = true { didSet { save() } }
@@ -262,6 +263,7 @@ final class BrowserSettings: ObservableObject {
         var editorPreferences = EditorPreferences()
         var newTabDestination = BrowserNewTabDestination.computer
         var opensArchivesInTraverse = true
+        var quickCompressionFormat = ArchiveCreationFormat.zip
         var alwaysReviewArchiveCopies = false
         var asksBeforeMovingToTrash = false
         var interfaceSize = InterfaceSize.standard
@@ -340,7 +342,7 @@ final class BrowserSettings: ObservableObject {
 
         enum CodingKeys: String, CodingKey {
             case newTabDestination, interfaceSize, previousFolderApplication, editorPreferences
-            case opensArchivesInTraverse, alwaysReviewArchiveCopies, asksBeforeMovingToTrash
+            case opensArchivesInTraverse, quickCompressionFormat, alwaysReviewArchiveCopies, asksBeforeMovingToTrash
             case privateNamesSources, privateNamesAddressSuggestions, privateNamesAllowFollowing
             case analysisChartStyle
             case analysisIncludesApplicationDataByDefault, analysisLocationChoices, analysisKeepsResults
@@ -377,6 +379,7 @@ final class BrowserSettings: ObservableObject {
             editorPreferences = try values.decodeIfPresent(EditorPreferences.self, forKey: .editorPreferences) ?? .init()
             newTabDestination = try values.decodeIfPresent(BrowserNewTabDestination.self, forKey: .newTabDestination) ?? .computer
             opensArchivesInTraverse = try values.decodeIfPresent(Bool.self, forKey: .opensArchivesInTraverse) ?? true
+            quickCompressionFormat = try values.decodeIfPresent(ArchiveCreationFormat.self, forKey: .quickCompressionFormat) ?? .zip
             alwaysReviewArchiveCopies = try values.decodeIfPresent(Bool.self, forKey: .alwaysReviewArchiveCopies) ?? false
             asksBeforeMovingToTrash = try values.decodeIfPresent(Bool.self, forKey: .asksBeforeMovingToTrash) ?? false
             interfaceSize = (try? values.decode(InterfaceSize.self, forKey: .interfaceSize)) ?? .standard
@@ -543,6 +546,7 @@ final class BrowserSettings: ObservableObject {
             startupMode = settings.startupMode
             newTabDestination = settings.newTabDestination
             opensArchivesInTraverse = settings.opensArchivesInTraverse
+            quickCompressionFormat = settings.quickCompressionFormat
             alwaysReviewArchiveCopies = settings.alwaysReviewArchiveCopies
             asksBeforeMovingToTrash = settings.asksBeforeMovingToTrash
             interfaceSize = settings.interfaceSize
@@ -640,6 +644,7 @@ final class BrowserSettings: ObservableObject {
             startupMode = value.startupMode
             newTabDestination = value.newTabDestination
             opensArchivesInTraverse = value.opensArchivesInTraverse
+            quickCompressionFormat = value.quickCompressionFormat
             alwaysReviewArchiveCopies = value.alwaysReviewArchiveCopies
             asksBeforeMovingToTrash = value.asksBeforeMovingToTrash
             interfaceSize = value.interfaceSize
@@ -1292,6 +1297,19 @@ struct BrowserSettingsView: View {
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Archives") {
+                    if AppFeatureAvailability.policy.edition == .development || settings.quickCompressionFormat != .zip {
+                        Picker("Quick Compress format", selection: $settings.quickCompressionFormat) {
+                            ForEach(ArchiveCreationFormat.allCases, id: \.self) { format in
+                                Text(format.displayName).tag(format).disabled(!format.availableForQuickAction)
+                            }
+                        }
+                        Text("Quick Compress uses the chosen format with its standard compression setting. Compress… keeps the full options for each job.")
+                            .interfaceFont(.caption).foregroundStyle(.secondary)
+                        if !settings.quickCompressionFormat.availableForQuickAction {
+                            Text("The saved \(settings.quickCompressionFormat.displayName) quick format is unavailable in this edition. Choose an available format here; Compress… remains available.")
+                                .interfaceFont(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     Toggle("Always review archive copies", isOn: $settings.alwaysReviewArchiveCopies)
                     Text("Paste or drag one file or folder directly into its destination. Existing names and selections that need a new containing folder still open a review. Extract… always opens a review.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
