@@ -6,15 +6,18 @@ struct APFSVolumeFormatTests {
     private actor RecordingProbe: APFSVolumeFormatRecording {
         enum Failure: Error { case injected }
         var events: [String] = []
+        let failIntent: Bool
         let failSubmission: Bool
         let failTerminal: Bool
-        init(failSubmission: Bool = false, failTerminal: Bool = false) {
+        init(failIntent: Bool = false, failSubmission: Bool = false, failTerminal: Bool = false) {
+            self.failIntent = failIntent
             self.failSubmission = failSubmission; self.failTerminal = failTerminal
         }
         nonisolated func ownerStillCurrent() -> Bool { true }
         func recordIntent(_ snapshot: APFSVolumeFormatSnapshot) throws {
             guard snapshot.validate() else { throw Failure.injected }
             events.append("intent")
+            if failIntent { throw Failure.injected }
         }
         func recordSubmitted() throws {
             events.append("submitted")
@@ -82,12 +85,14 @@ struct APFSVolumeFormatTests {
     @Test func exactNameAndCurrentPolicyAreRequiredBeforeAnyNativeInquiry() async {
         let plan = APFSVolumeFormatPlan(selected: selection(), original: observed())
         let backend = APFSVolumeFormat()
-        let wrong = await backend.perform(plan, confirmedName: "Other", permitted: { true })
+        let probe = RecordingProbe()
+        let wrong = await backend.perform(plan, confirmedName: "Other", recording: probe, permitted: { true })
         #expect(!wrong.submitted && wrong.formatted == nil && wrong.failure == .confirmationRequired)
         #expect(wrong.toolExitStatus == nil)
-        let held = await backend.perform(plan, confirmedName: "Erase Me", permitted: { false })
+        let held = await backend.perform(plan, confirmedName: "Erase Me", recording: probe, permitted: { false })
         #expect(!held.submitted && held.formatted == nil && held.failure == .unavailable)
         #expect(held.toolExitStatus == nil)
+        #expect(await probe.trace().isEmpty)
         #expect(!String(reflecting: plan).contains("Generated"))
     }
 
@@ -146,6 +151,18 @@ struct APFSVolumeFormatTests {
         #expect(await probe.trace() == ["intent", "terminal:notSubmitted"])
         #expect(snapshot.validate())
         #expect(snapshot.originalContainer().sameIdentityAndMembers(as: container()))
+    }
+
+    @Test func failedIntentCannotReachSubmission() async {
+        let probe = RecordingProbe(failIntent: true)
+        let session = APFSVolumeFormatRecoverySession(probe)
+        do {
+            try await session.begin(APFSVolumeFormatSnapshot(observed()))
+            Issue.record("Failed durable intent was accepted")
+        } catch {
+            #expect(error is RecordingProbe.Failure)
+        }
+        #expect(await probe.trace() == ["intent"])
     }
 
     @Test func lostImageOwnerRefusesIntentBeforeAnyLaunch() async {

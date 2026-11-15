@@ -354,10 +354,21 @@ enum NativeDriveLifecycleVerification {
         let plan = try await format.prepare(target)
         try require(plan.name == addedName && plan.selected == target && plan.siblingNames == [sibling.name],
                     "Generated APFS Format review changed the selected member")
+        let generatedOwner = APFSVolumeFormatGeneratedOwner(fixtureID: receipt.jobID,
+            imagePath: fixture.appendingPathComponent("fixture.dmg").path,
+            rootDevice: receipt.fixtureDevice, rootInode: receipt.fixtureInode,
+            imageDevice: receipt.imageDevice, imageInode: receipt.imageInode,
+            ownerUID: UInt32(geteuid()), outerMediaID: receipt.outerMediaID)
+        guard generatedOwner.validate(), let store = NativeDriveJobStore.applicationStore() else {
+            throw UIVerification.Failure(message: "Generated APFS Format durable job store is unavailable")
+        }
+        let recording = store.recording(owner: generatedOwner,
+            attachmentCurrent: { formatSeal.imageAndOuterCurrent() })
+        try require(recording.ownerStillCurrent(), "Generated APFS Format job owner is stale")
         try evidence.write(["phase": "intent", "request": "one-apfs-volume-erase", "imageInode": receipt.imageInode,
                             "siblingUUID": initial.volumeUUID!.uuidString, "targetUUID": added.id.uuidString,
                             "targetMarkerInode": markerBefore.inode], leaf: "apfs-format-intent.json")
-        let formatted = await format.perform(plan, confirmedName: addedName, permitted: {
+        let formatted = await format.perform(plan, confirmedName: addedName, recording: recording, permitted: {
             AppFeatureAvailability.allows(.apfsVolumeCreation) && formatSeal.current()
         }, submitted: { evidence.recordSubmission() })
         // This receipt precedes every success assertion. An OS denial, a
@@ -376,6 +387,12 @@ enum NativeDriveLifecycleVerification {
         try require(formatted.submitted && formatted.failure == nil && newVolume.id != added.id
                     && newVolume.name == addedName && formatted.toolExitStatus == 0,
                     "Generated APFS Format postcondition was not established")
+        let durable = try await store.load()
+        try require(durable.record?.id == recording.jobID
+                    && durable.record?.phase == .compatibleReplacement
+                    && durable.record?.replacementID == newVolume.id
+                    && durable.record?.isUnresolved == true,
+                    "Generated APFS Format result lacks an unresolved durable job")
         try await until("Formatted two-member discovery") {
             let members = drives.volumes.filter { $0.group == receipt.outerMediaID && $0.volumeUUID != nil }
             return members.count == 2 && members.contains(where: { $0.volumeUUID == newVolume.id && $0.url != nil })

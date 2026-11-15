@@ -128,10 +128,12 @@ public final class APFSVolumeFormat: @unchecked Sendable {
     /// `confirmedName` must be independently entered by the person reviewing
     /// the loss of this volume's contents. `permitted` is rechecked on the
     /// worker queue at the launch boundary, not only when the sheet opens.
+    /// Every launch requires an owned durable recorder; a missing store must
+    /// refuse before the native request rather than skip intent persistence.
     public func perform(_ plan: APFSVolumeFormatPlan, confirmedName: String,
+                        recording: any APFSVolumeFormatRecording,
                         permitted: @escaping @Sendable () -> Bool,
-                        submitted: @escaping @Sendable () -> Void = {},
-                        recording: (any APFSVolumeFormatRecording)? = nil) async -> APFSVolumeFormatResult {
+                        submitted: @escaping @Sendable () -> Void = {}) async -> APFSVolumeFormatResult {
         do { try admit() } catch { return .init(submitted: false, formatted: nil, failure: .busy) }
         defer { release() }
         guard confirmedName == plan.name else {
@@ -139,7 +141,7 @@ public final class APFSVolumeFormat: @unchecked Sendable {
         }
         let cancellation = APFSVolumeTool.Cancellation()
         let submission = APFSVolumeTool.MutationAdmission()
-        let recovery = recording.map(APFSVolumeFormatRecoverySession.init)
+        let recovery = APFSVolumeFormatRecoverySession(recording)
         var intentRecorded = false
         var didSubmit = false
         var terminal: APFSVolumeTool.MutationReply?
@@ -156,16 +158,14 @@ public final class APFSVolumeFormat: @unchecked Sendable {
             try Task.checkCancellation()
             if cancellation.isCancelled { throw CancellationError() }
             guard permitted() else { throw APFSVolumeFormatFailure.unavailable }
-            if let recovery {
-                do { try await recovery.begin(APFSVolumeFormatSnapshot(current)); intentRecorded = true }
-                catch { throw APFSVolumeFormatFailure.recoveryUnavailable }
-            }
+            do { try await recovery.begin(APFSVolumeFormatSnapshot(current)); intentRecorded = true }
+            catch { throw APFSVolumeFormatFailure.recoveryUnavailable }
             terminal = try await withTaskCancellationHandler {
                 try await tool.eraseVolume(device: current.info.device, name: plan.name, admission: submission,
-                                           permitted: { permitted() && (recovery?.ownerStillCurrent() ?? true)
+                                           permitted: { permitted() && recovery.ownerStillCurrent()
                                                && ProcessInfo.processInfo.systemUptime < plan.expiresAt
                                                && !cancellation.isCancelled }, submitted: {
-                                               recovery?.didSubmit(); submitted()
+                                               recovery.didSubmit(); submitted()
                                            })
             } onCancel: {
                 cancellation.cancel()
@@ -186,7 +186,7 @@ public final class APFSVolumeFormat: @unchecked Sendable {
             guard info.uuid == replacement.uuid, info.device == replacement.device,
                   info.container == current.container.device, info.name == plan.name,
                   info.caseSensitive == plan.caseSensitive,
-                  recovery?.ownerStillCurrent() ?? true else { throw APFSVolumeFormatFailure.uncertain }
+                  recovery.ownerStillCurrent() else { throw APFSVolumeFormatFailure.uncertain }
             result = .init(submitted: true,
                          formatted: .init(id: replacement.uuid, name: replacement.name, mountPoint: info.mount),
                          failure: nil, toolExitStatus: terminal?.status, diskutilErrorCode: terminal?.errorCode)
@@ -195,7 +195,7 @@ public final class APFSVolumeFormat: @unchecked Sendable {
                          failure: didSubmit ? .uncertain : Self.preflightFailure(error),
                          toolExitStatus: terminal?.status, diskutilErrorCode: terminal?.errorCode)
         }
-        if intentRecorded, let recovery { return await recovery.finish(result) }
+        if intentRecorded { return await recovery.finish(result) }
         return result
     }
 
