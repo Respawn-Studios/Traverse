@@ -10,6 +10,7 @@ enum StorageChartIntegration {
     #if DEBUG
     static var startAtStorageRolesForQualification = false
     static var startAtFileTypesForQualification = false
+    static let groupSelectionForQualification = PassthroughSubject<(UUID, String), Never>()
     #endif
     static let appearance = StorageChartAppearance()
     static func configure(settings: BrowserSettings) { appearance.bind(settings) }

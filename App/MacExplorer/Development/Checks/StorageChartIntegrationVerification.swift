@@ -3,6 +3,17 @@ import AppKit
 import Combine
 import StorageAnalysis
 
+private final class StorageChartQueryHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reached = false
+    let release = DispatchSemaphore(value: 0)
+    var entered: Bool { lock.withLock { reached } }
+    func pause() {
+        lock.withLock { reached = true }
+        _ = release.wait(timeout: .now() + 30)
+    }
+}
+
 /// Two retained, generated sources only. Exercises the actual Properties and
 /// full-analysis projection, not a second renderer or independent query owner.
 @MainActor
@@ -18,6 +29,46 @@ enum StorageChartIntegrationVerification {
     }
     private static func settled(_ view: StorageDimensionalChartView, depth: Int) async throws {
         try await wait("Integrated chart did not settle at depth \(depth)") { view.frames.count == depth && !view.isAnimating }
+    }
+    private static func propertiesScroll(in view: NSView?) -> NSScrollView? {
+        guard let view else { return nil }
+        if let scroll = view as? NSScrollView, scroll.frame.width > 300,
+           (scroll.documentView?.frame.height ?? 0) > scroll.contentView.bounds.height + 80 { return scroll }
+        for child in view.subviews {
+            if let scroll = propertiesScroll(in: child) { return scroll }
+        }
+        return nil
+    }
+    private static func verifyPendingGroup(_ name: String, result: StorageAnalysisResult,
+                                           drill: StorageBreakdownChartModel, surface: StorageDimensionalChartView,
+                                           window: NSWindow, scroll: NSScrollView, sourceAccesses: () -> Int) async throws {
+        try await wait("Previous stored query did not drain") { result.activeReaderCount == 0 }
+        let hold = StorageChartQueryHold(), initialY = scroll.contentView.bounds.origin.y, chartSize = surface.bounds.size
+        let initialAccesses = sourceAccesses(), initialWorkers = result.queryWorkerLaunchCountForQualification
+        try result.installQueryReleaseHookForQualification { hold.pause() }
+        defer {
+            hold.release.signal()
+            if result.activeReaderCount == 0 { try? result.installQueryReleaseHookForQualification(nil) }
+        }
+        StorageChartIntegration.groupSelectionForQualification.send((result.id, name))
+        try await wait("First \(name) read did not reach its held catalog response") { hold.entered && drill.loading }
+        try await wait("Pending \(name) did not retain its Properties chart") {
+            surface.window === window && surface.frames.isEmpty && surface.bounds.size == chartSize
+        }
+        try await wait("Pending \(name) changed the Properties viewport") {
+            abs(scroll.contentView.bounds.origin.y - initialY) < 2
+        }
+        try require(!surface.interactive && sourceAccesses() == initialAccesses,
+            "Pending \(name) exposed stale chart actions or changed source authority")
+        hold.release.signal()
+        try await wait("Held \(name) query did not settle") { !drill.loading && result.activeReaderCount == 0 }
+        try await settled(surface, depth: 1)
+        try await wait("Settled \(name) changed the Properties viewport") {
+            abs(scroll.contentView.bounds.origin.y - initialY) < 2
+        }
+        try require(surface.window === window && surface.bounds.size == chartSize && sourceAccesses() == initialAccesses
+            && result.queryWorkerLaunchCountForQualification == initialWorkers + 1,
+            "\(name) changed chart geometry, reacquired the source, or did not use one stored query")
     }
     private static func boundaryControls() throws {
         func frame(_ index: Int, _ bytes: UInt64?) -> StorageChartSlice {
@@ -112,9 +163,61 @@ enum StorageChartIntegrationVerification {
         try await settled(surface, depth: 1)
         try require(surface.frames.last?.slices.first?.id == "steam" && surface.frames.last?.slices.first?.bytes == 70,
             "Properties did not project the stored role target and amount")
+        // Exercise first-load transitions in the actual Properties ScrollView;
+        // the separate Layouts review starts with preloaded groups.
+        guard let propertiesWindow = properties.window else { throw UIVerification.Failure(message: "Properties window missing") }
+        propertiesWindow.setContentSize(.init(width: 580, height: 500))
+        try await wait("Properties vertical viewport unavailable") { propertiesScroll(in: propertiesWindow.contentView) != nil }
+        guard let scroll = propertiesScroll(in: propertiesWindow.contentView) else { throw UIVerification.Failure(message: "Properties viewport missing") }
+        let initialOrigin = scroll.contentView.bounds.origin
+        scroll.contentView.scroll(to: .init(x: initialOrigin.x, y: initialOrigin.y + 80))
+        if abs(scroll.contentView.bounds.origin.y - initialOrigin.y) < 20 {
+            scroll.contentView.scroll(to: .init(x: initialOrigin.x, y: initialOrigin.y - 80))
+        }
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try require(abs(scroll.contentView.bounds.origin.y - initialOrigin.y) >= 20,
+            "Properties fixture did not establish a nonzero viewport")
+        try await Task.sleep(for: .milliseconds(50))
+        try await verifyPendingGroup("Folders", result: result, drill: drill, surface: surface,
+            window: propertiesWindow, scroll: scroll, sourceAccesses: { accesses })
+        let workersAfterFolders = result.queryWorkerLaunchCountForQualification
+        StorageChartIntegration.groupSelectionForQualification.send((result.id, "Purpose"))
+        try await wait("Properties Purpose root was not restored") { surface.frames.last?.slices.first?.id == "steam" && !drill.loading }
+        StorageChartIntegration.groupSelectionForQualification.send((result.id, "Folders"))
+        try await wait("Cached Folders root was not restored") { surface.frames.last?.id == "folder-0" && !drill.loading }
+        try require(result.queryWorkerLaunchCountForQualification == workersAfterFolders && accesses == scanAccesses,
+            "Returning to Folders queried the catalog again or reacquired source access")
+        StorageChartIntegration.groupSelectionForQualification.send((result.id, "Purpose"))
+        try await wait("Properties Purpose root did not return") { surface.frames.last?.slices.first?.id == "steam" && !drill.loading }
+        if result.supportsApplicationLayouts {
+            try await verifyPendingGroup("App Libraries", result: result, drill: drill, surface: surface,
+                window: propertiesWindow, scroll: scroll, sourceAccesses: { accesses })
+            let workersAfterLayouts = result.queryWorkerLaunchCountForQualification
+            StorageChartIntegration.groupSelectionForQualification.send((result.id, "Purpose"))
+            try await wait("Properties Purpose root did not return from Layouts") { surface.frames.last?.slices.first?.id == "steam" && !drill.loading }
+            StorageChartIntegration.groupSelectionForQualification.send((result.id, "App Libraries"))
+            try await wait("Cached Layouts root was not restored") { surface.frames.last?.id.contains("App Libraries") == true && !drill.loading }
+            try require(result.queryWorkerLaunchCountForQualification == workersAfterLayouts && accesses == scanAccesses,
+                "Returning to App Libraries queried the catalog again or reacquired source access")
+            StorageChartIntegration.groupSelectionForQualification.send((result.id, "Purpose"))
+            try await wait("Properties Purpose root did not return from cached Layouts") { surface.frames.last?.slices.first?.id == "steam" && !drill.loading }
+        }
+        try require(StorageDimensionalChartProbe.latest === surface && StorageDimensionalChartProbe.creations == creations,
+            "Group switching recreated the Properties chart surface")
+        let drillOrigin = scroll.contentView.bounds.origin.y
         surface.activateForQualification(.slice(0))
         try await wait("Properties Steam query") { drill.levels.count == 1 && !drill.loading }
         try await settled(surface, depth: 2)
+        try await wait("Properties drill moved the viewport") { abs(scroll.contentView.bounds.origin.y - drillOrigin) < 2 }
+        surface.activateForQualification(.ancestor(0))
+        try await wait("Properties Back did not restore the root") { drill.levels.isEmpty && !drill.loading }
+        try await settled(surface, depth: 1)
+        try await wait("Properties Back moved the viewport") { abs(scroll.contentView.bounds.origin.y - drillOrigin) < 2 }
+        surface.activateForQualification(.slice(0))
+        try await wait("Properties Steam query after Back") { drill.levels.count == 1 && !drill.loading }
+        try await settled(surface, depth: 2)
+        propertiesWindow.setContentSize(.init(width: 580, height: 780))
+        scroll.contentView.scroll(to: initialOrigin); scroll.reflectScrolledClipView(scroll.contentView)
         let chosenTint = surface.frames[0].slices[0].tint
         try require(surface.frames.last?.slices.max(by: { ($0.bytes ?? 0) < ($1.bytes ?? 0) })?.tint == chosenTint,
             "Integrated child did not inherit its chosen parent color")

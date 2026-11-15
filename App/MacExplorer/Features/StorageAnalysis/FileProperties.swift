@@ -570,6 +570,26 @@ final class FilePropertiesWindowController: NSWindowController, NSWindowDelegate
 private struct FilePropertiesView: View {
     @ObservedObject var model: FilePropertiesModel
     var namesEditor: PrivateNamesEditorModel? = nil
+    @State private var scrollPosition = ScrollPosition()
+    @State private var chartViewport = ChartViewport()
+
+    private final class ChartViewport {
+        var visibleY: CGFloat = 0
+        var pendingY: CGFloat?
+    }
+
+    private func preserveChartViewport() {
+        chartViewport.pendingY = chartViewport.visibleY
+        restoreChartViewport()
+    }
+    private func restoreChartViewport() {
+        Task { @MainActor in
+            await Task.yield() // Let the chart's new SwiftUI layout settle first.
+            guard let y = chartViewport.pendingY else { return }
+            withTransaction(Transaction(animation: nil)) { scrollPosition.scrollTo(y: y) }
+            if !model.chartDrill.loading { chartViewport.pendingY = nil }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -615,6 +635,19 @@ private struct FilePropertiesView: View {
                         .help("Properties reads selected-item metadata. Scanning reads names and sizes inside the chosen folder, never file contents. Symbolic-link targets are not followed. macOS privacy and file permissions can restrict access.")
                 }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
             }
+            .scrollPosition($scrollPosition)
+            .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { _, y in
+                chartViewport.visibleY = y
+            }
+            .onScrollPhaseChange { _, phase in
+                if phase == .tracking || phase == .interacting || phase == .decelerating {
+                    chartViewport.pendingY = nil
+                }
+            }
+            .onReceive(model.chartDrill.$loading.removeDuplicates()) { loading in
+                if !loading { restoreChartViewport() }
+            }
+            .onReceive(model.chartDrill.$canBrowse) { _ in chartViewport.pendingY = nil }
             Divider()
             HStack {
                 Button(model.urls.count > 1 ? "Copy Paths" : "Copy Path") { model.copyPaths(model.urls) }
@@ -688,7 +721,8 @@ private struct FilePropertiesView: View {
                 }
                 if let report = model.attribution {
                     StorageAttributionView(report: report, compact: true, drill: model.chartDrill,
-                        folderRootTitle: model.selectedObservation?.name ?? "Selected folder", onOpenFullAnalysis: { model.openFullAnalysis() })
+                        folderRootTitle: model.selectedObservation?.name ?? "Selected folder", onOpenFullAnalysis: { model.openFullAnalysis() },
+                        onNavigation: preserveChartViewport)
                         .toolPageEntrance("storage-breakdown", enabled: model.allowsDetailMotion,
                             mode: model.detailMotionMode, initiallyRevealed: false)
                 }
@@ -893,6 +927,7 @@ struct StorageAttributionView: View {
     @ObservedObject private var chartAppearance = StorageChartIntegration.appearance
     var folderRootTitle: String
     var onOpenFullAnalysis: (() -> Void)? = nil
+    var onNavigation: (() -> Void)? = nil
     #if DEBUG
     @State private var group = StorageChartIntegration.startAtFileTypesForQualification ? Group.fileTypes
         : StorageChartIntegration.startAtStorageRolesForQualification || StoragePurposeJourneyFeature.isEnabled ? .roles : .fileTypes
@@ -958,8 +993,34 @@ struct StorageAttributionView: View {
     }
     private var rows: [Slice] { report.isProvisional ? baseRows : drill.current.map(slices) ?? baseRows }
     private var backEnabled: Bool { !drill.levels.isEmpty && (group != .folders || drill.levels.count > 1) }
+    private var emptyChartMessage: String {
+        if !report.hasLayoutAttribution && (displayGroup == .roles || displayGroup == .projects) {
+            return "Layout attribution was not completed. File Types and stored folder totals remain available."
+        }
+        if drill.loading {
+            switch displayGroup {
+            case .folders: return "Reading stored folder totals…"
+            case .layouts: return "Reading stored app library totals…"
+            default: return "Reading stored breakdown…"
+            }
+        }
+        if !drill.message.isEmpty { return drill.message }
+        if drill.hasConfirmedPurposeChanges && drill.current?.purposeLocations != nil {
+            return "Shown locations were moved since this scan. Scan again to update the recorded totals."
+        }
+        return "No regular-file bytes were observed."
+    }
+    private func selectGroup(_ value: Group) {
+        guard !report.isProvisional, value != group else { return }
+        onNavigation?()
+        drill.reset(); drill.setMetric(metric)
+        if value == .folders { drill.openRootFolder(title: folderRootTitle) }
+        if value == .layouts { drill.loadApplicationLayouts() }
+        group = value
+    }
     private func open(_ row: Slice) {
         guard !report.isProvisional, !drill.loading, !drill.locationActionRunning else { return }
+        onNavigation?()
         if let location = row.location { drill.selectPurposeLocation(location.id); return }
         drill.setMetric(metric)
         if let purpose = row.purposeTarget { drill.openPurpose(purpose, title: row.title); return }
@@ -993,6 +1054,7 @@ struct StorageAttributionView: View {
         return StorageChartIntegration.colored(frames)
     }
     private func returnToFrame(_ index: Int) {
+        onNavigation?()
         drill.returnToLevelCount(displayGroup == .folders ? index + 1 : index)
     }
     private func openNativeSlice(_ index: Int, frames: [StorageChartFrame]) {
@@ -1014,7 +1076,7 @@ struct StorageAttributionView: View {
                 ForEach(Array(drill.levels.dropLast().enumerated()), id: \.element.id) { index, level in
                     if displayGroup != .folders || index > 0 {
                         Image(systemName: "chevron.right").interfaceFont(.caption2).foregroundStyle(.secondary)
-                        Button(level.title) { drill.returnToLevelCount(index + 1) }.buttonStyle(.plain)
+                        Button(level.title) { onNavigation?(); drill.returnToLevelCount(index + 1) }.buttonStyle(.plain)
                     }
                 }
                 Image(systemName: "chevron.right").interfaceFont(.caption2).foregroundStyle(.secondary)
@@ -1029,18 +1091,22 @@ struct StorageAttributionView: View {
     }
     var body: some View {
         let frames = dimensionalFrames
-        return VStack(alignment: .leading, spacing: 10) {
+        let missingLayout = !report.hasLayoutAttribution && (displayGroup == .roles || displayGroup == .projects)
+        let chartReady = !missingLayout && !rows.isEmpty && !frames.isEmpty && frames.last?.slices.isEmpty == false
+        let presentedFrames = chartReady ? frames : []
+        let chartHeight: CGFloat = compact || overview ? 220 : 300
+        let content = VStack(alignment: .leading, spacing: 10) {
             if report.isProvisional {
                 Text("Counted so far").interfaceFont(.callout.weight(.semibold))
             }
             HStack {
-              Picker("Group", selection: Binding(get: { displayGroup }, set: { if !report.isProvisional { group = $0 } })) {
+              Picker("Group", selection: Binding(get: { displayGroup }, set: { selectGroup($0) })) {
                 ForEach(Group.allCases.filter { ($0 != .folders || drill.canBrowse) && ($0 != .layouts || drill.canShowApplicationLayouts) }, id: \.self) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.menu).fixedSize(horizontal: true, vertical: false).disabled(report.isProvisional)
                 .help(report.isProvisional ? "More views and folder details become available when scanning finishes." : "File Types groups by filename. Purpose and App Libraries use known folder layouts. Projects opens each recognized project’s own composition. These are clues, not a cleanup recommendation.")
               if overview {
                   Spacer()
-                  if drill.loading { ProgressView().controlSize(.small).help("Loading stored totals") }
+                  if drill.loading && chartReady { ProgressView().controlSize(.small).help("Loading stored totals") }
                   sizePicker
               }
             }
@@ -1056,14 +1122,14 @@ struct StorageAttributionView: View {
                             Text("File Types").tag(StoredAnalysisFacet.fileTypes)
                         }.pickerStyle(.menu).fixedSize()
                         Spacer(minLength: 8)
-                        Button("Browse Recorded Folders…") { drill.browseRecordedProjectFolders() }.disabled(drill.loading)
+                        Button("Browse Recorded Folders…") { onNavigation?(); drill.browseRecordedProjectFolders() }.disabled(drill.loading)
                     }
                 }
             }
             if !overview { HStack {
                 sizePicker
                 Spacer()
-                if drill.loading { ProgressView().controlSize(.small).help("Loading stored totals") }
+                if drill.loading && chartReady { ProgressView().controlSize(.small).help("Loading stored totals") }
             } }
             if drill.current?.purposeProjects != nil {
                 Text("Inside project").interfaceFont(.callout.weight(.medium))
@@ -1074,14 +1140,14 @@ struct StorageAttributionView: View {
             }
             if !report.isProvisional, let level = drill.current {
                 HStack(spacing: 8) {
-                    Button { drill.back() } label: { Image(systemName: "chevron.left") }.disabled(!backEnabled).help("Previous breakdown")
+                    Button { onNavigation?(); drill.back() } label: { Image(systemName: "chevron.left") }.disabled(!backEnabled).help("Previous breakdown")
                     nativeBreadcrumbs
                     Spacer()
                     Text(storageMetricText(level.value.value.bytes[metric], files: level.value.value.counts.regularFiles))
                         .interfaceFont(.caption).monospacedDigit()
                 }
             }
-            if !drill.message.isEmpty { Text(drill.message).interfaceFont(.caption).foregroundStyle(.secondary) }
+            if !drill.message.isEmpty && chartReady { Text(drill.message).interfaceFont(.caption).foregroundStyle(.secondary) }
             if drill.canExplainOther {
                 Button("Why are these files Other?") { showsOtherExplanation = true; drill.explainOther() }
                     .disabled(drill.loading).help("Explain filename patterns and storage roles using this scan; no rescan or file-content reads.")
@@ -1098,22 +1164,25 @@ struct StorageAttributionView: View {
                         }
                     }
             }
-            if !report.hasLayoutAttribution && (displayGroup == .roles || displayGroup == .projects) {
-                Text("Layout attribution was not completed. File Types and stored folder totals remain available.").foregroundStyle(.secondary)
-            } else if rows.isEmpty {
-                Text(drill.loading ? "Loading breakdown…" : drill.hasConfirmedPurposeChanges && drill.current?.purposeLocations != nil
-                    ? "Shown locations were moved since this scan. Scan again to update the recorded totals." : "No regular-file bytes were observed.").foregroundStyle(.secondary)
-            } else {
-                HStack(alignment: .top, spacing: 18) {
-                        StorageDimensionalChart(frames: frames, scopeIdentity: drill.scopeIdentity, style: chartAppearance.style,
-                            interactive: !report.isProvisional && !drill.loading,
+            HStack(alignment: .top, spacing: 18) {
+                    ZStack {
+                        StorageDimensionalChart(frames: presentedFrames, scopeIdentity: drill.scopeIdentity, style: chartAppearance.style,
+                            interactive: chartReady && !report.isProvisional && !drill.loading,
                             reduceMotion: reduceMotion || !chartAppearance.motion.allows(.charts),
                             reduceTransparency: reduceTransparency, motionMode: chartAppearance.motion.mode,
                             onOpen: { openNativeSlice($0, frames: frames) },
                             onReturn: returnToFrame, onStyle: { chartAppearance.choose($0) })
-                            .frame(width: compact ? 200 : overview ? 250 : 300, height: compact || overview ? 220 : 300)
+                            .opacity(chartReady ? 1 : 0).accessibilityHidden(!chartReady)
+                        if !chartReady {
+                            VStack(spacing: 8) {
+                                if drill.loading { ProgressView().controlSize(.small) }
+                                Text(emptyChartMessage).interfaceFont(.caption).multilineTextAlignment(.center)
+                                    .foregroundStyle(.secondary)
+                            }.padding(12).accessibilityIdentifier("storage-chart-placeholder")
+                        }
+                    }.frame(width: compact ? 200 : overview ? 250 : 300, height: chartHeight)
                     VStack(alignment: .leading, spacing: 5) {
-                      if let frame = frames.last {
+                      if chartReady, let frame = frames.last {
                         ForEach(Array(frame.slices.prefix(compact ? 5 : 15).enumerated()), id: \.element.id) { index, slice in
                             if slice.canOpen {
                                 Button { openNativeSlice(index, frames: frames) } label: { nativeLegend(slice) }
@@ -1128,13 +1197,14 @@ struct StorageAttributionView: View {
                                 }
                             }.fixedSize(horizontal: true, vertical: false).disabled(drill.loading)
                         }
+                      } else {
+                          Text(emptyChartMessage).interfaceFont(.caption).foregroundStyle(.secondary)
                       }
                       if let selection = drill.selectedPurposeLocation {
                           purposeLocationDetails(selection)
                       }
                     }.frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
+            }.frame(minHeight: chartHeight, alignment: .top)
             if !drill.locationMessage.isEmpty { Text(drill.locationMessage).interfaceFont(.caption).foregroundStyle(.secondary) }
             if drill.hasConfirmedPurposeChanges, drill.current?.purposeTarget != nil {
                 Text("Confirmed moved locations are hidden · sizes remain recorded until the next scan.").interfaceFont(.caption).foregroundStyle(.secondary)
@@ -1162,16 +1232,23 @@ struct StorageAttributionView: View {
                     .help("Hard links and shared APFS data can overlap physical storage. These totals do not measure exclusive or reclaimable space.")
             }
         }
-        .onChange(of: group) { _, value in
-            drill.reset(); drill.setMetric(metric)
-            if value == .folders { drill.open(.folder(0), title: folderRootTitle) }
-            if value == .layouts { drill.loadApplicationLayouts() }
-        }
         .onChange(of: allocated) { _, _ in drill.setMetric(metric) }
         .onChange(of: drill.current?.id) { _, _ in showsOtherExplanation = false }
         .onDisappear { showsOtherExplanation = false }
+        .onChange(of: drill.scopeIdentity) { _, _ in
+            if group == .folders && drill.canBrowse { drill.openRootFolder(title: folderRootTitle) }
+            if group == .layouts && drill.canShowApplicationLayouts { drill.loadApplicationLayouts() }
+        }
         .onChange(of: drill.canBrowse) { _, available in if !available && group == .folders { group = .fileTypes } }
         .onChange(of: drill.canShowApplicationLayouts) { _, available in if !available && group == .layouts { group = .fileTypes } }
+        #if DEBUG
+        return content.onReceive(StorageChartIntegration.groupSelectionForQualification) { selection in
+            let (scope, name) = selection
+            if compact && drill.scopeIdentity == scope, let value = Group(rawValue: name) { selectGroup(value) }
+        }
+        #else
+        return content
+        #endif
     }
     @ViewBuilder private func purposeLocationDetails(_ selection: StorageBreakdownChartModel.PurposeLocationSelection) -> some View {
         let location = selection.location

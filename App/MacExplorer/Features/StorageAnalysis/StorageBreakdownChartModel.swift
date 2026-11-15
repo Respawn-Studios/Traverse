@@ -54,6 +54,9 @@ final class StorageBreakdownChartModel: ObservableObject {
     private var resultID: UUID?
     private var generation = UUID()
     private var metric = AnalysisByteMetric.dataLogical
+    // Only the bounded root folder breakdown is reused across group changes.
+    // A new read view revokes this cache along with Application Layouts.
+    private var folderRoots: [AnalysisByteMetric: StoredAnalysisBreakdown] = [:]
     private var request: Task<Void, Never>?
     private enum Intent {
         case breakdown(StoredAnalysisDrillTarget, title: String, replace: Bool)
@@ -81,7 +84,7 @@ final class StorageBreakdownChartModel: ObservableObject {
         // A repeated render of the same view preserves its chosen size metric.
         // Explicit size changes go through setMetric, as in the existing model.
         guard viewID != queries?.viewID || self.liveLocationResult?.id != liveLocationResult?.id else { return }
-        reset(); applicationLayouts = nil
+        reset(); applicationLayouts = nil; folderRoots = [:]
         self.result = queries; self.liveLocationResult = liveLocationResult
         resultID = queries?.catalogID; viewID = queries?.viewID
         self.metric = metric; canBrowse = queries != nil
@@ -96,7 +99,7 @@ final class StorageBreakdownChartModel: ObservableObject {
         generation = UUID(); pending = nil; request?.cancel()
         levels = []; loading = false; message = ""
     }
-    func close() { reset(); result = nil; liveLocationResult = nil; viewID = nil; resultID = nil; canBrowse = false; canShowApplicationLayouts = false; canUsePurposeJourney = false; applicationLayouts = nil; knownTrashes = [:]; onLocationAction = nil; onCancelLocationAction = nil }
+    func close() { reset(); result = nil; liveLocationResult = nil; viewID = nil; resultID = nil; canBrowse = false; canShowApplicationLayouts = false; canUsePurposeJourney = false; applicationLayouts = nil; folderRoots = [:]; knownTrashes = [:]; onLocationAction = nil; onCancelLocationAction = nil }
     /// A cancelled task may not yet have entered the result's reader queue.
     /// Wait for this owner before interpreting a zero shared reader count.
     func waitUntilQueriesDrained() async { await request?.value }
@@ -104,6 +107,13 @@ final class StorageBreakdownChartModel: ObservableObject {
         guard canShowApplicationLayouts, applicationLayouts == nil else { return }
         generation = UUID(); pending = .applicationLayouts
         loading = true; message = ""; request?.cancel(); pump()
+    }
+    func openRootFolder(title: String) {
+        guard canBrowse, result != nil else { return }
+        if let value = folderRoots[metric] {
+            levels = [.init(target: .folder(0), title: title, value: value)]
+            loading = false; message = ""
+        } else { open(.folder(0), title: title) }
     }
     func open(_ target: StoredAnalysisDrillTarget, title: String) {
         guard levels.count < 16 else { message = "Use the folder browser below to explore deeper."; return }
@@ -242,6 +252,7 @@ final class StorageBreakdownChartModel: ObservableObject {
                 case .breakdown(let target, let title, let replace):
                     let value = try await result.breakdown(target, metric: metric)
                     if let self, self.generation == token, !Task.isCancelled {
+                        if target == .folder(0) { self.folderRoots[metric] = value }
                         let explanation = replace && self.current?.target == target ? self.current?.otherExplanation : nil
                         if replace, !self.levels.isEmpty { self.levels.removeLast() }
                         self.levels.append(.init(target: target, title: title, value: value, otherExplanation: explanation)); self.loading = false
