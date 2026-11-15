@@ -263,12 +263,28 @@ enum ToolContentMotion {
     private static let views = NSHashTable<NSView>.weakObjects()
     /// A retained window can be shown repeatedly. Bringing it forward, or
     /// cancelling an accepted close, must not replay its entrance.
-    static func revealWindowIfNewlyShown(_ window: NSWindow, wasVisible: Bool) {
+    static func prepareWindowEntrance(_ window: NSWindow, wasVisible: Bool) -> BrowserMotionPreferences? {
         guard !wasVisible, !window.isMiniaturized, window.sheetParent == nil,
-              let chrome = window.contentViewController as? ToolWindowChrome else { return }
-        reveal(chrome.contentHost, effect: .windows)
+              let chrome = window.contentViewController as? ToolWindowChrome,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              chrome.motion.allows(.windows) else { return nil }
+        window.alphaValue = 0
+        return chrome.motion
+    }
+    static func revealWindow(_ window: NSWindow, motion: BrowserMotionPreferences?) {
+        guard let motion else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.20 * motion.mode.durationScale
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 1
+        }
     }
     static func finish(in window:NSWindow) {
+        if !ToolWindowCloseMotion.isClosing(window), window.alphaValue < 1 {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0; window.animator().alphaValue = 1
+            }
+        }
         (window.contentViewController as? ToolWindowChrome)?.contentHost.layer?.removeAnimation(forKey: "tool-page-crossfade")
         for view in views.allObjects where view.window === window || view.window == nil {
             view.layer?.removeAnimation(forKey:"tool-content-entrance")

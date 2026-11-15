@@ -171,6 +171,7 @@ import QuartzCore
         let native = animationBehavior
         if userClose { animationBehavior = .none }
         super.close(); animationBehavior = native
+        ToolContentMotion.finish(in: self)
     }
     override func sendEvent(_ event: NSEvent) {
         guard !ToolWindowCloseMotion.isClosing(self) else { return }
@@ -178,8 +179,12 @@ import QuartzCore
     }
     override func makeKeyAndOrderFront(_ sender: Any?) {
         let wasVisible = isVisible
-        ToolWindowCloseMotion.cancel(self); super.makeKeyAndOrderFront(sender)
-        ToolContentMotion.revealWindowIfNewlyShown(self, wasVisible: wasVisible)
+        ToolWindowCloseMotion.cancel(self)
+        let native = animationBehavior
+        let entrance = ToolContentMotion.prepareWindowEntrance(self, wasVisible: wasVisible)
+        if entrance != nil { animationBehavior = .none }
+        super.makeKeyAndOrderFront(sender); animationBehavior = native
+        ToolContentMotion.revealWindow(self, motion: entrance)
     }
 }
 
@@ -194,6 +199,7 @@ import QuartzCore
         let native = animationBehavior
         if userClose { animationBehavior = .none }
         super.close(); animationBehavior = native
+        ToolContentMotion.finish(in: self)
     }
     override func sendEvent(_ event: NSEvent) {
         guard !ToolWindowCloseMotion.isClosing(self) else { return }
@@ -201,7 +207,11 @@ import QuartzCore
     }
     override func makeKeyAndOrderFront(_ sender: Any?) {
         let wasVisible = isVisible
-        ToolWindowCloseMotion.cancel(self); super.makeKeyAndOrderFront(sender)
-        ToolContentMotion.revealWindowIfNewlyShown(self, wasVisible: wasVisible)
+        ToolWindowCloseMotion.cancel(self)
+        let native = animationBehavior
+        let entrance = ToolContentMotion.prepareWindowEntrance(self, wasVisible: wasVisible)
+        if entrance != nil { animationBehavior = .none }
+        super.makeKeyAndOrderFront(sender); animationBehavior = native
+        ToolContentMotion.revealWindow(self, motion: entrance)
     }
 }

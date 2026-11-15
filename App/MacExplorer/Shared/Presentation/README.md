@@ -32,8 +32,8 @@ Custom keyboard-window subclasses inherit ToolMotionWindow too. Use
 performClose for an ordinary user Close/Done action; keep direct close for
 feature-owned teardown after work has drained. New presentations use position;
 bringing an existing window forward must preserve its user-selected frame.
-Hidden-to-visible presentations share a short entrance through the same native
-window classes. Showing a visible window or cancelling its close does not replay
+Hidden-to-visible presentations share a short native window fade, including the
+titlebar and material. It retains no window picture. Showing a visible window or cancelling its close does not replay
 the entrance. Opening and closing retain independent motion preferences.
 Interface-size changes use the same native content crossfade once per visible
 window. Text keeps its actual requested size and native controls keep focus;

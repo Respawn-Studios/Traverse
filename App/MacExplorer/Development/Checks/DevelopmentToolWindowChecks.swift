@@ -219,7 +219,16 @@ import Foundation
         let properties = FilePropertiesWindowController(settings: settings, copyPaths: { _ in })
         let help = TraverseHelpController.shared
         var windows: [NSWindow] = [preferences]
+        var stage = "startup", passed = false
+        var observations: [[String: Any]] = []
+        var alphaSamples: [CGFloat] = []
         defer {
+            try? JSONSerialization.data(withJSONObject: ["passed": passed, "stage": stage, "windows": observations,
+                "nativeWindowAlpha": windows.map { $0.alphaValue },
+                "lastOpeningAlphaSamples": alphaSamples,
+                "independentEffects": passed, "programmaticCloseImmediate": passed,
+                "systemReduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion], options: [.prettyPrinted, .sortedKeys])
+                .write(to: root.appendingPathComponent("evidence/tool-window-lifecycle.json"), options: .withoutOverwriting)
             for window in windows { ToolWindowCloseMotion.cancel(window); window.close() }
             properties.cancel(); help.history.cancel(); settings.motion = original
         }
@@ -230,24 +239,36 @@ import Foundation
             ("Analyzer", { analysis.applyToolStyle(settings); analysis.showWindow(nil); return analysis.window })
         ]
         NSApplication.shared.activate(ignoringOtherApps: true)
-        var observations: [[String: Any]] = []
         for mode in BrowserMotionMode.allCases {
             settings.motion = .init(mode: mode)
             try await Task.sleep(for: .milliseconds(30))
             for (name, show) in shows {
+                stage = name + "/" + mode.rawValue + "/opening"
                 guard let window = show(), let chrome = window.contentViewController as? ToolWindowChrome else { throw Failure.presentation }
                 if !windows.contains(where: { $0 === window }) { windows.append(window) }
                 let expected = mode != .off && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-                let entrance = chrome.contentHost.layer?.animation(forKey: "tool-content-entrance")
-                try UIVerification.require((entrance != nil) == expected, name + " normal opening missed its motion policy")
+                let entrance = window.alphaValue < 1
+                try UIVerification.require(entrance == expected, name + " normal opening missed its motion policy")
+                alphaSamples = [window.alphaValue]
+                let openingDeadline = CACurrentMediaTime() + 1
+                while window.alphaValue < 1 && CACurrentMediaTime() < openingDeadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                    alphaSamples.append(window.alphaValue)
+                }
+                let openingAlpha = alphaSamples.first(where: { $0 > 0 && $0 < 1 }) ?? window.alphaValue
+                stage = name + "/" + mode.rawValue + "/intermediate-opacity"
+                try UIVerification.require(!expected || openingAlpha > 0 && openingAlpha < 1,
+                    name + " opening did not expose an intermediate native window opacity")
                 try await wait { window.isVisible && window.isOnActiveSpace && window.occlusionState.contains(.visible) }
                 let frame = window.frame, child = chrome.children.first
-                try await wait { chrome.contentHost.layer?.animation(forKey: "tool-content-entrance") == nil }
+                stage = name + "/" + mode.rawValue + "/settling"
+                try await wait { window.alphaValue == 1 }
                 _ = show()
                 try UIVerification.require(window.frame == frame && chrome.children.first === child
-                    && chrome.contentHost.layer?.animation(forKey: "tool-content-entrance") == nil,
+                    && window.alphaValue == 1,
                     name + " bring-to-front replayed motion or rebuilt its allocation")
                 window.performClose(nil)
+                stage = name + "/" + mode.rawValue + "/closing"
                 let closing = ToolWindowCloseMotion.isClosing(window)
                 try UIVerification.require(closing == expected, name + " native user close missed its motion policy")
                 if expected {
@@ -258,22 +279,31 @@ import Foundation
                         name + " Show did not cancel the pending close")
                     window.performClose(nil)
                 }
+                var closingAlpha: CGFloat?
+                let closingDeadline = CACurrentMediaTime() + 1
+                while window.isVisible && CACurrentMediaTime() < closingDeadline {
+                    if window.alphaValue > 0 && window.alphaValue < 1 { closingAlpha = window.alphaValue }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                try UIVerification.require(!expected || closingAlpha != nil,
+                    name + " closing did not expose an intermediate native window opacity")
                 try await wait { !window.isVisible && !ToolWindowCloseMotion.isClosing(window) }
                 try UIVerification.require(window.alphaValue == 1 && !window.ignoresMouseEvents,
                     name + " retained a hidden or unresponsive presentation")
                 observations.append(["window": name, "mode": mode.rawValue,
-                    "entrance": entrance != nil, "userCloseFade": closing, "framePreserved": true])
+                    "entrance": entrance, "openingIntermediateAlpha": openingAlpha,
+                    "closingIntermediateAlpha": closingAlpha ?? 1, "userCloseFade": closing, "framePreserved": true])
             }
         }
         // Opening and closing have separate switches. Programmatic teardown
         // must remain immediate even when both user-facing effects are on.
         for opening in [false, true] {
+            stage = "independent-effects/" + String(opening)
             settings.motion = .init(windows: opening, windowClosing: !opening)
             try await Task.sleep(for: .milliseconds(30))
             preferences.makeKeyAndOrderFront(nil)
-            let layer = (preferences.contentViewController as? ToolWindowChrome)?.contentHost.layer
             let systemReduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            try UIVerification.require((layer?.animation(forKey: "tool-content-entrance") != nil) == (opening && !systemReduced),
+            try UIVerification.require((preferences.alphaValue < 1) == (opening && !systemReduced),
                 "Independent opening preference was ignored")
             try await wait { preferences.occlusionState.contains(.visible) }
             preferences.performClose(nil)
@@ -282,14 +312,13 @@ import Foundation
             try await wait { !preferences.isVisible }
         }
         settings.motion = .init()
+        stage = "programmatic-close"
         try await Task.sleep(for: .milliseconds(30))
         preferences.makeKeyAndOrderFront(nil); preferences.close()
         try UIVerification.require(!preferences.isVisible && !ToolWindowCloseMotion.isClosing(preferences),
             "Programmatic teardown acquired a user-close fade")
-        try JSONSerialization.data(withJSONObject: ["passed": true, "windows": observations,
-            "independentEffects": true, "programmaticCloseImmediate": true,
-            "systemReduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion], options: [.prettyPrinted, .sortedKeys])
-            .write(to: root.appendingPathComponent("evidence/tool-window-lifecycle.json"), options: .withoutOverwriting)
+        try UIVerification.require(preferences.alphaValue == 1, "Programmatic teardown retained its opening fade")
+        stage = "completed"; passed = true
     }
     private static func descendants(_ view: NSView?) -> [NSView] {
         guard let view else { return [] }; return [view] + view.subviews.flatMap { descendants($0) }
