@@ -36,7 +36,7 @@ import StorageAnalysis
             root = candidate
             let surface = selectedSurface ?? "settings"
             let modeText = arguments.firstIndex(of: "--motion-mode").flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil } ?? "full"
-            guard ["settings","editor-settings","help","analysis","properties","connection","ssh","ssh-prompts","ssh-jump","workspace","tools","chart","filters","controls","integration","deep","deep-navigation","progress","stop","failures","workload"].contains(surface), let mode = BrowserMotionMode(rawValue: modeText) else { throw Failure.scope }
+            guard ["settings","editor-settings","help","analysis","properties","connection","ssh","ssh-prompts","ssh-jump","workspace","tools","window-lifecycle","chart","filters","controls","integration","deep","deep-navigation","progress","stop","failures","workload"].contains(surface), let mode = BrowserMotionMode(rawValue: modeText) else { throw Failure.scope }
             let settings = BrowserSettings(persist: false)
             settings.appearance = .dark; settings.navigationStyle = .glass; settings.glassFileContent = true
             if arguments.contains("--motion-light") { settings.appearance = .light }
@@ -208,6 +208,11 @@ import StorageAnalysis
                 checkpoint = "generated-native-storage-chart"
                 let review = try await StorageDimensionalChartVerification.motionReview(root: candidate, settings: settings)
                 additionalChecks = review.checks; clips = review.clips
+            } else if surface == "window-lifecycle" {
+                checkpoint = "actual-tool-window-lifecycle"
+                try await DevelopmentToolWindowChecks.verifyWindowLifecycle(root: candidate, settings: settings)
+                additionalChecks["windowLifecycle"] = try JSONSerialization.jsonObject(with:
+                    Data(contentsOf: candidate.appendingPathComponent("evidence/tool-window-lifecycle.json")))
             } else if surface == "tools" {
                 checkpoint = "shared-native-tool-theme"
                 let review = try await DevelopmentToolWindowChecks.run(root: candidate, settings: settings)

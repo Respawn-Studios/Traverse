@@ -261,6 +261,13 @@ private struct ToolPageCrossfadeTrigger<ID: Equatable & Sendable>: NSViewReprese
 enum ToolContentMotion {
     // Weak bookkeeping only: this never keeps a view/private description alive.
     private static let views = NSHashTable<NSView>.weakObjects()
+    /// A retained window can be shown repeatedly. Bringing it forward, or
+    /// cancelling an accepted close, must not replay its entrance.
+    static func revealWindowIfNewlyShown(_ window: NSWindow, wasVisible: Bool) {
+        guard !wasVisible, !window.isMiniaturized, window.sheetParent == nil,
+              let chrome = window.contentViewController as? ToolWindowChrome else { return }
+        reveal(chrome.contentHost, effect: .windows)
+    }
     static func finish(in window:NSWindow) {
         (window.contentViewController as? ToolWindowChrome)?.contentHost.layer?.removeAnimation(forKey: "tool-page-crossfade")
         for view in views.allObjects where view.window === window || view.window == nil {

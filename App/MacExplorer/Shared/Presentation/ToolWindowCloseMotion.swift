@@ -177,7 +177,9 @@ import QuartzCore
         super.sendEvent(event)
     }
     override func makeKeyAndOrderFront(_ sender: Any?) {
+        let wasVisible = isVisible
         ToolWindowCloseMotion.cancel(self); super.makeKeyAndOrderFront(sender)
+        ToolContentMotion.revealWindowIfNewlyShown(self, wasVisible: wasVisible)
     }
 }
 
@@ -198,6 +200,8 @@ import QuartzCore
         super.sendEvent(event)
     }
     override func makeKeyAndOrderFront(_ sender: Any?) {
+        let wasVisible = isVisible
         ToolWindowCloseMotion.cancel(self); super.makeKeyAndOrderFront(sender)
+        ToolContentMotion.revealWindowIfNewlyShown(self, wasVisible: wasVisible)
     }
 }

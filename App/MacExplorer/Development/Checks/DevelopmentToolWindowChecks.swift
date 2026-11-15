@@ -210,6 +210,87 @@ import Foundation
             "deviceRootBenchmarkNavigation": true, "benchmarkWrites": 0,
             "liveLightDarkSystemChanges": true, "actualDriveSelectionChanged": true], clips)
     }
+    /// Exercise the actual retained controllers, not a direct call to an
+    /// animation helper. This makes the normal opening/closing path observable.
+    static func verifyWindowLifecycle(root: URL, settings: BrowserSettings) async throws {
+        let original = settings.motion
+        let preferences = BrowserSettingsWindow.make(BrowserSettingsView(settings: settings))
+        let analysis = StorageAnalysisWindowController(onChooseFolder: {}, onRefresh: {}, onStop: {}, onAppStorage: {})
+        let properties = FilePropertiesWindowController(settings: settings, copyPaths: { _ in })
+        let help = TraverseHelpController.shared
+        var windows: [NSWindow] = [preferences]
+        defer {
+            for window in windows { ToolWindowCloseMotion.cancel(window); window.close() }
+            properties.cancel(); help.history.cancel(); settings.motion = original
+        }
+        let shows: [(String, () -> NSWindow?)] = [
+            ("Settings", { preferences.makeKeyAndOrderFront(nil); return preferences }),
+            ("What's New", { help.showForMotionVerification(.whatsNew, settings: settings); return help.window }),
+            ("Properties", { properties.show(urls: [root.appendingPathComponent("source/Upload.txt")]); return properties.window }),
+            ("Analyzer", { analysis.applyToolStyle(settings); analysis.showWindow(nil); return analysis.window })
+        ]
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        var observations: [[String: Any]] = []
+        for mode in BrowserMotionMode.allCases {
+            settings.motion = .init(mode: mode)
+            try await Task.sleep(for: .milliseconds(30))
+            for (name, show) in shows {
+                guard let window = show(), let chrome = window.contentViewController as? ToolWindowChrome else { throw Failure.presentation }
+                if !windows.contains(where: { $0 === window }) { windows.append(window) }
+                let expected = mode != .off && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                let entrance = chrome.contentHost.layer?.animation(forKey: "tool-content-entrance")
+                try UIVerification.require((entrance != nil) == expected, name + " normal opening missed its motion policy")
+                try await wait { window.isVisible && window.isOnActiveSpace && window.occlusionState.contains(.visible) }
+                let frame = window.frame, child = chrome.children.first
+                try await wait { chrome.contentHost.layer?.animation(forKey: "tool-content-entrance") == nil }
+                _ = show()
+                try UIVerification.require(window.frame == frame && chrome.children.first === child
+                    && chrome.contentHost.layer?.animation(forKey: "tool-content-entrance") == nil,
+                    name + " bring-to-front replayed motion or rebuilt its allocation")
+                window.performClose(nil)
+                let closing = ToolWindowCloseMotion.isClosing(window)
+                try UIVerification.require(closing == expected, name + " native user close missed its motion policy")
+                if expected {
+                    try UIVerification.require(window.isVisible && window.ignoresMouseEvents, name + " retired before its accepted fade")
+                    window.makeKeyAndOrderFront(nil)
+                    try UIVerification.require(window.isVisible && !ToolWindowCloseMotion.isClosing(window)
+                        && !window.ignoresMouseEvents && window.alphaValue == 1,
+                        name + " Show did not cancel the pending close")
+                    window.performClose(nil)
+                }
+                try await wait { !window.isVisible && !ToolWindowCloseMotion.isClosing(window) }
+                try UIVerification.require(window.alphaValue == 1 && !window.ignoresMouseEvents,
+                    name + " retained a hidden or unresponsive presentation")
+                observations.append(["window": name, "mode": mode.rawValue,
+                    "entrance": entrance != nil, "userCloseFade": closing, "framePreserved": true])
+            }
+        }
+        // Opening and closing have separate switches. Programmatic teardown
+        // must remain immediate even when both user-facing effects are on.
+        for opening in [false, true] {
+            settings.motion = .init(windows: opening, windowClosing: !opening)
+            try await Task.sleep(for: .milliseconds(30))
+            preferences.makeKeyAndOrderFront(nil)
+            let layer = (preferences.contentViewController as? ToolWindowChrome)?.contentHost.layer
+            let systemReduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            try UIVerification.require((layer?.animation(forKey: "tool-content-entrance") != nil) == (opening && !systemReduced),
+                "Independent opening preference was ignored")
+            try await wait { preferences.occlusionState.contains(.visible) }
+            preferences.performClose(nil)
+            try UIVerification.require(ToolWindowCloseMotion.isClosing(preferences) == (!opening && !systemReduced),
+                "Independent closing preference was ignored")
+            try await wait { !preferences.isVisible }
+        }
+        settings.motion = .init()
+        try await Task.sleep(for: .milliseconds(30))
+        preferences.makeKeyAndOrderFront(nil); preferences.close()
+        try UIVerification.require(!preferences.isVisible && !ToolWindowCloseMotion.isClosing(preferences),
+            "Programmatic teardown acquired a user-close fade")
+        try JSONSerialization.data(withJSONObject: ["passed": true, "windows": observations,
+            "independentEffects": true, "programmaticCloseImmediate": true,
+            "systemReduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion], options: [.prettyPrinted, .sortedKeys])
+            .write(to: root.appendingPathComponent("evidence/tool-window-lifecycle.json"), options: .withoutOverwriting)
+    }
     private static func descendants(_ view: NSView?) -> [NSView] {
         guard let view else { return [] }; return [view] + view.subviews.flatMap { descendants($0) }
     }
