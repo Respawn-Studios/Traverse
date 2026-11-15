@@ -21,7 +21,8 @@ internal final class TARMutationSource: @unchecked Sendable {
                   TARSourceBinding.isGzipFilename(binding.source.lastPathComponent),
                   spool.decodedBytes <= TARCompressedDecoder.maximumBytes,
                   UInt64(original.observed.size) <= TARCompressedDecoder.maximumBytes else { throw TARMemberEditFailure.unsupportedArchive }
-            gzipHeader = try GzipArchiveHeader(original.read(0, 10, maximum: 10, check: check))
+            gzipHeader = try GzipArchiveHeader(original.read(0,
+                min(GzipArchiveHeader.maximumBytes, Int(original.observed.size)), maximum: GzipArchiveHeader.maximumBytes, check: check))
             try spool.verifyDigest(check: check)
             try withoutActuallyEscaping(check) { check in
                 _ = try GzipArchiveEncoder.verify(original.descriptor, rawBytes: spool.decodedBytes,

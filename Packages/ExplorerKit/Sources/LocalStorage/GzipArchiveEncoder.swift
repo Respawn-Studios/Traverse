@@ -32,16 +32,28 @@ internal final class GzipArchiveEncoder {
         output: @escaping (UnsafeRawBufferPointer) throws -> Void) throws {
         let context = Context(check: check, output: output); self.context = context
         var result = tr_gzip_result()
-        let nativeHeader = header.map { tr_gzip_header(modification_time: $0.modificationTime,
-            operating_system: $0.operatingSystem, text: $0.text ? 1 : 0) }
         func create(_ header: UnsafePointer<tr_gzip_header>?) -> OpaquePointer? {
             tr_gzip_encoder_create(maximumRaw, maximumEncoded, level, header,
             { raw in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().poll() } ?? 1 },
             { raw, bytes, count in raw.map { Unmanaged<Context>.fromOpaque($0).takeUnretainedValue().consume(bytes, count) } ?? 0 },
             Unmanaged.passUnretained(context).toOpaque(), &result)
         }
-        if var value = nativeHeader { handle = withUnsafePointer(to: &value) { create($0) } }
-        else { handle = create(nil) }
+        if let header {
+            let extra = header.extra ?? Data(), name = header.name ?? Data(), comment = header.comment ?? Data()
+            guard extra.count <= 65_535, name.count <= GzipArchiveHeader.maximumBytes,
+                  comment.count <= GzipArchiveHeader.maximumBytes else { throw TAROutputStream.Failure.limit }
+            handle = extra.withUnsafeBytes { extra in name.withUnsafeBytes { name in comment.withUnsafeBytes { comment in
+                var value = tr_gzip_header()
+                value.modification_time = header.modificationTime; value.operating_system = header.operatingSystem
+                value.text = header.text ? 1 : 0; value.header_crc = header.headerCRC ? 1 : 0
+                value.has_extra = header.extra == nil ? 0 : 1; value.has_name = header.name == nil ? 0 : 1
+                value.has_comment = header.comment == nil ? 0 : 1
+                value.extra = extra.bindMemory(to: UInt8.self).baseAddress; value.extra_count = UInt32(extra.count)
+                value.name = name.bindMemory(to: UInt8.self).baseAddress; value.name_count = UInt32(name.count)
+                value.comment = comment.bindMemory(to: UInt8.self).baseAddress; value.comment_count = UInt32(comment.count)
+                return withUnsafePointer(to: &value) { create($0) }
+            } } }
+        } else { handle = create(nil) }
         try require(result)
         guard handle != nil else { throw TAROutputStream.Failure.mismatch }
     }

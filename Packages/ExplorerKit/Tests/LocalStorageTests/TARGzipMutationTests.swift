@@ -69,23 +69,67 @@ struct TARGzipMutationTests {
             #expect(try Data(contentsOf: source) == before)
         }
     }
-    @Test(arguments: [UInt8(2), 4, 8, 16])
-    func optionalHeadersStayBrowseableButRefuseLossyRewrite(flag: UInt8) async throws {
+    private func withHeader(_ input: Data, flags: UInt8, empty: Bool = false) -> Data {
+        var bytes = Data(input.prefix(10)); bytes[3] = flags; bytes[8] = 2
+        if flags & 4 != 0 { bytes.append(empty ? Data([0, 0]) : Data([3, 0, 0, 255, 3])) }
+        if flags & 8 != 0 { bytes.append(empty ? Data([0]) : Data([46, 46, 47, 255, 0])) }
+        if flags & 16 != 0 { bytes.append(empty ? Data([0]) : Data([99, 0xfe, 109, 0])) }
+        if flags & 2 != 0 {
+            let crc = bytes.withUnsafeBytes { crc32(0, $0.bindMemory(to: UInt8.self).baseAddress, uInt(bytes.count)) }
+            bytes.append(contentsOf: [UInt8(truncatingIfNeeded: crc), UInt8(truncatingIfNeeded: crc >> 8)])
+        }
+        bytes.append(input.dropFirst(10)); return bytes
+    }
+    @Test(arguments: [UInt8(2), 4, 8, 16, 30, 31], [false, true])
+    func optionalHeadersKeepOpaqueFieldsAndRegenerateHeaderCRC(flag: UInt8, empty: Bool) async throws {
         try await fixture(transform: { input in
-            var bytes = input; bytes[3] = flag
-            let extra: Data
-            if flag == 2 {
-                let crc = bytes.prefix(10).withUnsafeBytes { crc32(0, $0.bindMemory(to: UInt8.self).baseAddress, 10) }
-                extra = Data([UInt8(truncatingIfNeeded: crc), UInt8(truncatingIfNeeded: crc >> 8)])
-            } else { extra = flag == 4 ? Data([3, 0, 1, 2, 3]) : Data("retained header\0".utf8) }
-            bytes.insert(contentsOf: extra, at: 10); return bytes
+            withHeader(input, flags: flag, empty: empty)
         }) { _, session, source, history, before in
             let destination = try await session.destinationForMemberChanges(session.root)
             let engine = RecoverableFileOperations(journalDirectory: history, authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
             let observed = try await engine.observeSelection([source])
-            await #expect(throws: (any Error).self) {
-                try await engine.prepareTARMemberMutationOriginal(.newFile(destination, name: "New.txt"), observing: observed)
-            }
+            let plan = try await engine.prepareTARMemberMutationOriginal(.newFile(destination, name: "New.txt"), observing: observed)
+            let result = await engine.performArchiveOriginalUpdate(plan)
+            #expect(result.result.disposition == .succeeded)
+            let output = try Data(contentsOf: source)
+            #expect(try GzipArchiveHeader(output) == GzipArchiveHeader(before))
+            #expect(output[8] == 0)
+            let cold = RecoverableFileOperations(journalDirectory: history, authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
+            #expect(await cold.undo(recordID: try #require(result.recordID)).result.disposition == .succeeded)
+            #expect(try Data(contentsOf: source) == before)
+        }
+    }
+    @Test func malformedReservedAndOverBudgetHeadersRefuseBeforeMutation() throws {
+        let fixed = Data([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3])
+        var reserved = fixed; reserved[3] = 32
+        var missingName = fixed; missingName[3] = 8; missingName.append(Data(repeating: 65, count: 65_526))
+        var badExtra = fixed; badExtra[3] = 4; badExtra.append(contentsOf: [255, 255, 1])
+        var badCRC = withHeader(fixed, flags: 2); badCRC[10] ^= 1
+        for bytes in [Data(fixed.prefix(9)), reserved, missingName, badExtra, badCRC] {
+            #expect(throws: TARMemberEditFailure.unsupportedArchive) { try GzipArchiveHeader(bytes) }
+        }
+        var maximum = fixed; maximum[3] = 8; maximum.append(Data(repeating: 65, count: 65_525)); maximum.append(0)
+        #expect(try GzipArchiveHeader(maximum).name?.count == 65_525)
+        maximum.insert(65, at: 10)
+        #expect(throws: TARMemberEditFailure.unsupportedArchive) { try GzipArchiveHeader(maximum) }
+    }
+    @Test func maximumHeaderSurvivesEncoderChunkBoundaryAndColdUndo() async throws {
+        try await fixture(transform: { input in
+            var header = Data(input.prefix(10)); header[3] = 8
+            header.append(Data(repeating: 65, count: 65_525)); header.append(0)
+            return header + input.dropFirst(10)
+        }) { _, session, source, history, before in
+            let root = try await session.destinationForMemberChanges(session.root)
+            let engine = RecoverableFileOperations(journalDirectory: history,
+                authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
+            let plan = try await engine.prepareTARMemberMutationOriginal(.newFile(root, name: "Boundary.txt"),
+                observing: try await engine.observeSelection([source]))
+            let result = await engine.performArchiveOriginalUpdate(plan)
+            #expect(result.result.disposition == .succeeded)
+            #expect(try GzipArchiveHeader(Data(contentsOf: source)) == GzipArchiveHeader(before))
+            let cold = RecoverableFileOperations(journalDirectory: history,
+                authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage)
+            #expect(await cold.undo(recordID: try #require(result.recordID)).result.disposition == .succeeded)
             #expect(try Data(contentsOf: source) == before)
         }
     }

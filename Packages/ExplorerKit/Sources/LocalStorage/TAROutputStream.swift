@@ -69,7 +69,7 @@ internal final class TAROutputStream {
         guard Data(hash.finalize()) == digest else { throw Failure.mismatch }
         if gzip != nil {
             if let preservedGzipHeader {
-                guard try GzipArchiveHeader(read(0, 10, check: check)) == preservedGzipHeader else { throw Failure.mismatch }
+                guard try GzipArchiveHeader(read(0, min(GzipArchiveHeader.maximumBytes, Int(encodedCount)), check: check)) == preservedGzipHeader else { throw Failure.mismatch }
             }
             decoderPeakHeap = try GzipArchiveEncoder.verify(writer.descriptor, rawBytes: count,
                 encodedBytes: encodedCount, expected: Data(rawHash.finalize()), check: check)

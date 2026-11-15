@@ -53,8 +53,9 @@ Gzip rewriting reuses the retained, unlinked read-only spool. The original
 compressed file remains the source and history authority. One fresh decode
 must match that spool's digest, length and catalog; the output gets a second
 complete verification. Both raw TAR and gzip output stay within 128 MiB. The
-current writable wrapper preserves MTIME, OS and FTEXT, recalculates compression
-flags and refuses optional headers or concatenated streams rather than discard
+current writable wrapper preserves MTIME, OS, FTEXT and opaque extra/name/comment
+fields within a 64 KiB header, recalculates compression flags and header CRC,
+and refuses malformed headers or concatenated streams rather than discard
 their metadata. Fast/Balanced/Smallest choices apply to the complete output.
 
 Save and Save TAR Copy use the existing guarded archive engine. TAR original
