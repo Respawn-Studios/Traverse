@@ -3,6 +3,7 @@ import AppKit
 import Darwin
 import ExplorerCore
 @_spi(Qualification) import LocalStorage
+import SwiftUI
 
 @MainActor enum DriveDetailsVerification {
     /// One complete ordinary UI/workload check in the existing App target.
@@ -110,11 +111,18 @@ import ExplorerCore
                 && result.workload == expectedWorkload && result.preparationBytesWritten == (expectedWorkload == .random4K ? expectedBytes : 0)
                 && result.scratchURL == nil && !model.isWorking && operations.activeOwner == nil
                 && ApplicationFileActivity.gate.activeCount == active, "Actual bounded benchmark did not complete and drain")
+            try requireLatencyDistributions(result)
+            if CGPreflightScreenCaptureAccess() {
+                try await captureLatencyDetails(result, settings: settings,
+                    to: root.appendingPathComponent("evidence/drive-benchmark-latency-150.png"))
+            }
+            checks.append("Completed write/read block latencies yield fixed bounded distributions without another workload")
             generatedBytes += result.bytesWritten + result.preparationBytesWritten
             if quickMix {
                 guard let suite = model.selectedSuite, let random = suite.random4K else {
                     throw UIVerification.Failure(message: "Quick Mix did not retain both individual runs")
                 }
+                try requireLatencyDistributions(suite.sequential.result)
                 try require(suite.sequential.result.outcome == .completed
                     && suite.sequential.result.bytesWritten == 64 << 20 && suite.sequential.result.bytesRead == 64 << 20
                     && suite.sequential.result.blockBytes == 1 << 20 && suite.sequential.result.scratchURL == nil
@@ -166,7 +174,32 @@ import ExplorerCore
                     && DriveBenchmarkComparison(selected: secondRandom, reference: firstRandom) != nil
                     && DriveBenchmarkComparison(selected: secondRandom, reference: first.sequential) == nil,
                     "Quick Mix comparison crossed workloads or rejected matching stages")
-                checks.append("Comparisons admit like Quick Mix stages only; sequential and random stages never share rates")
+                let pair = DriveBenchmarkSuiteComparison(selected: second, reference: first)
+                try require(pair != nil
+                    && pair?.sequential.write.selectedRate?.isFinite == true
+                    && pair?.sequential.read.selectedRate?.isFinite == true
+                    && pair?.random4K.write.selectedIOPS?.isFinite == true
+                    && pair?.random4K.read.selectedIOPS?.isFinite == true
+                    && model.suiteComparisonCandidates.contains(where: { $0.sequential.suiteID == first.sequential.suiteID })
+                    && DriveBenchmarkSuiteComparison(selected: second,
+                        reference: .init(sequential: first.sequential, random4K: secondRandom)) == nil,
+                    "Quick Mix suite comparison crossed workloads, paired a foreign stage or lost measured rates")
+                let scrollBefore = model.window.flatMap { benchmarkScrollOffset($0) }
+                model.comparisonSuiteID = first.sequential.suiteID
+                try require(model.suiteComparison != nil && model.comparisonRunID == nil,
+                    "Quick Mix suite selection did not project the completed pair")
+                if let window = model.window, CGPreflightScreenCaptureAccess() {
+                    guard let scrollBefore else {
+                        throw UIVerification.Failure(message: "Quick Mix comparison scroll view is unavailable")
+                    }
+                    try await wait(seconds: 3) {
+                        benchmarkScrollOffset(window).map { $0 > scrollBefore + 100 } == true
+                    }
+                    try await Task.sleep(for: .milliseconds(200))
+                    try await GlassVerification.captureOwnedWindow(window,
+                        to: root.appendingPathComponent("evidence/drive-benchmark-suite-comparison.png"))
+                }
+                checks.append("Two complete Quick Mix pairs compare four named phases; a foreign stage is refused and no new workload starts")
             }
             try require(selected.result.outcome == .completed && model.comparisonCandidates.contains(where: { $0.id == reference.id }),
                 "Two completed matching workloads were not comparable")
@@ -177,7 +210,8 @@ import ExplorerCore
                 }
                 motionFrames += clip.frames.count; clips.append(["label": "drive-benchmark-comparison"])
             } else { model.comparisonRunID = reference.id }
-            try require(model.comparison?.selected.id == selected.id && model.comparison?.reference.id == reference.id
+            try require(model.suiteComparison == nil
+                && model.comparison?.selected.id == selected.id && model.comparison?.reference.id == reference.id
                 && model.comparison?.write.selectedRate?.isFinite == true && model.comparison?.read.selectedRate?.isFinite == true,
                 "Comparison lost the selected/reference result or finite measured rates")
             let otherVolume = DriveBenchmarkRun(date: reference.date, volumeName: "Other generated volume",
@@ -222,6 +256,7 @@ import ExplorerCore
             if quickMix {
                 let paired = try model.selectedSuite?.report()
                 try require(paired?.outcome == .partial && model.comparisonRunID == nil
+                    && model.suiteComparisonCandidates.isEmpty && model.comparisonSuiteID == nil
                     && model.comparisonCandidates.allSatisfy { $0.result.workload == .sequential },
                     "Stopped Quick Mix mislabeled the missing stage or crossed comparison workloads")
             } else {
@@ -373,6 +408,50 @@ import ExplorerCore
     }
     private static func require(_ value: Bool, _ message: String) throws {
         if !value { throw UIVerification.Failure(message: message) }
+    }
+    private static func requireLatencyDistributions(_ result: DriveBenchmarkResult) throws {
+        for latency in [result.writeLatency, result.readLatency] {
+            guard let buckets = latency.distribution?.buckets else {
+                throw UIVerification.Failure(message: "Completed benchmark has unavailable I/O latency distribution")
+            }
+            try require(buckets.count == 9 && buckets.reduce(0) { $0 + $1.count } == latency.operations
+                && buckets.first?.upperBoundMilliseconds == 0.125
+                && buckets.last?.lowerBoundMilliseconds == 16
+                && buckets.last?.upperBoundMilliseconds == nil,
+                "Completed benchmark lost fixed I/O latency bucket accounting")
+        }
+    }
+    private static func captureLatencyDetails(_ result: DriveBenchmarkResult, settings: BrowserSettings,
+                                              to destination: URL) async throws {
+        let priorSize = settings.interfaceSize, priorAppearance = settings.appearance
+        defer { settings.interfaceSize = priorSize; settings.appearance = priorAppearance }
+        settings.interfaceSize = .init(150); settings.appearance = .light
+        let window = NSWindow(contentRect: .init(x: 250, y: 100, width: 920, height: 820),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "I/O latency · generated benchmark review"
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = NSHostingView(rootView: InterfaceRoot(content:
+            DriveBenchmarkResultMetrics(result: result)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(24)))
+        defer { window.contentView = nil; window.close() }
+        window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(350))
+        try await GlassVerification.captureOwnedWindow(window, to: destination)
+    }
+    private static func benchmarkScrollOffset(_ window: NSWindow) -> CGFloat? {
+        window.contentView?.layoutSubtreeIfNeeded()
+        var pending = [window.contentView].compactMap { $0 }, inspected = 0
+        while let view = pending.popLast(), inspected < 512 {
+            inspected += 1
+            if let scroll = view as? NSScrollView, let document = scroll.documentView,
+               document.bounds.height > scroll.contentView.bounds.height + 300 {
+                return scroll.contentView.bounds.minY
+            }
+            pending += view.subviews
+        }
+        return nil
     }
     private static func wait(seconds: Double = 5, _ condition: () -> Bool) async throws {
         let deadline = ProcessInfo.processInfo.systemUptime + seconds

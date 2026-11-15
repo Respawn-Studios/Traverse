@@ -14,6 +14,11 @@ struct DriveBenchmarkComparison {
             let change = (selectedRate / referenceRate - 1) * 100
             return change.isFinite ? change : nil
         }
+        var iopsChangePercent: Double? {
+            guard let selectedIOPS, let referenceIOPS, referenceIOPS > 0 else { return nil }
+            let change = (selectedIOPS / referenceIOPS - 1) * 100
+            return change.isFinite ? change : nil
+        }
     }
     let selected: DriveBenchmarkRun, reference: DriveBenchmarkRun
     let write: Phase, read: Phase
@@ -47,5 +52,35 @@ struct DriveBenchmarkComparison {
         guard amount.isFinite, amount > 0, elapsed.isFinite, elapsed > 0 else { return nil }
         let value = amount / elapsed
         return value.isFinite ? value : nil
+    }
+}
+
+/// A read-only projection of two complete Quick Mix pairs. Each stage must
+/// independently satisfy the same exact-match comparison as an individual
+/// run; there is no aggregate rate or cross-workload comparison.
+struct DriveBenchmarkSuiteComparison {
+    let selected: DriveBenchmarkSuite
+    let reference: DriveBenchmarkSuite
+    let sequential: DriveBenchmarkComparison
+    let random4K: DriveBenchmarkComparison
+
+    init?(selected: DriveBenchmarkSuite, reference: DriveBenchmarkSuite) {
+        guard let selectedID = selected.sequential.suiteID,
+              let referenceID = reference.sequential.suiteID,
+              selectedID != referenceID,
+              let selectedRandom = selected.random4K, let referenceRandom = reference.random4K,
+              selectedRandom.suiteID == selectedID, referenceRandom.suiteID == referenceID,
+              selected.sequential.fileSystemID == selectedRandom.fileSystemID,
+              reference.sequential.fileSystemID == referenceRandom.fileSystemID,
+              selected.sequential.result.workload == .sequential,
+              reference.sequential.result.workload == .sequential,
+              selectedRandom.result.workload == .random4K,
+              referenceRandom.result.workload == .random4K,
+              let sequential = DriveBenchmarkComparison(selected: selected.sequential, reference: reference.sequential),
+              let random4K = DriveBenchmarkComparison(selected: selectedRandom, reference: referenceRandom) else { return nil }
+        self.selected = selected
+        self.reference = reference
+        self.sequential = sequential
+        self.random4K = random4K
     }
 }

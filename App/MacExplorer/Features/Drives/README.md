@@ -57,6 +57,12 @@ actual bypass/flush outcome, phase rates, IOPS, block latency and bounded curves
 They are file-workload observations, not a hardware-health score or calibrated
 raw-device benchmark.
 
+Measurement details also show a fixed nine-range I/O latency histogram for the
+already measured write and read block calls. The ranges double from under
+0.125 ms to 16 ms or more; counts sum to completed calls. An incomplete run or
+invalid timing shows an unavailable state instead of a distribution. The
+histogram does not add I/O and is not included in the copied report's v2 JSON.
+
 Quick Mix is one explicit click after folder selection. It runs a fixed 64 MiB
 sequential 1 MiB workload, waits for that run's guarded cleanup, then runs a
 16 MiB random 4 KiB QD1 workload with the same requested cache setting. Random
@@ -77,6 +83,12 @@ Partial/failed runs keep byte/time facts without aggregate speed claims.
 workload, block/test/preparation-size, requested cache mode and actual cache/flush
 outcomes, including when the runs belong to different Quick Mix suites. Its paired view
 starts no read or benchmark and adds no persistent result store.
+Two complete Quick Mix suites can also be compared as a pair when both named
+stages independently pass those exact-match rules. Sequential rates stay MB/s,
+random 4 KiB rates stay IOPS, and the four phase changes are shown separately.
+An incomplete suite, stale history partner or mismatched cache/flush outcome
+does not become a suite comparison. This is a session-only projection of the
+same retained results; it starts no additional workload.
 
 ## Read-only health
 

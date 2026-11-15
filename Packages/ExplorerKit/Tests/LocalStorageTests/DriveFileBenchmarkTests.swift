@@ -5,6 +5,32 @@ import Testing
 
 @Suite(.serialized)
 struct DriveFileBenchmarkTests {
+    @Test func latencyDistributionUsesFixedDoublingBucketsAndRejectsInvalidSamples() throws {
+        let latency = DriveBenchmarkLatency([0, 0.000124, 0.000125, 0.00025, 0.0005,
+                                             0.001, 0.002, 0.004, 0.008, 0.016])
+        let buckets = try #require(latency.distribution?.buckets)
+        #expect(latency.operations == 10 && buckets.count == 9)
+        #expect(buckets.map(\.count) == [2, 1, 1, 1, 1, 1, 1, 1, 1])
+        #expect(buckets.reduce(0) { $0 + $1.count } == latency.operations)
+        #expect(buckets.first?.lowerBoundMilliseconds == 0 && buckets.first?.upperBoundMilliseconds == 0.125)
+        #expect(buckets.last?.lowerBoundMilliseconds == 16 && buckets.last?.upperBoundMilliseconds == nil)
+        #expect(latency.medianMilliseconds == 0.5 && latency.p95Milliseconds == 16)
+
+        #expect(DriveBenchmarkLatency([]).distribution == nil)
+        for invalid in [Double.nan, .infinity, -0.001, .greatestFiniteMagnitude] {
+            let invalidLatency = DriveBenchmarkLatency([0.001, invalid])
+            #expect(invalidLatency.operations == 2 && invalidLatency.distribution == nil)
+            #expect(invalidLatency.medianMilliseconds.isNaN && invalidLatency.p95Milliseconds.isNaN)
+            let result = DriveBenchmarkResult(outcome: .completed, bytesWritten: 8_000_000,
+                writeSeconds: 1, flushSeconds: 1, writeLatency: invalidLatency)
+            let report = try DriveBenchmarkReport(result: result,
+                recordedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            #expect(report.writeAndFlush.ioLatency == nil)
+            let json = try report.json()
+            #expect(!json.contains("NaN") && !json.contains("Infinity"))
+        }
+    }
+
     @Test func quickMixReportKeepsMeasuredRunsSeparateAndHidesSelectionIdentity() throws {
         let date = Date(timeIntervalSince1970: 1_700_000_000)
         let sequential = DriveBenchmarkResult(outcome: .completed, bytesWritten: 64 << 20, bytesRead: 64 << 20,
@@ -123,6 +149,8 @@ struct DriveFileBenchmarkTests {
         #expect(result.preparationBytesWritten == 1 << 20 && result.preparationSeconds > 0)
         #expect(result.bytesWritten == 1 << 20 && result.bytesRead == 1 << 20)
         #expect(result.writeLatency.operations == 256 && result.readLatency.operations == 256)
+        #expect(result.writeLatency.distribution?.buckets.reduce(0) { $0 + $1.count } == 256)
+        #expect(result.readLatency.distribution?.buckets.reduce(0) { $0 + $1.count } == 256)
         #expect(result.writeLatency.medianMilliseconds <= result.writeLatency.p95Milliseconds)
         #expect(result.readLatency.p95Milliseconds <= result.readLatency.p99Milliseconds)
         #expect(!result.samples.isEmpty && result.samples.count <= 600)

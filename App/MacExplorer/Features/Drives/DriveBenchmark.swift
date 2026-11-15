@@ -25,7 +25,12 @@ enum DriveBenchmarkFeature {
     @Published private(set) var samples: [DriveBenchmarkSample] = []
     @Published private(set) var history: [DriveBenchmarkRun] = []
     @Published private(set) var selectedRun: DriveBenchmarkRun?
-    @Published var comparisonRunID: UUID?
+    @Published var comparisonRunID: UUID? {
+        didSet { if comparisonRunID != nil { comparisonSuiteID = nil } }
+    }
+    @Published var comparisonSuiteID: UUID? {
+        didSet { if comparisonSuiteID != nil { comparisonRunID = nil } }
+    }
     @Published private(set) var notice = ""
     @Published private(set) var isWorking = false
     @Published private(set) var isChoosing = false
@@ -296,7 +301,7 @@ enum DriveBenchmarkFeature {
                 let record = DriveBenchmarkRun(date: started, volumeName: volumeName, fileSystemID: selection.fileSystemID,
                     result: measured, healthSamples: captured, suiteID: suiteID)
                 selectedRun = record
-                comparisonRunID = nil
+                comparisonRunID = nil; comparisonSuiteID = nil
                 history.insert(record, at: 0)
                 if history.count > 8 { history.removeLast(history.count - 8) }
                 #if DEBUG
@@ -323,9 +328,13 @@ enum DriveBenchmarkFeature {
     }
     func review(_ run: DriveBenchmarkRun) {
         guard !hasPendingWork, run.fileSystemID == selectedDevice else { return }
-        result = run.result; samples = run.result.samples; selectedRun = run; comparisonRunID = nil
+        result = run.result; samples = run.result.samples; selectedRun = run
+        comparisonRunID = nil; comparisonSuiteID = nil
     }
-    private func clearResult() { result = nil; selectedRun = nil; comparisonRunID = nil; progress = nil; samples = []; activeWorkload = nil }
+    private func clearResult() {
+        result = nil; selectedRun = nil; comparisonRunID = nil; comparisonSuiteID = nil
+        progress = nil; samples = []; activeWorkload = nil
+    }
     var recentRuns: [DriveBenchmarkRun] { history.filter { $0.fileSystemID == selectedDevice } }
     var selectedSuite: DriveBenchmarkSuite? {
         guard let suiteID = selectedRun?.suiteID,
@@ -340,6 +349,20 @@ enum DriveBenchmarkFeature {
     var comparison: DriveBenchmarkComparison? {
         guard let selectedRun, let reference = comparisonCandidates.first(where: { $0.id == comparisonRunID }) else { return nil }
         return .init(selected: selectedRun, reference: reference)
+    }
+    var suiteComparisonCandidates: [DriveBenchmarkSuite] {
+        guard let selectedSuite else { return [] }
+        let runs = recentRuns
+        return runs.filter { $0.suiteID != nil && $0.result.workload == .sequential }.compactMap { first in
+            let second = runs.first { $0.suiteID == first.suiteID && $0.result.workload == .random4K }
+            let candidate = DriveBenchmarkSuite(sequential: first, random4K: second)
+            return DriveBenchmarkSuiteComparison(selected: selectedSuite, reference: candidate) == nil ? nil : candidate
+        }
+    }
+    var suiteComparison: DriveBenchmarkSuiteComparison? {
+        guard let selectedSuite,
+              let reference = suiteComparisonCandidates.first(where: { $0.sequential.suiteID == comparisonSuiteID }) else { return nil }
+        return .init(selected: selectedSuite, reference: reference)
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if choosing != nil { closeWhenDrained = true; choosing?.cancel(); return false }
@@ -385,6 +408,7 @@ struct DriveBenchmarkView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         VStack(spacing: 0) {
+          ScrollViewReader { scroll in
           ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if !model.isPresentedInWorkspace {
@@ -453,15 +477,30 @@ struct DriveBenchmarkView: View {
                     }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
                         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 14))
                 }
+                if !model.isWorking, !model.suiteComparisonCandidates.isEmpty {
+                    Picker("Compare Quick Mix with", selection: $model.comparisonSuiteID) {
+                        Text("No suite comparison").tag(nil as UUID?)
+                        ForEach(model.suiteComparisonCandidates, id: \.sequential.id) { suite in
+                            Text(suite.sequential.displayTimestamp).tag(suite.sequential.suiteID)
+                        }
+                    }.disabled(model.hasPendingWork)
+                }
                 if !model.isWorking, !model.comparisonCandidates.isEmpty {
-                    Picker("Compare with", selection: $model.comparisonRunID) {
+                    Picker("Compare selected run with", selection: $model.comparisonRunID) {
                         Text("No comparison").tag(nil as UUID?)
                         ForEach(model.comparisonCandidates) { run in
                             Text(run.displayTimestamp).tag(Optional(run.id))
                         }
                     }.disabled(model.hasPendingWork)
                 }
-                if let comparison = model.comparison {
+                if let suiteComparison = model.suiteComparison {
+                    DriveBenchmarkSuiteComparisonView(comparison: suiteComparison)
+                        .transition(.identity)
+                        .id("benchmark-suite-comparison")
+                    if let health {
+                        DriveHealthTrend(model: health, recordedPoints: model.selectedRun?.healthSamples)
+                    }
+                } else if let comparison = model.comparison {
                     DriveBenchmarkComparisonView(comparison: comparison, settings: settings)
                         .transition(.identity)
                     if let health {
@@ -544,6 +583,14 @@ struct DriveBenchmarkView: View {
                     .interfaceFont(.caption).foregroundStyle(.secondary)
             }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
           }
+          .onChange(of: model.comparisonSuiteID) { _, selected in
+              guard selected != nil, model.suiteComparison != nil else { return }
+              withAnimation(reduceMotion || !settings.motion.allows(.pages) ? nil
+                  : .easeOut(duration: 0.16 * settings.motion.mode.durationScale)) {
+                  scroll.scrollTo("benchmark-suite-comparison", anchor: .top)
+              }
+          }
+          }
           Divider()
           HStack {
               Menu("Copy Results") {
@@ -564,6 +611,7 @@ struct DriveBenchmarkView: View {
             // Interpolating the replacement's geometry moves lower labels
             // through the new cards. Blend the committed native page instead.
             .animation(nil, value: model.comparisonRunID)
+            .animation(nil, value: model.comparisonSuiteID)
             .toolPageCrossfade(model.comparisonRunID, motion: settings.motion)
     }
     private var fraction: Double {

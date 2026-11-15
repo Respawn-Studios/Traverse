@@ -23,20 +23,57 @@ public enum DriveBenchmarkCacheMode: String, CaseIterable, Hashable, Sendable {
 /// Latencies cover the completed block's I/O calls, excluding guards and byte
 /// verification. Throughput/IOPS use whole phase wall time, including those costs.
 public struct DriveBenchmarkLatency: Sendable {
+    /// Fixed, bounded counts of completed block calls. A bucket includes its
+    /// lower bound and excludes its upper bound; the final bucket has no upper
+    /// bound. Raw block timings are not retained in the result.
+    public struct Distribution: Sendable {
+        public struct Bucket: Sendable {
+            public let lowerBoundMilliseconds: Double
+            public let upperBoundMilliseconds: Double?
+            public let count: Int
+        }
+        public let buckets: [Bucket]
+    }
+
+    private static let bucketUpperBoundsMilliseconds: [Double] = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16]
     public let operations: Int
     public let medianMilliseconds: Double
     public let p95Milliseconds: Double
     public let p99Milliseconds: Double
+    public let distribution: Distribution?
     init(_ seconds: [Double]) {
+        operations = seconds.count
+        guard !seconds.isEmpty else {
+            medianMilliseconds = 0; p95Milliseconds = 0; p99Milliseconds = 0
+            distribution = nil
+            return
+        }
+        guard seconds.allSatisfy({ $0.isFinite && $0 >= 0 && ($0 * 1_000).isFinite }) else {
+            medianMilliseconds = .nan; p95Milliseconds = .nan; p99Milliseconds = .nan
+            distribution = nil
+            return
+        }
         let values = seconds.sorted()
-        operations = values.count
         func percentile(_ fraction: Double) -> Double {
-            guard !values.isEmpty else { return 0 }
             return values[min(values.count - 1, max(0, Int(ceil(Double(values.count) * fraction)) - 1))] * 1_000
         }
         medianMilliseconds = percentile(0.5)
         p95Milliseconds = percentile(0.95)
         p99Milliseconds = percentile(0.99)
+        var counts = Array(repeating: 0, count: Self.bucketUpperBoundsMilliseconds.count + 1)
+        for value in values {
+            let milliseconds = value * 1_000
+            let index = Self.bucketUpperBoundsMilliseconds.firstIndex(where: { milliseconds < $0 })
+                ?? Self.bucketUpperBoundsMilliseconds.count
+            counts[index] += 1
+        }
+        distribution = .init(buckets: counts.indices.map { index in
+            Distribution.Bucket(
+                lowerBoundMilliseconds: index == 0 ? 0 : Self.bucketUpperBoundsMilliseconds[index - 1],
+                upperBoundMilliseconds: index < Self.bucketUpperBoundsMilliseconds.count
+                    ? Self.bucketUpperBoundsMilliseconds[index] : nil,
+                count: counts[index])
+        })
     }
 }
 

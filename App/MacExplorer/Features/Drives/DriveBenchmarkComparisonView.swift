@@ -84,3 +84,54 @@ struct DriveBenchmarkComparisonView: View {
         return value.formatted(.number.precision(.fractionLength(precision)))
     }
 }
+
+/// Four named measurements from two complete Quick Mix pairs. Sequential
+/// transfers remain MB/s and random 4 KiB accesses remain operations/s.
+struct DriveBenchmarkSuiteComparisonView: View {
+    let comparison: DriveBenchmarkSuiteComparison
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Quick Mix comparison").interfaceFont(.headline)
+            Text("Selected: \(comparison.selected.sequential.displayTimestamp) · Reference: \(comparison.reference.sequential.displayTimestamp)")
+                .interfaceFont(.caption).foregroundStyle(.secondary)
+            stage("Sequential · 64 MiB", write: comparison.sequential.write, read: comparison.sequential.read, random: false)
+            stage("Random 4 KiB · 16 MiB", write: comparison.random4K.write, read: comparison.random4K.read, random: true)
+            Text("Each stage compares only the same completed workload, size, filesystem and cache/flush outcomes. Changes reflect these file workloads, not drive health.")
+                .interfaceFont(.caption).foregroundStyle(.secondary)
+        }.accessibilityIdentifier("benchmark-suite-comparison")
+    }
+
+    private func stage(_ title: String, write: DriveBenchmarkComparison.Phase,
+                       read: DriveBenchmarkComparison.Phase, random: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title).interfaceFont(.callout.bold())
+            phase("Write + flush", write, random: random)
+            Divider()
+            phase("Read + verify", read, random: random)
+        }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.04), in: .rect(cornerRadius: 12))
+    }
+
+    private func phase(_ title: String, _ value: DriveBenchmarkComparison.Phase, random: Bool) -> some View {
+        let selected = random ? value.selectedIOPS : value.selectedRate
+        let reference = random ? value.referenceIOPS : value.referenceRate
+        let change = random ? value.iopsChangePercent : value.rateChangePercent
+        let unit = random ? "IOPS" : "MB/s"
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).interfaceFont(.callout)
+                Spacer(minLength: 8)
+                Text(change.map { ($0 > 0 ? "+" : "") + $0.formatted(.number.precision(.fractionLength(1))) + "%" } ?? "Change unavailable")
+                    .interfaceFont(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+            Text("Selected \(number(selected)) \(unit) · Reference \(number(reference)) \(unit)")
+                .interfaceFont(.caption).foregroundStyle(.secondary).monospacedDigit()
+        }
+    }
+
+    private func number(_ value: Double?) -> String {
+        guard let value, value.isFinite, value >= 0 else { return "—" }
+        return value.formatted(.number.precision(.fractionLength(1)))
+    }
+}
