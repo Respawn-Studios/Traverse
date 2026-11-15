@@ -606,11 +606,16 @@ enum WorkspaceNavigationVerification {
                 }
                 let viewport = browser.folderScroll.contentSize.width
                 let edge = visible.reduce(CGFloat.zero) { $0 + $1.width + table.intercellSpacing.width }
+                if label.hasSuffix("all-columns") {
+                    try require(Set(visible.map { $0.identifier.rawValue }) == Set(BrowserColumn.allCases.map(\.rawValue)),
+                        "All-column layout omitted an optional metadata column")
+                }
                 try require(name.width >= 180 * InterfaceMetrics.scale - 1 && table.frame.width >= edge - 1
                     && browser.folderScroll.hasHorizontalScroller && browser.selectedURLs == selections[index],
                     "Responsive pane collapsed Name, clipped optional columns, or changed selection at \(label)")
                 observations.append(["stage": label, "pane": index, "percent": percent, "viewport": viewport,
-                    "name": name.width, "date": date.width, "document": table.frame.width, "columnsEdge": edge])
+                    "name": name.width, "date": date.width, "document": table.frame.width, "columnsEdge": edge,
+                    "visibleColumns": visible.map { $0.identifier.rawValue }])
             }
         }
         try await layout(100, narrow: false, label: "normal-default")
@@ -623,6 +628,10 @@ enum WorkspaceNavigationVerification {
         }
         try await layout(150, narrow: true, label: "narrow-large-default")
         try await capture(workspace, window: window, owned: owned, name: "columns-narrow-150")
+        settings.showsCreatedColumn = true; settings.showsAccessedColumn = true; settings.showsExtensionColumn = true
+        try await layout(150, narrow: true, label: "narrow-large-all-columns")
+        try await layout(150, narrow: false, label: "wide-large-all-columns")
+        settings.showsCreatedColumn = false; settings.showsAccessedColumn = false; settings.showsExtensionColumn = false
         try await layout(100, narrow: true, label: "before-native-resize")
         let table = browsers[0].table
         for key in ["name", "modified"] { try resizeHeaderColumn(table, key: key, delta: 40) }

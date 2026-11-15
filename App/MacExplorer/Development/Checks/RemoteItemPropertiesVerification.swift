@@ -419,27 +419,56 @@ import FileOperations
         smb: SMBRemoteRowsView, window: NSWindow) async throws -> [[String: Any]] {
         let settings = owner.settings, initial = window.contentView!.bounds.size, originalSize = settings.interfaceSize
         let smbSize = smb.frame.size, selection = sftp.table.selectedRowIndexes
+        let originalSMBSelection = smb.table.selectedRowIndexes
+        smb.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        let smbSelection = smb.table.selectedRowIndexes
+        try require(smb.superview == nil && smb.window == nil)
+        // Document extent is an AppKit window-layout result. Exercise the SMB
+        // component in a real native allocation, just like the SFTP tab.
+        let smbWindow = NSWindow(contentRect: .init(x: 90, y: 90, width: smbSize.width, height: smbSize.height),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        smbWindow.isReleasedWhenClosed = false; smbWindow.isRestorable = false
+        smbWindow.title = "Generated SMB column layout"
+        smbWindow.contentView = smb
+        smbWindow.makeKeyAndOrderFront(nil)
         var observations: [[String: Any]] = [], wideDates: [String: CGFloat] = [:]
         defer {
+            smbWindow.contentView = nil; smbWindow.close()
             settings.interfaceSize = originalSize
             window.setContentSize(initial); window.contentView?.layoutSubtreeIfNeeded()
             smb.setFrameSize(smbSize); smb.needsLayout = true; smb.layoutSubtreeIfNeeded()
+            smb.table.selectRowIndexes(originalSMBSelection, byExtendingSelection: false)
+            window.makeKeyAndOrderFront(nil)
         }
         for (percent, narrow) in [(100, false), (100, true), (150, true), (150, false), (100, false)] {
             settings.interfaceSize = .init(percent)
             await Task.yield()
             window.setContentSize(narrow ? .init(width: 760, height: initial.height) : initial)
             window.contentView?.layoutSubtreeIfNeeded()
-            smb.setFrameSize(.init(width: narrow ? 420 : 700, height: smbSize.height))
+            smbWindow.setContentSize(.init(width: narrow ? 420 : 700, height: smbSize.height))
+            smbWindow.layoutIfNeeded()
             smb.needsLayout = true; smb.layoutSubtreeIfNeeded()
             sftp.needsLayout = true; sftp.layoutSubtreeIfNeeded()
+            await Task.yield()
+            smbWindow.layoutIfNeeded(); window.layoutIfNeeded()
             for (label, table, scroll) in [("sftp", sftp.table, sftp.scroll), ("smb", smb.table, smb.scroll)] {
                 guard let name = table.tableColumn(withIdentifier: .init("name")),
                       let date = table.tableColumn(withIdentifier: .init("modified")) else { throw Failure.scope }
                 let visible = table.tableColumns.filter { !$0.isHidden }
                 let edge = visible.reduce(CGFloat.zero) { $0 + $1.width + table.intercellSpacing.width }
-                try require(name.width >= 180 * InterfaceMetrics.scale - 1 && table.frame.width >= edge - 1
-                    && scroll.hasHorizontalScroller && sftp.table.selectedRowIndexes == selection)
+                let valid = name.width >= 180 * InterfaceMetrics.scale - 1 && table.frame.width >= edge - 1
+                    && scroll.hasHorizontalScroller && sftp.table.selectedRowIndexes == selection
+                    && smb.table.selectedRowIndexes == smbSelection
+                if !valid {
+                    let facts: [String: Any] = ["surface": label, "percent": percent, "narrow": narrow,
+                        "viewport": scroll.contentView.bounds.width, "name": name.width,
+                        "document": table.frame.width, "columnsEdge": edge,
+                        "horizontalScroller": scroll.hasHorizontalScroller,
+                        "selectionPreserved": sftp.table.selectedRowIndexes == selection && smb.table.selectedRowIndexes == smbSelection]
+                    let data = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys])
+                    FileHandle.standardError.write(Data("REMOTE_COLUMN_FAILURE ".utf8) + data + Data("\n".utf8))
+                }
+                try require(valid)
                 if percent == 100 {
                     if narrow, let wide = wideDates[label] { try require(date.width < wide - 1) }
                     else { wideDates[label] = date.width }

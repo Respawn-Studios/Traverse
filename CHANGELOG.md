@@ -38,6 +38,18 @@ Earlier private-beta version numbers belong to a separate release history.
 - Editor closing follows animation preferences while retaining text until the
   native window closes. Quit joins a Close or its chosen Save already in progress.
 
+### Fixed
+
+- Creating a folder and finishing Rename keep the current listing visible while
+  its replacement loads.
+- Pane transitions leave unchanged neighbours still, preserve Glass backgrounds
+  and finish sooner. Larger interface sizes reserve enough room for the footer.
+- Details lists avoid a layout loop when restoring the sidebar in a split workspace.
+- Properties keeps its chart and scroll position steady when changing storage
+  groups, drilling into a slice or going Back. Repeated groups reuse stored totals.
+- Settings, What's New, Properties and Analyzer share native opening and closing
+  transitions. Discarding an unsaved Properties draft follows the same close flow.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added

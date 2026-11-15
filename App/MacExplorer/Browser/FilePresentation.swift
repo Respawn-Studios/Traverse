@@ -124,8 +124,12 @@ protocol FileColumnSizingTable: AnyObject {
         }
         let otherWidth = others.reduce(CGFloat.zero) { $0 + $1.width }
         assign(name, userWidths[name.identifier].map { $0 * scale } ?? (viewport - otherWidth - spacing))
-        // NSTableView owns its document extent from these columns. Assigning
-        // its frame here fights native minimum-width rounding during layout.
+        let width = max(viewport, visible.reduce(CGFloat.zero) { $0 + $1.width } + spacing)
+        // AppKit can retain a point of document padding during clip layout.
+        // Cover all columns, but do not force that harmless surplus smaller
+        // on every layout pass. Keep native width/height autoresizing intact.
+        let delta = width - table.frame.width
+        if delta > 0.5 || delta < -1.001 { table.setFrameSize(.init(width: width, height: table.frame.height)) }
     }
 
     func beginHeaderInteraction(_ table: NSTableView) -> [NSUserInterfaceItemIdentifier: CGFloat]? {
