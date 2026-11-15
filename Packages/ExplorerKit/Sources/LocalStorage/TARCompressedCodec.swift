@@ -1,4 +1,5 @@
 import Foundation
+import ExplorerCore
 @_spi(ArchiveProduction) import FileOperations
 
 /// Concrete wrapper identity is part of the prepared source proof/cache key.
@@ -6,10 +7,11 @@ import Foundation
 internal enum TARCompressedCodec: String, Sendable {
     case gzip, bzip2
     static func filename(_ name: String) -> Self? {
-        let lower = name.lowercased()
-        if lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz") { return .gzip }
-        if lower.hasSuffix(".tar.bz2") || lower.hasSuffix(".tbz2") { return .bzip2 }
-        return nil
+        switch ArchiveFilename(name)?.kind {
+        case .tarGzip: .gzip
+        case .tarBzip2: .bzip2
+        default: nil
+        }
     }
     func accepts(_ header: Data) -> Bool {
         switch self {

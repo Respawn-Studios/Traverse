@@ -74,7 +74,7 @@ public enum AnalysisFileType: Int, CaseIterable, Sendable {
         case "jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "avif", "tif", "tiff", "bmp", "svg", "ico", "dng", "raw", "psd": return .images
         case "mp4", "m4v", "mov", "mkv", "avi", "webm", "mpeg", "mpg", "mts", "m2ts": return .video
         case "mp3", "m4a", "aac", "wav", "aiff", "aif", "flac", "ogg", "opus", "alac": return .audio
-        case "zip", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz", "vpk", "pak", "pck": return .archives
+        case "zip", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz", "tbz2", "txz", "vpk", "pak", "pck": return .archives
         case "dmg", "iso", "img", "sparseimage", "toast": return .diskImages
         case "vmdk", "vdi", "vhd", "vhdx", "qcow", "qcow2", "hdd": return .virtualDisks
         case "gguf", "ggml", "safetensors", "onnx", "mlmodel", "tflite": return .models

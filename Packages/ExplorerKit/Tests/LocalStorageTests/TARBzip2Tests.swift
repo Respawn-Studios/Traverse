@@ -26,9 +26,13 @@ struct TARBzip2Tests {
         #expect(try TARTestFixture.decodedBzip2(url) == raw)
     }
 
-    @Test(arguments: [1, 2, 6, 9])
-    func textSaveRebindPreservesImportedBlockAndIndependentInversePolicy(block: Int) async throws {
-        let f = try TARTestFixture(pax: true), source = try f.bzip2Source(block: block)
+    @Test(arguments: [1, 2, 6, 9], ["tar.bz2", "tbz"])
+    func textSaveRebindPreservesImportedBlockAndIndependentInversePolicy(block: Int, suffix: String) async throws {
+        let f = try TARTestFixture(pax: true), original = try f.bzip2Source(block: block)
+        let source = suffix == "tar.bz2" ? original : f.root.appendingPathComponent("Source." + suffix)
+        if source != original { try FileManager().moveItem(at: original, to: source) }
+        #expect(AuthoredArchiveFormat.strictPortableTARBzip2.acceptsFilename(source.lastPathComponent))
+        #expect(!AuthoredArchiveFormat.strictPortableTARGzip.acceptsFilename(source.lastPathComponent))
         let before = try Data(contentsOf: source), history = f.root.appendingPathComponent("history")
         let cache = f.root.appendingPathComponent("cache")
         try FileManager().createDirectory(at: cache, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])

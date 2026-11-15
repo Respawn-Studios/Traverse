@@ -19,6 +19,12 @@ The existing Swift package supplies reusable behavior independently of native UI
 | DriveHealthXPCService | Direct-distribution service entry point; its separate role/signature policy lives in app composition and distribution |
 | RetainedColdProbe | Existing bounded subprocess helper for retained-state tests; not another app or operation engine |
 
+`ArchiveFilename` in ExplorerCore is the common filename-only identity for
+archive wrappers and aliases, including compound extensions. LocalStorage,
+FileOperations and app presentation use it without inferring operation support
+from a name. The reader still validates bytes; each mutation keeps its own
+format and protection admission.
+
 Matching suites live in `Tests/`; `NameStoreFaultSupport` supports existing storage
 fault tests. New regression tests should live with the affected module and reuse
 its fixtures. Do not create another copied package to test normal changes.

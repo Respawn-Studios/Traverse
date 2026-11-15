@@ -23,7 +23,7 @@ let package = Package(
         .executableTarget(name: "DriveHealthWorker", dependencies: ["DriveHealthNative"]),
         .target(name: "BoundedArchiveCodecs", publicHeadersPath: "include", linkerSettings: [.linkedLibrary("z"), .linkedLibrary("bz2")]),
         .target(name: "SSHConfiguration"),
-        .target(name: "FileOperations"),
+        .target(name: "FileOperations", dependencies: ["ExplorerCore"]),
         .target(name: "Search", dependencies: ["ExplorerCore"]),
         .target(name: "StorageAnalysis", dependencies: ["ExplorerCore"], exclude: ["README.md"]),
         .executableTarget(name: "RetainedColdProbe", dependencies: ["StorageAnalysis", "ExplorerCore"]),

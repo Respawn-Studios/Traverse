@@ -4,7 +4,7 @@ import Testing
 
 @Test func fileTypeHintsUseOnlyTheFinalASCIIExtension() {
     let cases: [(String, AnalysisFileType)] = [
-        ("Movie.MP4", .video), ("a/b.tAr.Gz", .archives), ("x.dmg", .diskImages),
+        ("Movie.MP4", .video), ("a/b.tAr.Gz", .archives), ("archive.TBZ", .archives), ("x.dmg", .diskImages),
         ("x.qcow2", .virtualDisks), ("weights.safetensors", .models), ("x.heic", .images),
         ("notes.pages", .documents), ("budget.numbers", .spreadsheets), ("talk.key", .presentations),
         ("code.rs", .textAndSource), ("x.woff2", .fonts), ("x.flac", .audio),

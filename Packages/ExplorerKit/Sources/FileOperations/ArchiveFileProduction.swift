@@ -1,6 +1,7 @@
 import CoreServices
 import Darwin
 import Foundation
+import ExplorerCore
 
 /// The default remains exact source inheritance. The native-stage profile is
 /// an explicit qualification candidate, not an ordinary app activation.
@@ -29,12 +30,12 @@ public enum AuthoredZIPMetadataPolicy: Sendable, Equatable {
     case strictPortableTARBzip2
 
     public func acceptsFilename(_ name: String) -> Bool {
-        let lower = name.lowercased()
+        let kind = ArchiveFilename(name)?.kind
         return switch self {
-        case .zip: lower.hasSuffix(".zip")
-        case .strictPortableTAR: lower.hasSuffix(".tar")
-        case .strictPortableTARGzip: lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz")
-        case .strictPortableTARBzip2: lower.hasSuffix(".tar.bz2") || lower.hasSuffix(".tbz2")
+        case .zip: kind == .zip
+        case .strictPortableTAR: kind == .tar
+        case .strictPortableTARGzip: kind == .tarGzip
+        case .strictPortableTARBzip2: kind == .tarBzip2
         }
     }
 }
