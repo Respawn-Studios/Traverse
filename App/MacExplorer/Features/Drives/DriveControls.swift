@@ -53,7 +53,7 @@ struct DriveStatusView: View {
     @ObservedObject var presentation: DrivePopoverPresentation
     var inspectVolume: ((ManagedVolume) -> Void)?
     var body: some View {
-        Button { presentation.show() } label: {
+        Button { drives.loadNativeDriveJobIfNeeded(); presentation.show() } label: {
             Label(drives.pending == nil ? "Drives" : drives.pendingActionTitle + " pending", systemImage: "eject")
                 .interfaceFont(.system(size: 11))
         }
@@ -84,6 +84,10 @@ struct DriveControlsView: View {
             Text("Drives").interfaceFont(.headline)
             if !drives.protectionIssue.isEmpty {
                 Label(drives.protectionIssue, systemImage: "exclamationmark.shield").interfaceFont(.callout).fixedSize(horizontal: false, vertical: true)
+            }
+            if !drives.nativeDriveJobIssue.isEmpty {
+                Label(drives.nativeDriveJobIssue, systemImage: "exclamationmark.triangle")
+                    .interfaceFont(.callout).fixedSize(horizontal: false, vertical: true)
             }
             if !drives.protectionReady || !drives.protectionIssue.isEmpty {
                 Button(drives.isEditingProtection ? "Checking Protection…" : "Reload Protection", action: drives.reloadProtection)

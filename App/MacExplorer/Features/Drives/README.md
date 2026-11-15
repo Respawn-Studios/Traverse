@@ -24,6 +24,20 @@ parents refuse in-app creation at the backend; the common product policy holds
 that operation. There is no erase, partition or privilege-helper fallback.
 A checked unchanged layout and an uncertain layout are different outcomes.
 
+The unwired `LocalStorage.APFSVolumeFormat` candidate is restricted to one
+ordinary APFS member on a generated disk image. Its optional recording hook
+persists an intent after fresh APFS preflight and before native submission,
+records a launched child without blocking pipe draining, and keeps failed
+postlaunch writes uncertain. A compatible APFS replacement stays a provisional,
+unresolved durable job until an independent marker/attachment witness is
+qualified. `NativeDriveJobStore` uses the existing private
+snapshot writer for one generated-image job; an intent surviving a restart is
+shown as potentially submitted when Drives is opened. Cold inspection is
+read-only and requires the exact generated backing file plus an independent
+attachment verifier; a compatible replacement does not clear an unresolved
+job without generated marker evidence.
+Ordinary Format UI, personal images and physical drives remain held.
+
 ## File benchmark
 
 `DriveBenchmark.swift` uses `LocalStorage.DriveFileBenchmark` for an explicit

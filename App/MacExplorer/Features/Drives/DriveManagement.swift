@@ -56,6 +56,7 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
               protectedLocations: [URL] = [], offscreen: Bool = false,
               benchmark: ((ManagedVolume?) -> Void)? = nil, browser: BrowserViewController? = nil,
               initialPage: DriveWorkspacePage? = nil) {
+        drives?.loadNativeDriveJobIfNeeded()
         self.drives = drives; self.protectedLocations = protectedLocations
         self.settings = settings
         benchmarkHandler = benchmark

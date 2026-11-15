@@ -132,6 +132,7 @@ public final class APFSVolumeCreation: @unchecked Sendable {
         do { try admit() } catch { return .init(submitted: false, created: nil, failure: .busy) }
         defer { release() }
         let cancellation = APFSVolumeTool.Cancellation()
+        let submission = APFSVolumeTool.MutationAdmission()
         var didSubmit = false
         var terminal: APFSVolumeTool.MutationReply?
         do {
@@ -144,15 +145,26 @@ public final class APFSVolumeCreation: @unchecked Sendable {
             }
             try current.validateNewName(plan.name)
             try Task.checkCancellation()
-            guard permitted(), !cancellation.isCancelled else { throw APFSVolumeCreationFailure.unavailable }
+            if cancellation.isCancelled { throw CancellationError() }
+            guard permitted() else { throw APFSVolumeCreationFailure.unavailable }
             // Only the fixed, freshly observed container reaches the tool. No
             // synchronous UI callback opens a device or constructs a command.
             let command = ["apfs", "addVolume", current.device, plan.caseSensitive ? "Case-sensitive APFS" : "APFS", plan.name]
-            do { terminal = try await tool.mutate(command, submitted: submitted) }
+            do {
+                terminal = try await withTaskCancellationHandler {
+                    try await tool.mutate(command, admission: submission,
+                                          permitted: { permitted() && ProcessInfo.processInfo.systemUptime < plan.expiresAt
+                                              && !cancellation.isCancelled }, submitted: submitted)
+                } onCancel: {
+                    cancellation.cancel()
+                    submission.cancel()
+                }
+            }
             catch {
                 // The tool only throws before Process.run succeeds; once
                 // launched, all terminal statuses return after actual drain.
-                return .init(submitted: false, created: nil, failure: (error as? APFSVolumeCreationFailure) ?? .unavailable,
+                return .init(submitted: false, created: nil, failure: error is CancellationError ? .cancelled
+                    : (error as? APFSVolumeCreationFailure) ?? .unavailable,
                     failureStage: .submission)
             }
             didSubmit = true
@@ -187,7 +199,22 @@ public final class APFSVolumeCreation: @unchecked Sendable {
     private func release() { lock.withLock { occupied = false } }
 
     private func observe(_ selected: ManagedVolume, cancellation: APFSVolumeTool.Cancellation) async throws -> APFSContainerObservation {
-        guard selected.deviceKind == .diskImage || selected.deviceKind == .externalDisk && selected.isInternal == false,
+        try await APFSVolumeObservationReader.observe(selected, inspector: inspector, tool: tool,
+                                                     cancellation: cancellation, diskImageOnly: false).container
+    }
+}
+
+struct APFSObservedVolume: Sendable {
+    let info: APFSVolumeObservation
+    let container: APFSContainerObservation
+}
+
+/// Common native/container binding for the distinct Add and Format workflows.
+/// A cached topology row or a BSD name alone never authorizes either request.
+enum APFSVolumeObservationReader {
+    static func observe(_ selected: ManagedVolume, inspector: any VolumeInspecting, tool: APFSVolumeTool,
+                        cancellation: APFSVolumeTool.Cancellation, diskImageOnly: Bool) async throws -> APFSObservedVolume {
+        guard (selected.deviceKind == .diskImage || !diskImageOnly && selected.deviceKind == .externalDisk && selected.isInternal == false),
               let uuid = selected.volumeUUID, selected.mediaID != nil, selected.group != nil, selected.url != nil else {
             throw APFSVolumeCreationFailure.unsupported
         }
@@ -200,7 +227,7 @@ public final class APFSVolumeCreation: @unchecked Sendable {
         let container = try APFSContainerObservation.decode(try await tool.inquire(["apfs", "list", "-plist", info.container], cancellation: cancellation), selected: uuid)
         guard container.device == info.container, container.volumes.contains(where: { $0.uuid == uuid && $0.device == info.device }),
               try await inspector.inspect(selected).volume == selected, !cancellation.isCancelled else { throw APFSVolumeCreationFailure.changed }
-        return container
+        return .init(info: info, container: container)
     }
 }
 
@@ -255,7 +282,7 @@ struct APFSContainerObservation: Sendable {
             throw APFSVolumeCreationFailure.unavailable
         }; return value
     }
-    static func decode(_ data: Data, selected: UUID) throws -> Self {
+    static func decode(_ data: Data, selected: UUID, requireSelected: Bool = true) throws -> Self {
         let root = try plist(data)
         guard let containers = root["Containers"] as? [[String: Any]], containers.count == 1, let d = containers.first,
               let device = d["ContainerReference"] as? String, validContainer(device),
@@ -281,7 +308,7 @@ struct APFSContainerObservation: Sendable {
             return .init(device: device, uuid: uuid, name: name, quota: quota, reserve: reserve)
         }.sorted { $0.device < $1.device }
         guard Set(volumes.map(\.uuid)).count == volumes.count, Set(volumes.map(\.device)).count == volumes.count,
-              volumes.contains(where: { $0.uuid == selected }) else { throw APFSVolumeCreationFailure.changed }
+              (!requireSelected || volumes.contains(where: { $0.uuid == selected })) else { throw APFSVolumeCreationFailure.changed }
         return .init(device: device, uuid: uuid, selectedUUID: selected, capacity: capacity, free: free, stores: stores, volumes: volumes)
     }
     func validateNewName(_ name: String) throws {

@@ -125,6 +125,135 @@ class Fixture:
         self.mount = mount
         return mount, leaves[0]
 
+    def two_member_owned(self, *, original_uuid: str, target_uuid: str | None = None) -> dict:
+        """Read two ordinary APFS members of this exact image; keep one-member checks strict."""
+        original_uuid = str(uuid.UUID(original_uuid)).upper()
+        target_uuid = str(uuid.UUID(target_uuid)).upper() if target_uuid is not None else None
+        attachment = self.attachment()
+        entities = (attachment or {}).get("system-entities", [])
+        outer = entities[0].get("dev-entry", "") if entities else ""
+        leaves = [entity.get("dev-entry", "") for entity in entities
+                  if entity.get("content-hint") == "41504653-0000-11AA-AA11-00306543ECAC"]
+        if (not re.fullmatch(r"/dev/disk[0-9]+", outer) or not 1 <= len(leaves) <= 2
+                or len(set(leaves)) != len(leaves)
+                or any(not re.fullmatch(r"/dev/disk[0-9]+s[0-9]+", leaf) for leaf in leaves)):
+            raise RuntimeError("Generated image outer/APFS attachment changed")
+        leaf_infos = [plistlib.loads(tool(["/usr/sbin/diskutil", "info", "-plist", leaf])) for leaf in leaves]
+        originals = [info for info in leaf_infos
+                     if isinstance(info.get("VolumeUUID"), str)
+                     and str(uuid.UUID(info["VolumeUUID"])).upper() == original_uuid]
+        if len(originals) != 1:
+            raise RuntimeError("Original generated APFS leaf is no longer in the attachment")
+        original = originals[0]
+        container_device = original.get("APFSContainerReference")
+        if (original.get("DeviceNode") not in leaves or original.get("FilesystemType") != "apfs"
+                or not isinstance(container_device, str) or not re.fullmatch(r"disk[0-9]+", container_device)):
+            raise RuntimeError("Generated APFS attachment no longer resolves to its container")
+        graph = plistlib.loads(tool(["/usr/sbin/diskutil", "apfs", "list", "-plist", container_device]))
+        containers = graph.get("Containers", [])
+        if len(containers) != 1 or not isinstance(containers[0], dict):
+            raise RuntimeError("Generated APFS container observation is ambiguous")
+        container = containers[0]
+        volumes = container.get("Volumes", [])
+        stores = container.get("PhysicalStores", [])
+        if (container.get("ContainerReference") != container_device or len(volumes) != 2 or len(stores) != 1
+                or not isinstance(container.get("APFSContainerUUID"), str)
+                or type(container.get("CapacityCeiling")) is not int or container["CapacityCeiling"] <= 0
+                or not isinstance(stores[0], dict) or not isinstance(stores[0].get("DeviceIdentifier"), str)):
+            raise RuntimeError("Generated APFS graph is not one ordinary two-member container")
+        expected = {original_uuid} if target_uuid is None else {original_uuid, target_uuid}
+        members: dict[str, dict] = {}
+        for member in volumes:
+            if not isinstance(member, dict):
+                raise RuntimeError("Generated APFS member observation is invalid")
+            raw_identifier = member.get("APFSVolumeUUID")
+            try:
+                identifier = str(uuid.UUID(raw_identifier)).upper()
+            except (ValueError, TypeError, AttributeError):
+                raise RuntimeError("Generated APFS member UUID is invalid") from None
+            device = member.get("DeviceIdentifier")
+            if (not isinstance(identifier, str) or not isinstance(device, str)
+                    or not re.fullmatch(r"disk[0-9]+s[0-9]+", device) or identifier in members
+                    or not isinstance(member.get("Name"), str) or member.get("Roles") != []
+                    or any(member.get(key) is not False for key in ("Encryption", "FileVault", "Locked", "CryptoMigrationOn"))
+                    or type(member.get("CapacityQuota")) is not int or member["CapacityQuota"] != 0
+                    or type(member.get("CapacityReserve")) is not int or member["CapacityReserve"] != 0):
+                raise RuntimeError("Generated APFS member has unsupported identity or attributes")
+            info = plistlib.loads(tool(["/usr/sbin/diskutil", "info", "-plist", device]))
+            mount_text = info.get("MountPoint")
+            try:
+                info_uuid = str(uuid.UUID(info.get("VolumeUUID"))).upper()
+            except (ValueError, TypeError, AttributeError):
+                raise RuntimeError("Generated APFS member native UUID is invalid") from None
+            if (info.get("DeviceIdentifier") != device or info_uuid != identifier
+                    or info.get("APFSContainerReference") != container_device or info.get("FilesystemType") != "apfs"
+                    or info.get("Internal") is not False or info.get("Encryption") is not False
+                    or info.get("FileVault") is not False or info.get("Locked") is not False
+                    or info.get("APFSVolumeGroupID") is not None
+                    or not isinstance(mount_text, str) or not mount_text):
+                raise RuntimeError("Generated APFS member native info changed")
+            mount = self.os_mount_path(mount_text)
+            mount_stat = mount.stat()
+            if mount_stat.st_dev == self.root_id[0] or not stat.S_ISDIR(mount_stat.st_mode):
+                raise RuntimeError("Generated APFS member mount changed")
+            mounted_info = plistlib.loads(tool(["/usr/sbin/diskutil", "info", "-plist", str(mount)]))
+            if (mounted_info.get("DeviceIdentifier") != device or mounted_info.get("MountPoint") != str(mount)
+                    or str(uuid.UUID(mounted_info.get("VolumeUUID"))).upper() != identifier
+                    or mount.stat().st_dev != mount_stat.st_dev):
+                raise RuntimeError("Generated APFS member mount no longer matches its device")
+            members[identifier] = {"device": device, "name": member["Name"], "mount": str(mount),
+                                   "mountDevice": mount_stat.st_dev, "caseSensitive": info.get("FilesystemName") == "Case-sensitive APFS"}
+        if original_uuid not in members or target_uuid is not None and set(members) != expected:
+            raise RuntimeError("Generated APFS sibling or target identity changed")
+        self.validate()
+        if self.attachment() != attachment:
+            raise RuntimeError("Generated image attachment changed during APFS observation")
+        return {"outer": outer, "container": container_device, "containerUUID": container["APFSContainerUUID"],
+                "capacity": container["CapacityCeiling"], "store": stores[0], "members": members}
+
+    def member_marker(self, mount_text: str, leaf: str, *, expected_device: str,
+                      expected_uuid: str, expected_mount_device: int) -> tuple[int, int] | None:
+        """Inspect one fixed generated marker through its pinned member mount."""
+        if leaf not in (".mac-explorer-drive-owner", ".mac-explorer-format-target"):
+            raise RuntimeError("Unrecognized generated APFS marker")
+        mount = self.os_mount_path(mount_text)
+        expected_uuid = str(uuid.UUID(expected_uuid)).upper()
+        def matches_mount() -> bool:
+            details = plistlib.loads(tool(["/usr/sbin/diskutil", "info", "-plist", str(mount)]))
+            try:
+                observed_uuid = str(uuid.UUID(details.get("VolumeUUID"))).upper()
+            except (ValueError, TypeError, AttributeError):
+                return False
+            return (details.get("DeviceIdentifier") == expected_device and observed_uuid == expected_uuid
+                    and details.get("MountPoint") == str(mount))
+        if not matches_mount():
+            raise RuntimeError("Generated APFS marker mount no longer identifies its member")
+        directory = os.open(mount, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            pinned = os.fstat(directory)
+            if (not stat.S_ISDIR(pinned.st_mode) or pinned.st_dev != expected_mount_device
+                    or pinned.st_dev == self.root_id[0]):
+                raise RuntimeError("Generated APFS marker mount changed")
+            try:
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            except FileNotFoundError:
+                if not matches_mount() or os.fstat(directory).st_dev != expected_mount_device:
+                    raise RuntimeError("Generated APFS marker mount changed during read")
+                return None
+            try:
+                value = os.fstat(fd)
+                if (not stat.S_ISREG(value.st_mode) or value.st_dev != pinned.st_dev
+                        or value.st_uid != os.geteuid() or value.st_nlink != 1 or value.st_size != 36
+                        or os.read(fd, 37) != self.job.encode()):
+                    raise RuntimeError("Generated APFS marker identity or contents changed")
+                if not matches_mount() or os.fstat(directory).st_dev != expected_mount_device:
+                    raise RuntimeError("Generated APFS marker mount changed during read")
+                return value.st_dev, value.st_ino
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
+
     def attach_owned(self) -> None:
         self.validate()
         if self.attachment() is not None:
@@ -249,36 +378,44 @@ def main() -> int:
     mode.add_argument("--qualify-attached", type=Path,
                       help="Run normal lifecycle checks within the separately approved retained-image session; never attaches an image.")
     parser.add_argument("--session-proof", type=Path)
-    parser.add_argument("--apfs-ui", action="store_true",
-                        help="Existing lifecycle owner, one 1 GiB generated image, real CUA Review/Add flow; no other workload.")
+    apfs_mode = parser.add_mutually_exclusive_group()
+    apfs_mode.add_argument("--apfs-ui", action="store_true",
+                           help="Existing lifecycle owner, one 1 GiB generated image, real CUA Review/Add flow; no other workload.")
+    apfs_mode.add_argument("--apfs-format", action="store_true",
+                           help="One new 1 GiB generated image; at most one Add and one APFS member Format in a test-only native route.")
     args = parser.parse_args()
     if args.qualify_attached is not None and args.session_proof is None:
         parser.error("--qualify-attached requires --session-proof")
     if args.session_proof is not None and args.qualify_attached is None:
         parser.error("--session-proof requires --qualify-attached")
-    if args.apfs_ui and args.inspect_existing is not None:
-        parser.error("--apfs-ui is not an inspection-only action")
+    if (args.apfs_ui or args.apfs_format) and args.inspect_existing is not None:
+        parser.error("APFS mutation modes are not inspection-only actions")
+    if args.apfs_format and args.qualify_attached is not None:
+        parser.error("--apfs-format requires a fresh image; retained sessions are refused")
     if not args.execute and args.inspect_existing is None and args.qualify_attached is None:
-        print("Review only: " + ("one 1 GiB image, CUA APFS Review/Add, at most one Add, no lifecycle/Copy workload. " if args.apfs_ui
+        print("Review only: " + ("one fresh 1 GiB image, at most one Add and one APFS member Format, no UI or other workload. " if args.apfs_format
+              else "one 1 GiB image, CUA APFS Review/Add, at most one Add, no lifecycle/Copy workload. " if args.apfs_ui
               else "one 512 MiB APFS image; normal attach, app-coordinated Unmount/Mount/queued Copy/Eject. ")
               + "Preserve evidence and image. Use --execute only with the owner's explicit scoped approval.")
         return 0
     if not args.inspect_existing:
-        if args.apfs_ui:
+        if args.apfs_ui or args.apfs_format:
             require_unlocked_console()
         # Finish compilation and current-app admission before making a disk
         # image. A missing standalone-probe dependency must consume no mount.
         compiled_debug_inputs(require_current_source=True)
         build_preparation_probe()
     preserved_root = args.inspect_existing or args.qualify_attached
-    fixture = Fixture.preserved(preserved_root) if preserved_root else Fixture(image_bytes=1 << 30 if args.apfs_ui else 512 << 20)
-    if args.apfs_ui and fixture.image_bytes != 1 << 30:
-        raise RuntimeError("APFS UI qualification requires the exact 1 GiB generated image")
+    fixture = Fixture.preserved(preserved_root) if preserved_root else Fixture(image_bytes=1 << 30 if args.apfs_ui or args.apfs_format else 512 << 20)
+    if (args.apfs_ui or args.apfs_format) and fixture.image_bytes != 1 << 30:
+        raise RuntimeError("APFS qualification requires the exact 1 GiB generated image")
     evidence = local_directory("evidence") / ("drive-lifecycle-" + stamp())
     evidence.mkdir(mode=0o700)
     log = evidence / "native.log"
     report = {"passed": False, "fixture": str(fixture.root), "imagePreserved": True,
-              "apfsUI": args.apfs_ui, "addCallBudget": 1 if args.apfs_ui else 0}
+              "apfsUI": args.apfs_ui, "apfsFormat": args.apfs_format,
+              "addCallBudget": 1 if args.apfs_ui or args.apfs_format else 0,
+              "formatCallBudget": 1 if args.apfs_format else 0}
     uncertain_process = False
     try:
         if args.qualify_attached:
@@ -315,15 +452,16 @@ def main() -> int:
             with log.open("xb") as stream:
                 command = [str(APP / "Contents/MacOS/Mac Explorer"), "--verify-ui", "--offscreen",
                            "--verify-drive-lifecycle", "--fixture-root", str(fixture.root), "--evidence-root", str(evidence)]
-                if args.apfs_ui:
-                    command.append("--apfs-ui")
-                    # Only the App bounds its pre-submission CUA wait. Never
-                    # timeout/kill the App while a creation child may be alive.
+                if args.apfs_ui or args.apfs_format:
+                    command.append("--apfs-format" if args.apfs_format else "--apfs-ui")
+                    # Never timeout/kill the App while either mutation child
+                    # may be alive. The App owns actual drain and uncertainty.
                     uncertain_process = True
                     process = subprocess.Popen(command, env=env, cwd=ROOT, stdin=subprocess.DEVNULL,
                         stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
-                    write_json(evidence / "native-ui-process.json", {"pid": process.pid, "apfsUI": True,
-                        "addCallBudget": 1, "preSubmissionWaitSeconds": 600, "parentMutationTimeout": False})
+                    write_json(evidence / "native-ui-process.json", {"pid": process.pid, "apfsUI": args.apfs_ui,
+                        "apfsFormat": args.apfs_format, "addCallBudget": 1, "formatCallBudget": 1 if args.apfs_format else 0,
+                        "preSubmissionWaitSeconds": 600 if args.apfs_ui else 0, "parentMutationTimeout": False})
                     process.wait()
                     uncertain_process = False
                 else:
@@ -340,7 +478,30 @@ def main() -> int:
             write_json(evidence / "runtime-diagnostics.json", diagnostics)
             if process.returncode or not result.get("passed") or not diagnostics.get("passed"):
                 raise RuntimeError("Native drive qualification did not pass; see retained evidence")
-            if not args.apfs_ui:
+            if args.apfs_format:
+                outcome = read_json(evidence / "apfs-format-result.json")
+                if outcome.get("passed") is not True or outcome.get("submitted") is not True:
+                    raise RuntimeError("Generated APFS Format did not return an exact verified result")
+                graph = fixture.two_member_owned(original_uuid=outcome["siblingUUID"], target_uuid=outcome["formattedUUID"])
+                if (graph["outer"] != outcome["outerDevice"]
+                        or graph["members"][outcome["siblingUUID"]]["device"] != outcome["siblingDevice"]
+                        or graph["members"][outcome["formattedUUID"]]["name"] != outcome["formattedName"]):
+                    raise RuntimeError("Generated APFS Format post-graph changed after native verification")
+                sibling_mount = graph["members"][outcome["siblingUUID"]]["mount"]
+                target_mount = graph["members"][outcome["formattedUUID"]]["mount"]
+                sibling = graph["members"][outcome["siblingUUID"]]
+                target = graph["members"][outcome["formattedUUID"]]
+                sibling_marker = fixture.member_marker(sibling_mount, ".mac-explorer-drive-owner",
+                    expected_device=sibling["device"], expected_uuid=outcome["siblingUUID"],
+                    expected_mount_device=sibling["mountDevice"])
+                target_marker = fixture.member_marker(target_mount, ".mac-explorer-format-target",
+                    expected_device=target["device"], expected_uuid=outcome["formattedUUID"],
+                    expected_mount_device=target["mountDevice"])
+                if (sibling_marker != (graph["members"][outcome["siblingUUID"]]["mountDevice"], outcome["siblingMarkerInode"])
+                        or target_marker is not None):
+                    raise RuntimeError("Generated APFS sibling marker or erased target marker changed")
+                report["twoMemberPostcheck"] = True
+            if not args.apfs_ui and not args.apfs_format:
                 deadline = time.monotonic() + 5
                 while fixture.attachment() is not None and time.monotonic() < deadline:
                     time.sleep(0.1)
@@ -350,7 +511,7 @@ def main() -> int:
     except Exception as error:
         report["failure"] = str(error)
     finally:
-        if (args.qualify_attached or args.apfs_ui) and not report["passed"]:
+        if (args.qualify_attached or args.apfs_ui or args.apfs_format) and not report["passed"]:
             report["retainedForDiagnosis"] = True
         elif fixture.image_id is not None and not uncertain_process:
             try:

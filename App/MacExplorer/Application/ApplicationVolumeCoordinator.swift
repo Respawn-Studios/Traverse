@@ -24,8 +24,13 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     private var running: Task<Void, Never>?
     private var runID: UUID?
     private let protectionStore: DriveProtectionStore
+    private let nativeDriveJobStore: NativeDriveJobStore?
     private var protectionSnapshot: DriveProtectionStore.Snapshot?
     private var protectionTask: Task<Void, Never>?
+    private var nativeDriveJobTask: Task<Void, Never>?
+    private var nativeDriveJobLoaded = false
+    @Published private(set) var nativeDriveJobReady = false
+    @Published private(set) var nativeDriveJobIssue = ""
     private var sessionProtection: [UUID: VolumeProtectionLevel] = [:]
     @Published private(set) var protectionReady = false
     @Published private(set) var isEditingProtection = false
@@ -58,8 +63,9 @@ final class ApplicationVolumeCoordinator: ObservableObject {
         self.operations = operations; self.backend = backend
         let directory = AppStorageLocations.stateDirectory?.appendingPathComponent("drive-protection")
         self.protectionStore = protectionStore ?? DriveProtectionStore(directory: directory, memoryOnly: backend != nil)
+        self.nativeDriveJobStore = NativeDriveJobStore.applicationStore()
     }
-    isolated deinit { discovery?.cancel(); evaluation?.cancel() }
+    isolated deinit { discovery?.cancel(); evaluation?.cancel(); nativeDriveJobTask?.cancel() }
 
     func startDiscovery() {
         guard discovery == nil else { return }
@@ -87,6 +93,45 @@ final class ApplicationVolumeCoordinator: ObservableObject {
             }
         }
     }
+
+    /// A cold intent may have reached diskutil before the app stopped. This
+    /// passive read creates no state; unresolved or unreadable records keep
+    /// native Format admission closed, while ordinary drive discovery remains.
+    func loadNativeDriveJobIfNeeded() {
+        guard !nativeDriveJobLoaded, nativeDriveJobTask == nil else { return }
+        nativeDriveJobReady = false
+        nativeDriveJobIssue = "Checking saved drive jobs…"
+        nativeDriveJobTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let store = self.nativeDriveJobStore else { throw NativeDriveJobStore.Failure.unavailable }
+                let snapshot = try await store.load()
+                if snapshot.record?.isUnresolved == true {
+                    self.nativeDriveJobIssue = "A prior APFS Format request may have been submitted. Inspect the exact disk image before another native drive change."
+                } else {
+                    self.nativeDriveJobIssue = ""; self.nativeDriveJobReady = true
+                }
+            } catch {
+                self.nativeDriveJobIssue = "The saved native drive job could not be verified. Native Format remains unavailable."
+            }
+            self.nativeDriveJobLoaded = true
+            self.nativeDriveJobTask = nil
+        }
+    }
+
+    #if DEBUG
+    /// Only the separately gated generated-image verification may obtain a
+    /// recorder. It does not submit anything and grants no Format UI action.
+    func generatedFormatRecording(owner: APFSVolumeFormatGeneratedOwner,
+                                  attachmentCurrent: @escaping @Sendable () -> Bool) -> (any APFSVolumeFormatRecording)? {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.contains("--verify-drive-lifecycle"), args.contains("--apfs-format"),
+              owner.validate() else { return nil }
+        if !nativeDriveJobLoaded { loadNativeDriveJobIfNeeded() }
+        guard nativeDriveJobReady, nativeDriveJobIssue.isEmpty else { return nil }
+        return nativeDriveJobStore?.recording(owner: owner, attachmentCurrent: attachmentCurrent)
+    }
+    #endif
 
     func reloadProtection() {
         guard !isBusy, protectionTask == nil else { return }

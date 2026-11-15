@@ -6,7 +6,28 @@ import Security
 /// stopped; an add-volume child is never signalled, even on cancellation,
 /// timeout or excessive output. Its actual return always owns the worker.
 final class APFSVolumeTool: Sendable {
-    enum Failure: Error { case launch, inquiry }
+    enum Failure: Error { case launch, inquiry, admission }
+    /// Cancellation and mutation submission share one decision on the tool
+    /// queue. Once launch begins, cancellation cannot claim to stop the child.
+    final class MutationAdmission: @unchecked Sendable {
+        enum Decision: Equatable { case launch, cancelled, unavailable }
+        private enum State: Equatable { case open, cancelled, refused, launching }
+        private let lock = NSLock()
+        private var state = State.open
+        func cancel() { lock.withLock { if state == .open { state = .cancelled } } }
+        func beginIfAllowed(_ permitted: () -> Bool) -> Decision {
+            lock.withLock {
+                switch state {
+                case .cancelled: return .cancelled
+                case .refused, .launching: return .unavailable
+                case .open: break
+                }
+                guard permitted() else { state = .refused; return .unavailable }
+                state = .launching
+                return .launch
+            }
+        }
+    }
     /// Internal qualification only. Delivered after the mutation child has
     /// actually been reaped; never included in the public creation result.
     struct MutationTerminal: Sendable {
@@ -42,12 +63,33 @@ final class APFSVolumeTool: Sendable {
         let errorCode: Int?
         let diagnosticCategory: APFSVolumeCreationResult.DiagnosticCategory?
     }
-    func mutate(_ arguments: [String], submitted: @escaping @Sendable () -> Void) async throws -> MutationReply {
+    func mutate(_ arguments: [String], admission: MutationAdmission,
+                permitted: @escaping @Sendable () -> Bool,
+                submitted: @escaping @Sendable () -> Void) async throws -> MutationReply {
         guard Self.permitsInProcessMutation else { throw APFSVolumeCreationFailure.unavailable }
         guard arguments.count == 5, arguments.prefix(2) == ["apfs", "addVolume"],
               APFSContainerObservation.validContainer(arguments[2]), ["APFS", "Case-sensitive APFS"].contains(arguments[3]),
               (try? APFSVolumeCreation.validatedName(arguments[4])) == arguments[4] else { throw APFSVolumeCreationFailure.unsupported }
-        let reply = try await run(arguments, mutation: true, cancellation: nil, submitted: submitted)
+        let reply = try await run(arguments, mutation: true, cancellation: nil,
+                                  admission: admission, permitted: permitted, submitted: submitted)
+        return .init(status: reply.status, errorCode: reply.errorCode, diagnosticCategory: reply.diagnosticCategory)
+    }
+    /// This is a separate, fixed APFS-volume erase request. It cannot select a
+    /// container, whole device, another filesystem or a password option.
+    static func eraseVolumeArguments(device: String, name: String) throws -> [String] {
+        guard device.range(of: #"\Adisk[0-9]{1,6}s[0-9]{1,6}\z"#, options: .regularExpression) != nil,
+              (try? APFSVolumeCreation.validatedName(name)) == name else {
+            throw APFSVolumeFormatFailure.unsupported
+        }
+        return ["apfs", "eraseVolume", device, "-name", name]
+    }
+    func eraseVolume(device: String, name: String, admission: MutationAdmission,
+                     permitted: @escaping @Sendable () -> Bool,
+                     submitted: @escaping @Sendable () -> Void) async throws -> MutationReply {
+        let arguments = try Self.eraseVolumeArguments(device: device, name: name)
+        guard Self.permitsInProcessMutation else { throw APFSVolumeFormatFailure.unavailable }
+        let reply = try await run(arguments, mutation: true,
+                                  cancellation: nil, admission: admission, permitted: permitted, submitted: submitted)
         return .init(status: reply.status, errorCode: reply.errorCode, diagnosticCategory: reply.diagnosticCategory)
     }
     /// A folder grant is never disk-operation authority. Even a mistaken App
@@ -104,18 +146,28 @@ final class APFSVolumeTool: Sendable {
         return first
     }
     private func run(_ arguments: [String], mutation: Bool, cancellation: Cancellation?,
+                     admission: MutationAdmission? = nil, permitted: @escaping @Sendable () -> Bool = { true },
                      submitted: @escaping @Sendable () -> Void = {}) async throws -> Reply {
         let observer = terminalObserver
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
-                do { continuation.resume(returning: try Self.collect(arguments, mutation: mutation, cancellation: cancellation, submitted: submitted, observer: observer)) }
+                do { continuation.resume(returning: try Self.collect(arguments, mutation: mutation, cancellation: cancellation,
+                    admission: admission, permitted: permitted, submitted: submitted, observer: observer)) }
                 catch { continuation.resume(throwing: error) }
             }
         }
     }
     private static func collect(_ arguments: [String], mutation: Bool, cancellation: Cancellation?,
+                                admission: MutationAdmission?, permitted: @Sendable () -> Bool,
                                 submitted: @Sendable () -> Void, observer: TerminalObserver?) throws -> Reply {
         if !mutation, cancellation?.isCancelled == true { throw CancellationError() }
+        if mutation {
+            switch admission?.beginIfAllowed(permitted) ?? .unavailable {
+            case .launch: break
+            case .cancelled: throw CancellationError()
+            case .unavailable: throw Failure.admission
+            }
+        }
         let child = Process(), output = Pipe(), errors = Pipe()
         let control = DriveHealthChildControl()
         child.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")

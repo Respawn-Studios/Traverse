@@ -66,6 +66,22 @@ struct APFSVolumeCreationTests {
         #expect(!String(reflecting: plan).contains("generated"))
     }
 
+    @Test func cancellationWinsUntilMutationLaunchBegins() {
+        let cancelled = APFSVolumeTool.MutationAdmission()
+        cancelled.cancel()
+        #expect(cancelled.beginIfAllowed({ true }) == .cancelled)
+
+        let policyHeld = APFSVolumeTool.MutationAdmission()
+        #expect(policyHeld.beginIfAllowed({ false }) == .unavailable)
+        policyHeld.cancel()
+        #expect(policyHeld.beginIfAllowed({ true }) == .unavailable)
+
+        let launched = APFSVolumeTool.MutationAdmission()
+        #expect(launched.beginIfAllowed({ true }) == .launch)
+        launched.cancel()
+        #expect(launched.beginIfAllowed({ true }) == .unavailable)
+    }
+
     @Test func toolDiagnosticsRetainOnlyFixedNumericErrorSuffix() {
         #expect(APFSVolumeTool.numericErrorCode(Data("Started on disk9\nError starting APFS operation: permission refused (-69501)\n".utf8)) == -69501)
         #expect(APFSVolumeTool.numericErrorCode(Data("Error: -69493: You can't add any more APFS Volumes to its APFS Container\n".utf8)) == -69493)
