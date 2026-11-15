@@ -408,8 +408,13 @@ import LocalStorage
             phase = "invalid-callback-url"
             let offer = try await offered(["First.txt"]), replies = Replies()
             let base = root.appendingPathComponent("state/Refused", isDirectory: true)
-            guard let dot = URL(string: "../Outside.txt", relativeTo: base) else { throw FileOperationFailure.invalidRequest }
-            try UIVerification.require(ArchivePromiseExport.resolvedDestination(dot) == nil,
+            guard let dot = URL(string: "../Outside.txt", relativeTo: base),
+                  let same = URL(string: "./Inside.txt", relativeTo: base) else { throw FileOperationFailure.invalidRequest }
+            let safe = URL(fileURLWithPath: "Inside.txt", isDirectory: false, relativeTo: base)
+            try UIVerification.require(!ArchivePromiseExport.originalPathIsAdmissible(dot)
+                && !ArchivePromiseExport.originalPathIsAdmissible(same)
+                && ArchivePromiseExport.originalPathIsAdmissible(safe)
+                && ArchivePromiseExport.resolvedDestination(dot) == nil,
                 "A composed dot component silently changed the callback spelling")
             guard let invalid = URL(string: "https://example.invalid/generated-no-request") else { throw UIVerification.Failure(message: "Invalid-URL control missing") }
             try send(offer, "First.txt", to: invalid, replies, "invalid")

@@ -310,13 +310,17 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     /// Flatten a composed file URL without changing its resolved path. Dot
     /// components remain refused; destination authority is still established
     /// by the observed parent and the concrete operation engine.
+    static func originalPathIsAdmissible(_ supplied: URL) -> Bool {
+        guard let raw = URLComponents(url: supplied, resolvingAgainstBaseURL: false)?.path,
+              !raw.isEmpty, raw.utf8.count <= 8_192, !raw.contains("\0") else { return false }
+        return !raw.split(separator: "/").contains(where: { $0 == "." || $0 == ".." })
+    }
     static func resolvedDestination(_ supplied: URL) -> URL? {
-        guard supplied.isFileURL, supplied.relativePath.utf8.count <= 8_192,
-              !supplied.relativePath.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+        guard supplied.isFileURL, originalPathIsAdmissible(supplied) else { return nil }
         let url = supplied.absoluteURL
         guard url.isFileURL, url.baseURL == nil,
               url.path.utf8.elementsEqual(supplied.path.utf8),
-              url.path.utf8.count <= 8_192, url.lastPathComponent.utf8.count <= 255,
+              url.path.utf8.count <= 8_192, !url.path.contains("\0"), url.lastPathComponent.utf8.count <= 255,
               !url.lastPathComponent.isEmpty, url.lastPathComponent != ".", url.lastPathComponent != "..",
               !url.lastPathComponent.contains("/"), !url.lastPathComponent.contains("\0"),
               url.query == nil, url.fragment == nil,
