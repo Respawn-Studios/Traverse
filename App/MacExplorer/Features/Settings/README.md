@@ -16,5 +16,6 @@ saved-invitation choice. The same setup and Help views bind the correct choice;
 Operations stores `quickCompressionFormat` in the versioned settings snapshot.
 Older snapshots default to ZIP. Unknown values and newer snapshots stay
 preserved rather than being overwritten. The command captures its format before
-preparation and checks edition availability again before publishing; an
-unavailable saved format never silently turns into another archive type.
+preparation and checks edition availability again before publishing; a
+recognized saved format that is unavailable in this edition stays disabled
+instead of switching types.
