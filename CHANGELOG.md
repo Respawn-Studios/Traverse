@@ -26,6 +26,7 @@ Earlier private-beta version numbers belong to a separate release history.
   behavior recorded in results and exports.
 - A bounded Quick Mix benchmark, matched suite comparisons and readable
   per-block latency distributions alongside the existing result metrics.
+  Copied text and JSON results include the same completed-call distribution.
 - Deliberate compressed-TAR Open in Development includes bounded preparation.
   Passive restore and return to a changed archive still wait for Prepare.
 - Editor closing follows animation preferences while retaining text until the

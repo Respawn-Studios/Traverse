@@ -15,6 +15,24 @@ struct DriveFileBenchmarkTests {
         #expect(buckets.first?.lowerBoundMilliseconds == 0 && buckets.first?.upperBoundMilliseconds == 0.125)
         #expect(buckets.last?.lowerBoundMilliseconds == 16 && buckets.last?.upperBoundMilliseconds == nil)
         #expect(latency.medianMilliseconds == 0.5 && latency.p95Milliseconds == 16)
+        let measured = DriveBenchmarkResult(outcome: .completed, bytesWritten: 40_960, bytesRead: 40_960,
+            writeSeconds: 1, readSeconds: 1, flushSeconds: 0.1, workload: .random4K,
+            blockBytes: 4096, writeLatency: latency, readLatency: latency)
+        let copied = try DriveBenchmarkReport(result: measured,
+            recordedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let copiedBuckets = try #require(copied.writeAndFlush.ioLatency?.distribution)
+        #expect(copiedBuckets.map(\.count) == buckets.map(\.count))
+        #expect(copiedBuckets.reduce(0) { $0 + $1.count } == copied.writeAndFlush.completedOperations)
+        #expect(copied.summary.contains("I/O latency distribution") && copied.summary.contains("[16.000,∞): 1"))
+        let copiedJSON = try #require(JSONSerialization.jsonObject(with: Data(copied.json().utf8)) as? [String: Any])
+        let write = try #require(copiedJSON["writeAndFlush"] as? [String: Any])
+        let ioLatency = try #require(write["ioLatency"] as? [String: Any])
+        let encodedBuckets = try #require(ioLatency["distribution"] as? [[String: Any]])
+        #expect(copiedJSON["schemaVersion"] as? Int == 3 && encodedBuckets.count == 9)
+        #expect(encodedBuckets.compactMap { $0["count"] as? Int }.reduce(0, +) == latency.operations)
+        #expect(encodedBuckets.first?["lowerBoundMilliseconds"] as? Double == 0)
+        #expect(encodedBuckets.first?["upperBoundMilliseconds"] as? Double == 0.125)
+        #expect(encodedBuckets.last?["upperBoundMilliseconds"] is NSNull)
 
         #expect(DriveBenchmarkLatency([]).distribution == nil)
         for invalid in [Double.nan, .infinity, -0.001, .greatestFiniteMagnitude] {
@@ -49,8 +67,13 @@ struct DriveFileBenchmarkTests {
         let json = try suite.json()
         let object = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         #expect(object["schemaVersion"] as? Int == 1 && object["preset"] as? String == "quick-mix-v1")
-        #expect((object["sequential"] as? [String: Any])?["schemaVersion"] as? Int == 2)
+        #expect((object["sequential"] as? [String: Any])?["schemaVersion"] as? Int == 3)
         #expect((object["random4K"] as? [String: Any])?["workload"] as? String == "random4K")
+        let randomPhase = (object["random4K"] as? [String: Any])?["writeAndFlush"] as? [String: Any]
+        let randomLatency = randomPhase?["ioLatency"] as? [String: Any]
+        let randomBuckets = randomLatency?["distribution"] as? [[String: Any]]
+        let randomCounts = randomBuckets?.compactMap { $0["count"] as? Int }
+        #expect(randomCounts?.count == 9 && randomCounts?.reduce(0, +) == 4096)
         #expect(suite.summary.contains("Sequential") && suite.summary.contains("Random 4 KiB"))
         for text in [json, suite.summary] {
             #expect(!text.contains("volumeName") && !text.contains("fileSystemID") && !text.contains("scratchURL"))
@@ -102,7 +125,7 @@ struct DriveFileBenchmarkTests {
         #expect(report.writeAndFlush.megabytesPerSecond == nil && report.writeAndFlush.ioLatency == nil)
         let json = try report.json()
         let object = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        #expect(object["schemaVersion"] as? Int == 2 && object["cleanupNeeded"] as? Bool == true)
+        #expect(object["schemaVersion"] as? Int == 3 && object["cleanupNeeded"] as? Bool == true)
         #expect(object["cacheMode"] as? String == "tryNoCache")
         #expect((object["performanceSamples"] as? [[String: Any]])?.count == 600)
         for text in [json, report.summary] {
@@ -136,7 +159,9 @@ struct DriveFileBenchmarkTests {
             #expect(report.summary.contains("Partial/failed observations") && !report.summary.contains(" MB/s"))
             #expect(report.summary.contains("not proof of hardware persistence"))
             #expect(report.failureCode == (outcome == .failed ? "verification" : nil))
-            _ = try report.json()
+            let object = try #require(JSONSerialization.jsonObject(with: Data(report.json().utf8)) as? [String: Any])
+            #expect((object["writeAndFlush"] as? [String: Any])?["ioLatency"] == nil)
+            #expect((object["readAndVerify"] as? [String: Any])?["ioLatency"] == nil)
         }
     }
 

@@ -141,17 +141,28 @@ import SwiftUI
             model.copyResults(.summary); model.copyResults(.json)
             try require(copiedResults.count == 2, "Summary/JSON did not publish exactly two text results")
             let copiedJSON = try JSONSerialization.jsonObject(with: Data(copiedResults[1].utf8)) as? [String: Any]
+            let copiedWrite = copiedJSON?["writeAndFlush"] as? [String: Any]
+            let copiedRead = copiedJSON?["readAndVerify"] as? [String: Any]
+            let copiedWriteBuckets = (copiedWrite?["ioLatency"] as? [String: Any])?["distribution"] as? [[String: Any]]
+            let copiedReadBuckets = (copiedRead?["ioLatency"] as? [String: Any])?["distribution"] as? [[String: Any]]
+            let copiedWriteCounts = copiedWriteBuckets?.compactMap { $0["count"] as? Int }
+            let copiedReadCounts = copiedReadBuckets?.compactMap { $0["count"] as? Int }
             try require(copiedResults[0].hasPrefix("Traverse file benchmark")
-                && copiedJSON?["schemaVersion"] as? Int == 2
+                && copiedResults[0].contains("I/O latency distribution")
+                && copiedJSON?["schemaVersion"] as? Int == 3
                 && copiedJSON?["cacheMode"] as? String == DriveBenchmarkCacheMode.tryNoCache.rawValue
+                && copiedWriteCounts?.count == 9 && copiedWriteCounts?.reduce(0, +) == result.writeLatency.operations
+                && copiedReadCounts?.count == 9 && copiedReadCounts?.reduce(0, +) == result.readLatency.operations
                 && !copiedResults.contains(where: { $0.contains(folder.path) || $0.contains(volume.name) }),
-                "Copied benchmark output did not use the shared text publisher or retained a selection identity")
+                "Copied benchmark output lost distribution, skipped the shared text publisher or retained selection identity")
             if quickMix {
                 model.copyResults(.suiteSummary); model.copyResults(.suiteJSON)
                 try require(copiedResults.count == 4 && copiedResults[2].hasPrefix("Traverse Quick Mix file benchmark"),
                     "Quick Mix summary was not copied through the shared publisher")
                 let paired = try JSONSerialization.jsonObject(with: Data(copiedResults[3].utf8)) as? [String: Any]
                 try require(paired?["schemaVersion"] as? Int == 1
+                    && (paired?["sequential"] as? [String: Any])?["schemaVersion"] as? Int == 3
+                    && (paired?["random4K"] as? [String: Any])?["schemaVersion"] as? Int == 3
                     && (paired?["sequential"] as? [String: Any])?["workload"] as? String == "sequential"
                     && (paired?["random4K"] as? [String: Any])?["workload"] as? String == "random4K"
                     && !copiedResults[3].contains(folder.path) && !copiedResults[3].contains(volume.name),

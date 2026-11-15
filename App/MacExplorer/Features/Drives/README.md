@@ -38,9 +38,11 @@ shown as potentially submitted when Drives is opened. Cold inspection is
 read-only and requires the exact generated backing file plus an independent
 attachment verifier; a compatible replacement does not clear an unresolved
 job without generated marker evidence.
-The source and shared Debug build include the recorder admission and cold
-read-only check; native recorder runtime is not yet qualified. Ordinary in-app
-Format UI, personal images and physical drives remain held.
+Generated-image acceptance covers passive admission before creation, one Add,
+one erase of its new member, persisted submission/terminal records, sibling
+preservation, cold unresolved inspection and normal detach. This evidence is
+specific to the disposable image; ordinary in-app Format UI, personal images
+and physical drives remain held.
 
 ## File benchmark
 
@@ -65,7 +67,10 @@ Measurement details also show a fixed nine-range I/O latency histogram for the
 already measured write and read block calls. The ranges double from under
 0.125 ms to 16 ms or more; counts sum to completed calls. An incomplete run or
 invalid timing shows an unavailable state instead of a distribution. The
-histogram does not add I/O and is not included in the copied report's v2 JSON.
+histogram does not add I/O. Individual copied reports use v3 JSON and include
+the validated bounds and counts, plus the same distribution in their text
+summary. The final range has no upper bound (`null` in JSON). Quick Mix keeps
+its v1 envelope with the separate v3 sequential and random reports inside it.
 
 Quick Mix is one explicit click after folder selection. It runs a fixed 64 MiB
 sequential 1 MiB workload, waits for that run's guarded cleanup, then runs a
