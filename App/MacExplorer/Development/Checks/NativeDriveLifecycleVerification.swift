@@ -23,6 +23,12 @@ enum NativeDriveLifecycleVerification {
         let outerMediaID: UInt64
     }
     nonisolated static func validate(_ root: URL, output: URL) throws -> URL {
+        let args = ProcessInfo.processInfo.arguments
+        let apfsModes = ["--apfs-ui", "--apfs-format-preflight", "--apfs-format", "--apfs-format-cold"].filter(args.contains)
+        guard apfsModes.count <= 1,
+              apfsModes.isEmpty || args.contains("--verify-drive-lifecycle") else {
+            throw UIVerification.Failure(message: "Generated APFS Format modes are ambiguous")
+        }
         guard let declared = ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"],
               root.path == URL(fileURLWithPath: declared).standardizedFileURL.path,
               root.path == root.resolvingSymlinksInPath().path,
@@ -32,6 +38,21 @@ enum NativeDriveLifecycleVerification {
         guard output.path == output.resolvingSymlinksInPath().path,
               output.deletingLastPathComponent() == root.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("evidence", isDirectory: true)
         else { throw UIVerification.Failure(message: "Native drive evidence root refused") }
+        if args.contains("--apfs-format-preflight") {
+            let job = String(root.lastPathComponent.dropFirst("drive-lifecycle-".count))
+            var fixture = stat(), evidence = stat(), image = stat()
+            guard let jobID = UUID(uuidString: job), jobID.uuidString == job,
+                  lstat(root.path, &fixture) == 0, fixture.st_mode & S_IFMT == S_IFDIR,
+                  fixture.st_uid == geteuid(),
+                  lstat(output.path, &evidence) == 0, evidence.st_mode & S_IFMT == S_IFDIR,
+                  evidence.st_uid == geteuid(),
+                  apfsOwnerMarkerCurrent(root: root, jobID: jobID),
+                  lstat(root.appendingPathComponent("fixture.dmg").path, &image) == -1,
+                  errno == ENOENT else {
+                throw UIVerification.Failure(message: "Pre-image Format fixture is not empty and owned")
+            }
+            return root.deletingLastPathComponent().deletingLastPathComponent()
+        }
         let receipt = try readReceipt(output)
         var fixture = stat(), image = stat()
         guard receipt.version == 3, root.lastPathComponent == "drive-lifecycle-" + receipt.jobID.uuidString,
@@ -41,10 +62,10 @@ enum NativeDriveLifecycleVerification {
               lstat(root.appendingPathComponent("fixture.dmg").path, &image) == 0, image.st_mode & S_IFMT == S_IFREG,
               Int64(image.st_dev) == receipt.imageDevice, image.st_ino == receipt.imageInode,
               image.st_uid == geteuid(), fixture.st_uid == geteuid(),
-              image.st_size == (ProcessInfo.processInfo.arguments.contains("--apfs-ui")
-                  || ProcessInfo.processInfo.arguments.contains("--apfs-format") ? off_t(1 << 30) : off_t(512 << 20)), image.st_nlink == 1
+              image.st_size == (args.contains("--apfs-ui") || args.contains("--apfs-format")
+                  || args.contains("--apfs-format-cold") ? off_t(1 << 30) : off_t(512 << 20)), image.st_nlink == 1
         else { throw UIVerification.Failure(message: "Native drive fixture receipt refused") }
-        if ProcessInfo.processInfo.arguments.contains("--apfs-format") {
+        if args.contains("--apfs-format") || args.contains("--apfs-format-cold") {
             guard apfsOwnerMarkerCurrent(root: root, jobID: receipt.jobID) else {
                 throw UIVerification.Failure(message: "Generated APFS Format owner marker refused")
             }
@@ -66,6 +87,9 @@ enum NativeDriveLifecycleVerification {
     }
 
     static func run(browser: BrowserViewController, fixture: URL, output: URL) async throws -> [String] {
+        if ProcessInfo.processInfo.arguments.contains("--apfs-format-preflight") {
+            return try await apfsFormatPreflight(browser: browser, fixture: fixture, output: output)
+        }
         let receipt = try await Task.detached { try readReceipt(output) }.value
         let operations = browser.operationCoordinator
         let original = operations.drives
@@ -83,6 +107,9 @@ enum NativeDriveLifecycleVerification {
         var initial = try await observed(drives) {
             $0.mediaID == receipt.mediaID && $0.group == receipt.outerMediaID
                 && (receipt.startsUnmounted ? $0.url == nil && $0.canMount : $0.url?.path == receipt.initialMount && $0.fileSystemID == receipt.mountDevice)
+        }
+        if ProcessInfo.processInfo.arguments.contains("--apfs-format-cold") {
+            return try await apfsFormatCold(drives: drives, initial: initial, receipt: receipt, fixture: fixture, output: output)
         }
         if ProcessInfo.processInfo.arguments.contains("--apfs-ui") {
             return try await apfsUI(browser: browser, drives: drives, initial: initial, receipt: receipt, output: output)
@@ -185,6 +212,38 @@ enum NativeDriveLifecycleVerification {
         try JSONSerialization.data(withJSONObject: ["checks": checks, "passed": true], options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("drive-lifecycle.json"), options: .withoutOverwriting)
         return checks
+    }
+
+    /// Read only the Development app's exact private job slot before the
+    /// Python owner creates or attaches an image. No discovery or recorder is
+    /// started by this visit.
+    private static func apfsFormatPreflight(browser: BrowserViewController, fixture: URL,
+                                            output: URL) async throws -> [String] {
+        let expectedState = fixture.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("runtime", isDirectory: true)
+        let channel = Bundle.main.object(forInfoDictionaryKey: "MacExplorerDistributionChannel") as? String
+        try require(Bundle.main.bundleIdentifier == "local.macexplorer.development"
+                    && channel == "development"
+                    && AppStorageLocations.stateDirectory?.standardizedFileURL.path == expectedState.path,
+                    "Pre-image Format check requires the isolated Development job store")
+        guard let store = NativeDriveJobStore.applicationStore() else {
+            throw UIVerification.Failure(message: "Pre-image Format job store is unavailable")
+        }
+        let before = try await store.load()
+        let drives = ApplicationVolumeCoordinator(operations: browser.operationCoordinator,
+                                                  backend: VolumeLifecycle.shared)
+        await drives.waitForNativeDriveJobLoad()
+        try require(drives.nativeFormatSavedJobIsClean(),
+                    "A prior or unreadable native Format job blocks image creation")
+        let after = try await store.load()
+        try require(before.bytes == after.bytes,
+                    "Pre-image Format job changed during passive admission")
+        _ = try await Task.detached { try validate(fixture, output: output) }.value
+        let result: [String: Any] = ["passed": true, "cleanAdmission": true,
+                                     "imageAbsent": true, "recorderCreated": false, "jobUnchanged": true]
+        try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("apfs-format-preflight.json"), options: .withoutOverwriting)
+        return ["Development job store admitted a clean slot before image creation"]
     }
 
     private static func apfsUI(browser: BrowserViewController, drives: ApplicationVolumeCoordinator,
@@ -310,6 +369,9 @@ enum NativeDriveLifecycleVerification {
         let initialInspection = try await VolumeLifecycle.shared.inspect(initial)
         let originalLeaf = try APFSFormatImageSeal.Leaf(initial, initialInspection)
         let originalSeal = try APFSFormatImageSeal(root: fixture, receipt: receipt, original: originalLeaf)
+        await drives.waitForNativeDriveJobLoad()
+        try require(drives.nativeDriveJobReady && drives.nativeDriveJobIssue.isEmpty,
+                    "A prior or unreadable native Format job blocks generated APFS mutation")
         let owner = UUID()
         try require(operations.begin(owner: owner), "Generated APFS work gate is occupied")
         let activity: any Sendable
@@ -354,16 +416,11 @@ enum NativeDriveLifecycleVerification {
         let plan = try await format.prepare(target)
         try require(plan.name == addedName && plan.selected == target && plan.siblingNames == [sibling.name],
                     "Generated APFS Format review changed the selected member")
-        let generatedOwner = APFSVolumeFormatGeneratedOwner(fixtureID: receipt.jobID,
-            imagePath: fixture.appendingPathComponent("fixture.dmg").path,
-            rootDevice: receipt.fixtureDevice, rootInode: receipt.fixtureInode,
-            imageDevice: receipt.imageDevice, imageInode: receipt.imageInode,
-            ownerUID: UInt32(geteuid()), outerMediaID: receipt.outerMediaID)
-        guard generatedOwner.validate(), let store = NativeDriveJobStore.applicationStore() else {
-            throw UIVerification.Failure(message: "Generated APFS Format durable job store is unavailable")
+        let generatedOwner = formatOwner(receipt: receipt, fixture: fixture)
+        guard let recording = drives.generatedFormatRecording(owner: generatedOwner,
+            attachmentCurrent: { formatSeal.imageAndOuterCurrent() }) else {
+            throw UIVerification.Failure(message: "Generated APFS Format durable recorder was not admitted")
         }
-        let recording = store.recording(owner: generatedOwner,
-            attachmentCurrent: { formatSeal.imageAndOuterCurrent() })
         try require(recording.ownerStillCurrent(), "Generated APFS Format job owner is stale")
         try evidence.write(["phase": "intent", "request": "one-apfs-volume-erase", "imageInode": receipt.imageInode,
                             "siblingUUID": initial.volumeUUID!.uuidString, "targetUUID": added.id.uuidString,
@@ -387,7 +444,7 @@ enum NativeDriveLifecycleVerification {
         try require(formatted.submitted && formatted.failure == nil && newVolume.id != added.id
                     && newVolume.name == addedName && formatted.toolExitStatus == 0,
                     "Generated APFS Format postcondition was not established")
-        let durable = try await store.load()
+        let durable = try await recording.store.load()
         try require(durable.record?.id == recording.jobID
                     && durable.record?.phase == .compatibleReplacement
                     && durable.record?.replacementID == newVolume.id
@@ -416,7 +473,8 @@ enum NativeDriveLifecycleVerification {
         let afterSeal = try APFSFormatImageSeal(root: fixture, receipt: receipt, original: originalLeaf, target: currentLeaf)
         try require(afterSeal.current() && afterSeal.outer == formatSeal.outer,
                     "Formatted APFS target is not bound to the original image")
-        try evidence.write(["passed": true, "submitted": true, "siblingUUID": initial.volumeUUID!.uuidString,
+        try evidence.write(["passed": true, "submitted": true, "jobID": recording.jobID.uuidString,
+                            "siblingUUID": initial.volumeUUID!.uuidString,
                             "siblingDevice": originalLeaf.device, "siblingMarkerInode": originalMarker.inode,
                             "formattedUUID": newVolume.id.uuidString,
                             "formattedName": newVolume.name, "outerDevice": "/dev/" + afterSeal.outer,
@@ -425,6 +483,70 @@ enum NativeDriveLifecycleVerification {
         return ["One owned generated APFS image and exact original member passed launch-boundary checks",
                 "One Add and one Format drained; exact sibling survived and target marker disappeared",
                 "Fresh native target and unrelated mounted identities reconciled without retry"]
+    }
+
+    /// A second process must read the unresolved job from disk. This route has
+    /// no Add/Format call and cannot obtain a recorder while that job remains.
+    private static func apfsFormatCold(drives: ApplicationVolumeCoordinator, initial: ManagedVolume,
+                                       receipt: Receipt, fixture: URL, output: URL) async throws -> [String] {
+        guard !receipt.startsUnmounted, initial.deviceKind == .diskImage, let siblingID = initial.volumeUUID else {
+            throw UIVerification.Failure(message: "Cold Format review requires the mounted generated sibling")
+        }
+        let owner = formatOwner(receipt: receipt, fixture: fixture)
+        guard owner.validate(), let store = NativeDriveJobStore.applicationStore() else {
+            throw UIVerification.Failure(message: "Cold Format durable job store is unavailable")
+        }
+        let before = try await store.load()
+        guard let record = before.record, let replacementID = record.replacementID,
+              record.owner == owner, record.phase == .compatibleReplacement, record.isUnresolved,
+              record.snapshot.targetID != siblingID, replacementID != siblingID,
+              record.snapshot.members.count == 2,
+              record.snapshot.members.contains(where: { $0.uuid == siblingID && $0.name == initial.name }) else {
+            throw UIVerification.Failure(message: "Cold Format job is not the exact unresolved generated request")
+        }
+        let siblingMarker = try await verifyMarker(initial, receipt: receipt)
+        let siblingInspection = try await VolumeLifecycle.shared.inspect(initial)
+        let siblingLeaf = try APFSFormatImageSeal.Leaf(initial, siblingInspection)
+        let target = try await observed(drives) {
+            $0.volumeUUID == replacementID && $0.group == receipt.outerMediaID && $0.url != nil
+        }
+        let members = drives.volumes.filter { $0.group == receipt.outerMediaID && $0.volumeUUID != nil }
+        try require(members.count == 2 && Set(members.compactMap(\.volumeUUID)) == Set([siblingID, replacementID]),
+                    "Cold Format graph is not the exact two-member image")
+        let targetInspection = try await VolumeLifecycle.shared.inspect(target)
+        let targetLeaf = try APFSFormatImageSeal.Leaf(target, targetInspection)
+        let seal = try APFSFormatImageSeal(root: fixture, receipt: receipt, original: siblingLeaf, target: targetLeaf)
+        let siblingMarkerAfter = try await verifyMarker(initial, receipt: receipt)
+        try require(seal.current() && siblingMarker == siblingMarkerAfter,
+                    "Cold Format image or sibling marker changed")
+        try await requireFormatTargetMarkerAbsent(target, fixture: fixture)
+
+        await drives.waitForNativeDriveJobLoad()
+        try require(!drives.nativeDriveJobReady && !drives.nativeDriveJobIssue.isEmpty,
+                    "Cold unresolved Format job did not close coordinator admission")
+        try require(!drives.generatedFormatJobIsAdmissible(owner: owner),
+                    "Cold unresolved Format job reopened the recorder gate")
+        let compatible = try await store.inspectUnresolvedCompatibleReplacement(owner: owner,
+            backend: APFSVolumeFormat(), ownerStillCurrent: { seal.current() })
+        let after = try await store.load()
+        try require(after.bytes == before.bytes && after.record == record && seal.current()
+                    && !drives.nativeDriveJobReady && !drives.generatedFormatJobIsAdmissible(owner: owner),
+                    "Cold Format inspection changed the job or reopened admission")
+        let result: [String: Any] = ["passed": true, "jobID": record.id.uuidString,
+            "unresolved": true, "admissionHeld": true, "recordUnchanged": true,
+            "compatibleInspection": compatible]
+        try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("apfs-format-cold-result.json"), options: .withoutOverwriting)
+        return ["Separate read-only app launch loaded the exact unresolved generated Format job",
+                "Coordinator held the recorder gate and inspection preserved the durable record"]
+    }
+
+    private static func formatOwner(receipt: Receipt, fixture: URL) -> APFSVolumeFormatGeneratedOwner {
+        APFSVolumeFormatGeneratedOwner(fixtureID: receipt.jobID,
+            imagePath: fixture.appendingPathComponent("fixture.dmg").path,
+            rootDevice: receipt.fixtureDevice, rootInode: receipt.fixtureInode,
+            imageDevice: receipt.imageDevice, imageInode: receipt.imageInode,
+            ownerUID: UInt32(geteuid()), outerMediaID: receipt.outerMediaID)
     }
 
     private static func createFormatTargetMarker(_ volume: ManagedVolume, receipt: Receipt, fixture: URL) async throws -> MarkerIdentity {

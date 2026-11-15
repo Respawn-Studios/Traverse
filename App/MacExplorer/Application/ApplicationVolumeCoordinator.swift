@@ -120,15 +120,35 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     }
 
     #if DEBUG
+    /// Generated verification waits for the same passive admission read that
+    /// ordinary drive presentation starts. A failed or unresolved read never
+    /// becomes a clean slot merely because the check has waited for it.
+    func waitForNativeDriveJobLoad() async {
+        loadNativeDriveJobIfNeeded()
+        if let task = nativeDriveJobTask { await task.value }
+    }
+
+    /// Passive pre-image admission checks the saved job without constructing
+    /// a generated owner, attachment witness or mutation recorder.
+    func nativeFormatSavedJobIsClean() -> Bool {
+        nativeDriveJobLoaded && nativeDriveJobReady && nativeDriveJobIssue.isEmpty
+    }
+
+    /// The cold route checks this saved-job gate without gaining a recorder.
+    /// The warm route uses the same predicate before obtaining its recorder.
+    func generatedFormatJobIsAdmissible(owner: APFSVolumeFormatGeneratedOwner) -> Bool {
+        guard owner.validate() else { return false }
+        if !nativeDriveJobLoaded { loadNativeDriveJobIfNeeded() }
+        return nativeFormatSavedJobIsClean()
+    }
+
     /// Only the separately gated generated-image verification may obtain a
     /// recorder. It does not submit anything and grants no Format UI action.
     func generatedFormatRecording(owner: APFSVolumeFormatGeneratedOwner,
-                                  attachmentCurrent: @escaping @Sendable () -> Bool) -> (any APFSVolumeFormatRecording)? {
+                                  attachmentCurrent: @escaping @Sendable () -> Bool) -> NativeDriveJobStore.Recording? {
         let args = ProcessInfo.processInfo.arguments
         guard args.contains("--verify-drive-lifecycle"), args.contains("--apfs-format"),
-              owner.validate() else { return nil }
-        if !nativeDriveJobLoaded { loadNativeDriveJobIfNeeded() }
-        guard nativeDriveJobReady, nativeDriveJobIssue.isEmpty else { return nil }
+              generatedFormatJobIsAdmissible(owner: owner) else { return nil }
         return nativeDriveJobStore?.recording(owner: owner, attachmentCurrent: attachmentCurrent)
     }
     #endif

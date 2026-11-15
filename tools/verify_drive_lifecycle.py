@@ -393,7 +393,7 @@ def main() -> int:
     if args.apfs_format and args.qualify_attached is not None:
         parser.error("--apfs-format requires a fresh image; retained sessions are refused")
     if not args.execute and args.inspect_existing is None and args.qualify_attached is None:
-        print("Review only: " + ("one fresh 1 GiB image, at most one Add and one APFS member Format, no UI or other workload. " if args.apfs_format
+        print("Review only: " + ("one pre-image passive job check, one fresh 1 GiB image, at most one Add and one APFS member Format, then one cold read-only job check. " if args.apfs_format
               else "one 1 GiB image, CUA APFS Review/Add, at most one Add, no lifecycle/Copy workload. " if args.apfs_ui
               else "one 512 MiB APFS image; normal attach, app-coordinated Unmount/Mount/queued Copy/Eject. ")
               + "Preserve evidence and image. Use --execute only with the owner's explicit scoped approval.")
@@ -415,7 +415,9 @@ def main() -> int:
     report = {"passed": False, "fixture": str(fixture.root), "imagePreserved": True,
               "apfsUI": args.apfs_ui, "apfsFormat": args.apfs_format,
               "addCallBudget": 1 if args.apfs_ui or args.apfs_format else 0,
-              "formatCallBudget": 1 if args.apfs_format else 0}
+              "formatCallBudget": 1 if args.apfs_format else 0,
+              "preImageVisitBudget": 1 if args.apfs_format else 0,
+              "coldReadOnlyVisitBudget": 1 if args.apfs_format else 0}
     uncertain_process = False
     try:
         if args.qualify_attached:
@@ -441,6 +443,35 @@ def main() -> int:
             report["inspectionOnly"] = True
             print(json.dumps(values, indent=2), flush=True)
         else:
+            if args.apfs_format:
+                if os.path.lexists(fixture.image):
+                    raise RuntimeError("Pre-image Format check found an existing fixture image")
+                preflight_evidence = local_directory("evidence") / ("drive-lifecycle-preflight-" + fixture.job)
+                preflight_evidence.mkdir(mode=0o700)
+                preflight_log = preflight_evidence / "native.log"
+                preflight_env = environment(tooling=False)
+                preflight_env["MAC_EXPLORER_TEST_ROOT"] = str(fixture.root)
+                preflight_command = [str(APP / "Contents/MacOS/Mac Explorer"), "--verify-ui", "--offscreen",
+                                     "--verify-drive-lifecycle", "--apfs-format-preflight",
+                                     "--fixture-root", str(fixture.root), "--evidence-root", str(preflight_evidence)]
+                with preflight_log.open("xb") as stream:
+                    preflight_process = subprocess.run(preflight_command, env=preflight_env, cwd=ROOT,
+                        stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT, timeout=300, check=False)
+                preflight_report = read_json(preflight_evidence / "ui-verification.json")
+                preflight_result = read_json(preflight_evidence / "apfs-format-preflight.json")
+                preflight_diagnostics = inspect_runtime(preflight_log)
+                write_json(preflight_evidence / "runtime-diagnostics.json", preflight_diagnostics)
+                if (preflight_process.returncode or preflight_report.get("passed") is not True
+                        or preflight_report.get("mode") != "native-drive-format-preflight"
+                        or preflight_result != {"passed": True, "cleanAdmission": True,
+                                                "imageAbsent": True, "recorderCreated": False,
+                                                "jobUnchanged": True}
+                        or preflight_diagnostics.get("passed") is not True
+                        or os.path.lexists(fixture.image)):
+                    raise RuntimeError("Pre-image Format saved-job admission failed; image creation was not started")
+                fixture.validate()
+                report["preImageAdmission"] = True
+                report["preImageEvidence"] = str(preflight_evidence)
             fixture.create()
         if not args.inspect_existing:
             # Normal Mount may choose a new mountpoint. Bind each run to the
@@ -501,6 +532,38 @@ def main() -> int:
                         or target_marker is not None):
                     raise RuntimeError("Generated APFS sibling marker or erased target marker changed")
                 report["twoMemberPostcheck"] = True
+                # Read the durable unresolved job in a separate app process
+                # while the same image remains attached. Its evidence is a
+                # sibling directory because the native report is exclusive.
+                cold_evidence = local_directory("evidence") / ("drive-lifecycle-cold-" + fixture.job)
+                cold_evidence.mkdir(mode=0o700)
+                write_json(cold_evidence / "native-drive-receipt.json",
+                           read_json(evidence / "native-drive-receipt.json"))
+                cold_log = cold_evidence / "native.log"
+                cold_command = [str(APP / "Contents/MacOS/Mac Explorer"), "--verify-ui", "--offscreen",
+                                "--verify-drive-lifecycle", "--apfs-format-cold",
+                                "--fixture-root", str(fixture.root), "--evidence-root", str(cold_evidence)]
+                with cold_log.open("xb") as stream:
+                    cold_process = subprocess.run(cold_command, env=env, cwd=ROOT, stdin=subprocess.DEVNULL,
+                                                  stdout=stream, stderr=subprocess.STDOUT, timeout=300, check=False)
+                cold_report = read_json(cold_evidence / "ui-verification.json")
+                cold_result = read_json(cold_evidence / "apfs-format-cold-result.json")
+                cold_diagnostics = inspect_runtime(cold_log)
+                write_json(cold_evidence / "runtime-diagnostics.json", cold_diagnostics)
+                if (cold_process.returncode or cold_report.get("passed") is not True
+                        or cold_report.get("mode") != "native-drive-format-cold"
+                        or set(cold_result) != {"passed", "jobID", "unresolved", "admissionHeld",
+                                                "recordUnchanged", "compatibleInspection"}
+                        or cold_result.get("passed") is not True
+                        or cold_result.get("jobID") != outcome["jobID"]
+                        or cold_result.get("unresolved") is not True
+                        or cold_result.get("admissionHeld") is not True
+                        or cold_result.get("recordUnchanged") is not True
+                        or type(cold_result.get("compatibleInspection")) is not bool
+                        or cold_diagnostics.get("passed") is not True):
+                    raise RuntimeError("Cold unresolved Format admission did not pass; see retained evidence")
+                report["coldReadOnlyPostcheck"] = True
+                report["coldEvidence"] = str(cold_evidence)
             if not args.apfs_ui and not args.apfs_format:
                 deadline = time.monotonic() + 5
                 while fixture.attachment() is not None and time.monotonic() < deadline:
@@ -511,8 +574,12 @@ def main() -> int:
     except Exception as error:
         report["failure"] = str(error)
     finally:
+        report["imagePreserved"] = os.path.lexists(fixture.image)
         if (args.qualify_attached or args.apfs_ui or args.apfs_format) and not report["passed"]:
-            report["retainedForDiagnosis"] = True
+            if report["imagePreserved"]:
+                report["retainedForDiagnosis"] = True
+            else:
+                report["stoppedBeforeImage"] = True
         elif fixture.image_id is not None and not uncertain_process:
             try:
                 fixture.detach_owned()

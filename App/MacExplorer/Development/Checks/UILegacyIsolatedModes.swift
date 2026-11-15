@@ -15,7 +15,9 @@ import StorageAnalysis
         let state = context.state
             if args.contains("--verify-drive-lifecycle") {
                 state.checks += try await NativeDriveLifecycleVerification.run(browser: browser, fixture: root, output: output)
-                let report: [String: Any] = ["passed": true, "checks": state.checks, "mode": "native-drive-lifecycle",
+                let mode = args.contains("--apfs-format-preflight") ? "native-drive-format-preflight"
+                    : args.contains("--apfs-format-cold") ? "native-drive-format-cold" : "native-drive-lifecycle"
+                let report: [String: Any] = ["passed": true, "checks": state.checks, "mode": mode,
                     "notExercised": ["Force unmount", "Other physical devices", "Power loss"]]
                 try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
                     .write(to: output.appendingPathComponent("ui-verification.json"), options: .withoutOverwriting)
