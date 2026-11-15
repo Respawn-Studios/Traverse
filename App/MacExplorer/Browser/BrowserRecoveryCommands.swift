@@ -767,14 +767,8 @@ extension BrowserViewController {
         lastRecoveryRecordID = outcome.recordID
         finishOperationPresentation()
         consumeMoveClipboard(moveClipboard, after: result)
-        if activeID == initiatingTab, sessionID == visit, location.directoryURL != nil {
-            let destinations = result.items.compactMap { $0.status == .succeeded ? $0.destination : nil }
-            let rename = inlineRename.prepareCreatedFolderRefresh(createdFolderRename, result: result)
-            if createdFolderRename == nil || rename != nil {
-                tabs[activeIndex].state.selection = Set(destinations.filter { $0.deletingLastPathComponent().path == location.directoryURL?.path })
-            }
-            loadLocation(createdFolderRename: rename)
-        }
+        refreshDirectoryAfterOperation(result, initiatingTab: initiatingTab, visit: visit,
+                                       createdFolderRename: createdFolderRename)
         inspectOperationRecovery()
         if presentsResult { presentOperationResult(result, recoveryAction: recoveryAction) }
     }

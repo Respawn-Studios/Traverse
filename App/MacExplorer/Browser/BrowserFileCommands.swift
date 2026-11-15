@@ -519,20 +519,28 @@ extension BrowserViewController {
                 self.continuationMoveClipboard = nil
                 self.finishOperationPresentation()
                 self.consumeMoveClipboard(moveClipboard, after: result)
-                if self.activeID == initiatingTab, self.sessionID == initiatingVisit, self.location.directoryURL != nil {
-                    let destinations = result.items.compactMap { $0.status == .succeeded ? $0.destination : nil }
-                    let rename = self.inlineRename.prepareCreatedFolderRefresh(createdFolderRename, result: result)
-                    if createdFolderRename == nil || rename != nil {
-                        self.tabs[self.activeIndex].state.selection = Set(destinations.filter { $0.deletingLastPathComponent().path == self.location.directoryURL?.path })
-                    }
-                    self.loadLocation(createdFolderRename: rename)
-                }
+                self.refreshDirectoryAfterOperation(result, initiatingTab: initiatingTab, visit: initiatingVisit,
+                                                    createdFolderRename: createdFolderRename)
                 self.presentOperationResult(result)
             } catch {
                 self.finishOperationPresentation()
                 if !(error is CancellationError) { self.showOperationError(error) }
             }
         }
+    }
+
+    /// Both journaled and ordinary operations replace the listing in place.
+    /// Current rows stay visible during the read; they grant no new authority.
+    func refreshDirectoryAfterOperation(_ result: FileOperationResult, initiatingTab: UUID, visit: UUID,
+                                        createdFolderRename: UUID? = nil) {
+        guard activeID == initiatingTab, sessionID == visit, let parent = location.directoryURL else { return }
+        let destinations = result.items.compactMap { $0.status == .succeeded ? $0.destination : nil }
+        let rename = inlineRename.prepareCreatedFolderRefresh(createdFolderRename, result: result)
+        if createdFolderRename == nil || rename != nil {
+            tabs[activeIndex].state.selection = Set(destinations.filter { $0.deletingLastPathComponent().path == parent.path })
+        }
+        tabs[activeIndex].state.scrollOffset = currentScrollOffset
+        loadLocation(preservingVisibleRows: true, createdFolderRename: rename)
     }
 
     func consumeMoveClipboard(_ clipboard: MoveClipboardContext?, after result: FileOperationResult) {
