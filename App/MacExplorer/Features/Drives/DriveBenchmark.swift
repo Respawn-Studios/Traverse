@@ -15,6 +15,8 @@ enum DriveBenchmarkFeature {
     static let shared = ApplicationDriveBenchmark()
     @Published var size = DriveBenchmarkSize.standard
     @Published var workload = DriveBenchmarkWorkload.sequential
+    @Published var sequentialBlockSize = DriveSequentialBlockSize.mib1
+    @Published var cacheMode = DriveBenchmarkCacheMode.tryNoCache
     @Published private(set) var folder: URL?
     @Published private(set) var volumeName = "Choose a folder on the drive to test"
     @Published private(set) var progress: DriveBenchmarkProgress?
@@ -210,7 +212,8 @@ enum DriveBenchmarkFeature {
         let activity: any Sendable
         do { activity = try ApplicationFileActivity.beginOperation() }
         catch { operations.finish(owner: owner); notice = "A drive task is finishing. Try again when it completes."; return }
-        let size = size, workload = workload, started = Date(), volumeName = volumeName, group = selectedVolumeGroup
+        let size = size, workload = workload, sequentialBlockSize = sequentialBlockSize, cacheMode = cacheMode
+        let started = Date(), volumeName = volumeName, group = selectedVolumeGroup
         let diagnostic = ApplicationDiagnostics.shared.workflow(.driveBenchmark, context: .init(.driveBenchmark))
         let updates = AsyncStream.makeStream(of: DriveBenchmarkProgress.self, bufferingPolicy: .bufferingNewest(1))
         runID = owner
@@ -237,7 +240,8 @@ enum DriveBenchmarkFeature {
                 finishDeferredClose()
             }
             diagnostic.event(.admitted, context: .init(.driveBenchmark))
-            let measured = await reader.run(in: selection, size: size, workload: workload) {
+            let measured = await reader.run(in: selection, size: size, workload: workload,
+                                            sequentialBlockSize: sequentialBlockSize, cacheMode: cacheMode) {
                 // Record semantic boundaries before UI coalescing, not a log
                 // record per transferred chunk. No file inputs enter this seam.
                 if $0.completedBytes == 0 || $0.phase == .flushing {
@@ -370,9 +374,23 @@ struct DriveBenchmarkView: View {
                         Text("Extended · 1 GiB").tag(DriveBenchmarkSize.extended)
                     }.disabled(model.hasPendingWork)
                 }
+                AdaptiveToolColumns(settings: settings, minimumWidth: 480) {
+                    Picker("Sequential block", selection: $model.sequentialBlockSize) {
+                        ForEach(DriveSequentialBlockSize.allCases, id: \.self) { block in
+                            Text(block.title).tag(block)
+                        }
+                    }.disabled(model.hasPendingWork || model.workload == .random4K)
+                } trailing: {
+                    Picker("File caching", selection: $model.cacheMode) {
+                        Text("Normal system caching").tag(DriveBenchmarkCacheMode.normal)
+                        Text("Try no cache for test file").tag(DriveBenchmarkCacheMode.tryNoCache)
+                    }.disabled(model.hasPendingWork)
+                }
                 Text(model.workload == .random4K
                     ? "4 KiB blocks · one operation at a time · preparation writes one extra test-file size."
-                    : "1 MiB blocks · large sequential transfers · every byte verified.")
+                    : "\(model.sequentialBlockSize.title) blocks · large sequential transfers · every byte verified.")
+                    .interfaceFont(.caption).foregroundStyle(.secondary)
+                Text("Cache choice applies only to the generated test file. Neither mode clears macOS caches or measures a cold raw device.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)
                 if !model.isWorking, !model.comparisonCandidates.isEmpty {
                     Picker("Compare with", selection: $model.comparisonRunID) {
@@ -434,7 +452,10 @@ struct DriveBenchmarkView: View {
                                 Text("Preparation wrote \(FileSizeText.string(result.preparationBytesWritten)) in \(result.preparationSeconds.formatted(.number.precision(.fractionLength(2)))) s, outside the measured phases.")
                             }
                             Text("Flush: \(result.flushSeconds.formatted(.number.precision(.fractionLength(3)))) s. I/O latency covers the block's read/write calls; transfer rates also include validation and other file-workload overhead.")
-                            Text(result.cacheBypass == .enabled ? "Filesystem cache bypass was requested for the test file." : "Filesystem cache bypass was unavailable or not attempted.")
+                            Text(result.cacheMode == .normal ? "Normal system caching was selected; no cache bypass was requested."
+                                : result.cacheBypass == .enabled ? "No-cache was requested for the test file."
+                                : result.cacheBypass == .unavailable ? "No-cache was requested but unavailable."
+                                : "The no-cache request was not reached.")
                             Text(result.flush == .fullSync ? "The operating system acknowledged a full flush request." : result.flush == .fileSyncOnly ? "The filesystem acknowledged a flush; a full device flush was unavailable." : "A flush was not completed.")
                         }.interfaceFont(.caption).foregroundStyle(.secondary).padding(.top, 8)
                     }

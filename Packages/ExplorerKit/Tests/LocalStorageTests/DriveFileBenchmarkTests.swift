@@ -19,7 +19,8 @@ struct DriveFileBenchmarkTests {
         #expect(report.writeAndFlush.megabytesPerSecond == nil && report.writeAndFlush.ioLatency == nil)
         let json = try report.json()
         let object = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        #expect(object["schemaVersion"] as? Int == 1 && object["cleanupNeeded"] as? Bool == true)
+        #expect(object["schemaVersion"] as? Int == 2 && object["cleanupNeeded"] as? Bool == true)
+        #expect(object["cacheMode"] as? String == "tryNoCache")
         #expect((object["performanceSamples"] as? [[String: Any]])?.count == 600)
         for text in [json, report.summary] {
             #expect(!text.contains("private-volume") && !text.contains("private-scratch"))
@@ -70,6 +71,37 @@ struct DriveFileBenchmarkTests {
         #expect(!result.samples.isEmpty && result.samples.count <= 600)
         #expect(result.samples.allSatisfy { $0.elapsedSeconds >= 0 && $0.megabytesPerSecond.isFinite && $0.megabytesPerSecond >= 0 })
         #expect(result.scratchURL == nil)
+        #expect(try FileManager().contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+
+    @Test(arguments: DriveSequentialBlockSize.allCases)
+    func sequentialBlockChoicesKeepExactBytesAndOwnedCleanup(block: DriveSequentialBlockSize) async throws {
+        let root = try LocalStorageTestFixtures.directory()
+        defer { try? FileManager().removeItem(at: root) }
+        let result = await DriveFileBenchmark().runForTesting(in: root, bytes: 8 << 20,
+            sequentialBlockSize: block, cacheMode: .normal)
+        #expect(result.outcome == .completed && result.failure == nil)
+        #expect(result.blockBytes == block.bytes && result.cacheMode == .normal)
+        #expect(result.cacheBypass == .notAttempted)
+        #expect(result.bytesWritten == 8 << 20 && result.bytesRead == 8 << 20)
+        #expect(result.writeLatency.operations == (8 << 20) / block.bytes)
+        #expect(result.readLatency.operations == (8 << 20) / block.bytes)
+        #expect(result.scratchURL == nil)
+        #expect(try FileManager().contentsOfDirectory(atPath: root.path).isEmpty)
+        let report = try DriveBenchmarkReport(result: result, recordedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(report.cacheMode == "normal" && report.blockBytes == block.bytes)
+        #expect(report.summary.contains("normal policy; bypass not requested"))
+    }
+
+    @Test func randomFourKiBDoesNotInheritSequentialBlockChoice() async throws {
+        let root = try LocalStorageTestFixtures.directory()
+        defer { try? FileManager().removeItem(at: root) }
+        let result = await DriveFileBenchmark().runForTesting(in: root, bytes: 1 << 20, workload: .random4K,
+            sequentialBlockSize: .mib4, cacheMode: .normal)
+        #expect(result.outcome == .completed && result.blockBytes == 4096)
+        #expect(result.writeLatency.operations == 256 && result.readLatency.operations == 256)
+        #expect(result.preparationBytesWritten == 1 << 20)
+        #expect(result.cacheBypass == .notAttempted && result.scratchURL == nil)
         #expect(try FileManager().contentsOfDirectory(atPath: root.path).isEmpty)
     }
 

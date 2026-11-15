@@ -26,6 +26,7 @@ struct DriveBenchmarkComparison {
               current.bytesWritten > 0, current.bytesRead > 0,
               current.bytesWritten == prior.bytesWritten, current.bytesRead == prior.bytesRead,
               current.preparationBytesWritten == prior.preparationBytesWritten,
+              current.cacheMode == prior.cacheMode,
               current.cacheBypass == prior.cacheBypass, current.flush == prior.flush else { return nil }
         self.selected = selected; self.reference = reference
         write = Self.phase(current.bytesWritten, current.writeSeconds + current.flushSeconds, current.writeLatency,

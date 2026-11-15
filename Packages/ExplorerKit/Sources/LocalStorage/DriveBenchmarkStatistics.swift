@@ -5,6 +5,21 @@ public enum DriveBenchmarkWorkload: String, CaseIterable, Sendable {
     public var blockBytes: Int { self == .sequential ? 1 << 20 : 4 << 10 }
 }
 
+/// Only sequential transfers vary their block size. Random access remains
+/// the separately named 4 KiB, one-operation-at-a-time workload.
+public enum DriveSequentialBlockSize: Int, CaseIterable, Hashable, Sendable {
+    case kib256 = 262_144, mib1 = 1_048_576, mib4 = 4_194_304
+    public var bytes: Int { rawValue }
+    public var title: String {
+        switch self { case .kib256: "256 KiB"; case .mib1: "1 MiB"; case .mib4: "4 MiB" }
+    }
+}
+
+/// A per-file request, never a global cache clear or a cold-device promise.
+public enum DriveBenchmarkCacheMode: String, CaseIterable, Hashable, Sendable {
+    case normal, tryNoCache
+}
+
 /// Latencies cover the completed block's I/O calls, excluding guards and byte
 /// verification. Throughput/IOPS use whole phase wall time, including those costs.
 public struct DriveBenchmarkLatency: Sendable {
@@ -55,7 +70,7 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
         public let phase: String
         public let elapsedSeconds, megabytesPerSecond: Double
     }
-    public let schemaVersion = 1
+    public let schemaVersion = 2
     public let measurement = "generated-file-workload"
     public let recordedAt: Date
     public let outcome: Outcome
@@ -63,6 +78,7 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
     public let failureCode: String?
     public let workload: String
     public let blockBytes: Int
+    public let cacheMode: String
     public let preparationBytesWritten: Int64
     public let preparationSeconds, writeSeconds, flushSeconds: Double?
     public let writeAndFlush, readAndVerify: Phase
@@ -77,6 +93,7 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
         switch result.outcome { case .completed: outcome = .completed; case .cancelled: outcome = .partial; case .failed: outcome = .failed }
         failureCode = result.failure?.rawValue
         workload = result.workload.rawValue; blockBytes = result.blockBytes
+        cacheMode = result.cacheMode.rawValue
         preparationBytesWritten = result.preparationBytesWritten
         preparationSeconds = Self.duration(result.preparationSeconds)
         let writing = Self.duration(result.writeSeconds), flushing = Self.duration(result.flushSeconds)
@@ -105,7 +122,7 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
             "Write + flush: \(writeAndFlush.completedBytes) bytes · \(Self.seconds(writeAndFlush.elapsedSeconds))",
             "Read + verify: \(readAndVerify.completedBytes) bytes · \(Self.seconds(readAndVerify.elapsedSeconds))",
             "Flush: \(Self.seconds(flushSeconds)) · \(flushDescription)",
-            "Filesystem cache bypass: \(cacheBypassRequest == "enabled" ? "requested for the test file" : cacheBypassRequest == "unavailable" ? "unavailable" : "not attempted")",
+            "Filesystem cache: \(cacheMode == DriveBenchmarkCacheMode.normal.rawValue ? "normal policy; bypass not requested" : cacheBypassRequest == "enabled" ? "no-cache requested for the test file" : cacheBypassRequest == "unavailable" ? "no-cache request unavailable" : "no-cache request not reached")",
             "Cleanup needed: \(cleanupNeeded ? "Yes — inspect the result in Traverse" : "No")"]
         if let failureCode { lines.append("Failure code: " + failureCode) }
         if outcome == .completed {

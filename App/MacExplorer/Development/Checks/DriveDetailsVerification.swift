@@ -118,7 +118,8 @@ import ExplorerCore
             try require(copiedResults.count == 2, "Summary/JSON did not publish exactly two text results")
             let copiedJSON = try JSONSerialization.jsonObject(with: Data(copiedResults[1].utf8)) as? [String: Any]
             try require(copiedResults[0].hasPrefix("Traverse file benchmark")
-                && copiedJSON?["schemaVersion"] as? Int == 1
+                && copiedJSON?["schemaVersion"] as? Int == 2
+                && copiedJSON?["cacheMode"] as? String == DriveBenchmarkCacheMode.tryNoCache.rawValue
                 && !copiedResults.contains(where: { $0.contains(folder.path) || $0.contains(volume.name) }),
                 "Copied benchmark output did not use the shared text publisher or retained a selection identity")
             checks.append("Explicit Summary/JSON copies use the shared text publisher on a private test sink, omit the chosen folder/volume identity and remain disabled during work")

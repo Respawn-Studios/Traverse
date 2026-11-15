@@ -65,6 +65,7 @@ public struct DriveBenchmarkResult: Sendable {
     public fileprivate(set) var flushSeconds: Double = 0
     public fileprivate(set) var workload: DriveBenchmarkWorkload = .sequential
     public fileprivate(set) var blockBytes: Int = 1 << 20
+    public fileprivate(set) var cacheMode: DriveBenchmarkCacheMode = .tryNoCache
     public fileprivate(set) var preparationBytesWritten: Int64 = 0
     public fileprivate(set) var preparationSeconds: Double = 0
     public fileprivate(set) var writeLatency = DriveBenchmarkLatency([])
@@ -123,14 +124,20 @@ public final class DriveFileBenchmark: @unchecked Sendable {
 
     public func run(in directory: DriveBenchmarkDirectory, size: DriveBenchmarkSize = .standard,
                     workload: DriveBenchmarkWorkload = .sequential,
+                    sequentialBlockSize: DriveSequentialBlockSize = .mib1,
+                    cacheMode: DriveBenchmarkCacheMode = .tryNoCache,
                     progress: @escaping @Sendable (DriveBenchmarkProgress) -> Void = { _ in }) async -> DriveBenchmarkResult {
-        await run(in: directory, bytes: size.bytes, workload: workload, elapsedCeiling: 180, progress: progress)
+        await run(in: directory, bytes: size.bytes, workload: workload,
+                  sequentialBlockSize: sequentialBlockSize, cacheMode: cacheMode,
+                  elapsedCeiling: 180, progress: progress)
     }
 
     // Internal qualification uses tiny generated fixtures; production callers
     // can choose only the three bounded sizes above.
     func runForTesting(in directory: URL, bytes: Int64, expectedFileSystemID: Int64? = nil,
                         workload: DriveBenchmarkWorkload = .sequential,
+                       sequentialBlockSize: DriveSequentialBlockSize = .mib1,
+                       cacheMode: DriveBenchmarkCacheMode = .tryNoCache,
                        elapsedCeiling: Double = 180,
                        progress: @escaping @Sendable (DriveBenchmarkProgress) -> Void = { _ in }) async -> DriveBenchmarkResult {
         do {
@@ -138,24 +145,37 @@ public final class DriveFileBenchmark: @unchecked Sendable {
             guard expectedFileSystemID == nil || selected.fileSystemID == expectedFileSystemID else {
                 return .init(failure: .changed)
             }
-            return await runForTesting(in: selected, bytes: bytes, workload: workload, elapsedCeiling: elapsedCeiling, progress: progress)
+            return await runForTesting(in: selected, bytes: bytes, workload: workload,
+                                       sequentialBlockSize: sequentialBlockSize, cacheMode: cacheMode,
+                                       elapsedCeiling: elapsedCeiling, progress: progress)
         } catch is CancellationError { return .init(outcome: .cancelled) }
         catch let error as DriveBenchmarkFailure { return .init(failure: error) }
         catch { return .init(failure: .preparation) }
     }
 
     func runForTesting(in directory: DriveBenchmarkDirectory, bytes: Int64,
-                       workload: DriveBenchmarkWorkload = .sequential, elapsedCeiling: Double = 180,
+                       workload: DriveBenchmarkWorkload = .sequential,
+                       sequentialBlockSize: DriveSequentialBlockSize = .mib1,
+                       cacheMode: DriveBenchmarkCacheMode = .tryNoCache, elapsedCeiling: Double = 180,
                        progress: @escaping @Sendable (DriveBenchmarkProgress) -> Void = { _ in }) async -> DriveBenchmarkResult {
-        guard bytes > 0, bytes <= 8 << 20, bytes % (1 << 20) == 0,
+        let blockBytes = workload == .random4K ? workload.blockBytes : sequentialBlockSize.bytes
+        guard bytes > 0, bytes <= 8 << 20, bytes % Int64(blockBytes) == 0,
               elapsedCeiling > 0, elapsedCeiling <= 180 else {
             return .init(failure: .preparation)
         }
-        return await run(in: directory, bytes: bytes, workload: workload, elapsedCeiling: elapsedCeiling, progress: progress)
+        return await run(in: directory, bytes: bytes, workload: workload,
+                         sequentialBlockSize: sequentialBlockSize, cacheMode: cacheMode,
+                         elapsedCeiling: elapsedCeiling, progress: progress)
     }
 
-    private func run(in directory: DriveBenchmarkDirectory, bytes: Int64, workload: DriveBenchmarkWorkload, elapsedCeiling: Double,
+    private func run(in directory: DriveBenchmarkDirectory, bytes: Int64, workload: DriveBenchmarkWorkload,
+                     sequentialBlockSize: DriveSequentialBlockSize, cacheMode: DriveBenchmarkCacheMode,
+                     elapsedCeiling: Double,
                      progress: @escaping @Sendable (DriveBenchmarkProgress) -> Void) async -> DriveBenchmarkResult {
+        let blockBytes = workload == .random4K ? workload.blockBytes : sequentialBlockSize.bytes
+        guard bytes > 0, bytes <= DriveBenchmarkSize.extended.bytes, bytes % Int64(blockBytes) == 0 else {
+            return .init(failure: .preparation)
+        }
         guard lock.withLock({ if running { return false }; running = true; return true }) else {
             return .init(failure: .busy)
         }
@@ -166,6 +186,7 @@ public final class DriveFileBenchmark: @unchecked Sendable {
             await withCheckedContinuation { continuation in
                 queue.async { [self] in
                     let result = Self.measure(in: directory, bytes: bytes, workload: workload,
+                                              blockBytes: blockBytes, cacheMode: cacheMode,
                                               cancellation: cancellation, started: started,
                                               elapsedCeiling: elapsedCeiling, progress: progress)
                     lock.withLock { running = false }
@@ -201,15 +222,16 @@ public final class DriveFileBenchmark: @unchecked Sendable {
     }
 
     private static func measure(in selection: DriveBenchmarkDirectory, bytes: Int64,
-                                workload: DriveBenchmarkWorkload, cancellation: Cancellation,
+                                workload: DriveBenchmarkWorkload, blockBytes: Int,
+                                cacheMode: DriveBenchmarkCacheMode, cancellation: Cancellation,
                                 started: UInt64, elapsedCeiling: Double,
                                 progress: @Sendable (DriveBenchmarkProgress) -> Void) -> DriveBenchmarkResult {
-        let chunk = workload.blockBytes
+        let chunk = blockBytes
         let directory = selection.url
         let scratchName = ".traverse-benchmark-" + UUID().uuidString
         let fileName = "generated.dat"
         var result = DriveBenchmarkResult()
-        result.workload = workload; result.blockBytes = chunk
+        result.workload = workload; result.blockBytes = chunk; result.cacheMode = cacheMode
         var writeLatencies: [Double] = [], readLatencies: [Double] = []
         var previousProgress = started, previousBytes: Int64 = 0
         var parent: Int32 = -1, scratch: Int32 = -1, file: Int32 = -1
@@ -291,7 +313,9 @@ public final class DriveFileBenchmark: @unchecked Sendable {
                   witness.value.st_nlink == 1 else { throw DriveBenchmarkFailure.preparation }
             fileWitness = witness
             guard onSelectedVolume(witness.value) else { throw DriveBenchmarkFailure.changed }
-            result.cacheBypass = fcntl(file, F_NOCACHE, 1) == 0 ? .enabled : .unavailable
+            if cacheMode == .tryNoCache {
+                result.cacheBypass = fcntl(file, F_NOCACHE, 1) == 0 ? .enabled : .unavailable
+            }
 
             let writeBuffer = UnsafeMutableRawPointer.allocate(byteCount: chunk, alignment: 4096)
             let readBuffer = UnsafeMutableRawPointer.allocate(byteCount: chunk, alignment: 4096)
