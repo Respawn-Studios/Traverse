@@ -192,13 +192,13 @@ being mistaken for build instructions. These are presentation hints, not a build
 validator or embedded shell. References: [Dockerfile](https://docs.docker.com/reference/dockerfile/),
 [GNU Make](https://www.gnu.org/s/make/manual/html_node/Makefile-Contents.html).
 
-## Text inside ZIPs
+## Text inside archives
 
-An admitted ZIP edit opens one eligible regular member in this same editor.
+An admitted ZIP or plain-TAR edit opens one eligible regular member in this same editor.
 `ArchiveTextDocumentController` owns the exact member snapshot and retains its
-archive access; the ordinary ZIP reader and archive mutation journal own every
-read, replacement, copy and Undo. Save updates the original ZIP; Save ZIP Copy
-creates a new ZIP and follows that exact verified copy. A changed archive refuses
+archive access; the concrete format reader and shared archive mutation journal own every
+read, replacement, copy and Undo. Save updates the original archive; Save Archive Copy
+creates a new archive and follows that exact verified copy. A changed archive refuses
 Save while keeping the draft visible. Reload is explicit, and Save a Text Copy
 exports the visible draft independently. No temporary extracted editing tree or
 second file writer is introduced. Initial and saved encoded text are bounded to
@@ -206,7 +206,9 @@ second file writer is introduced. Initial and saved encoded text are bounded to
 
 The editor-preferences native flow exercises repeated Save, exact rebind,
 original-archive Undo, stale refusal, Reload, copy-follow and copy Undo.
-Installed signature and sandbox source grants require separate validation.
+`native-check tar-editor` covers the same lifecycle with TAR's separate v18
+original-update admission. TAR editing is Development-only until distribution
+qualification. Installed signature and sandbox source grants require separate validation.
 
 The existing Explorer/Custom Control-alias preference also applies to local and
 remote editor menus: Save/Save As/Close, Undo/Redo, Cut/Copy/Paste, Select All,

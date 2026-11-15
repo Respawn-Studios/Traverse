@@ -95,6 +95,33 @@ struct TARClipboardSource {
             && items.contains{ids.contains($0.id) && $0.kind == .file}
     }
     var canPreviewSelected:Bool {canPreviewSelection(selection)}
+    var canEditSelectedText: Bool { canEditTextSelection(selection) }
+    var allowsTextEditing: Bool { browser?.canOpenTARTextEditor == true && !isCompressedSource && summary?.blockedMembers == 0 }
+    func canEditTextSelection(_ ids: Set<TARItemID>) -> Bool {
+        allowsTextEditing && canPreviewSelection(ids) && items.contains {
+            ids.contains($0.id) && !ArchiveImagePreview.supportsFilename($0.name)
+                && $0.logicalBytes <= TARTextPreview.maximumUTF8Bytes
+        }
+    }
+    func editSelectedText() {
+        guard canEditSelectedText, let id = selection.first, let session, let source,
+              let item = items.first(where: { $0.id == id }), let browser else { return }
+        let currentToken = token, currentPage = pageToken
+        isPreparingPreview = true
+        selectionWork = Task { [self] in
+            defer { selectionWork = nil; isPreparingPreview = false }
+            do {
+                let chosen = try await session.selectionForTextPreview(id)
+                let access = await browser.accessLifetime(for: [source, source.deletingLastPathComponent()])
+                guard permitsEmbeddedAction, !Task.isCancelled, !closed, !suspended,
+                      currentToken == token, currentPage == pageToken, !browser.isBrowserSuspended else { return }
+                ApplicationLocalTextEditors.shared.openArchiveText(chosen, source: source, path: item.path,
+                    reader: reader, retaining: access, from: browser)
+            } catch {
+                if !closed, !Task.isCancelled, currentToken == token { notice = ArchiveTextDocumentController.message(error) }
+            }
+        }
+    }
     var preferredPreview: ArchivePreviewMode { .preferred(for: items.first { selection.contains($0.id) }?.name) }
     var isCompressedSource: Bool { source.map(Self.isCompressed) ?? false }
     var showsCompressedPreparation: Bool {
@@ -429,7 +456,9 @@ struct TARClipboardSource {
     func openSelection() {
         guard current,!busy,!isPreparingPreview,selection.count==1,let item=items.first(where:{selection.contains($0.id)}) else{return}
         if let folder=item.folder{visit(folder)}
-        else if item.kind == .file { previewSelected() }
+        else if canEditSelectedText, settings.editorPreferences.route(forFilename: item.name, command: .ordinaryOpen) == .traverse {
+            editSelectedText()
+        } else if item.kind == .file { previewSelected() }
     }
     func visit(_ folder:TARFolderID) {
         guard !closed,!suspended,session != nil else{return}

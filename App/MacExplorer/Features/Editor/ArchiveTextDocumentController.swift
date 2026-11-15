@@ -2,13 +2,13 @@ import AppKit
 import FileOperations
 import LocalStorage
 
-/// One captured ZIP member, using the ordinary native editor and the existing
+/// One captured archive member, using the ordinary native editor and the existing
 /// archive producer/journal. No extracted editable file or second Save engine.
 @MainActor final class ArchiveTextDocumentController {
     let id = UUID()
     let window: NativeTextEditorWindow
-    private(set) var opened: ZIPTextEditDocument
-    private let reader: ZIPArchiveReader
+    private(set) var opened: ArchiveEditableTextDocument
+    private var formatName: String { opened.formatName }
     private let engine: RecoverableFileOperations
     private let access: FileAccessLifetimes
     private let interactions: ArchiveEditorInteractions
@@ -23,26 +23,27 @@ import LocalStorage
     private var languageOverride = false, wrappingOverride = false
     private var captureGeneration: UUID?
     private var copyName: String?
-    private var messageText = "Ready · ZIP"
+    private var messageText = "Ready"
     private var explanation: String?
     private(set) var latestRecordID: UUID?
     private var textCopyRecords: [UUID] = []
     var didClose: ((UUID) -> Void)?
     private lazy var preparation = EditorPreparationOwner { [weak self] input, result in self?.prepared(input, result) }
 
-    init(opened: ZIPTextEditDocument, reader: ZIPArchiveReader, engine: RecoverableFileOperations,
+    init(opened: ArchiveEditableTextDocument, engine: RecoverableFileOperations,
          access: FileAccessLifetimes, interactions: ArchiveEditorInteractions,
          installChrome: (NSWindow) -> Void) {
-        self.opened = opened; self.reader = reader; self.engine = engine
+        self.opened = opened; self.engine = engine
         self.access = access; self.interactions = interactions
         state = .init(value: opened.contents, binding: TextDocumentBinding())
-        window = .init(displayName: opened.displayName + " · ZIP", installChrome: installChrome)
+        window = .init(displayName: opened.displayName + " · " + opened.formatName, installChrome: installChrome)
         window.surface.install(opened.contents)
-        window.saveAsButton.title = "Save ZIP Copy…"
+        messageText = "Ready · " + opened.formatName
+        window.saveAsButton.title = "Save " + opened.formatName + " Copy…"
         window.saveAsMenuTitle = window.saveAsButton.title
-        window.recoveryButton.title = "View ZIP Result…"
+        window.recoveryButton.title = "View " + opened.formatName + " Result…"
         window.recoveryMenuTitle = window.recoveryButton.title
-        window.saveButton.toolTip = "Update this text file inside its ZIP. The earlier ZIP is kept for Undo."
+        window.saveButton.toolTip = "Update this text file inside its " + opened.formatName + ". The earlier archive is kept for Undo."
         window.onSave = { [weak self] in self?.save() }
         window.captureComparison = { [weak self] in
             guard let self, !closed, !closing, !isBusy,
@@ -50,7 +51,7 @@ import LocalStorage
             return .init(baseline: baseline, current: window.surface.textView.string,
                 format: state.value.format, language: language)
         }
-        window.onSaveAs = { [weak self] in self?.saveZIPCopy() }
+        window.onSaveAs = { [weak self] in self?.saveArchiveCopy() }
         window.onTextCopy = { [weak self] in self?.saveTextCopy() }
         window.onTextCopyResults = { [weak self] record in
             guard let self, let id = record ?? textCopyRecords.last else { return }; interactions.showResult(id)
@@ -66,7 +67,7 @@ import LocalStorage
             guard let self, !closed else { return }
             do {
                 pendingEdit = try state.beginEdit()
-                if !isBusy && !needsReview { messageText = "Edited · ZIP" }
+                if !isBusy && !needsReview { messageText = "Edited · " + formatName }
                 present()
             }
             catch { messageText = "This change could not be validated. Keep the editor open." }
@@ -138,7 +139,7 @@ import LocalStorage
                     else if case .failure(let failure) = validation {
                         messageText = "Text was not saved"; explanation = Self.message(failure)
                     } else {
-                        messageText = state.isDirty ? "Captured text unchanged · newer edits remain" : "No changes to save · ZIP"
+                        messageText = state.isDirty ? "Captured text unchanged · newer edits remain" : "No changes to save · " + formatName
                     }
                 } catch { messageText = Self.message(error) }
                 copyName = nil
@@ -150,11 +151,11 @@ import LocalStorage
         finishChosenSave()
     }
     func save() { captureSave(copyName: nil) }
-    func saveZIPCopy() {
+    func saveArchiveCopy() {
         guard !isBusy, !closed, !needsReview, let native = window.window else { return }
         choosing = true; refresh()
         work = Task { [self] in
-            let name = await interactions.chooseZIPCopyName(native, opened.archiveURL)
+            let name = await interactions.chooseArchiveCopyName(native, opened.archiveURL)
             work = nil; choosing = false
             if let name, !Task.isCancelled { captureSave(copyName: name) }
             refresh()
@@ -174,7 +175,7 @@ import LocalStorage
     }
     private func performSave(_ snapshot: TextSaveSnapshot, copyName: String?) {
         let original = opened
-        messageText = "Waiting to save ZIP…"
+        messageText = "Waiting to save " + formatName + "…"
         work = Task { [self] in
             var permit: UUID?
             var received: RecoverableOperationResult?
@@ -191,19 +192,13 @@ import LocalStorage
             do {
                 permit = try await interactions.acquireMutation(); try Task.checkCancellation()
                 let source = try await engine.observeSelection([original.archiveURL])
-                let plan: ArchiveWritePlan
-                if let copyName {
-                    plan = .create(try await engine.prepareZIPMemberTextReplacementCopy(original, contents: snapshot.value,
-                        outputName: copyName, observing: source))
-                } else {
-                    try await interactions.requireUnreferenced(original.archiveURL)
-                    plan = .update(try await engine.prepareZIPMemberTextReplacementOriginal(original,
-                        contents: snapshot.value, observing: source))
-                    try await interactions.requireUnreferenced(original.archiveURL)
-                }
+                if copyName == nil { try await interactions.requireUnreferenced(original.archiveURL) }
+                let plan = try await original.prepareSave(contents: snapshot.value, copyName: copyName,
+                    observing: source, using: engine)
+                if copyName == nil { try await interactions.requireUnreferenced(original.archiveURL) }
                 try Task.checkCancellation()
                 destination = plan.destination
-                messageText = "Saving and verifying ZIP…"; refresh()
+                messageText = "Saving and verifying " + formatName + "…"; refresh()
                 let result = await plan.perform(using: engine, progress: nil)
                 received = result
                 if let id = result.recordID { latestRecordID = id }
@@ -213,7 +208,7 @@ import LocalStorage
                       result.result.items[0].recoveryURLs.isEmpty else {
                     let uncertain = result.recordID != nil || result.result.items.contains { !$0.recoveryURLs.isEmpty || $0.status == .failed(.recoveryUncertain) }
                     try state.finishSave(snapshot, result: uncertain ? .uncertain : .failed)
-                    messageText = uncertain ? "ZIP Save needs review" : "ZIP was not saved"
+                    messageText = uncertain ? formatName + " Save needs review" : formatName + " was not saved"
                     explanation = OperationResultDescription(result: result.result).summary
                     if !uncertain {
                         if result.result.disposition == .cancelled { announcement = .stopped }
@@ -224,11 +219,11 @@ import LocalStorage
                 }
                 // Success acknowledges only the captured generation and a fresh
                 // exact member in the engine-confirmed output, never newer typing.
-                let rebound = try await reader.reopenTextForEdit(original, at: destination,
+                let rebound = try await original.reopen(at: destination,
                     expecting: snapshot.value, retaining: access)
                 opened = rebound
                 try state.finishSave(snapshot, result: .confirmed(TextDocumentBinding()))
-                messageText = state.isDirty ? "Captured text saved · newer edits remain" : "Saved · ZIP"
+                messageText = state.isDirty ? "Captured text saved · newer edits remain" : "Saved · " + formatName
                 explanation = nil
                 ApplicationDiagnostics.shared.event(.archiveCreate, .completed, trace: snapshot.id, relatedTrace: id)
                 announcement = .saved(newerEditsRemain: state.isDirty)
@@ -237,8 +232,8 @@ import LocalStorage
                 if state.activeSave?.id == snapshot.id {
                     try? state.finishSave(snapshot, result: published ? .uncertain : error is CancellationError ? .cancelledBeforeMutation : .failed)
                 }
-                messageText = published ? "ZIP Save needs review" : error is CancellationError ? "Save stopped · text kept" : "ZIP was not saved"
-                explanation = published ? "The ZIP operation has a recorded result, but this editor could not confirm its new text. Keep this draft and review the ZIP result before another Save." : Self.message(error)
+                messageText = published ? formatName + " Save needs review" : error is CancellationError ? "Save stopped · text kept" : formatName + " was not saved"
+                explanation = published ? "The archive operation has a recorded result, but this editor could not confirm its new text. Keep this draft and review its result before another Save." : Self.message(error)
                 ApplicationDiagnostics.shared.event(.archiveCreate, published ? .interrupted : error is CancellationError ? .cancelled : .failed,
                     trace: snapshot.id, error: DiagnosticErrors.project(error), relatedTrace: id)
                 if !published, !(error is TextDocumentFailure) {
@@ -255,12 +250,12 @@ import LocalStorage
             defer { work = nil; choosing = false; refresh() }
             guard await interactions.confirmReload(native, state.isDirty), !Task.isCancelled else { return }
             do {
-                let fresh = try await reader.reopenTextForEdit(opened, retaining: access)
+                let fresh = try await opened.reopen(retaining: access)
                 try Task.checkCancellation()
                 // Reload is an explicit whole-buffer decision, not syntax delivery.
                 opened = fresh; state = .init(value: fresh.contents, binding: TextDocumentBinding())
                 pendingEdit = nil; window.surface.install(fresh.contents)
-                messageText = "Reloaded · ZIP"; explanation = nil; present()
+                messageText = "Reloaded · " + formatName; explanation = nil; present()
             } catch { messageText = "Reload failed · text kept"; explanation = Self.message(error) }
         }
     }
@@ -284,7 +279,7 @@ import LocalStorage
                 switch try await interactions.publishTextCopy(value, generation, destination, native) {
                 case .saved(let receipt) where receipt.generation == generation && receipt.document.contents == value:
                     textCopyRecords = Array((textCopyRecords + [receipt.recordID]).suffix(8))
-                    messageText = "Text copy saved · ZIP draft kept"
+                    messageText = "Text copy saved · archive draft kept"
                 case .saved(let receipt):
                     textCopyRecords = Array((textCopyRecords + [receipt.recordID]).suffix(8))
                     messageText = "Text copy needs review"
@@ -371,6 +366,11 @@ import LocalStorage
             }
         }
         if (error as? ZIPArchiveFailure) == .changed { return "The ZIP changed. Reload to review its current text, or save your visible text as a separate copy." }
+        if let failure = error as? TARMemberEditFailure { return failure.userMessage }
+        if error is TARTextPreviewFailure { return ArchiveTextPreviewOwner.message(error, mode: .text) }
+        if (error as? TARArchiveFailure) == .changed {
+            return "The TAR changed. Reload to review its current text, or save your visible text as a separate copy."
+        }
         return ArchiveCreationModel.message(error)
     }
 }

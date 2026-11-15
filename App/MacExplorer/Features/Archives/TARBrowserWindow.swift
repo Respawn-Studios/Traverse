@@ -128,6 +128,9 @@ private struct TARBrowserView:View {
         }
         table.setAccessibilityLabel("TAR archive members. Open folders or preview selected files.")
         let menu=NSMenu();menu.addItem(withTitle:"Open",action:#selector(openSelected(_:)),keyEquivalent:"").target=self
+        if TARTextEditorFeature.available {
+            menu.addItem(withTitle: "Edit in Traverse", action: #selector(editText(_:)), keyEquivalent: "").target = self
+        }
         menu.addItem(withTitle:"Preview Text",action:#selector(previewText(_:)),keyEquivalent:"").target=self
         menu.addItem(withTitle:"Preview as Hex",action:#selector(previewHex(_:)),keyEquivalent:"").target=self
         menu.addItem(withTitle: "Copy", action: #selector(copyMembers(_:)), keyEquivalent: "").target = self
@@ -137,7 +140,7 @@ private struct TARBrowserView:View {
         table.contextMenuProvider = { [weak self] in
             guard let self else { return nil }
             return NativeContextMenu.arrange(table.menu,
-                groups: [[#selector(openSelected(_:)), #selector(previewText(_:)), #selector(previewHex(_:))],
+                groups: [[#selector(openSelected(_:)), #selector(editText(_:)), #selector(previewText(_:)), #selector(previewHex(_:))],
                          [#selector(copyMembers(_:)), #selector(extractSelected(_:)), #selector(showMemberProperties(_:))]],
                 allows: validateMenuItem)
         }
@@ -224,6 +227,7 @@ private struct TARBrowserView:View {
     }
     @objc private func openSelected(_ sender:Any?){model?.openSelection()}
     @objc private func previewText(_ sender:Any?){model?.previewSelected()}
+    @objc private func editText(_ sender: Any?) { model?.editSelectedText() }
     @objc private func previewHex(_ sender:Any?){model?.previewSelectedAsBytes()}
     @objc private func copyMembers(_ sender: Any?) { if canCopyMembers?() == true { onCopyMembers?() } }
     @objc private func extractSelected(_ sender:Any?){model?.extract(selected:true)}
@@ -232,6 +236,7 @@ private struct TARBrowserView:View {
         guard let model else{return false}
         if item.action == #selector(openSelected(_:)){return model.current && !model.busy && !model.isPreparingPreview && model.selection.count==1 && (items.contains{model.selection.contains($0.id) && $0.folder != nil} || model.canPreviewSelected)}
         if item.action == #selector(previewText(_:)) { item.title = model.preferredPreview.commandTitle; return model.canPreviewSelected }
+        if item.action == #selector(editText(_:)) { return model.canEditSelectedText }
         if item.action == #selector(previewHex(_:)){return model.canPreviewSelected}
         if item.action == #selector(copyMembers(_:)) { return canCopyMembers?() == true }
         if item.action == #selector(showMemberProperties(_:)) { return model.observedMember != nil }

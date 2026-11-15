@@ -2,7 +2,7 @@ import Foundation
 
 /// Catalog format and operation semantics are independent version spaces.
 internal enum OperationCatalogProtocol: String, Codable, Sendable {
-    case treeV1, nameRenameV2, treeV3, nameRenameV4, archiveUpdateV5, archiveStrictCloneV6, downloadAdoptionV7, ownedTrashV8, treeTrashRootAddV9, ownedTrashRootAddDeleteV10, treeNativeTrashV11, treeNativeTrashV12, archiveNativeUpdateV13, receivedPublicDownloadV14, publicZIPExtractionFileV15, publicProducedTreeV16, publicTARExtractionFileV17, groupedCopyV1, selectionGroupV2, textRevisionV3
+    case treeV1, nameRenameV2, treeV3, nameRenameV4, archiveUpdateV5, archiveStrictCloneV6, downloadAdoptionV7, ownedTrashV8, treeTrashRootAddV9, ownedTrashRootAddDeleteV10, treeNativeTrashV11, treeNativeTrashV12, archiveNativeUpdateV13, receivedPublicDownloadV14, publicZIPExtractionFileV15, publicProducedTreeV16, publicTARExtractionFileV17, tarNativeUpdateV18, groupedCopyV1, selectionGroupV2, textRevisionV3
     var version: Int {
         switch self {
         case .treeV1, .groupedCopyV1: 1
@@ -22,6 +22,7 @@ internal enum OperationCatalogProtocol: String, Codable, Sendable {
         case .publicZIPExtractionFileV15: 15
         case .publicProducedTreeV16: 16
         case .publicTARExtractionFileV17: 17
+        case .tarNativeUpdateV18: 18
         }
     }
     static func ordinary(version: Int) throws -> Self {
@@ -43,6 +44,7 @@ internal enum OperationCatalogProtocol: String, Codable, Sendable {
         case 15: .publicZIPExtractionFileV15
         case 16: .publicProducedTreeV16
         case 17: .publicTARExtractionFileV17
+        case 18: .tarNativeUpdateV18
         default: throw FileOperationFailure.recoveryUncertain
         }
     }
@@ -66,15 +68,16 @@ internal enum OperationCatalogRecord: Sendable {
     case publicZIPExtractionFileV15(JournalRecord)
     case publicProducedTreeV16(JournalRecord)
     case publicTARExtractionFileV17(JournalRecord)
+    case tarNativeUpdateV18(JournalRecord)
     case groupedCopyV1(GroupedCopyRecord)
     case selectionGroupV2(SelectionGroupRecord)
     case textRevisionV3(TextRevisionRecordV2)
 
     var id: UUID {
-        switch self { case .treeV1(let r), .nameRenameV2(let r), .treeV3(let r), .nameRenameV4(let r), .archiveUpdateV5(let r), .archiveStrictCloneV6(let r), .downloadAdoptionV7(let r), .ownedTrashV8(let r), .treeTrashRootAddV9(let r), .treeNativeTrashV11(let r), .treeNativeTrashV12(let r), .archiveNativeUpdateV13(let r), .receivedPublicDownloadV14(let r), .publicZIPExtractionFileV15(let r), .publicProducedTreeV16(let r), .publicTARExtractionFileV17(let r), .ownedTrashRootAddDeleteV10(let r): r.id; case .groupedCopyV1(let r): r.head.id; case .selectionGroupV2(let r): r.manifest.id; case .textRevisionV3(let r): r.id }
+        switch self { case .treeV1(let r), .nameRenameV2(let r), .treeV3(let r), .nameRenameV4(let r), .archiveUpdateV5(let r), .archiveStrictCloneV6(let r), .downloadAdoptionV7(let r), .ownedTrashV8(let r), .treeTrashRootAddV9(let r), .treeNativeTrashV11(let r), .treeNativeTrashV12(let r), .archiveNativeUpdateV13(let r), .receivedPublicDownloadV14(let r), .publicZIPExtractionFileV15(let r), .publicProducedTreeV16(let r), .publicTARExtractionFileV17(let r), .tarNativeUpdateV18(let r), .ownedTrashRootAddDeleteV10(let r): r.id; case .groupedCopyV1(let r): r.head.id; case .selectionGroupV2(let r): r.manifest.id; case .textRevisionV3(let r): r.id }
     }
     var legacy: JournalRecord? {
-        switch self { case .treeV1(let r), .nameRenameV2(let r), .treeV3(let r), .nameRenameV4(let r), .archiveUpdateV5(let r), .archiveStrictCloneV6(let r), .downloadAdoptionV7(let r), .ownedTrashV8(let r), .treeTrashRootAddV9(let r), .ownedTrashRootAddDeleteV10(let r), .treeNativeTrashV11(let r), .treeNativeTrashV12(let r), .archiveNativeUpdateV13(let r), .receivedPublicDownloadV14(let r), .publicZIPExtractionFileV15(let r), .publicProducedTreeV16(let r), .publicTARExtractionFileV17(let r): r; case .groupedCopyV1, .selectionGroupV2, .textRevisionV3: nil }
+        switch self { case .treeV1(let r), .nameRenameV2(let r), .treeV3(let r), .nameRenameV4(let r), .archiveUpdateV5(let r), .archiveStrictCloneV6(let r), .downloadAdoptionV7(let r), .ownedTrashV8(let r), .treeTrashRootAddV9(let r), .ownedTrashRootAddDeleteV10(let r), .treeNativeTrashV11(let r), .treeNativeTrashV12(let r), .archiveNativeUpdateV13(let r), .receivedPublicDownloadV14(let r), .publicZIPExtractionFileV15(let r), .publicProducedTreeV16(let r), .publicTARExtractionFileV17(let r), .tarNativeUpdateV18(let r): r; case .groupedCopyV1, .selectionGroupV2, .textRevisionV3: nil }
     }
     var treeRecord: JournalRecord? {
         switch self { case .treeV1(let r), .treeV3(let r): r; default: nil }

@@ -50,7 +50,16 @@ final class ApplicationLocalTextEditors {
     func openArchiveText(_ selection: ZIPTextPreviewSelection, source: URL, path: String,
                          reader: ZIPArchiveReader, retaining access: FileAccessLifetimes,
                          from browser: BrowserViewController) {
-        guard browser.canOpenZIPTextEditor, !reviewingTermination, !terminationPrepared,
+        openArchiveText(.zip(selection, reader), source: source, path: path, retaining: access, from: browser)
+    }
+    func openArchiveText(_ selection: TARTextPreviewSelection, source: URL, path: String,
+                         reader: TARArchiveReader, retaining access: FileAccessLifetimes,
+                         from browser: BrowserViewController) {
+        openArchiveText(.tar(selection, reader), source: source, path: path, retaining: access, from: browser)
+    }
+    private func openArchiveText(_ request: ArchiveTextEditorRequest, source: URL, path: String,
+                         retaining access: FileAccessLifetimes, from browser: BrowserViewController) {
+        guard request.isAllowed(from: browser), !reviewingTermination, !terminationPrepared,
               let engine = browser.recoverableFileOperations else { return }
         if archiveEditors.showExisting(source: source, path: path) { return }
         guard documentReservationCount + ApplicationRemoteTextEditors.shared.allTextReservationCount < 4 else {
@@ -66,7 +75,7 @@ final class ApplicationLocalTextEditors {
                 try await ArchiveOriginalReferences.requireUnreferenced([original], names: names, retaining: access)
             },
             confirmReload: { window, dirty in await Self.confirmReload(in: window, dirty: dirty) },
-            chooseZIPCopyName: ArchiveEditorInteractions.chooseZIPCopyName,
+            chooseArchiveCopyName: ArchiveEditorInteractions.chooseArchiveCopyName,
             chooseTextCopy: { [self] window, name in
                 await chooseDestination(in: window, source: nil, context: context, isTextCopy: true, suggestedName: name)
             },
@@ -86,7 +95,7 @@ final class ApplicationLocalTextEditors {
                 }
                 if let original { ArchiveOriginalReferences.refresh(original, in: coordinator) }
             })
-        archiveEditors.open(selection, source: source, path: path, reader: reader, engine: engine,
+        archiveEditors.open(request, source: source, path: path, engine: engine,
                             access: access, settings: browser.settings, interactions: interactions,
                             report: { [weak browser] message in browser?.status.stringValue = message })
     }
@@ -587,7 +596,7 @@ final class ApplicationLocalTextEditors {
         alert.messageText = needsRecovery ? "Keep this visible text before closing?" : "Save your changes before closing?"
         alert.informativeText = needsRecovery
             ? "The earlier Save is still unconfirmed. A saved version of this visible text may not exist. Save a separate text copy, or cancel and review the earlier result. Closing discards this window’s visible text without confirming the Save."
-            : archive ? "Save updates this text file inside its ZIP and keeps the earlier ZIP for Undo. A changed ZIP is never overwritten. Don’t Save discards only this window’s changes."
+            : archive ? "Save updates this text file inside its archive and keeps the earlier archive for Undo. A changed archive is never overwritten. Don’t Save discards only this window’s changes."
                 : "Unsaved text will be lost if you close without saving. If the saved file changed, Save creates a separate new file."
         alert.addButton(withTitle: needsRecovery ? "Save a Text Copy…" : "Save")
         alert.addButton(withTitle: needsRecovery ? "Close and Discard Visible Text" : "Don’t Save")

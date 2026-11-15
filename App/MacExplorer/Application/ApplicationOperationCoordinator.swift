@@ -142,6 +142,8 @@ final class ApplicationOperationCoordinator: ObservableObject {
         let authoredPublicMark: NativeAuthoredCreatePublicMarkPolicy =
             markedArchiveReview || NativeLocalProtectionPolicy.nativeAuthoredCreatePublicMarkAvailable
                 ? .sourceQualification : .held
+        let tarOriginalUpdate: AuthoredTAROriginalUpdatePolicy = TARTextEditorFeature.available
+            ? .developmentNativeStage : .held
         let protectedNames = [directory.deletingLastPathComponent(),
                               directory.deletingLastPathComponent().appendingPathComponent("private-names", isDirectory: true),
                               directory.deletingLastPathComponent().appendingPathComponent("drive-protection", isDirectory: true),
@@ -193,7 +195,8 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 authoredZIPMetadataPolicy: zipMetadata,
                 strictPortableTARCreationPolicy: portableTAR,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
-                authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate, downloadAdoptionPolicy: downloadAdoption,
+                authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
+                authoredTAROriginalUpdatePolicy: tarOriginalUpdate, downloadAdoptionPolicy: downloadAdoption,
                 receivedDownloadPublicQuarantinePolicy: publicDownload,
                 zipOneFilePublicExtractionPolicy: zipOneFileExtraction, tarOneFilePublicExtractionPolicy: tarFile,
                 receivedFolderPublicQuarantinePolicy: receivedFolder, zipTreePublicExtractionPolicy: zipTree,
@@ -206,6 +209,7 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 strictPortableTARCreationPolicy: portableTAR,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
                 authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
+                authoredTAROriginalUpdatePolicy: tarOriginalUpdate,
                 downloadAdoptionPolicy: downloadAdoption, receivedDownloadPublicQuarantinePolicy: publicDownload,
                 zipOneFilePublicExtractionPolicy: zipOneFileExtraction, tarOneFilePublicExtractionPolicy: tarFile,
                 receivedFolderPublicQuarantinePolicy: receivedFolder, zipTreePublicExtractionPolicy: zipTree,

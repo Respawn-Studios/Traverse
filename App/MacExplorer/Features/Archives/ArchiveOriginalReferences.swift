@@ -1,15 +1,15 @@
 import Darwin
 import Foundation
 
-/// App-owned saved names are separate from the file-operation journal. A ZIP
+/// App-owned saved names are separate from the file-operation journal. An archive
 /// replacement must not silently move one of their bound objects into recovery.
 @MainActor enum ArchiveOriginalReferences {
     enum Failure: Error {
         case savedNames, unavailable
         var message: String {
             switch self {
-            case .savedNames: "This ZIP version has saved names. Save a ZIP copy or review its saved names before changing it."
-            case .unavailable: "Saved names could not be checked for this ZIP. Save a ZIP copy or review saved names before changing it."
+            case .savedNames: "This archive version has saved names. Save an archive copy or review its saved names before changing it."
+            case .unavailable: "Saved names could not be checked for this archive. Save an archive copy or review saved names before changing it."
             }
         }
     }
@@ -47,6 +47,10 @@ import Foundation
             }
         }
         if let standalone = ApplicationZIPBrowser.shared.controller,
+           standalone.window?.isVisible == true, standalone.model.source == original {
+            standalone.model.refresh()
+        }
+        if let standalone = ApplicationTARBrowser.shared.controller,
            standalone.window?.isVisible == true, standalone.model.source == original {
             standalone.model.refresh()
         }

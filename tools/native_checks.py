@@ -200,9 +200,10 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                  incremental_analysis: bool = False, connection_phase: str = "persistence",
                  marked_source_create: bool = False) -> Path:
     """Run existing feature checks in the ordinary app, with generated data only."""
+    tar_editor = feature == "tar-editor"
     native_zip_recovery = feature == "zip-editor-native-recovery"
     native_zip_update = feature in ("zip-update-native", "zip-editor-native", "zip-editor-native-recovery")
-    if feature in ("zip-editor-native", "zip-editor-native-recovery"):
+    if feature in ("zip-editor-native", "zip-editor-native-recovery", "tar-editor"):
         feature = "editor-preferences"
     if not offscreen:
         require_unlocked_console()
@@ -620,6 +621,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command.append("--update-original")
     if feature == "zip-update-tracked":
         command.append("--tracked-zip")
+    if tar_editor:
+        command.extend(["--tar-editor", "--archive-editor-only"])
     if native_zip_update:
         command.append("--native-original-update")
     if native_zip_recovery:

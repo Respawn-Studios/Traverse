@@ -71,6 +71,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     internal let strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy
     internal let nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy
     internal let authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy
+    internal let authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy
     @_spi(ArchiveProduction) public var nativeZIPCreationAcceptsMarkedSources: Bool {
         authoredZIPMetadataPolicy == .nativeCreate
     }
@@ -117,6 +118,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                             strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
                             nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
                             authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
+                  authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
                             downloadAdoptionPolicy: DownloadAdoptionPolicy = .held,
                             receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy = .held,
                             zipOneFilePublicExtractionPolicy: ZIPOneFilePublicExtractionPolicy = .held,
@@ -131,6 +133,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   strictPortableTARCreationPolicy: strictPortableTARCreationPolicy,
                   nativeAuthoredCreatePublicMarkPolicy: nativeAuthoredCreatePublicMarkPolicy,
                   authoredZIPOriginalUpdateNativePolicy: authoredZIPOriginalUpdateNativePolicy,
+                  authoredTAROriginalUpdatePolicy: authoredTAROriginalUpdatePolicy,
                   downloadAdoptionPolicy: downloadAdoptionPolicy,
                   receivedDownloadPublicQuarantinePolicy: receivedDownloadPublicQuarantinePolicy,
                   zipOneFilePublicExtractionPolicy: zipOneFilePublicExtractionPolicy,
@@ -147,6 +150,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                             strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
                             nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
                             authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
+                  authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
                             downloadAdoptionPolicy: DownloadAdoptionPolicy = .held,
                             receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy = .held,
                             zipOneFilePublicExtractionPolicy: ZIPOneFilePublicExtractionPolicy = .held,
@@ -162,6 +166,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   strictPortableTARCreationPolicy: strictPortableTARCreationPolicy,
                   nativeAuthoredCreatePublicMarkPolicy: nativeAuthoredCreatePublicMarkPolicy,
                   authoredZIPOriginalUpdateNativePolicy: authoredZIPOriginalUpdateNativePolicy,
+                  authoredTAROriginalUpdatePolicy: authoredTAROriginalUpdatePolicy,
                   downloadAdoptionPolicy: downloadAdoptionPolicy,
                   receivedDownloadPublicQuarantinePolicy: receivedDownloadPublicQuarantinePolicy,
                   zipOneFilePublicExtractionPolicy: zipOneFilePublicExtractionPolicy,
@@ -248,6 +253,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
         nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
         authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
+                  authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
         receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy = .held,
         zipOneFilePublicExtractionPolicy: ZIPOneFilePublicExtractionPolicy = .held,
         tarOneFilePublicExtractionPolicy: TAROneFilePublicExtractionPolicy = .held,
@@ -262,6 +268,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   strictPortableTARCreationPolicy: strictPortableTARCreationPolicy,
                   nativeAuthoredCreatePublicMarkPolicy: nativeAuthoredCreatePublicMarkPolicy,
                   authoredZIPOriginalUpdateNativePolicy: authoredZIPOriginalUpdateNativePolicy,
+                  authoredTAROriginalUpdatePolicy: authoredTAROriginalUpdatePolicy,
                   downloadAdoptionPolicy: .held,
                   receivedDownloadPublicQuarantinePolicy: receivedDownloadPublicQuarantinePolicy,
                   zipOneFilePublicExtractionPolicy: zipOneFilePublicExtractionPolicy,
@@ -281,6 +288,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
                   nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
                   authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
+                  authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
                   downloadAdoptionPolicy: DownloadAdoptionPolicy = .held,
                   receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy = .held,
                   zipOneFilePublicExtractionPolicy: ZIPOneFilePublicExtractionPolicy = .held,
@@ -302,6 +310,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         self.strictPortableTARCreationPolicy = strictPortableTARCreationPolicy
         self.nativeAuthoredCreatePublicMarkPolicy = nativeAuthoredCreatePublicMarkPolicy
         self.authoredZIPOriginalUpdateNativePolicy = authoredZIPOriginalUpdateNativePolicy
+        self.authoredTAROriginalUpdatePolicy = authoredTAROriginalUpdatePolicy
         self.downloadAdoptionPolicy = downloadAdoptionPolicy
         self.receivedDownloadPublicQuarantinePolicy = receivedDownloadPublicQuarantinePolicy
         self.zipOneFilePublicExtractionPolicy = zipOneFilePublicExtractionPolicy
@@ -427,6 +436,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
             return try OperationHistoryInspector.inspect(self.directory, after: after, limit: limit,
                 cancellation: cancellation, allowDownloadAdoptionUndoHint: adoptionUndoHint,
                 allowNativeOriginalUpdateUndoHint: self.authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage,
+                allowNativeTARUpdateUndoHint: self.authoredTAROriginalUpdatePolicy == .developmentNativeStage,
                 allowPublicDownloadUndoHint: self.receivedDownloadPublicQuarantinePolicy == .sourceQualification,
                 allowPublicZIPExtractionUndoHint: self.zipOneFilePublicExtractionPolicy == .sourceQualification,
                 allowPublicTARExtractionUndoHint: self.tarOneFilePublicExtractionPolicy == .sourceQualification,
@@ -442,6 +452,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
             let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks, cancellation: cancellation)
             let page = try journal.inspectSummaries(after: after, limit: limit,
                 allowNativeOriginalUpdateUndoHint: self.authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage,
+                allowNativeTARUpdateUndoHint: self.authoredTAROriginalUpdatePolicy == .developmentNativeStage,
                 allowPublicDownloadUndoHint: self.receivedDownloadPublicQuarantinePolicy == .sourceQualification,
                 allowPublicZIPExtractionUndoHint: self.zipOneFilePublicExtractionPolicy == .sourceQualification,
                 allowPublicTARExtractionUndoHint: self.tarOneFilePublicExtractionPolicy == .sourceQualification,
@@ -541,6 +552,12 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     /// were durably acknowledged before any replacement intent existed.
     public func restoreInterruptedOriginalZIP(recordID: UUID,
         progress: (@Sendable (OperationProgress) -> Void)? = nil) async -> RecoverableOperationResult {
+        await restoreInterruptedOriginalArchive(recordID: recordID, progress: progress)
+    }
+    /// Format admission is checked against the persisted v13 ZIP or v18 TAR
+    /// record, before any retained original can be restored.
+    public func restoreInterruptedOriginalArchive(recordID: UUID,
+        progress: (@Sendable (OperationProgress) -> Void)? = nil) async -> RecoverableOperationResult {
         await reverse(recordID: recordID, recovering: true,
             restoringInterruptedOriginalZIP: true, progress: progress)
     }
@@ -609,8 +626,8 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 }
                 if restoringInterruptedOriginalZIP {
                     guard recovering,
-                          self.authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage,
-                          OperationJournal.hasRecordedNativeZIPOriginalOnly(record.snapshot) else {
+                          self.nativeArchiveUpdateEnabled(version: record.snapshot.version),
+                          OperationJournal.hasRecordedNativeArchiveOriginalOnly(record.snapshot) else {
                         throw FileOperationFailure.unsupported
                     }
                     let step = record.steps[0]
@@ -637,7 +654,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 // V13 generic reconciliation cannot infer an unacknowledged
                 // native mark change; only the explicit one-step action proceeds.
                 guard (record.snapshot.version != 12 || !recovering),
-                      (record.snapshot.version != 13 || !recovering || restoringInterruptedOriginalZIP) else {
+                      (![13, 18].contains(record.snapshot.version) || !recovering || restoringInterruptedOriginalZIP) else {
                     throw FileOperationFailure.unsupported
                 }
                 if record.nameRename != nil {
@@ -653,7 +670,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 // qualification may undo its changed backup. V6 identifies the
                 // strict cloned producer and requires that qualification before
                 // any inverse mutation. Both require the exact recorded image.
-                let archiveUpdate = [5, 6, 13].contains(record.snapshot.version)
+                let archiveUpdate = [5, 6, 13, 18].contains(record.snapshot.version)
                 let adoptedDownload = record.snapshot.version == 7 ? record.downloadAdoption : nil
                 if record.snapshot.version == 7 {
                     guard !recovering, record.state == "committed", record.steps.count == 1,
@@ -669,7 +686,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     try adoptedDownload.security.require(pin, at: final)
                 }
                 let nativeZIPDisplacement: Bool = archiveUpdate
-                    && record.snapshot.operation == "Update ZIP"
+                    && record.snapshot.operation == (record.snapshot.version == 18 ? "Update TAR" : "Update ZIP")
                     && record.steps.count == 2
                     && record.areas.contains { record.steps[0].destination == $0.url.appendingPathComponent("displaced") }
                     && record.steps[1].source == record.steps[0].destination.deletingLastPathComponent().appendingPathComponent("payload")
@@ -680,8 +697,8 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     && record.steps[0].after.map { !record.steps[0].before.matches($0)
                         && record.steps[0].before.identity.sameObject(as: $0.identity) } == true
                 let candidateZIPPolicy: Bool
-                if record.snapshot.version == 13 {
-                    candidateZIPPolicy = self.authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage
+                if [13, 18].contains(record.snapshot.version) {
+                    candidateZIPPolicy = self.nativeArchiveUpdateEnabled(version: record.snapshot.version)
                 } else {
                     switch (record.snapshot.version, self.authoredZIPMetadataPolicy) {
                     case (5, .nativeStageQualification), (6, .exactSourceCloneQualification):
@@ -691,7 +708,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 }
                 // V6 and v13 identify their producer policy. Neither may borrow
                 // the v5 inverse or another candidate's authority.
-                guard ![6, 13].contains(record.snapshot.version) || candidateZIPPolicy else {
+                guard ![6, 13, 18].contains(record.snapshot.version) || candidateZIPPolicy else {
                     throw FileOperationFailure.recoveryUncertain
                 }
                 guard !nativeZIPDisplacement || (!recovering && candidateZIPPolicy) else {

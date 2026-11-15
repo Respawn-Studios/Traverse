@@ -1,4 +1,5 @@
 import ExplorerCore
+import FileOperations
 import Foundation
 
 internal struct TARSourceBinding: Sendable {
@@ -60,6 +61,49 @@ public final class TARArchiveReader: @unchecked Sendable {
                 previewLimits:self.previewLimits,check:cancellation.check,probe:self.probe){bytes,check in
                     try TARTextPreview.decode(bytes,check:check)
                 }
+        }
+    }
+    public func openTextForEdit(_ selection: TARTextPreviewSelection,
+        retaining lifetime: (any Sendable)? = nil) async throws -> TARTextEditDocument {
+        guard selection.binding.compressed == nil else { throw TARMemberEditFailure.compressedArchive }
+        return try await perform(retaining: lifetime) { cancellation in
+            try TARTextPreviewReader.readChecked(selection, excluding: self.excludedRoots,
+                limits: self.limits, previewLimits: self.previewLimits,
+                check: cancellation.check, probe: self.probe) { bytes, check in
+                try check(); return try TARTextEditDocument(selection: selection, bytes: bytes)
+            }
+        }
+    }
+    public func reopenTextForEdit(_ previous: TARTextEditDocument, at archive: URL? = nil,
+        expecting contents: TextDocumentValue? = nil,
+        retaining lifetime: (any Sendable)? = nil) async throws -> TARTextEditDocument {
+        let url = archive ?? previous.archiveURL
+        guard url.pathExtension.lowercased() == "tar",
+              url == previous.archiveURL || (contents != nil
+                && url.deletingLastPathComponent() == previous.archiveURL.deletingLastPathComponent()) else {
+            throw TARArchiveFailure.invalidSelection
+        }
+        return try await perform(retaining: lifetime) { cancellation in
+            let output = try self.read(url, cancellation: cancellation)
+            var index = 0
+            for part in previous.archivePath.split(separator: "/") {
+                try cancellation.check()
+                guard let next = output.storage.nodes[index].children.first(where: {
+                    output.storage.nodes[$0].name.utf8.elementsEqual(part.utf8)
+                }) else { throw TARArchiveFailure.changed }
+                index = next
+            }
+            guard let record = output.storage.nodes[index].record, record.kind == .file else {
+                throw TARArchiveFailure.changed
+            }
+            let selection = TARTextPreviewSelection(binding: output.binding, record: record)
+            let document = try TARTextPreviewReader.readChecked(selection, excluding: self.excludedRoots,
+                limits: self.limits, previewLimits: self.previewLimits,
+                check: cancellation.check, probe: self.probe) { bytes, check in
+                try check(); return try TARTextEditDocument(selection: selection, bytes: bytes)
+            }
+            guard contents == nil || document.contents.encoded == contents?.encoded else { throw TARArchiveFailure.changed }
+            return document
         }
     }
     public func previewBytes(_ selection:TARTextPreviewSelection,retaining lifetime:(any Sendable)?=nil)async throws->TARBytePreview {

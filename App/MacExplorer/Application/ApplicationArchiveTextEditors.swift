@@ -14,7 +14,18 @@ enum ZIPTextEditorFeature {
     }
 }
 
+enum TARTextEditorFeature {
+    static var available: Bool {
+        AppFeatureAvailability.policy.edition == .development && TARBrowseFeature.available
+            && !GeneratedSandboxReview.admitted
+    }
+}
+
 @MainActor extension BrowserViewController {
+    var canOpenTARTextEditor: Bool {
+        TARTextEditorFeature.available && !isBrowserSuspended
+            && !isReadOnlyFileSession && recoverableFileOperations != nil
+    }
     var canOpenZIPTextEditor: Bool {
         ZIPTextEditorFeature.available && !isBrowserSuspended
             && !isReadOnlyFileSession && recoverableFileOperations != nil
@@ -44,12 +55,12 @@ enum ZIPTextEditorFeature {
         }) else { return false }
         entry.document.show(); return true
     }
-    func open(_ selection: ZIPTextPreviewSelection, source: URL, path: String, reader: ZIPArchiveReader,
+    func open(_ request: ArchiveTextEditorRequest, source: URL, path: String,
               engine: RecoverableFileOperations, access: FileAccessLifetimes, settings: BrowserSettings,
               interactions: ArchiveEditorInteractions, report: @escaping (String) -> Void) {
         let key = Key(source: source, path: path)
         guard !reviewingTermination, opening[key] == nil, !showExisting(source: source, path: path) else { return }
-        report("Opening text from ZIP…")
+        report("Opening archive text…")
         opening[key] = Task { [self] in
             let trace = UUID()
             var inspection: UUID?
@@ -62,10 +73,10 @@ enum ZIPTextEditorFeature {
             do {
                 guard let token = ApplicationOperationCoordinator.shared.beginInspection() else { throw FileOperationFailure.unavailable }
                 inspection = token
-                let value = try await reader.openTextForEdit(selection, retaining: access)
+                let value = try await request.open(retaining: access)
                 try Task.checkCancellation()
                 guard !reviewingTermination, value.archiveURL == source, value.archivePath == path else { throw CancellationError() }
-                let document = ArchiveTextDocumentController(opened: value, reader: reader, engine: engine,
+                let document = ArchiveTextDocumentController(opened: value, engine: engine,
                     access: access, interactions: interactions, installChrome: {
                         $0.isRestorable = false; ToolWindowChrome.install(in: $0, settings: settings)
                     })

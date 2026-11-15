@@ -7,6 +7,9 @@ import Foundation
 /// Source admission and private-output inheritance. Raw security flags remain
 /// opaque. This never changes a source, removes quarantine or grants approval.
 internal enum ZIPSourceSecurity {
+    static func nativeAuthoredWitness(_ descriptor: Int32) throws -> AuthoredZIPSecurityWitness {
+        .init(quarantine: try quarantine(descriptor), provenance: try provenance(descriptor))
+    }
     /// Held only by a prepared local Create inventory. It never leaves the
     /// process, enters history, or supplies bytes to a produced ZIP.
     struct CreationInputWitness: Equatable, Sendable {

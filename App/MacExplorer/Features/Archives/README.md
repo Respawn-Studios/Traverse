@@ -32,8 +32,25 @@ Plain TAR opens directly. Gzip TAR requires explicit Prepare into the shared
 private pool, bounded to 128 MiB and four copies. Restoring a tab or searching
 names does not decode it. `ApplicationCompressedArchives` retains actual worker,
 source access and prepared-copy leases through drain and the volume/Quit barrier.
-A prepared spool path is never operation authority. TAR rewrite, compressed-TAR
-creation, nesting and outgoing TAR promises require separate support.
+A prepared spool path is never operation authority. Compressed-TAR rewriting
+and creation, nesting and outgoing TAR promises require separate support.
+
+## TAR text editing in development
+
+Plain TAR members can use the common native editor in Development builds.
+`TARTextEditDocument` binds complete UTF-8 bytes to the retained catalog;
+`PreparedTARTextEdit` streams a replacement without unpacking an editable tree.
+Unchanged entries retain their original bytes, headers and local PAX records.
+The edited member keeps ownership names, mode and unrelated PAX fields; its
+header and any PAX size override are updated together. Links, special members,
+unsupported root metadata and archives over 1 GiB refuse the write.
+
+Save and Save TAR Copy use the existing guarded archive engine. TAR original
+replacement has its own default-held policy and v18 history, independent of
+ZIP v13. The earlier archive stays available for cold Undo; an interrupted
+retained-original step has an explicit, revalidated Restore action. The writer
+keeps the native stage's macOS protection and never copies a source mark over
+it. This source support does not activate TAR editing in a distributed build.
 
 ## Creation and ZIP edits
 
@@ -79,7 +96,7 @@ for the same destination. Each job retains cancellation, access and exactly-once
 completion through actual drain; a callback grants no folder access itself.
 
 Reuse existing archive package tests and `tools/dev.py native-check` entries:
-`create-zip`, `create-tar`, `zip-add-copy`, `compressed-tar`, and relevant editor or
+`create-zip`, `create-tar`, `zip-add-copy`, `compressed-tar`, `tar-editor`, and relevant editor or
 batch-rename journeys. Independently inspect generated output and original
 identity, conflict refusal, cancellation, interruption and guarded Undo.
 Offscreen functional checks do not establish motion, physical input, external

@@ -16,6 +16,7 @@ public final class ArchiveUpdatePlan: @unchecked Sendable {
     internal let sourceParents: [URL: EntrySnapshot]
     internal let rootMetadata: ArchiveOriginalRootMetadata
     internal let producer: any ArchiveFileProducer
+    internal let authoredFormat: AuthoredArchiveFormat
     internal let engine: UUID
     private let lock = NSLock()
     private var consumed = false
@@ -23,7 +24,7 @@ public final class ArchiveUpdatePlan: @unchecked Sendable {
     internal init(sources: [URL], original: URL, identities: [EntrySnapshot],
                   sourceParents: [URL: EntrySnapshot], parentIdentity: EntrySnapshot,
                   rootMetadata: ArchiveOriginalRootMetadata, producer: any ArchiveFileProducer,
-                  engine: UUID) {
+                  engine: UUID, authoredFormat: AuthoredArchiveFormat) {
         self.sources = sources; destination = original
         directorySources = zip(sources, identities).compactMap { $0.1.isDirectory ? $0.0 : nil }
         files = producer.preview.files; folders = producer.preview.folders
@@ -31,7 +32,7 @@ public final class ArchiveUpdatePlan: @unchecked Sendable {
         parent = original.deletingLastPathComponent()
         self.parentIdentity = parentIdentity; sourcesIdentity = identities
         self.sourceParents = sourceParents; self.rootMetadata = rootMetadata
-        self.producer = producer; self.engine = engine
+        self.producer = producer; self.engine = engine; self.authoredFormat = authoredFormat
     }
     internal func consume(by candidate: UUID) -> Bool {
         lock.withLock {
@@ -134,18 +135,39 @@ internal struct ArchiveOriginalRootMetadata: Equatable, Sendable {
 }
 
 extension RecoverableFileOperations {
+    internal func nativeArchiveUpdateEnabled(for format: AuthoredArchiveFormat) -> Bool {
+        switch format {
+        case .zip: authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage
+        case .strictPortableTAR: authoredTAROriginalUpdatePolicy == .developmentNativeStage
+        }
+    }
+
+    internal func nativeArchiveUpdateEnabled(version: Int) -> Bool {
+        switch version {
+        case 13: nativeArchiveUpdateEnabled(for: .zip)
+        case 18: nativeArchiveUpdateEnabled(for: .strictPortableTAR)
+        default: false
+        }
+    }
+
     /// The original is the first observed source. Additional Add-to-ZIP roots
     /// retain their own parent observations and may live on other local volumes.
     @_spi(ArchiveProduction) public func prepareArchiveOriginalUpdate(
         sources: [URL], original: URL, observing selection: FileOperationSelection,
+        authoredFormat: AuthoredArchiveFormat = .zip,
         makeProducer: @escaping @Sendable (@Sendable () throws -> Void) throws -> any ArchiveFileProducer
     ) async throws -> ArchiveUpdatePlan {
         try await worker { cancellation in
             if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
             guard !sources.isEmpty, sources.count <= 512, sources.first == original,
                   sources.count == selection.urls.count, sources.count == selection.identities.count,
-                  original.pathExtension.lowercased() == "zip",
+                  original.pathExtension.lowercased() == (authoredFormat == .zip ? "zip" : "tar"),
                   Set(sources).count == sources.count else { throw FileOperationFailure.invalidRequest }
+            if authoredFormat == .strictPortableTAR {
+                guard self.authoredTAROriginalUpdatePolicy == .developmentNativeStage else {
+                    throw FileOperationFailure.unsupported
+                }
+            }
             try validateName(original.lastPathComponent)
             let target = try DirectoryAnchor(original.deletingLastPathComponent())
             guard try NativeRenameVolume.qualified(in: target) != nil,
@@ -179,11 +201,17 @@ extension RecoverableFileOperations {
             let metadata = try ArchiveOriginalRootMetadata.observe(original)
             // Refuse tracked originals before offering Update in the UI. The
             // mutation path repeats this check against the current file state.
-            if self.authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage,
+            if self.nativeArchiveUpdateEnabled(for: authoredFormat),
                metadata.flags & UInt32(UF_TRACKED) != 0 {
                 throw FileOperationFailure.unsupported
             }
             let producer = try makeProducer({ try cancellation.check() })
+            if authoredFormat == .strictPortableTAR {
+                guard let native = producer as? any NativeAuthoredArchiveFileProducer,
+                      native.authoredArchiveFormat == authoredFormat,
+                      producer is any StrictPortableTARFileProducer,
+                      !(producer is any AuthoredZIPFileProducer) else { throw FileOperationFailure.unsupported }
+            }
             let preview = producer.preview
             guard preview.files >= 0, preview.folders >= 0, preview.files <= 10_000,
                   preview.folders < 20_000, preview.files + preview.folders < 20_000,
@@ -193,7 +221,7 @@ extension RecoverableFileOperations {
             let plan = ArchiveUpdatePlan(sources: observed.map(\.url), original: original,
                 identities: observed.map(\.snapshot), sourceParents: sourceParents,
                 parentIdentity: target.identity, rootMetadata: metadata, producer: producer,
-                engine: self.continuationSession)
+                engine: self.continuationSession, authoredFormat: authoredFormat)
             try self.validateArchiveOriginalUpdate(plan, cancellation: cancellation)
             return plan
         }
@@ -226,7 +254,7 @@ extension RecoverableFileOperations {
             try cancellation.check()
             let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks,
                                                cancellation: cancellation)
-            guard let record = try journal.inspectRecord(recordID), [5, 6, 13].contains(record.version),
+            guard let record = try journal.inspectRecord(recordID), [5, 6, 13, 18].contains(record.version),
                   let first = record.steps.first, let area = record.areas.first else { return nil }
             return [first.source, area.url.appendingPathComponent("displaced"),
                     area.url.appendingPathComponent("payload")]
@@ -236,6 +264,12 @@ extension RecoverableFileOperations {
     internal func validateArchiveOriginalUpdate(_ plan: ArchiveUpdatePlan,
                                                 cancellation: OperationCancellation) throws {
         try cancellation.check()
+        if plan.authoredFormat == .strictPortableTAR {
+            guard authoredTAROriginalUpdatePolicy == .developmentNativeStage,
+                  (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == .strictPortableTAR else {
+                throw FileOperationFailure.unsupported
+            }
+        }
         let target = try DirectoryAnchor(plan.parent, resolve: false)
         guard target.identity.sameObject(as: plan.parentIdentity),
               try NativeRenameVolume.qualified(in: target) != nil,
@@ -288,7 +322,7 @@ extension RecoverableFileOperations {
             // A tracked ZIP can transfer its logical document identity when a
             // replacement appears at the old path. Hold that native case until
             // a signed Update/Undo contract covers both inodes and their flags.
-            if authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage,
+            if nativeArchiveUpdateEnabled(for: plan.authoredFormat),
                plan.rootMetadata.flags & UInt32(UF_TRACKED) != 0 {
                 throw FileOperationFailure.unsupported
             }
@@ -307,11 +341,12 @@ extension RecoverableFileOperations {
             if case .exactSourceCloneQualification = authoredZIPMetadataPolicy,
                plan.producer is any AuthoredZIPFileProducer { strictClone = true }
             else { strictClone = false }
-            let nativeOriginalUpdate = authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage
-            guard !nativeOriginalUpdate || plan.producer is any AuthoredZIPFileProducer else {
+            let nativeOriginalUpdate = nativeArchiveUpdateEnabled(for: plan.authoredFormat)
+            guard !nativeOriginalUpdate || (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == plan.authoredFormat else {
                 throw FileOperationFailure.unsupported
             }
-            let protocolKind: OperationCatalogProtocol = nativeOriginalUpdate ? .archiveNativeUpdateV13
+            let protocolKind: OperationCatalogProtocol = plan.authoredFormat == .strictPortableTAR ? .tarNativeUpdateV18
+                : nativeOriginalUpdate ? .archiveNativeUpdateV13
                 : strictClone ? .archiveStrictCloneV6 : .archiveUpdateV5
             let record = try journal.beginArchiveUpdateEdit(protocolKind: protocolKind); active = record
             for source in plan.sources { try record.appendLocation(source) }
@@ -346,13 +381,13 @@ extension RecoverableFileOperations {
                     throw FileOperationFailure.copyMetadataMismatch
                 }
             }
-            let authoredZIP: (any AuthoredZIPFileProducer)?
+            let authoredZIP: (any NativeAuthoredArchiveFileProducer)?
             if authoredZIPMetadataPolicy == .nativeStageQualification || nativeOriginalUpdate {
-                authoredZIP = plan.producer as? any AuthoredZIPFileProducer
+                authoredZIP = plan.producer as? any NativeAuthoredArchiveFileProducer
             } else { authoredZIP = nil }
             // The native displacement proof applies to the old inode only.
             // Strict-clone production still uses the ordinary exact-mark path.
-            let displacedZIP: (any AuthoredZIPFileProducer)? = strictClone
+            let displacedZIP: (any NativeAuthoredArchiveFileProducer)? = strictClone
                 ? plan.producer as? any AuthoredZIPFileProducer : authoredZIP
             let stageIdentity = try exactClone?.identity ?? authoredZIP.map { _ in try EntrySnapshot(fd: fd) }
             let stageSecurity = try authoredZIP.map { _ in try AuthoredZIPSecurityWitness.observe(fd) }
@@ -397,7 +432,7 @@ extension RecoverableFileOperations {
             let receipt: ArchiveProducedNode
             let producedSecurity: AuthoredZIPSecurityWitness?
             if let authoredZIP, let stageSecurity {
-                let produced = try authoredZIP.produceAuthoredZIP(into: fd, stageSecurity: stageSecurity,
+                let produced = try authoredZIP.produceNativeArchive(into: fd, stageSecurity: stageSecurity,
                     allowSourceMarkInheritance: !nativeOriginalUpdate,
                     check: { try cancellation.check() },
                     progress: { bytes, items in cancellation.progress?.advance(bytes: Int64(bytes), items: items) })

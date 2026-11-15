@@ -19,6 +19,9 @@ internal struct TARRecord: Sendable {
     let ordinal: Int, path: String, kind: TARMemberKind
     let headerOffset: UInt64, dataOffset: UInt64, bytes: UInt64
     var modification: ArchiveMemberModification? = nil
+    /// A local PAX/GNU extension belongs to the following member. Writers keep
+    /// that raw record rather than reconstructing metadata from display facts.
+    var extensionOffset: UInt64? = nil
 }
 internal struct TARParsedDirectory: Sendable {
     let records: [TARRecord]
@@ -38,6 +41,7 @@ internal enum TARMetadataParser {
         guard length >= 1024, length % 512 == 0 else { throw TARArchiveFailure.malformed }
         guard length <= limits.sourceBytes else { throw TARArchiveFailure.limited }
         var cursor: UInt64 = 0, records = [TARRecord](), pending: Override?, physical = 0
+        var extensionOffset: UInt64?
         var metadataBytes = 0, names = 0, logical: UInt64 = 0, rootSeen = false
         var witness = SHA256()
         func metadata(_ offset: UInt64, _ count: Int) throws -> Data {
@@ -90,6 +94,7 @@ internal enum TARMetadataParser {
                     guard path.utf8.count <= limits.pathBytes else { throw TARArchiveFailure.limited }
                     pending = .init(path: path)
                 }
+                extensionOffset = cursor
                 cursor = try next(dataOffset, declared, length: length); continue
             }
             let kind: TARMemberKind
@@ -113,6 +118,7 @@ internal enum TARMetadataParser {
             let modification = if let override = pending?.modification { paxModification(override) }
                 else { headerModification(header) }
             pending = nil
+            let memberExtension = extensionOffset; extensionOffset = nil
             let safe = try path(name, directory: kind == .directory, limits: limits)
             cursor = try next(dataOffset, bytes, length: length)
             if safe.isEmpty {
@@ -127,7 +133,7 @@ internal enum TARMetadataParser {
                 logical += bytes
             }
             records.append(.init(ordinal: physical, path: safe, kind: kind, headerOffset: dataOffset - 512,
-                dataOffset: dataOffset, bytes: bytes, modification: modification))
+                dataOffset: dataOffset, bytes: bytes, modification: modification, extensionOffset: memberExtension))
         }
         throw TARArchiveFailure.malformed
     }

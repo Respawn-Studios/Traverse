@@ -169,7 +169,7 @@ final class OperationRecoveryWindowController: NSWindowController, NSWindowDeleg
         }
     }
     private static func needsAttention(_ record: OperationRecoveryRecord) -> Bool {
-        record.requiresManualTrashReview || record.canRecover || record.canRestoreOriginalZIP
+        record.requiresManualTrashReview || record.canRecover || record.canRestoreOriginalArchive
             || ["needsReview", "cleanupReview", "trashDeleteReview"].contains(record.state)
     }
     @objc private func changeFilter(_ sender: Any?) {
@@ -283,9 +283,9 @@ final class OperationRecoveryWindowController: NSWindowController, NSWindowDeleg
         logsButton.isEnabled = selected != nil && onShowLogs != nil
         let heldTrash = selected.map(Self.holdsOrdinaryTrash) == true
         undoButton.isEnabled = selected?.canUndo == true && !heldTrash
-        let canRestoreZIP = selected?.canRestoreOriginalZIP == true
+        let canRestoreZIP = selected?.canRestoreOriginalArchive == true
         recoverButton.isEnabled = (selected?.canRecover == true || canRestoreZIP) && !heldTrash
-        recoverButton.title = canRestoreZIP ? "Restore Original ZIP" : "Restore Original State"
+        recoverButton.title = canRestoreZIP ? "Restore Original " + (selected?.originalArchiveFormatName ?? "Archive") : "Restore Original State"
         let grouped = selected?.kind == .groupedCopy
         let selectionGroup = selected?.kind == .selectionGroup
         let textRevision = selected?.kind == .textRevision
@@ -350,9 +350,9 @@ final class OperationRecoveryWindowController: NSWindowController, NSWindowDeleg
     }
     private static func statusText(_ record: OperationRecoveryRecord) -> String {
         if record.requiresManualTrashReview { return "Trash result uncertain · inspect locations" }
-        if record.zipReplacementNotStarted { return "Stopped before ZIP replacement" }
+        if record.zipReplacementNotStarted { return "Stopped before archive replacement" }
         if holdsOrdinaryTrash(record) { return "Trash history · actions held for this beta" }
-        if record.canRestoreOriginalZIP { return "ZIP update interrupted" }
+        if record.canRestoreOriginalArchive { return record.originalArchiveFormatName + " update interrupted" }
         if record.canRecover { return "Review interrupted operation" }
         if record.canUndo {
             return record.state == "committed"
@@ -373,10 +373,10 @@ final class OperationRecoveryWindowController: NSWindowController, NSWindowDeleg
         }
         if holdsOrdinaryTrash(record) { return OrdinaryNativeTrashFeature.recoveryHoldMessage }
         if record.zipReplacementNotStarted {
-            return "Traverse stopped while preparing this ZIP, before replacing the original. Any preparation files are retained for review. Inspect the recorded locations before making further changes."
+            return "Traverse stopped while preparing this archive, before replacing the original. Any preparation files are retained for review. Inspect the recorded locations before making further changes."
         }
-        if record.canRestoreOriginalZIP {
-            return "The ZIP update stopped before the edited archive was put in place. Restore Original ZIP checks the retained original before returning it to its previous location. If the files changed, they stay in place for review."
+        if record.canRestoreOriginalArchive {
+            return "The archive update stopped before the edited archive was put in place. Restore Original Archive checks the retained original before returning it to its previous location. If the files changed, they stay in place for review."
         }
         if record.kind == .textRevision { return "Review the retained text versions before choosing what to keep or export." }
         if record.state == "trashDeleteReview" {
@@ -415,15 +415,15 @@ final class OperationRecoveryWindowController: NSWindowController, NSWindowDeleg
     }
     @objc private func loadMore(_ sender: Any?) { onLoadMore() }
     @objc private func recoverSelected(_ sender: Any?) {
-        guard let selected, selected.canRecover || selected.canRestoreOriginalZIP,
+        guard let selected, selected.canRecover || selected.canRestoreOriginalArchive,
               !Self.holdsOrdinaryTrash(selected) else { return }
         let alert = NSAlert()
-        let restoringZIP = selected.canRestoreOriginalZIP
-        alert.messageText = restoringZIP ? "Restore the original ZIP?" : "Restore the original state of this interrupted operation?"
+        let restoringZIP = selected.canRestoreOriginalArchive
+        alert.messageText = restoringZIP ? "Restore the original " + selected.originalArchiveFormatName + "?" : "Restore the original state of this interrupted operation?"
         alert.informativeText = restoringZIP
             ? "Traverse checks the retained original before returning it to its previous location. Any file already there will be kept. The edited preparation copy stays available for review."
             : "Only recorded changes that can still be verified will be reversed. Existing occupants will be kept. Uncertain locations will remain for review."
-        alert.addButton(withTitle: restoringZIP ? "Restore Original ZIP" : "Restore Original State")
+        alert.addButton(withTitle: restoringZIP ? "Restore Original " + selected.originalArchiveFormatName : "Restore Original State")
         alert.addButton(withTitle: "Cancel")
         guard let window else { return }
         alert.beginSheetModal(for: window) { [weak self] result in

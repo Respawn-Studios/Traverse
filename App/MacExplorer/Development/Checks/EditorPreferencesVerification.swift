@@ -89,6 +89,7 @@ import LocalStorage
             host.pinsController = BrowserPinsController(stateDirectory: nil)
             host.privateNames = ApplicationPrivateNames(directory: root.appendingPathComponent("state/names"), settings: settings)
             let nativeZIPUpdate = ProcessInfo.processInfo.arguments.contains("--native-original-update")
+            let tarEditor = ProcessInfo.processInfo.arguments.contains("--tar-editor")
             if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
                 host.recoverableFileOperations = RecoverableFileOperations(
                     journalDirectory: root.appendingPathComponent("state/history"),
@@ -99,8 +100,10 @@ import LocalStorage
                 host.recoverableFileOperations = RecoverableFileOperations(
                     journalDirectory: root.appendingPathComponent("state/history"),
                     protecting: [root.appendingPathComponent("state")], activity: ApplicationFileActivity.beginOperation,
-                    authoredZIPMetadataPolicy: nativeZIPUpdate ? .nativeCreate : .exactSource,
+                    authoredZIPMetadataPolicy: nativeZIPUpdate || tarEditor ? .nativeCreate : .exactSource,
+                    strictPortableTARCreationPolicy: tarEditor ? .nativeCreateQualification : .held,
                     authoredZIPOriginalUpdateNativePolicy: nativeZIPUpdate ? .qualifiedNativeStage : .held,
+                    authoredTAROriginalUpdatePolicy: tarEditor ? .developmentNativeStage : .held,
                     zipOneFilePublicExtractionPolicy: ArchiveExtractionActivation.qualifiedZIPFileAvailable
                         ? .sourceQualification : .held)
             }

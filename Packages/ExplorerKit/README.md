@@ -30,7 +30,10 @@ protocol. TAR has its own explicit format/policy admission; ZIP qualification
 does not authorize it. Reading and explicit extraction remain in the ZIP/TAR
 reader and extraction files, with separate received-data protection policies.
 Current Preview/private-beta authoring uses the separately qualified native
-contracts; TAR rewriting and compressed-TAR creation remain distinct backlog.
+contracts. Plain-TAR text rewriting now has Development-only source support:
+`TARTextEditDocument`, `TARTextReplacement` and `TARMemberHeader` retain source
+metadata and use a separately admitted v18 original-update record. Compressed-TAR
+rewriting and creation remain separate work.
 The [roadmap](../../docs/ROADMAP.md) distinguishes shipped behavior, qualified
 work and future plans. Edition admission remains in application composition.
 

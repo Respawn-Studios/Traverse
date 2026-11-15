@@ -221,6 +221,8 @@ import LocalStorage
         guard let engine = browser.recoverableFileOperations, sources.count == 2,
               sources.allSatisfy({ $0.path.hasPrefix(root.appendingPathComponent("source").path + "/") }),
               let parent = sources.first?.deletingLastPathComponent() else { throw Failure(stage: "archive-editor-generated-scope") }
+        let tar = ProcessInfo.processInfo.arguments.contains("--tar-editor")
+        let format = tar ? "TAR" : "ZIP", suffix = tar ? "tar" : "zip"
         let settings = browser.settings, previous = browser.settings.editorPreferences
         let previousMotion = settings.motion
         defer { settings.updateEditorPreferences(previous); settings.motion = previousMotion }
@@ -231,10 +233,12 @@ import LocalStorage
             let coordinator = ApplicationOperationCoordinator.shared
             try await coordinator.prepareOperationState(for: engine)
             let observed = try await engine.observeSelection(sources)
-            let plan = try await engine.prepareZIPCreation(sources: sources, parent: parent, name: "Editor Archive.zip", observing: observed)
+            let plan: ArchiveCreationPlan
+            if tar { plan = try await engine.prepareTARCreation(sources: sources, parent: parent, name: "Editor Archive.tar", observing: observed) }
+            else { plan = try await engine.prepareZIPCreation(sources: sources, parent: parent, name: "Editor Archive.zip", observing: observed) }
             let created = await engine.performArchiveCreation(plan)
             try need(created.result.disposition == .succeeded, "archive-editor-generated-zip-create")
-            let source = parent.appendingPathComponent("Editor Archive.zip")
+            let source = parent.appendingPathComponent("Editor Archive." + suffix)
             let originalBytes = try await Task.detached { try Data(contentsOf: source) }.value
             var native = previous; try native.setTarget(.traverse, forExtension: "json")
             settings.updateEditorPreferences(native)
@@ -243,20 +247,29 @@ import LocalStorage
             browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.focusBrowserContent()
             browser.openSelection(nil)
             try await wait("archive-editor-inline-page") { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }
-            guard let archive = browser.currentArchive, let model = archive.zipModelForVerification,
-                  let item = model.visibleItems.first(where: { $0.name == sources[0].lastPathComponent }) else {
-                throw Failure(stage: "archive-editor-real-row-missing")
+            let itemPath: String
+            if tar {
+                guard let model = browser.currentArchive?.tarModelForVerification,
+                      let item = model.items.first(where: { $0.name == sources[0].lastPathComponent }) else {
+                    throw Failure(stage: "archive-editor-real-tar-row-missing")
+                }
+                model.selection = [item.id]; itemPath = item.path
+                try need(model.canEditSelectedText, "archive-editor-tar-row-command-not-admitted")
+                model.openSelection()
+            } else {
+                guard let model = browser.currentArchive?.zipModelForVerification,
+                      let item = model.visibleItems.first(where: { $0.name == sources[0].lastPathComponent }) else {
+                    throw Failure(stage: "archive-editor-real-zip-row-missing")
+                }
+                model.selection = [item.id]; itemPath = item.path
+                try need(model.canEditSelectedText, "archive-editor-zip-row-command-not-admitted")
+                model.openSelection([item.id])
             }
-            model.selection = [item.id]
-            try need(model.canEditSelectedText, "archive-editor-row-command-not-admitted")
-            // Ordinary row Open follows the same filename preference as local
-            // and SFTP Open. Explicit Edit remains separately available.
-            model.openSelection([item.id])
             let editors = ApplicationLocalTextEditors.shared
-            try await wait("archive-editor-open-owner") { editors.archiveDocumentForVerification(source: source, path: item.path) != nil }
-            guard let doc = editors.archiveDocumentForVerification(source: source, path: item.path) else { throw Failure(stage: "archive-editor-native-window-missing") }
+            try await wait("archive-editor-open-owner") { editors.archiveDocumentForVerification(source: source, path: itemPath) != nil }
+            guard let doc = editors.archiveDocumentForVerification(source: source, path: itemPath) else { throw Failure(stage: "archive-editor-native-window-missing") }
             document = doc
-            let first = "{\"generated\":\"first ZIP edit\"}\n", second = "{\"generated\":\"second ZIP edit\"}\n"
+            let first = "{\"generated\":\"first archive edit\"}\n", second = "{\"generated\":\"second archive edit\"}\n"
             edit(first, in: doc); doc.window.saveButton.performClick(nil)
             try await wait("archive-editor-first-save") { !doc.isBusy && !doc.isDirty && doc.latestRecordID != nil }
             try need(doc.opened.contents.text == first && !doc.needsReview, "archive-editor-first-save-not-rebound")
@@ -270,7 +283,8 @@ import LocalStorage
             let cold = RecoverableFileOperations(journalDirectory: root.appendingPathComponent("state/history"),
                 protecting: [root.appendingPathComponent("state")],
                 authoredZIPMetadataPolicy: nativeZIPUpdate ? .nativeCreate : .exactSource,
-                authoredZIPOriginalUpdateNativePolicy: nativeZIPUpdate ? .qualifiedNativeStage : .held)
+                authoredZIPOriginalUpdateNativePolicy: nativeZIPUpdate ? .qualifiedNativeStage : .held,
+                authoredTAROriginalUpdatePolicy: tar ? .developmentNativeStage : .held)
             let restored = await cold.undo(recordID: secondRecord)
             let afterUndo = try await Task.detached { try Data(contentsOf: source) }.value
             try need(restored.result.disposition == .succeeded && afterUndo == firstBytes, "archive-editor-cold-undo-not-exact")
@@ -284,13 +298,13 @@ import LocalStorage
             try await wait("archive-editor-reload") { !doc.isBusy && !doc.isDirty && doc.window.surface.textView.string == first }
             doc.show(); doc.window.saveAsButton.performClick(nil)
             try await confirm("Save Copy", in: doc.window.window)
-            let copy = parent.appendingPathComponent("Editor Archive-edited.zip")
+            let copy = parent.appendingPathComponent("Editor Archive-edited." + suffix)
             try await wait("archive-editor-copy-follow") { !doc.isBusy && !doc.isDirty && doc.opened.archiveURL == copy }
             guard let copyRecord = doc.latestRecordID else { throw Failure(stage: "archive-editor-copy-record-missing") }
             let afterCopy = try await Task.detached { try Data(contentsOf: source) }.value
             try need(afterCopy == firstBytes && doc.opened.contents.text == first, "archive-editor-copy-changed-original")
             if CGPreflightScreenCaptureAccess(), !ProcessInfo.processInfo.arguments.contains("--offscreen"), let window = doc.window.window {
-                try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/editor-zip.png"))
+                try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/editor-" + suffix + ".png"))
             }
             // Concurrent Close/Quit must join one native close, not reopen a
             // removed document after its preparation worker drains.
@@ -309,10 +323,12 @@ import LocalStorage
             try await wait("archive-editor-return-local-listing") {
                 browser.location.directoryURL == parent && !browser.isLoading && browser.rowsByURL[sources[0]] != nil
             }
-            var checks = ["Ordinary ZIP row Open uses the common native editor, Save twice rebinds the exact member, and cold archive Undo restores its prior bytes",
-                "Changed ZIP Save refuses without touching the ZIP or draft; explicit Reload, ZIP Copy-follow, copy Undo and actual user performClose/joined Quit complete through existing owners with Full closing motion enabled",
+            var checks = ["Ordinary \(format) row Open uses the common native editor, Save twice rebinds the exact member, and cold archive Undo restores its prior bytes",
+                "Changed \(format) Save refuses without touching the archive or draft; explicit Reload, archive Copy-follow, copy Undo and actual user performClose/joined Quit complete through existing owners with Full closing motion enabled",
                 "A drained feature's accepted close acknowledges native willClose exactly once inside performClose without a deferred fade or implicit AppKit animation"]
-            if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
+            if tar {
+                checks.append("Plain TAR shares native editor preferences, Save/Reload, metadata-preserving copy, and independent v18 original-update/cold Undo admission")
+            } else if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
                 checks += try await interruptedRestore(source: source, browser: browser, engine: engine, root: root)
             } else {
                 checks.append(try await createFile(source: source, browser: browser, cold: cold, root: root))

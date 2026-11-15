@@ -50,6 +50,12 @@ public enum AuthoredZIPOriginalUpdateNativePolicy: Sendable, Equatable {
     case qualifiedNativeStage
 }
 
+/// TAR original replacement is a separate development qualification. Enabling
+/// ZIP updates never admits this format or its inverse history records.
+public enum AuthoredTAROriginalUpdatePolicy: Sendable, Equatable {
+    case held, developmentNativeStage
+}
+
 /// Transient raw security data from one owned authored-archive payload. It is never stored
 /// in the operation journal or sent to diagnostics.
 @_spi(ArchiveProduction) public struct AuthoredZIPSecurityWitness: Equatable, Sendable {
@@ -97,12 +103,30 @@ public enum AuthoredZIPOriginalUpdateNativePolicy: Sendable, Equatable {
 
 /// Only the concrete local ZIP edit producer implements this path. Generic
 /// producers, received files and extraction retain their existing policy.
-@_spi(ArchiveProduction) public protocol AuthoredZIPFileProducer: ArchiveFileProducer {
+@_spi(ArchiveProduction) public protocol NativeAuthoredArchiveFileProducer: ArchiveFileProducer {
+    var authoredArchiveFormat: AuthoredArchiveFormat { get }
+    func produceNativeArchive(into descriptor: Int32, stageSecurity: AuthoredZIPSecurityWitness,
+        allowSourceMarkInheritance: Bool, check: @Sendable () throws -> Void,
+        progress: @Sendable (UInt64, Int) -> Void) throws -> AuthoredZIPProducedFile
+    func requirePublicQuarantineRecognition(_ descriptor: Int32, at url: URL) throws
+}
+
+@_spi(ArchiveProduction) public protocol AuthoredZIPFileProducer: NativeAuthoredArchiveFileProducer {
     func produceAuthoredZIP(into descriptor: Int32, stageSecurity: AuthoredZIPSecurityWitness,
         allowSourceMarkInheritance: Bool,
         check: @Sendable () throws -> Void,
         progress: @Sendable (UInt64, Int) -> Void) throws -> AuthoredZIPProducedFile
     func requirePublicQuarantineRecognition(_ descriptor: Int32, at url: URL) throws
+}
+
+@_spi(ArchiveProduction) public extension AuthoredZIPFileProducer {
+    var authoredArchiveFormat: AuthoredArchiveFormat { .zip }
+    func produceNativeArchive(into descriptor: Int32, stageSecurity: AuthoredZIPSecurityWitness,
+        allowSourceMarkInheritance: Bool, check: @Sendable () throws -> Void,
+        progress: @Sendable (UInt64, Int) -> Void) throws -> AuthoredZIPProducedFile {
+        try produceAuthoredZIP(into: descriptor, stageSecurity: stageSecurity,
+            allowSourceMarkInheritance: allowSourceMarkInheritance, check: check, progress: progress)
+    }
 }
 
 @_spi(ArchiveProduction) public protocol ArchiveFileProducer: Sendable {
@@ -256,7 +280,7 @@ extension RecoverableFileOperations {
     /// Foundation's quarantine view is path based. Bracket that observation
     /// with the pinned descriptor, exact raw mark and parent-relative identity.
     internal func requireAuthoredZIPPublicQuarantine(_ security: AuthoredZIPSecurityWitness,
-        producer: any AuthoredZIPFileProducer, descriptor: Int32,
+        producer: any NativeAuthoredArchiveFileProducer, descriptor: Int32,
         parent: DirectoryAnchor, name: String, identity: EntrySnapshot) throws {
         try parent.validate()
         let before = try EntrySnapshot(parent: parent.fd, name: name)

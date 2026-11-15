@@ -370,7 +370,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         for (title, action) in [("Preview Text", #selector(previewText(_:))), ("Preview as Hex", #selector(previewHex(_:)))] {
             let item=NSMenuItem(title:title,action:action,keyEquivalent:"");item.target=self;actions.menu?.addItem(item)
         }
-        if format == .zip, ZIPTextEditorFeature.available {
+        if format == .zip && ZIPTextEditorFeature.available || format == .tar && TARTextEditorFeature.available {
             let item = NSMenuItem(title: "Edit in Traverse", action: #selector(editText(_:)), keyEquivalent: "")
             item.target = self; actions.menu?.addItem(item)
         }
@@ -648,7 +648,8 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
             rows.isHidden = showsPreparation
             if newlyShowingPreparation, let preparationView { ToolContentMotion.reveal(preparationView) }
             if newlyShowingRows { ToolContentMotion.reveal(rows.fileScrollView.contentView) }
-            caption.stringValue = m.compressedSizeDescription ?? (m.isCompressedSource ? "TAR · gzip · Read-only" : "TAR · Read-only")
+            caption.stringValue = m.compressedSizeDescription ?? (m.isCompressedSource ? "TAR · gzip · Read-only"
+                : m.allowsTextEditing ? "TAR · Text editing" : "TAR · Read-only")
             caption.toolTip = m.compressedSizeDescription.map { $0 + "\nArchive is the original gzip size. Prepared TAR includes headers and padding. Files is the sum of recorded member sizes." }
                 ?? ArchiveBrowsingGuidance.contentHelp
             rows.update(m, settings: browser.settings, glassOverride: glass, showsOnlyCurrent: true)
@@ -738,7 +739,8 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     @objc private func extractAll(_ sender: Any?) { switch model { case .zip(let m, _): m.extract(); case .tar(let m, _): m.extract(selected: false); case nil: break } }
     @objc private func previewText(_ sender:Any?) {switch model{case .zip(let m,_):m.previewSelected();case .tar(let m,_):m.previewSelected();case nil:break}}
     @objc private func editText(_ sender: Any?) {
-        guard isPresented, case .zip(let model, _) = model else { return }; model.editSelectedText()
+        guard isPresented else { return }
+        switch model { case .zip(let m, _): m.editSelectedText(); case .tar(let m, _): m.editSelectedText(); case nil: break }
     }
     @objc private func previewHex(_ sender:Any?) {switch model{case .zip(let m,_):m.previewSelectedAsBytes();case .tar(let m,_):m.previewSelectedAsBytes();case nil:break}}
     @objc private func refreshArchive(_ sender: Any?) { refresh() }
@@ -780,7 +782,8 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         case #selector(removeFromCopy(_:)): canRemoveFromCopy
         case #selector(addToCopy(_:)): if case .zip(let model, _) = model { model.canAddMembersInCopy } else { false }
         case #selector(previewText(_:)), #selector(previewHex(_:)): canPreview
-        case #selector(editText(_:)): if case .zip(let model, _) = model { model.canEditSelectedText } else { false }
+        case #selector(editText(_:)):
+            switch model { case .zip(let m, _): m.canEditSelectedText; case .tar(let m, _): m.canEditSelectedText; case nil: false }
         case #selector(refreshArchive(_:)): true
         case #selector(testZIPContents(_:)):
             if case .zip(let model, _) = model { isPresented && model.canCheckContents } else { false }

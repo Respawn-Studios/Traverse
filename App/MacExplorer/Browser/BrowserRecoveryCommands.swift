@@ -290,7 +290,7 @@ extension BrowserViewController {
         guard !isBrowserSuspended, !isReadOnlyFileSession, canRunExclusiveFileCommand,
               let host = view.window, host.attachedSheet == nil,
               let engine = recoverableFileOperations,
-              rollback ? (record.canRecover || record.canRestoreOriginalZIP) : record.canUndo else { return }
+              rollback ? (record.canRecover || record.canRestoreOriginalArchive) : record.canUndo else { return }
         if !isControlledVerification { host.makeKeyAndOrderFront(nil) }
         let tab = activeID, visit = sessionID
         let coordinator = operationCoordinator, preparation = UUID()
@@ -385,7 +385,7 @@ extension BrowserViewController {
                                                lifetime: FileAccessLifetimes, tab: UUID, visit: UUID,
                                                qaTrash: Bool, presentsResult: Bool,
                                                onComplete: ((RecoverableOperationResult) -> Void)?) -> Bool {
-        let title = rollback ? (record.canRestoreOriginalZIP ? "Restoring original ZIP…" : "Restoring original state…")
+        let title = rollback ? (record.canRestoreOriginalArchive ? "Restoring original " + record.originalArchiveFormatName + "…" : "Restoring original state…")
             : "Undoing file operation…"
         guard startOperationPresentation(title, preparation: preparation) else { return false }
         // Transfer the existing preparation to the operation without yielding.
@@ -428,8 +428,8 @@ extension BrowserViewController {
             }
             let names = rollback ? nil : await self.privateNames.prepareMoveUndoNames(operationID: record.id, engine: engine)
             let outcome: RecoverableOperationResult
-            if rollback, record.canRestoreOriginalZIP {
-                outcome = await engine.restoreInterruptedOriginalZIP(recordID: record.id, progress: self.operationProgressSink)
+            if rollback, record.canRestoreOriginalArchive {
+                outcome = await engine.restoreInterruptedOriginalArchive(recordID: record.id, progress: self.operationProgressSink)
             } else if rollback {
                 outcome = await engine.recover(recordID: record.id, progress: self.operationProgressSink)
             } else {
