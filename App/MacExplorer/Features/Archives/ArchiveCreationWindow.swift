@@ -387,8 +387,10 @@ enum ZIPMemberRenameFeature {
                             change = .batchRename(selected, to: try chosenBatch.rule.names(for: chosenBatchNames))
                         } else { change = mutation.reviewed(name: chosenMemberName, addedSources: Array(sources.dropFirst())) }
                         let encoding: TARCompression? = change.isCompressed && !keepCurrentTARCompression ? chosenTARCompression : nil
-                        if originalUpdate { return .update(try await engine.prepareTARMemberMutationOriginal(change, compression: encoding, observing: captured)) }
-                        return .create(try await engine.prepareTARMemberMutationCopy(change, outputName: chosenName, compression: encoding, observing: captured))
+                        if originalUpdate { return .update(try await engine.prepareTARMemberMutationOriginal(change, compression: encoding,
+                            additionCollisions: chosenCollisions, observing: captured)) }
+                        return .create(try await engine.prepareTARMemberMutationCopy(change, outputName: chosenName, compression: encoding,
+                            additionCollisions: chosenCollisions, observing: captured))
                     case .batchRename(let selected):
                         let names = try chosenBatch.rule.names(for: chosenBatchNames)
                         if originalUpdate {
@@ -781,12 +783,10 @@ private struct ArchiveCreationView: View {
                         .disabled(!model.canReview).accessibilityIdentifier("zip-copy-choose-items")
                 }
                 if !model.addedSources.isEmpty {
-                    if model.outputFormat == .zip {
-                        Picker("Existing names", selection: $model.additionCollisions) {
-                            Text("Keep Both").tag(ZIPMemberAdditionCollisionPolicy.keepBoth)
-                            Text("Replace Files").tag(ZIPMemberAdditionCollisionPolicy.replaceFiles)
-                        }.pickerStyle(.segmented).disabled(!model.canReview)
-                    }
+                    Picker("Existing names", selection: $model.additionCollisions) {
+                        Text("Keep Both").tag(ZIPMemberAdditionCollisionPolicy.keepBoth)
+                        Text("Replace Files").tag(ZIPMemberAdditionCollisionPolicy.replaceFiles)
+                    }.pickerStyle(.segmented).disabled(!model.canReview)
                     ArchiveCopyMemberList(paths: model.addedNames,
                         folderPaths: model.addedFolderNames,
                         coveredSelectionCount: 0, title: model.additionReviewTitle,

@@ -31,13 +31,14 @@ internal struct TARMutationLayout: Sendable {
     let endOffset: UInt64
     var additions: ZIPCreationInventory?
     var replacement: TARTextEditDocument?
+    private var replacedAdditions = Set<Data>()
     private(set) var preview: ArchiveProductionPreview
     private let binding: TARSourceBinding
     private let preservedPhysicalRecords: Int
     var entries: [Entry] { originals.compactMap { $0 } + appended }
 
     init(_ mutation: TARMemberMutation, source: TARMutationSource, parsed: TARParsedDirectory,
-        check: () throws -> Void) throws {
+        additionCollisions: ZIPMemberAdditionCollisionPolicy = .keepBoth, check: () throws -> Void) throws {
         originalRecords = parsed.records; endOffset = parsed.endOffset
         binding = mutation.binding
         preservedPhysicalRecords = parsed.physicalRecords - parsed.records.reduce(0) { $0 + ($1.extensionOffset == nil ? 1 : 2) }
@@ -120,8 +121,30 @@ internal struct TARMutationLayout: Sendable {
             try validate(destination, namespace: namespace)
             guard !sources.isEmpty, sources.count <= 511 else { throw TARArchiveFailure.invalidSelection }
             let inventory = try ZIPCreationInventory(sources, prefix: destination.virtualFolder,
-                allowNativeMarkedSources: true, reserving: Self.children(in: destination.virtualFolder, namespace: namespace), check: check)
+                allowNativeMarkedSources: true,
+                reserving: additionCollisions == .keepBoth ? Self.children(in: destination.virtualFolder, namespace: namespace) : nil,
+                check: check)
             additions = inventory
+            if additionCollisions != .keepBoth {
+                var existing: [String: String] = [:], ambiguous = Set<String>()
+                for path in namespace.keys {
+                    try check(); let key = ZIPNameReservations.key(path)
+                    if existing.updateValue(path, forKey: key) != nil { ambiguous.insert(key) }
+                }
+                for root in inventory.roots {
+                    try check()
+                    let key = ZIPNameReservations.key(root.archivePath)
+                    guard let collision = existing[key] else { continue }
+                    // Replace authorizes only an exact regular-file root. A
+                    // directory, implicit tree or case variant never merges.
+                    guard additionCollisions == .replaceFiles, !root.isDirectory, !ambiguous.contains(key),
+                          collision.utf8.elementsEqual(root.archivePath.utf8), namespace[collision] == .file,
+                          let index = originalRecords.firstIndex(where: { $0.path.utf8.elementsEqual(collision.utf8) }) else {
+                        throw TARMemberEditFailure.conflict
+                    }
+                    originals[index] = nil; replacedAdditions.insert(Data(collision.utf8))
+                }
+            }
             for (index, node) in inventory.nodes.enumerated() {
                 try check()
                 let header = try TARCreationHeader(node, index: index)
@@ -229,8 +252,12 @@ internal struct TARMutationLayout: Sendable {
         } catch TARArchiveFailure.ambiguousNames { throw TARMemberEditFailure.conflict }
           catch TARArchiveFailure.limited { throw TARMemberEditFailure.limitReached }
         guard catalog.summary.files <= 10_000 else { throw TARMemberEditFailure.limitReached }
+        let addedItems = additions?.roots.map {
+            ArchiveAddedItemPreview(originalName: $0.originalName, archivePath: $0.archivePath,
+                isDirectory: $0.isDirectory, replacesExistingFile: replacedAdditions.contains(Data($0.archivePath.utf8)))
+        } ?? []
         preview = .init(files: catalog.summary.files, folders: catalog.summary.folders, logicalBytes: logical,
-            longestPathBytes: records.map { $0.path.utf8.count }.max() ?? 0, addedItems: additions?.roots ?? [])
+            longestPathBytes: records.map { $0.path.utf8.count }.max() ?? 0, addedItems: addedItems)
     }
     private static func namespace(_ records: [TARRecord], check: () throws -> Void) throws -> [String: TARMemberKind] {
         var result: [String: TARMemberKind] = [:], bytes = 0

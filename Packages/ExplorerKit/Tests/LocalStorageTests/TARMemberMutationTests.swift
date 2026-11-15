@@ -1,4 +1,5 @@
 import Foundation
+import CoreServices
 import Darwin
 @_spi(ArchiveProduction) @testable import FileOperations
 @testable import LocalStorage
@@ -220,6 +221,131 @@ struct TARMemberMutationTests {
             try PreparedTARMemberMutation(.batchRename(selected, to: selected.archivePaths), check: {})
         }
         #expect(try Data(contentsOf: f.source) == f.bytes)
+        await session.close()
+    }
+
+    @Test(arguments: [TARCompression.none, .gzipBalanced, .bzip2Balanced], [false, true])
+    func explicitRegularFileReplacementRetainsLocalInputsAndColdUndo(compression: TARCompression, original: Bool) async throws {
+        let f = try TARTestFixture(pax: true)
+        let source = try compression == .none ? f.source : compression == .gzipBalanced ? f.gzipSource() : f.bzip2Source()
+        let before = try Data(contentsOf: source), history = f.root.appendingPathComponent("history"), cache = f.root.appendingPathComponent("cache")
+        let replacement = f.root.appendingPathComponent("data.json"), newFile = f.root.appendingPathComponent("New.bin")
+        let content = Data([0, 255, 1, 0, 254]), addedContent = Data([12, 34, 56])
+        try content.write(to: replacement, options: .withoutOverwriting)
+        try addedContent.write(to: newFile, options: .withoutOverwriting)
+        try FileManager().setAttributes([.posixPermissions: 0o600], ofItemAtPath: replacement.path)
+        try FileManager().createDirectory(at: cache, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let pool = TARCompressedPreparationPool(cacheDirectory: cache, activity: .init()), reader = TARArchiveReader(compressedPool: pool)
+        let session = try await (compression == .none ? reader.open(source) : reader.prepareCompressed(source))
+        func flow() async throws {
+            let root = try await session.destinationForMemberChanges(session.root)
+            let intent = TARMemberMutation.add(root, sources: [replacement, newFile])
+            #expect(throws: TARMemberEditFailure.conflict) {
+                try PreparedTARMemberMutation(intent, additionCollisions: .refuse, check: {})
+            }
+            let engine = RecoverableFileOperations(journalDirectory: history,
+                strictPortableTARCreationPolicy: .nativeCreateQualification,
+                tarGzipCreationPolicy: .developmentNativeCreate, tarBzip2CreationPolicy: .developmentNativeCreate,
+                authoredTAROriginalUpdatePolicy: .developmentNativeStage, authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage,
+                authoredTARBzip2OriginalUpdatePolicy: .developmentNativeStage)
+            let selected = try await engine.observeSelection([source, replacement, newFile])
+            let result: RecoverableOperationResult, output: URL
+            if original {
+                let plan = try await engine.prepareTARMemberMutationOriginal(intent, additionCollisions: .replaceFiles, observing: selected)
+                #expect(plan.addedItems.filter(\.replacesExistingFile).map(\.archivePath) == ["data.json"])
+                result = await engine.performArchiveOriginalUpdate(plan); output = source
+            } else {
+                let plan = try await engine.prepareTARMemberMutationCopy(intent, outputName: "Replaced." + compression.fileExtension,
+                    additionCollisions: .replaceFiles, observing: selected)
+                #expect(plan.addedItems.filter(\.replacesExistingFile).map(\.archivePath) == ["data.json"])
+                result = await engine.performArchiveCreation(plan); output = plan.destination
+                #expect(try Data(contentsOf: source) == before)
+            }
+            #expect(result.result.disposition == .succeeded)
+            let decoded = try compression == .none ? Data(contentsOf: output)
+                : compression == .gzipBalanced ? TARTestFixture.decodedGzip(output) : TARTestFixture.decodedBzip2(output)
+            var expected = try snapshot(f.bytes); expected["data.json"] = .file(content); expected["New.bin"] = .file(addedContent)
+            #expect(try snapshot(decoded) == expected)
+            let parsed = try TARMetadataParser.parse(length: UInt64(decoded.count), check: {}, read: {
+                decoded.subdata(in: Int($0)..<(Int($0) + $1))
+            })
+            let record = try #require(parsed.records.first { $0.path == "data.json" })
+            #expect(decoded.subdata(in: Int(record.headerOffset + 100)..<Int(record.headerOffset + 108)) == Data("0000600\0".utf8))
+            let cold = RecoverableFileOperations(journalDirectory: history, authoredTAROriginalUpdatePolicy: .developmentNativeStage,
+                authoredTARGzipOriginalUpdatePolicy: .developmentNativeStage, authoredTARBzip2OriginalUpdatePolicy: .developmentNativeStage)
+            #expect(await cold.undo(recordID: try #require(result.recordID)).result.disposition == .succeeded)
+            #expect(try Data(contentsOf: source) == before)
+            if !original { #expect(!FileManager().fileExists(atPath: output.path)) }
+            #expect(try Data(contentsOf: replacement) == content && Data(contentsOf: newFile) == addedContent)
+        }
+        do { try await flow() }
+        catch { await session.close(); _ = await pool.closeAndDrain(); throw error }
+        await session.close(); #expect(await pool.closeAndDrain())
+    }
+
+    @Test func replacementRejectsFoldersCaseVariantsAndChangedLocalSource() async throws {
+        let f = try TARTestFixture(folderTree: true), session = try await TARArchiveReader().open(f.source)
+        let root = try await session.destinationForMemberChanges(session.root)
+        let a = f.root.appendingPathComponent("Folder"), b = f.root.appendingPathComponent("empty")
+        let variantRoot = f.root.appendingPathComponent("Case Variant")
+        try FileManager().createDirectory(at: variantRoot, withIntermediateDirectories: false)
+        let c = variantRoot.appendingPathComponent("DATA.json")
+        try FileManager().createDirectory(at: a, withIntermediateDirectories: false)
+        try Data([1]).write(to: a.appendingPathComponent("Child.bin"), options: .withoutOverwriting)
+        try Data([2]).write(to: b, options: .withoutOverwriting)
+        try Data([3]).write(to: c, options: .withoutOverwriting)
+        for local in [a, b, c] {
+            #expect(throws: TARMemberEditFailure.conflict) {
+                try PreparedTARMemberMutation(.add(root, sources: [local]), additionCollisions: .replaceFiles, check: {})
+            }
+        }
+        let incoming = f.root.appendingPathComponent("data.json")
+        try Data([4]).write(to: incoming, options: .withoutOverwriting)
+        let producer = try PreparedTARMemberMutation(.add(root, sources: [incoming]), additionCollisions: .replaceFiles, check: {})
+        try Data([5, 6]).write(to: incoming)
+        let (_, fd) = try f.output(); defer { close(fd) }
+        #expect(throws: (any Error).self) { try producer.produce(into: fd, check: {}, progress: { _, _ in }) }
+        #expect(try Data(contentsOf: f.source) == f.bytes)
+        await session.close()
+    }
+
+    @Test(arguments: [false, true])
+    func markedReplacementNeedsItsOwnNativeUpdateStageAdmission(admitted: Bool) async throws {
+        let f = try TARTestFixture(), local = f.root.appendingPathComponent("data.json")
+        #expect(try URL(fileURLWithPath: f.source.path).resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties == nil)
+        try Data([0, 255, 12]).write(to: local, options: .withoutOverwriting)
+        var values = URLResourceValues()
+        values.quarantineProperties = [kLSQuarantineAgentNameKey as String: "Generated replacement",
+            kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+            kLSQuarantineTimeStampKey as String: Date()]
+        var target = local; try target.setResourceValues(values)
+        let session = try await TARArchiveReader().open(f.source)
+        let root = try await session.destinationForMemberChanges(session.root)
+        var hooks = RecoveryHooks()
+        hooks.archiveProduction.stage = { stage, payload in
+            if stage == .payloadCreated {
+                let removed = payload.path.withCString { removexattr($0, "com.apple.quarantine", 0) }
+                guard removed == 0 || errno == ENOATTR else { throw FileOperationFailure.ioFailure }
+            }
+        }
+        let engine = RecoverableFileOperations(journalDirectory: f.root.appendingPathComponent("history"), hooks: hooks,
+            nativeAuthoredUpdatePublicMarkPolicy: admitted ? .sourceQualification : .held,
+            authoredTAROriginalUpdatePolicy: .developmentNativeStage)
+        let plan = try await engine.prepareTARMemberMutationOriginal(.add(root, sources: [local]), additionCollisions: .replaceFiles,
+            observing: engine.observeSelection([f.source, local]))
+        let result = await engine.performArchiveOriginalUpdate(plan)
+        if admitted {
+            #expect(result.result.disposition == .succeeded)
+            #expect(try URL(fileURLWithPath: f.source.path).resourceValues(forKeys: [.quarantinePropertiesKey])
+                .quarantineProperties?[kLSQuarantineAgentNameKey as String] as? String == "Traverse")
+            let cold = RecoverableFileOperations(journalDirectory: f.root.appendingPathComponent("history"),
+                authoredTAROriginalUpdatePolicy: .developmentNativeStage)
+            #expect(await cold.undo(recordID: try #require(result.recordID)).result.disposition == .succeeded)
+        } else { #expect(result.result.disposition != .succeeded) }
+        #expect(try Data(contentsOf: f.source) == f.bytes)
+        #expect(try Data(contentsOf: local) == Data([0, 255, 12]))
+        #expect(try URL(fileURLWithPath: local.path).resourceValues(forKeys: [.quarantinePropertiesKey])
+            .quarantineProperties?[kLSQuarantineAgentNameKey as String] as? String == "Generated replacement")
         await session.close()
     }
 

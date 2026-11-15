@@ -140,6 +140,53 @@ import LocalStorage
             try Probe.need(try await paths() == expected, "tar-members-exact-paths")
             try await undo(id, expected: before)
         }
+        let replacementParent = root.appendingPathComponent("source/Replacement Inputs")
+        let replacement = replacementParent.appendingPathComponent("Generated.json")
+        let replacementText = "{\"replacement\":true}\n"
+        try await Task.detached {
+            try FileManager().createDirectory(at: replacementParent, withIntermediateDirectories: false)
+            try Data(replacementText.utf8).write(to: replacement, options: .withoutOverwriting)
+        }.value
+        for cancel in [true, false] {
+            let (_, model, _) = try await openRoot()
+            model.reviewMutation(.add, addedSource: .init(urls: [replacement]))
+            let shown = try await review()
+            try await Probe.wait("tar-members-default-keep-both") { shown.model.canCreate && shown.model.preparedAdditions.count == 1 }
+            try Probe.need(shown.model.additionCollisions == .keepBoth && shown.model.replacedFileCount == 0,
+                "tar-members-replacement-default-remains-keep-both")
+            shown.model.additionCollisions = .replaceFiles
+            try await Probe.wait("tar-members-explicit-replacement-plan") {
+                shown.model.canCreate && shown.model.replacedFileCount == 1 && shown.model.summary?.files == 2
+            }
+            if cancel {
+                await ApplicationArchiveCreation.shared.closeAndDrain()
+                let cancelled = try await Task.detached { try Data(contentsOf: source) }.value
+                try Probe.need(cancelled == before, "tar-members-replacement-cancel")
+            } else {
+                if !ProcessInfo.processInfo.arguments.contains("--offscreen"), CGPreflightScreenCaptureAccess(), let window = shown.window {
+                    try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/tar-replace-file.png"))
+                }
+                let id = try await commit(shown)
+                func replacedText() async throws -> String {
+                    let reader = ApplicationCompressedArchives.shared.reader(excluding: [])
+                    let session = try await (TARBrowserModel.isCompressed(source) ? reader.prepareCompressed(source) : reader.open(source))
+                    let text: String
+                    do {
+                        let page = try await session.page(in: session.root)
+                        guard let member = page.items.first(where: { $0.name == "Generated.json" }) else {
+                            throw Probe.Failure(stage: "tar-members-replaced-member-missing")
+                        }
+                        let document = try await reader.openTextForEdit(session.selectionForTextPreview(member.id))
+                        text = document.contents.text
+                    } catch { await session.close(); throw error }
+                    await session.close(); return text
+                }
+                let text = try await replacedText(), currentPaths = try await paths()
+                try Probe.need(text == replacementText && currentPaths == Set(["Generated.json", "Other.json"]),
+                    "tar-members-exact-replaced-content")
+                try await undo(id, expected: before)
+            }
+        }
         for transfer in [Transfer.cut, .copy, .drag] {
             let copying = transfer == .copy
             var (owner, model, table) = try await openRoot()
@@ -217,7 +264,8 @@ import LocalStorage
                 "tar-members-paste-paths-and-marker-retirement")
             try await undo(id, expected: withFolder); try await undo(folderID, expected: before)
         }
-        return ["TAR Rename, Duplicate, Remove, Group, New Folder and Add share the ordinary review, preserve the source on Cancel, reject an occupied Rename and cold-Undo to the exact original",
+        return ["TAR Rename, batch Rename, Duplicate, Remove, Group, New Folder and Add share the ordinary review, preserve the source on Cancel, reject an occupied Rename and cold-Undo to the exact original",
+            "TAR Add defaults to Keep Both; explicit Replace Files shows its captured replacement, Cancel changes nothing, successful content replacement and cold Undo preserve exact names and original bytes",
             "Native TAR Cut/Copy → navigate → Paste uses an opaque private marker, rejects changed-board and same-folder Cut, keeps Cancel repeatable, refreshes the complete result and retires the marker only after publication; cold Undo restores both edits",
             interactive ? "The actual native pointer drag from Generated.json onto Destination opens the shared Move review, publishes the exact namespace and cold-Undoes both edits" :
             "TAR local Add and same-archive Move pass the real table delegate callbacks with a private generated drag input and reject duplicate delivery callbacks; actual pointer gestures remain separate acceptance"]

@@ -53,19 +53,22 @@ public enum TARMemberMutation: Sendable {
 
 extension RecoverableFileOperations {
     public func prepareTARMemberMutationOriginal(_ mutation: TARMemberMutation,
-        compression: TARCompression? = nil, observing source: FileOperationSelection) async throws -> ArchiveUpdatePlan {
+        compression: TARCompression? = nil, additionCollisions: ZIPMemberAdditionCollisionPolicy = .keepBoth,
+        observing source: FileOperationSelection) async throws -> ArchiveUpdatePlan {
         try await prepareArchiveOriginalUpdate(sources: [mutation.archiveURL] + mutation.addedSources,
             original: mutation.archiveURL, observing: source, authoredFormat: mutation.binding.authoredFormat) { check in
-            try PreparedTARMemberMutation(mutation, compression: compression, check: check, updatesOriginal: true)
+            try PreparedTARMemberMutation(mutation, compression: compression, additionCollisions: additionCollisions,
+                check: check, updatesOriginal: true)
         }
     }
     public func prepareTARMemberMutationCopy(_ mutation: TARMemberMutation, outputName: String,
-        compression: TARCompression? = nil, observing source: FileOperationSelection) async throws -> ArchiveCreationPlan {
+        compression: TARCompression? = nil, additionCollisions: ZIPMemberAdditionCollisionPolicy = .keepBoth,
+        observing source: FileOperationSelection) async throws -> ArchiveCreationPlan {
         guard mutation.binding.authoredFormat.acceptsFilename(outputName) else { throw TARMemberEditFailure.invalidName }
         return try await prepareArchiveCreation(sources: [mutation.archiveURL] + mutation.addedSources,
             parent: mutation.archiveURL.deletingLastPathComponent(), name: outputName,
             observing: source, authoredFormat: mutation.binding.authoredFormat) { check in
-            try PreparedTARMemberMutation(mutation, compression: compression, check: check)
+            try PreparedTARMemberMutation(mutation, compression: compression, additionCollisions: additionCollisions, check: check)
         }
     }
 }

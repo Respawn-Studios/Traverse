@@ -15,6 +15,9 @@ Earlier private-beta version numbers belong to a separate release history.
 - TAR.gz and TAR.bz2 creation through the shared archive publisher, with
   compression choices and guarded Undo. Gzip edits preserve bounded optional
   headers; bzip2 edits keep the current compression setting by default.
+- Explicit Replace Files for TAR additions, with binary-file support, a
+  captured preview, unchanged local inputs and guarded Undo. Keep Both remains
+  the default; folder replacement and merging are refused.
 - Benchmark block-size and file-cache options, with requested and actual cache
   behavior recorded in results and exports.
 - A bounded Quick Mix benchmark, matched suite comparisons and readable

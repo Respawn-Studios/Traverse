@@ -22,7 +22,8 @@ internal final class PreparedTARMemberMutation: TARCreationSourceWitness, Native
         check: @Sendable () throws -> Void, hooks: ZIPCreationHooks = .init(), updatesOriginal: Bool = false) throws {
         try self.init(.replace(document, contents: contents), check: check, hooks: hooks, updatesOriginal: updatesOriginal)
     }
-    init(_ mutation: TARMemberMutation, compression: TARCompression? = nil, check: @Sendable () throws -> Void,
+    init(_ mutation: TARMemberMutation, compression: TARCompression? = nil,
+        additionCollisions: ZIPMemberAdditionCollisionPolicy = .keepBoth, check: @Sendable () throws -> Void,
         hooks: ZIPCreationHooks = .init(), updatesOriginal: Bool = false) throws {
         let began = ProcessInfo.processInfo.systemUptime
         @Sendable func checkpoint() throws {
@@ -40,7 +41,8 @@ internal final class PreparedTARMemberMutation: TARCreationSourceWitness, Native
         let security = source.security
         let parsed = try source.parse(check: checkpoint)
         guard parsed.witness == binding.witness else { throw FileOperationFailure.sourceChanged }
-        let layout = try TARMutationLayout(mutation, source: source, parsed: parsed, check: checkpoint)
+        let layout = try TARMutationLayout(mutation, source: source, parsed: parsed,
+            additionCollisions: additionCollisions, check: checkpoint)
         let encodedBytes = try layout.encodedBytes(sourceLength: source.length)
         let limit: UInt64 = binding.compressed == nil ? 1 << 30 : TARCompressedDecoder.maximumBytes
         guard encodedBytes <= min(hooks.maximumEncodedBytes, limit) else { throw TARMemberEditFailure.limitReached }
