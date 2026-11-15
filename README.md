@@ -31,6 +31,15 @@
 </p>
 
 <p align="center">
+  <strong>Built with help from OpenAI Codex</strong><br>
+  I'm building Traverse with substantial assistance from Codex for coding,<br>
+  debugging and testing. Its help has brought this project to life much sooner<br>
+  than the months it would have taken me working alone.<br>
+  I'm using this project to learn Swift-based app development as I go<br>
+  But I still guide the project and take responsibility for what ships.
+</p>
+
+<p align="center">
   <a href="https://github.com/Respawn-Studios/Traverse/releases">Releases</a> ·
   <a href="docs/guides/features.md">Feature guide</a> ·
   <a href="https://github.com/Respawn-Studios/Traverse/wiki">Wiki</a> ·
