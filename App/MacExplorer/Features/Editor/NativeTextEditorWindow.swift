@@ -57,6 +57,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     private let copyActions = NSStackView()
     private let commandBar = NSStackView()
     private var closing = false
+    private var acceptedCloseEditable: Bool?
     private var hasPresentedEditor = false
     let openSearchID = UUID()
     private var openSearchPresented = false
@@ -420,6 +421,28 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
             let native = window.animationBehavior
             window.animationBehavior = .none; window.close(); window.animationBehavior = native
         }
+        acceptedCloseEditable = nil
+    }
+    /// Called only after the document owner has accepted Close and drained its
+    /// work. The actual native close remains synchronous in finishClose().
+    func prepareAcceptedClose() async -> Bool {
+        guard !closing, acceptedCloseEditable == nil, let window else { return false }
+        acceptedCloseEditable = surface.textView.isEditable
+        closing = true; surface.textView.isEditable = false
+        let prepared = await ToolWindowCloseMotion.prepareAcceptedClose(window)
+        guard prepared, self.window === window else {
+            restoreAcceptedClosePresentation(for: window)
+            return false
+        }
+        return true
+    }
+    func cancelAcceptedClosePreparation() {
+        restoreAcceptedClosePresentation(for: window)
+    }
+    private func restoreAcceptedClosePresentation(for window: NSWindow?) {
+        if let window { ToolWindowCloseMotion.cancel(window) }
+        if let acceptedCloseEditable { surface.textView.isEditable = acceptedCloseEditable }
+        acceptedCloseEditable = nil; closing = false
     }
     /// Document owners join captured-text CPU work before releasing their own
     /// buffers. No file-access lifetime or Save operation belongs to this view.
@@ -435,11 +458,16 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     /// A failed post-close local retirement reopens the same native surface,
     /// including its actual Undo history, in recovery-only mode.
     func reopenAfterFailedClose() {
-        closing = false
+        cancelAcceptedClosePreparation()
         retainPresentationDuringClose = false
         showWindow(nil); window?.makeKeyAndOrderFront(nil)
     }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { closing || shouldClose?() == true }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // The accepted visual gate blocks input, but only finishClose may
+        // perform the native close after the document owner's final recheck.
+        guard acceptedCloseEditable == nil else { return false }
+        return closing || shouldClose?() == true
+    }
     func windowWillClose(_ notification: Notification) {
         openSearchPresented = false
         commandFinderStorage?.dismiss(restoringFocus: false)
@@ -574,7 +602,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         return menu
     }
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
-        guard window?.isKeyWindow == true else { return false }
+        guard !closing, window?.isKeyWindow == true else { return false }
         switch item.action {
         case #selector(saveDocument(_:)): return saveButton.isEnabled
         case #selector(saveDocumentAs(_:)): return saveAsButton.isEnabled
@@ -632,8 +660,8 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
             section.submenu.map { commands(in: $0, category: section.title, depth: 0) } ?? []
         }
     }
-    @objc func findEditorCommand(_ sender: Any?) { commandFinder.present() }
-    @objc func findInOpenEditors(_ sender: Any?) { openSearch.present() }
+    @objc func findEditorCommand(_ sender: Any?) { if !closing { commandFinder.present() } }
+    @objc func findInOpenEditors(_ sender: Any?) { if !closing { openSearch.present() } }
     @objc private func surroundSelection(_ sender: NSMenuItem) {
         guard !closing, surface.lineCommands.canPerform, surface.textView.selectedRange().length > 0,
               let pair = EditorSurroundingPair(rawValue: sender.tag) else { return }
@@ -673,11 +701,11 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
               let action = NSTextFinder.Action(rawValue: sender.tag) else { return }
         surface.find.perform(action)
     }
-    @objc private func saveDocument(_ sender: Any?) { if window?.isKeyWindow == true && saveButton.isEnabled { onSave?() } }
-    @objc private func saveDocumentAs(_ sender: Any?) { if window?.isKeyWindow == true && saveAsButton.isEnabled { onSaveAs?() } }
-    @objc private func saveTextCopy(_ sender: Any?) { if window?.isKeyWindow == true && !textCopyButton.isHidden && textCopyButton.isEnabled { onTextCopy?() } }
+    @objc private func saveDocument(_ sender: Any?) { if !closing && window?.isKeyWindow == true && saveButton.isEnabled { onSave?() } }
+    @objc private func saveDocumentAs(_ sender: Any?) { if !closing && window?.isKeyWindow == true && saveAsButton.isEnabled { onSaveAs?() } }
+    @objc private func saveTextCopy(_ sender: Any?) { if !closing && window?.isKeyWindow == true && !textCopyButton.isHidden && textCopyButton.isEnabled { onTextCopy?() } }
     @objc private func showTextCopyResults(_ sender: Any?) {
-        guard window?.isKeyWindow == true, !textCopyResultsButton.isHidden, textCopyResultsButton.isEnabled else { return }
+        guard !closing, window?.isKeyWindow == true, !textCopyResultsButton.isHidden, textCopyResultsButton.isEnabled else { return }
         guard copyResults.count > 1 else { onTextCopyResults?(copyResults.first?.id); return }
         let menu = NSMenu()
         for result in copyResults {
@@ -687,22 +715,22 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         menu.popUp(positioning: nil, at: .init(x: 0, y: textCopyResultsButton.bounds.height), in: textCopyResultsButton)
     }
     @objc private func showExactTextCopyResult(_ sender: NSMenuItem) {
-        guard window?.isKeyWindow == true, textCopyResultsButton.isEnabled,
+        guard !closing, window?.isKeyWindow == true, textCopyResultsButton.isEnabled,
               let raw = sender.representedObject as? String, let record = UUID(uuidString: raw),
               copyResults.contains(where: { $0.id == record }) else { return }
         onTextCopyResults?(record)
     }
-    @objc private func reloadDocument(_ sender: Any?) { if window?.isKeyWindow == true && reloadButton.isEnabled { onReload?() } }
+    @objc private func reloadDocument(_ sender: Any?) { if !closing && window?.isKeyWindow == true && reloadButton.isEnabled { onReload?() } }
     @objc private func reviewBeforeSave(_ sender: Any?) {
-        if window?.isKeyWindow == true && beforeSaveButton.isEnabled { onRefusedVersion?(.before) }
+        if !closing && window?.isKeyWindow == true && beforeSaveButton.isEnabled { onRefusedVersion?(.before) }
     }
     @objc private func reviewEditedSave(_ sender: Any?) {
-        if window?.isKeyWindow == true && editedSaveButton.isEnabled { onRefusedVersion?(.edited) }
+        if !closing && window?.isKeyWindow == true && editedSaveButton.isEnabled { onRefusedVersion?(.edited) }
     }
-    @objc private func reviewVersions(_ sender: Any?) { if window?.isKeyWindow == true && recoveryButton.isEnabled { onRecovery?() } }
-    @objc private func stopDocumentWork(_ sender: Any?) { if window?.isKeyWindow == true && stopButton.isEnabled { onStop?() } }
+    @objc private func reviewVersions(_ sender: Any?) { if !closing && window?.isKeyWindow == true && recoveryButton.isEnabled { onRecovery?() } }
+    @objc private func stopDocumentWork(_ sender: Any?) { if !closing && window?.isKeyWindow == true && stopButton.isEnabled { onStop?() } }
     @objc private func showGoToLine(_ sender: Any?) {
-        guard let window, window.isKeyWindow, window.attachedSheet == nil,
+        guard !closing, let window, window.isKeyWindow, window.attachedSheet == nil,
               lineNavigation == nil, surface.canGoToLine, let index = surface.lineIndex else { return }
         let generation = surface.generation
         let current = index.location(at: surface.textView.selectedRange().location)?.line ?? 1

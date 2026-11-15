@@ -16,6 +16,7 @@ import LocalStorage
     private var pendingEdit: TextEditTicket?
     private var work: Task<Void, Never>?
     private var closeWork: Task<Bool, Never>?
+    private var closeWaiters: [CheckedContinuation<Bool, Never>] = []
     private var choosing = false, closing = false, closed = false, closeAfterSave = false
     private var nativeDidClose = false
     private var preferences = EditorPreferences()
@@ -294,21 +295,32 @@ import LocalStorage
         }
     }
     func requestClose() {
-        guard !closed else { return }; _ = beginClose()
+        guard !closed, !closeAfterSave else { return }; _ = beginClose()
     }
     func closeForTermination() async -> Bool {
         if closed { return true }
-        return await beginClose().value
+        return await withCheckedContinuation { continuation in
+            closeWaiters.append(continuation)
+            if closeWork == nil && !closeAfterSave { _ = beginClose() }
+        }
     }
     private func beginClose() -> Task<Bool, Never> {
         if let closeWork { return closeWork }
         let task = Task { [self] in
-            defer { closeWork = nil }
-            return await decideClose()
+            let result = await decideClose()
+            closeWork = nil
+            // A chosen Save continues this same intent after its real worker
+            // returns. Quit waits for the final native close, not this task.
+            if let result { resolveClose(result) }
+            return result ?? false
         }
         closeWork = task; return task
     }
-    private func decideClose() async -> Bool {
+    private func resolveClose(_ value: Bool) {
+        let waiters = closeWaiters; closeWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: value) }
+    }
+    private func decideClose() async -> Bool? {
         if closed { return true }
         guard !isBusy, !window.surface.textView.hasMarkedText(), let native = window.window else {
             messageText = "Finish or Stop this work before closing. Your text is kept."; show(); refresh(); return false
@@ -320,13 +332,24 @@ import LocalStorage
         choosing = false; window.surface.textView.isEditable = true
         switch choice {
         case .cancel, .review: refresh(); return false
-        case .save: closing = false; closeAfterSave = true; save(); return false
+        case .save:
+            closing = false; closeAfterSave = true; save()
+            if isBusy { return nil }
+            closeAfterSave = false; return false
         case .textCopy: closing = false; saveTextCopy(); return false
         case .discard:
+            window.surface.textView.isEditable = false
             await preparation.closeAndDrain()
             window.retainPresentationDuringClose = true
             nativeDidClose = false
             await window.closeComparisonAndDrain()
+            guard await window.prepareAcceptedClose(), window.window === native, !Task.isCancelled else {
+                window.cancelAcceptedClosePreparation()
+                preparation = EditorPreparationOwner { [weak self] input, result in self?.prepared(input, result) }
+                window.retainPresentationDuringClose = false
+                if nativeDidClose { window.reopenAfterFailedClose() }
+                return false
+            }
             window.finishClose()
             guard nativeDidClose else {
                 preparation = EditorPreparationOwner { [weak self] input, result in self?.prepared(input, result) }
@@ -337,13 +360,15 @@ import LocalStorage
                 preparation = EditorPreparationOwner { [weak self] input, result in self?.prepared(input, result) }
                 window.reopenAfterFailedClose(); messageText = "Closure needs review. Your draft stays visible."; refresh(); return false
             }
-            closed = true; window.surface.clearPrivatePresentation(); didClose?(id); return true
+            closed = true; window.surface.clearPrivatePresentation(); window.retainPresentationDuringClose = false
+            didClose?(id); return true
         }
     }
     private func finishChosenSave() {
         guard closeAfterSave, !isBusy else { return }
         closeAfterSave = false
         if state.closeDisposition == .ready { requestClose() }
+        else { resolveClose(false) }
     }
     private func refresh() {
         guard !closed else { return }

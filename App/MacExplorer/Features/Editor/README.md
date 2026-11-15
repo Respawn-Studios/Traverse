@@ -1,10 +1,17 @@
 # Editor
 
-Accepted document teardown uses the common tool window's explicit immediate
-close after the document owner drains its work. This delivers the actual native
-close acknowledgement before retiring a buffer or file pin, even inside a user
-Close callback. Ordinary tool-window user-close animation remains unchanged.
-No delayed event or timer is treated as native close acknowledgement.
+Document owners decide whether to close, then drain their work. The shared tool
+window can fade that same live editor according to Full, Reduced or Off and the
+Closing Windows preference. Its text and access stay owned; input and commands
+stay blocked. The owner then calls the explicit synchronous native close and
+waits for its actual acknowledgement before retiring a buffer or file pin.
+No animation completion is treated as a native close acknowledgement.
+
+Quit joins a Close already in progress, including its chosen Save. Re-show or
+cancellation can abandon a local/archive fade without discarding the draft.
+An already sealed remote close still finishes its semantic handoff if the
+optional fade is interrupted. This presentation layer never changes a backend
+close decision, grants file access or owns a file operation.
 
 ## Document windows and tabs
 
@@ -194,7 +201,7 @@ validator or embedded shell. References: [Dockerfile](https://docs.docker.com/re
 
 ## Text inside archives
 
-An admitted ZIP or plain-TAR edit opens one eligible regular member in this same editor.
+An admitted ZIP, plain-TAR or prepared gzip/bzip2 TAR edit opens one eligible regular member in this same editor.
 `ArchiveTextDocumentController` owns the exact member snapshot and retains its
 archive access; the concrete format reader and shared archive mutation journal own every
 read, replacement, copy and Undo. Save updates the original archive; Save Archive Copy
@@ -206,9 +213,11 @@ second file writer is introduced. Initial and saved encoded text are bounded to
 
 The editor-preferences native flow exercises repeated Save, exact rebind,
 original-archive Undo, stale refusal, Reload, copy-follow and copy Undo.
-`native-check tar-editor` covers the same lifecycle with TAR's separate v18
-original-update admission. TAR editing is Development-only until distribution
-qualification. Installed signature and sandbox source grants require separate validation.
+`native-check tar-editor`, `tar-gzip-editor` and `tar-bzip2-editor` cover the same
+lifecycle with separate v18, v19 and v20 original-update admission. The compressed
+variants reuse the bounded codec, TAR layout and publisher. TAR editing is
+Development-only until distribution qualification. Installed signature and
+sandbox source grants require separate validation.
 
 The existing Explorer/Custom Control-alias preference also applies to local and
 remote editor menus: Save/Save As/Close, Undo/Redo, Cut/Copy/Paste, Select All,

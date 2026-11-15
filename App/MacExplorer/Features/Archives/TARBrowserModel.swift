@@ -225,9 +225,7 @@ struct TARClipboardSource {
     var preferredPreview: ArchivePreviewMode { .preferred(for: items.first { selection.contains($0.id) }?.name) }
     var isCompressedSource: Bool { source.map(Self.isCompressed) ?? false }
     var formatName: String {
-        guard let name = source?.lastPathComponent.lowercased() else { return "TAR" }
-        if name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2") { return "TAR.bz2" }
-        return isCompressedSource ? "TAR.gz" : "TAR"
+        source.map(ArchiveActionNames.formatName) ?? "TAR"
     }
     var showsCompressedPreparation: Bool {
         CompressedTARFeature.available && isCompressedSource && (requiresPreparation || busy && summary == nil)

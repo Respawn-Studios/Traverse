@@ -60,7 +60,7 @@ enum RemoteTextSaveBoundary {
     // local retirement later fails. A reopened window is local text recovery.
     var remoteBodyHandoffAttempted = false
     var closeAfterSave = false
-    var closeWaiter: CheckedContinuation<Bool, Never>?
+    var closeWaiters: [CheckedContinuation<Bool, Never>] = []
     var closingRequest: UUID?
     // Retain an actual backend capture if its UI receipt could not be applied.
     var unappliedSave: TextSaveSnapshot?

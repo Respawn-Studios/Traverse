@@ -70,7 +70,8 @@ final class LocalTextDocumentController {
     private var fileTask: Task<Void, Never>?
     private var presentationTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
-    private var closeWaiter: CheckedContinuation<Bool, Never>?
+    private var closeWaiters: [CheckedContinuation<Bool, Never>] = []
+    private var nativeDidClose = false
     private var destination: EditorSaveDestination?
     private var pendingTextCopy: TextCopyCapture?
     private var textCopyDestination: EditorSaveDestination?
@@ -119,8 +120,7 @@ final class LocalTextDocumentController {
         window.onWrapping = { [weak self] in self?.wrappingWasOverridden = true }
         window.shouldClose = { [weak self] in self?.requestClose(); return false }
         window.didClose = { [weak self] in
-            guard let self else { return }
-            self.didClose?(self.id)
+            self?.nativeDidClose = true
         }
         window.surface.onEdit = { [weak self] text, generation in self?.edited(text, generation: generation) }
         window.surface.onRejectedEdit = { [weak self] failure in
@@ -285,7 +285,7 @@ final class LocalTextDocumentController {
     func save() { captureSave(intent: .original, to: nil) }
     private func captureSave(intent: TextSaveSnapshot.Intent, to target: EditorSaveDestination?) {
         guard let state, fileTask == nil, !closed, !choosing, !closing, unresolvedPublication == nil else {
-            resolveClose(false); return
+            closeAfterSave = false; resolveClose(false); return
         }
         guard intent != .original || !files.mustReloadBeforeOriginalSave else {
             closeAfterSave = false; resolveClose(false); message = "Reload the changed file before saving"; refresh(); return
@@ -312,7 +312,9 @@ final class LocalTextDocumentController {
     }
     func chooseSaveAs() {
         guard let state, let nativeWindow = window.window, fileTask == nil, !hasPendingSave,
-              state.unresolvedSave == nil, unresolvedPublication == nil, !choosing, !closing, !closed else { resolveClose(false); return }
+              state.unresolvedSave == nil, unresolvedPublication == nil, !choosing, !closing, !closed else {
+            closeAfterSave = false; resolveClose(false); return
+        }
         choosing = true; window.surface.textView.isEditable = false; refresh()
         presentationTask = Task { [weak self] in
             guard let self else { return }
@@ -661,11 +663,14 @@ final class LocalTextDocumentController {
     }
 
     func requestClose() {
-        guard !closed, closeTask == nil else { return }
+        guard !closed, closeTask == nil, !closeAfterSave else { return }
         if hasPendingFileWork || hasPendingSave {
             message = "Finish or Stop the current work before closing"; refresh(); return
         }
         guard let native = window.window else { return }
+        guard !window.surface.textView.hasMarkedText() else {
+            message = "Finish entering this text before closing"; resolveClose(false); refresh(); return
+        }
         closing = true; window.surface.textView.isEditable = false; refresh()
         closeTask = Task { [weak self] in
             guard let self else { return }
@@ -697,10 +702,22 @@ final class LocalTextDocumentController {
                 self.window.surface.textView.isEditable = false
                 await self.window.closeComparisonAndDrain()
                 await self.preparation.closeAndDrain()
-                guard self.fileTask == nil, !self.files.isWorking else {
-                    self.closeTask = nil; self.closing = false; self.resolveClose(false); self.refresh(); return
+                self.window.retainPresentationDuringClose = true
+                self.nativeDidClose = false
+                guard await self.window.prepareAcceptedClose(), self.window.window === native,
+                      self.fileTask == nil, !self.files.isWorking, !Task.isCancelled else {
+                    self.window.cancelAcceptedClosePreparation()
+                    self.preparation = EditorPreparationOwner { [weak self] input, result in self?.prepared(input, result) }
+                    self.closeTask = nil; self.closing = false; self.resolveClose(false)
+                    self.window.retainPresentationDuringClose = false
+                    if self.nativeDidClose { self.window.reopenAfterFailedClose() }
+                    self.window.surface.textView.isEditable = true; self.refresh(); return
                 }
+                // Keep the canonical text and access alive through the visual
+                // exit. Nothing may suspend between this check and native close.
+                self.window.finishClose()
                 do {
+                    guard self.nativeDidClose else { throw TextDocumentFailure.invalidReceipt }
                     try self.state?.discardAndClose()
                     try self.files.closeAfterDrain()
                     self.closed = true; self.state = nil; self.pendingEdit = nil; self.destination = nil
@@ -708,9 +725,14 @@ final class LocalTextDocumentController {
                     self.unconfirmedTextCopies = []; self.textCopyRecordID = nil
                     self.observedFileEvent?(.closed, nil, self.latestRecordID, nil)
                     self.window.surface.onEdit = nil; self.window.surface.onRejectedEdit = nil
-                    self.window.finishClose()
+                    self.window.surface.clearPrivatePresentation(); self.window.retainPresentationDuringClose = false
+                    self.didClose?(self.id)
                     self.resolveClose(true)
-                } catch { self.closing = false; self.resolveClose(false); self.message = "The editor is still finishing. Keep this window open."; self.refresh() }
+                } catch {
+                    self.preparation = EditorPreparationOwner { [weak self] input, result in self?.prepared(input, result) }
+                    self.closing = false; self.window.reopenAfterFailedClose(); self.resolveClose(false)
+                    self.message = "The editor is still finishing. Keep this window open."; self.refresh()
+                }
                 self.closeTask = nil
             }
         }
@@ -720,15 +742,17 @@ final class LocalTextDocumentController {
     /// application termination loops, or treating a window dismissal as drain.
     func closeForTermination() async -> Bool {
         if closed { return true }
-        guard closeTask == nil, closeWaiter == nil, !hasPendingFileWork, !hasPendingSave else {
+        guard closeTask != nil || closeAfterSave || (!hasPendingFileWork && !hasPendingSave && window.window != nil) else {
             window.showWindow(nil); message = "Finish or Stop the current work before quitting"; refresh(); return false
         }
         return await withCheckedContinuation { continuation in
-            closeWaiter = continuation; requestClose()
+            closeWaiters.append(continuation)
+            if closeTask == nil && !closeAfterSave { requestClose() }
         }
     }
     private func resolveClose(_ value: Bool) {
-        let waiter = closeWaiter; closeWaiter = nil; waiter?.resume(returning: value)
+        let waiters = closeWaiters; closeWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: value) }
     }
 
     private func refresh() {

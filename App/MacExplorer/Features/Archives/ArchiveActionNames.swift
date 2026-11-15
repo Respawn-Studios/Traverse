@@ -1,6 +1,13 @@
 import Foundation
 
 enum ArchiveActionNames {
+    static func formatName(for source: URL) -> String {
+        let name = source.lastPathComponent.lowercased()
+        if name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2") { return "TAR.bz2" }
+        if name.hasSuffix(".tar.gz") || name.hasSuffix(".tgz") { return "TAR.gz" }
+        return source.pathExtension.uppercased()
+    }
+
     static func editedCopyName(_ source: URL) -> String {
         let leaf = source.lastPathComponent
         let compound = [".tar.gz", ".tar.bz2"].first { leaf.lowercased().hasSuffix($0) }

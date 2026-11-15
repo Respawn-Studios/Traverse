@@ -18,16 +18,18 @@ import FileOperations
     }
     func closeForTermination() async -> Bool {
         if closed { return true }
-        guard closingWork == nil, closeWaiter == nil, !closeAfterSave, !isBusy else {
+        guard closingWork != nil || closeAfterSave || (!isBusy && window.window != nil) else {
             message = "Finish or Stop this work before closing. Your text stays owned."
             show(); refresh(); return false
         }
         return await withCheckedContinuation { continuation in
-            closeWaiter = continuation; requestClose()
+            closeWaiters.append(continuation)
+            if closingWork == nil && !closeAfterSave { requestClose() }
         }
     }
     private func resolveClose(_ value: Bool) {
-        let waiter = closeWaiter; closeWaiter = nil; waiter?.resume(returning: value)
+        let waiters = closeWaiters; closeWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: value) }
     }
     /// Call after actual preparation/Save/Stop completion. A newer edit or
     /// uncertain result resolves false without silently making a new decision.
@@ -41,7 +43,7 @@ import FileOperations
         requestClose()
     }
     private func decideClose() async -> Bool? {
-        guard !isBusy, let native = window.window else {
+        guard !isBusy, let native = window.window, let request = closingRequest else {
             message = "Finish or Stop this work, then close again. Your text and workers stay owned."
             show(); refresh(); return false
         }
@@ -82,7 +84,15 @@ import FileOperations
         await preparation.closeAndDrain()
         window.retainPresentationDuringClose = true
         nativeDidClose = false
-        window.finishClose()
+        let faded = await window.prepareAcceptedClose()
+        guard closingRequest == request, window.window === native else {
+            window.cancelAcceptedClosePreparation()
+            reopenAfterIncompleteClose(); return false
+        }
+        // The remote close handoff is already sealed. Re-show/cancellation can
+        // stop its optional fade, but cannot make that backend editable again.
+        if !faded { window.cancelAcceptedClosePreparation() }
+        if !nativeDidClose { window.finishClose() }
         guard nativeDidClose else {
             preparation = EditorPreparationOwner { [weak self] input, result in self?.prepared(input, result) }
             window.reopenAfterFailedClose()

@@ -132,7 +132,11 @@ import FileOperations
             await window.closeComparisonAndDrain()
             window.retainPresentationDuringClose = true
             nativeClosed = false
-            window.finishClose()
+            let faded = await window.prepareAcceptedClose()
+            // This is an accepted, drained Stop/Close; a visual interruption
+            // does not abandon it or release the retained version pin early.
+            if !faded { window.cancelAcceptedClosePreparation() }
+            if !nativeClosed { window.finishClose() }
             // The actual AppKit close ends the displayed version. The pin
             // remains through every export and presentation worker above.
             let pinEnded: Bool

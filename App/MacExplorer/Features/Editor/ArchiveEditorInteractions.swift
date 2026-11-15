@@ -18,7 +18,7 @@ import FileOperations
     static func chooseArchiveCopyName(in window: NSWindow, source: URL) async -> String? {
         guard window.attachedSheet == nil else { return nil }
         let alert = NSAlert()
-        let format = TARBrowserModel.isCompressed(source) ? "TAR.gz" : source.pathExtension.uppercased()
+        let format = ArchiveActionNames.formatName(for: source)
         alert.messageText = "Save an edited " + format + " copy"
         alert.informativeText = "The copy will be saved beside the original archive. Existing files are kept. This editor will follow the new copy."
         let field = NSTextField(string: ArchiveActionNames.editedCopyName(source))

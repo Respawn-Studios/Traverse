@@ -540,7 +540,29 @@ import LocalStorage
             }
         }
         try await tabPresentationChecks(c, first: doc)
-        doc.requestClose(); try await wait("native-document-and-observer-closed") { doc.isClosed && editors.documentCount == 0 }
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let native = doc.window.window {
+            c.settings.motion = .init(mode: .full)
+            let retainedText = text.string, retainedGeneration = surface.generation
+            doc.window.showWindow(nil); native.makeKeyAndOrderFront(nil)
+            try await wait("local-editor-close-foreground") { native.isKeyWindow && native.isOnActiveSpace
+                && native.occlusionState.contains(.visible) }
+            doc.window.window?.performClose(nil)
+            let interruptedQuit = Task { await doc.closeForTermination() }
+            try await wait("local-editor-accepted-close-gate") { ToolWindowCloseMotion.isClosing(native) }
+            // A direct unexpected native dismissal is distinct from a second
+            // user Close, which the view correctly refuses during the fade.
+            native.close()
+            try need(!(await interruptedQuit.value), "local-editor-interrupted-close-reported-success")
+            try await wait("local-editor-retained-buffer-reopened") { native.isVisible && text.isEditable }
+            try need(!doc.isClosed && text.string == retainedText && surface.generation == retainedGeneration
+                && editors.documentCount == 1, "local-editor-interrupted-close-lost-owned-text")
+        }
+        doc.window.window?.performClose(nil)
+        async let firstQuit = doc.closeForTermination()
+        async let secondQuit = doc.closeForTermination()
+        let joined = await (firstQuit, secondQuit)
+        try need(joined.0 && joined.1, "local-editor-concurrent-quit-did-not-join-close")
+        try await wait("native-document-and-observer-closed") { doc.isClosed && editors.documentCount == 0 }
         return ["Actual ordinary Open uses the configured Traverse editor without an external launch", "Live preferences scale once and preserve buffer, generation, selection and Undo", "Per-window Wrap/Syntax choices survive preference changes and Reload; actual close drains"]
             + (ProcessInfo.processInfo.arguments.contains("--offscreen") ? [] : ["Refused-review presentation dispatches Before/Edited native buttons without changing text or dirty state; no backend refusal is inferred"])
             + (ProcessInfo.processInfo.arguments.contains("--offscreen") ? [] : ["Actual editor tabs keep separate buffers and Save menus, native Next/Previous and detach work, connection groups stay separate, and the separate-window preference preserves existing groups", "Explorer editor Control aliases follow the live preference through native menus; Mac Command actions remain and no clipboard/file write is made"])

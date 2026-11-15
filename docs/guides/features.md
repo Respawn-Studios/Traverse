@@ -102,10 +102,19 @@ arrives by its own name; groups retain their archive paths inside a new folder.
 | Format | Browse and preview | Create or change |
 | --- | --- | --- |
 | ZIP | Folders, supported text/hex/images, extraction and internal pane copies | ZIP creation and supported member edits; eligible text members open in the editor |
-| Plain TAR | Folders, supported previews, extraction and internal pane copies | Plain TAR creation; no rewriting of an existing TAR |
-| Gzip TAR (`.tar.gz`, `.tgz`) | Explicit Prepare before browsing, preview or extraction | No compressed-TAR creation or rewriting |
+| Plain TAR | Folders, supported previews, extraction and internal pane copies | Plain TAR creation; member editing in Development |
+| Gzip TAR (`.tar.gz`, `.tgz`) | Explicit Prepare before browsing, preview or extraction | Creation and member editing in Development |
+| Bzip2 TAR (`.tar.bz2`, `.tbz2`) | Bounded Prepare, folders, supported previews and extraction in Development | Creation and member editing in Development |
 
-Archive size, metadata and member-type limits apply. Gzip preparation uses a
+The Development build adds TAR Rename, batch Rename, Remove, Duplicate, Move,
+Add, Group, Create File/Folder and internal Cut/Copy/Paste, plus text editing in
+plain or prepared compressed TARs. These reuse the ZIP workbench and editor.
+Keep Both is the default when adding files; Replace Files is explicit and never
+merges folders. Compressed TARs offer compression choices, while bzip2 edits can
+keep the current setting. These additions still need distribution qualification
+and are not part of the published 0.2.0 package.
+
+Archive size, metadata and member-type limits apply. Compressed preparation uses a
 bounded temporary copy and is not started by passive tab restore or filename
 search. Encrypted archives, ZIP64 and unsupported member metadata may be refused
 by a particular write route. A ZIP external drag and a remote external drag are
@@ -114,6 +123,7 @@ different capabilities; this guide does not promise remote-to-Finder delivery.
 ## Text editor
 
 Use Edit in Traverse for an eligible local, SFTP, SMB or ZIP text document.
+Development builds also support eligible plain and prepared compressed TAR text members.
 Documents can share native tabs or open in separate windows. Opening preferences
 choose Traverse's behavior without changing macOS file associations.
 

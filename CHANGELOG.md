@@ -22,6 +22,8 @@ Earlier private-beta version numbers belong to a separate release history.
   behavior recorded in results and exports.
 - A bounded Quick Mix benchmark, matched suite comparisons and readable
   per-block latency distributions alongside the existing result metrics.
+- Editor closing follows animation preferences while retaining text until the
+  native window closes. Quit joins a Close or its chosen Save already in progress.
 
 ## [0.2.0] - 2026-11-15
 

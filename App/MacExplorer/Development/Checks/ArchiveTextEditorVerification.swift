@@ -80,12 +80,12 @@ import LocalStorage
         }
         try await wait("tar-editor-prepared-page") { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }
     }
-    private static func acceptedNativeClose(_ settings: BrowserSettings) throws {
+    private static func acceptedNativeClose(_ settings: BrowserSettings, root: URL) async throws {
         let native = NativeTextEditorWindow(displayName: "Generated accepted close", installChrome: {
             ToolWindowChrome.install(in: $0, settings: settings)
         })
-        defer { native.finishClose() }
         var acknowledgements = 0
+        defer { if acknowledgements == 0 { native.finishClose() } }
         native.didClose = { acknowledgements += 1 }
         // Exercise a drained feature's synchronous close inside AppKit's user
         // close callback, rather than only calling the document owner directly.
@@ -94,6 +94,98 @@ import LocalStorage
         native.window?.performClose(nil)
         try need(acknowledgements == 1 && native.window?.isVisible == false,
             "accepted-close-inside-perform-close-must-acknowledge-once")
+        let originalMotion = settings.motion
+        defer { settings.motion = originalMotion }
+        let systemReduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        var timings: [[String: Any]] = []
+        func expose(_ held: NativeTextEditorWindow) async throws {
+            held.showWindow(nil); held.window?.makeKeyAndOrderFront(nil)
+            try await wait("accepted-close-foreground-presentation") {
+                held.window.map { $0.isKeyWindow && $0.isVisible && $0.isOnActiveSpace
+                    && $0.occlusionState.contains(.visible) } == true
+            }
+        }
+        for mode in BrowserMotionMode.allCases {
+            settings.motion = .init(mode: mode)
+            let held = NativeTextEditorWindow(displayName: "Generated close · " + mode.rawValue,
+                installChrome: { ToolWindowChrome.install(in: $0, settings: settings) })
+            guard let window = held.window else { throw Failure(stage: "accepted-close-missing-window") }
+            var closed = 0, ownerRequests = 0, textAtClose = false
+            defer { if closed == 0 { held.finishClose() }; held.surface.clearPrivatePresentation() }
+            held.surface.textView.string = "Generated retained close text"
+            held.surface.textView.isEditable = true
+            held.retainPresentationDuringClose = true
+            held.didClose = { [weak held] in closed += 1; textAtClose = held?.surface.textView.string == "Generated retained close text" }
+            held.shouldClose = { ownerRequests += 1; return false }
+            try await expose(held)
+            let began = ContinuousClock.now
+            let preparation = Task { await held.prepareAcceptedClose() }
+            if mode != .off && !systemReduced {
+                try await wait("accepted-close-live-gate") { ToolWindowCloseMotion.isClosing(window) }
+                try need(!held.surface.textView.isEditable && window.ignoresMouseEvents && closed == 0,
+                    "accepted-close-must-hold-input-and-native-lifetime")
+                window.performClose(nil)
+                try need(closed == 0 && ownerRequests == 0, "accepted-fade-reentrant-close-bypassed-owner")
+            }
+            try need(await preparation.value, "accepted-close-fade-did-not-complete")
+            let elapsed = began.duration(to: .now)
+            try need(closed == 0 && window.isVisible && !held.surface.textView.isEditable
+                && held.surface.textView.string == "Generated retained close text", "accepted-close-released-presentation-early")
+            // AppKit may finish an animator early after occlusion or a
+            // presentation change. Record wall time; ownership and actual
+            // native acknowledgement above/below remain strict assertions.
+            window.performClose(nil)
+            try need(closed == 0 && ownerRequests == 0, "prepared-close-reentrant-close-bypassed-owner")
+            held.finishClose()
+            try need(closed == 1 && textAtClose && !window.isVisible
+                && !ToolWindowCloseMotion.isClosing(window) && !window.ignoresMouseEvents && window.alphaValue == 1,
+                "accepted-close-native-acknowledgement-or-registry-drain")
+            timings.append(["mode": mode.rawValue, "elapsed": String(describing: elapsed), "nativeAcknowledgements": closed])
+        }
+        // A visual abort owns no document decision. It restores the very same
+        // window and editability; a later close must be independently admitted.
+        if !systemReduced {
+            for reason in ["show", "task-cancel", "preference", "unrelated-effect"] {
+                settings.motion = .init(mode: .full)
+                let held = NativeTextEditorWindow(displayName: "Generated close · " + reason,
+                    installChrome: { ToolWindowChrome.install(in: $0, settings: settings) })
+                guard let window = held.window else { throw Failure(stage: "accepted-abort-missing-window") }
+                defer { held.finishClose() }
+                held.surface.textView.isEditable = false
+                try await expose(held)
+                var closed = 0; held.didClose = { closed += 1 }
+                let preparation = Task { await held.prepareAcceptedClose() }
+                try await wait("accepted-abort-live-gate") { ToolWindowCloseMotion.isClosing(window) }
+                switch reason {
+                case "show": window.makeKeyAndOrderFront(nil)
+                case "task-cancel": preparation.cancel()
+                case "unrelated-effect": settings.motion.charts.toggle()
+                default: settings.motion.mode = .off
+                }
+                let completed = await preparation.value
+                if reason == "preference" || reason == "unrelated-effect" {
+                    try need(completed, "accepted-live-preference-change-lost-close")
+                    held.cancelAcceptedClosePreparation()
+                } else { try need(!completed, "accepted-visual-abort-reported-complete") }
+                try need(closed == 0 && window.isVisible && window.alphaValue == 1 && !window.ignoresMouseEvents
+                    && !held.surface.textView.isEditable && !ToolWindowCloseMotion.isClosing(window),
+                    "accepted-visual-abort-did-not-restore-prior-presentation")
+            }
+        }
+        settings.motion = .init(mode: .full, windowClosing: false)
+        let quiet = NativeTextEditorWindow(displayName: "Generated closing preference off",
+            installChrome: { ToolWindowChrome.install(in: $0, settings: settings) })
+        defer { quiet.finishClose() }
+        quiet.showWindow(nil)
+        try need(await quiet.prepareAcceptedClose(), "disabled-close-effect-was-refused")
+        try need(quiet.window.map { !ToolWindowCloseMotion.isClosing($0) } == true,
+            "disabled-close-effect-started-a-fade")
+        quiet.cancelAcceptedClosePreparation()
+        let report: [String: Any] = ["passed": true, "systemReduceMotion": systemReduced, "timings": timings,
+            "systemAccessibilitySettingsChanged": false, "fileOperations": 0, "minimumWallDurationPromised": false,
+            "notExercised": systemReduced ? ["Visible animated/abort paths while system Reduce Motion is enabled"] : ["Changing system Reduce Motion"]]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: root.appendingPathComponent("evidence/editor-close-motion.json"), options: .atomic)
     }
     private static func createFile(source: URL, browser: BrowserViewController,
                                    cold: RecoverableFileOperations, root: URL, tar: Bool = false) async throws -> String {
@@ -283,7 +375,7 @@ import LocalStorage
         let previousMotion = settings.motion
         defer { settings.updateEditorPreferences(previous); settings.motion = previousMotion }
         settings.motion = .init(mode: .full, windowClosing: true)
-        try acceptedNativeClose(settings)
+        try await acceptedNativeClose(settings, root: root)
         var document: ArchiveTextDocumentController?
         do {
             let coordinator = ApplicationOperationCoordinator.shared
@@ -372,6 +464,10 @@ import LocalStorage
             doc.reload(); try await confirm("Reload", in: doc.window.window)
             try await wait("archive-editor-reload") { !doc.isBusy && !doc.isDirty && doc.window.surface.textView.string == first }
             doc.show(); doc.window.saveAsButton.performClick(nil)
+            try await wait("archive-copy-format-sheet") { doc.window.window?.attachedSheet != nil }
+            let copyPrompt = doc.window.window?.attachedSheet?.contentView.map(views) ?? []
+            try need(copyPrompt.compactMap { $0 as? NSTextField }.contains { $0.stringValue == "Save an edited " + format + " copy" },
+                "archive-copy-prompt-shows-wrong-format")
             try await confirm("Save Copy", in: doc.window.window)
             let copy = parent.appendingPathComponent("Editor Archive-edited." + suffix)
             try await wait("archive-editor-copy-follow") { !doc.isBusy && !doc.isDirty && doc.opened.archiveURL == copy }
@@ -385,11 +481,33 @@ import LocalStorage
             // removed document after its preparation worker drains.
             try need(doc.window.window is ToolMotionWindow && settings.motion.allows(.windowClosing),
                 "archive-editor-full-close-policy")
+            let closeText = "{\"generated\":\"saved by the accepted Close\"}\n"
+            let beforeCloseSave = try await Task.detached { try Data(contentsOf: copy) }.value
+            edit(closeText, in: doc)
+            try await wait("archive-editor-close-dirty-ready") { doc.isDirty && !doc.isBusy }
             doc.window.window?.performClose(nil)
-            try need(await doc.closeForTermination(), "archive-editor-close-quit-did-not-join")
+            let cancelledQuit = Task { await doc.closeForTermination() }
+            try await confirm("Cancel", in: doc.window.window)
+            try need(!(await cancelledQuit.value) && !doc.isClosed && doc.window.surface.textView.string == closeText,
+                "archive-editor-cancelled-close-lost-draft")
+            let afterCancel = try await Task.detached { try Data(contentsOf: copy) }.value
+            try need(afterCancel == beforeCloseSave, "archive-editor-close-cancel-wrote-file")
+            doc.window.window?.performClose(nil)
+            let firstQuit = Task { await doc.closeForTermination() }
+            let secondQuit = Task { await doc.closeForTermination() }
+            try await confirm("Save", in: doc.window.window)
+            let firstClosed = await firstQuit.value, secondClosed = await secondQuit.value
+            try need(firstClosed && secondClosed, "archive-editor-chosen-save-quit-did-not-join")
             try await wait("archive-editor-owner-release") { doc.isClosed && editors.documentCount == 0 }
+            guard let closingSave = doc.latestRecordID, closingSave != copyRecord else {
+                throw Failure(stage: "archive-editor-close-save-record-missing")
+            }
             document = nil
             await browser.recoveryInspectionTask?.value
+            let undoClosingSave = await cold.undo(recordID: closingSave)
+            let afterClosingUndo = try await Task.detached { try Data(contentsOf: copy) }.value
+            try need(undoClosingSave.result.disposition == .succeeded && afterClosingUndo == beforeCloseSave,
+                "archive-editor-close-save-undo-not-exact")
             let removedCopy = await cold.undo(recordID: copyRecord)
             let copyExists = await Task.detached { FileManager().fileExists(atPath: copy.path) }.value
             let finalOriginal = try await Task.detached { try Data(contentsOf: source) }.value
@@ -400,7 +518,7 @@ import LocalStorage
                 browser.location.directoryURL == parent && !browser.isLoading && browser.rowsByURL[sources[0]] != nil
             }
             var checks = ["Ordinary \(format) row Open uses the common native editor, Save twice rebinds the exact member, and cold archive Undo restores its prior bytes",
-                "Changed \(format) Save refuses without touching the archive or draft; explicit Reload, archive Copy-follow, copy Undo and actual user performClose/joined Quit complete through existing owners with Full closing motion enabled",
+                "Changed \(format) Save refuses without touching the archive or draft; explicit Reload, archive Copy-follow, dirty Close Cancel, chosen Save/joined Quit and exact inverses complete through existing owners with Full closing motion enabled",
                 "A drained feature's accepted close acknowledges native willClose exactly once inside performClose without a deferred fade or implicit AppKit animation"]
             if tar {
                 checks.append("\(format) shares native editor preferences, Save/Reload, metadata-preserving copy, and independent v\(bzip2 ? 20 : gzip ? 19 : 18) original-update/cold Undo admission")

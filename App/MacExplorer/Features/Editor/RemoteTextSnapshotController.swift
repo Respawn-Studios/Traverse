@@ -82,7 +82,11 @@ import FileOperations
         let task = Task { [self] in
             await preparation.closeAndDrain()
             await window.closeComparisonAndDrain()
-            if !nativeClosed { window.finishClose() }
+            if !nativeClosed {
+                let faded = await window.prepareAcceptedClose()
+                if !faded { window.cancelAcceptedClosePreparation() }
+                if !nativeClosed { window.finishClose() }
+            }
             if nativeClosed { closed = true; observation = nil; didClose?(id) }
         }
         closing = task; await task.value
