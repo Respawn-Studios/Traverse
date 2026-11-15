@@ -47,9 +47,10 @@ private internal intent retains the original catalog IDs. Volume quiescence
 retires uncalled offers and waits for accepted work.
 
 Once accepted work releases command admission, the same current selection
-prepares a fresh offer without another click. Completion messages and that
-refresh are bound to the original view identity; a changed or closed visit
-cannot receive a late notice or restart preparation.
+prepares a fresh offer without another click. Completion messages, the browser
+footer and that refresh are bound to the original view identity; a changed or
+closed visit cannot receive a late notice or restart preparation. Busy admission
+also uses this captured notice instead of changing another visit's footer.
 
 AppKit supplies the destination as a URL value. A composed file URL is flattened
 only when its resolved path bytes stay identical; [URL.path](https://developer.apple.com/documentation/foundation/url/path)

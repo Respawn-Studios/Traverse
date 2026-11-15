@@ -384,7 +384,8 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
         checkpoint("operation-admission")
         guard !browser.isBrowserSuspended, browser.operationTask == nil,
               !ApplicationFileActivity.gate.isClosed, browser.recoverableFileOperations === engine,
-              browser.startOperationPresentation("Exporting selected archive items…", diagnosticTrace: id) else {
+              browser.startOperationPresentation("Exporting selected archive items…", diagnosticTrace: id,
+                reportsAdmissionFailure: false) else {
             failPending(state.stop(), error: CocoaError(.fileWriteUnknown))
             refuse(.unavailable, message: "Finish the current file operation before exporting these items.")
             releaseIfTerminal(); return
@@ -565,7 +566,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
         let text = failed ? "Export stopped after \(count) of \(rootCount) items. Completed exports remain; inspect Results for any retained work."
             : count == rootCount ? "Exported \(count) item\(count == 1 ? "" : "s"). The archive is unchanged."
             : "Exported \(count) of \(rootCount) items requested by the receiving app. The archive is unchanged."
-        browser.status.stringValue = text; return text
+        return text
     }
     private func publish(_ result: RecoverableOperationResult) {
         browser.lastOperationResult = result.result; browser.lastRecoveryRecordID = result.recordID

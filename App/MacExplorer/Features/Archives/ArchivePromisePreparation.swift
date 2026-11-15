@@ -67,8 +67,11 @@ import LocalStorage
                     // accepted operation still owns exclusive command admission.
                     let isCurrent = request.isCurrent, notice = request.notice
                     prepared = try ArchivePromiseExport(roots: roots, sourceAccess: access,
-                        browser: request.browser, window: request.window, notice: {
-                            if isCurrent() { notice($0) }
+                        browser: request.browser, window: request.window, notice: { [weak browser = request.browser] message in
+                            if isCurrent() {
+                                browser?.status.stringValue = message
+                                notice(message)
+                            }
                         }, workFinished: { [weak self] in
                             if isCurrent() { self?.refreshRequested?() }
                         })

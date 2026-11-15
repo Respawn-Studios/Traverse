@@ -268,8 +268,8 @@ import LocalStorage
             try await complete(offer, replies, keys: ["last", "first"])
             try UIVerification.require(replies.values("last") == [true] && replies.values("first") == [true] && offer.job.completedForVerification == 2,
                 "Out-of-order callbacks lost a root")
-            try UIVerification.require(view.notices.count == 2,
-                "The current archive view lost completion notices while its own operation held admission")
+            try UIVerification.require(view.notices.count == 2 && browser.status.stringValue == view.notices.last,
+                "The current archive view lost completion notices or its footer while its own operation held admission")
             let values = try await Task.detached { [expected] in
                 try [Data(contentsOf: target.appendingPathComponent("Receiver Last.txt")) == expected["Last.txt"],
                     Data(contentsOf: target.appendingPathComponent("Receiver First.txt")) == expected["First.txt"]]
@@ -334,16 +334,21 @@ import LocalStorage
             try send(offer, "Folder", to: URL(fileURLWithPath: "Folder", isDirectory: true, relativeTo: target), replies, "folder")
             try await wait { hold.entered }
             view.current = false
+            let currentFooter = "New archive visit status"
+            browser.status.stringValue = currentFooter
             offer.job.retireUncalled()
             try UIVerification.require(!offer.job.drainedForVerification && !offer.job.terminalForVerification && access.active > 0,
                 "Source retirement detached accepted work")
             hold.release(); try await complete(offer, replies, keys: ["folder"])
             let tree = try await Task.detached { try Data(contentsOf: target.appendingPathComponent("Folder/Member.txt")) == Data("Generated folder member\n".utf8)
                 && FileManager().contentsOfDirectory(atPath: target.appendingPathComponent("Folder/Empty").path).isEmpty }.value
-            try UIVerification.require(tree && replies.values("folder") == [true] && view.notices.isEmpty,
-                "Accepted folder did not finish after source retirement or changed a newer view's notice")
+            try UIVerification.require(tree && replies.values("folder") == [true] && view.notices.isEmpty
+                && browser.status.stringValue == currentFooter,
+                "Accepted folder did not finish after source retirement or changed a newer view's notice or footer")
             try send(offer, "Last.txt", to: target.appendingPathComponent("Late.txt"), replies, "late")
             try await wait { replies.values("late") == [false] }
+            try UIVerification.require(browser.status.stringValue == currentFooter,
+                "A late callback changed the newer archive visit's footer")
             checks.append("Source/offer retirement holds accepted folder work and scopes through exact nested/empty publication, refuses stale view notices and fails late uncalled roots")
         }
         do {
@@ -382,12 +387,24 @@ import LocalStorage
             let view = ViewState()
             let target = try await destination("Busy"), offer = try await offered(["First.txt"], notice: { view.notices.append($0) }),
                 replies = Replies(), token = UUID()
+            let staleView = ViewState()
+            let staleOffer = try await offered(["Last.txt"], isCurrent: { staleView.current },
+                notice: { staleView.notices.append($0) })
             try UIVerification.require(browser.operationCoordinator.beginPreparation(owner: token), "Busy control did not own preparation")
             defer { browser.operationCoordinator.finishPreparation(owner: token) }
             try send(offer, "First.txt", to: target.appendingPathComponent("Busy.txt"), replies, "busy")
             try await complete(offer, replies, keys: ["busy"])
-            try UIVerification.require(replies.values("busy") == [false] && view.notices.last?.contains("current file operation") == true,
+            try UIVerification.require(replies.values("busy") == [false] && view.notices.last?.contains("current file operation") == true
+                && browser.status.stringValue == view.notices.last,
                 "Busy callback entered a second writer or failed without a source-window explanation")
+            staleView.current = false
+            let currentFooter = "New visit during another operation"
+            browser.status.stringValue = currentFooter
+            try send(staleOffer, "Last.txt", to: target.appendingPathComponent("Stale Busy.txt"), replies, "stale-busy")
+            try await complete(staleOffer, replies, keys: ["stale-busy"])
+            try UIVerification.require(replies.values("stale-busy") == [false] && staleView.notices.isEmpty
+                && browser.status.stringValue == currentFooter,
+                "A stale callback's busy admission warning replaced the newer visit's footer")
             checks.append("A busy global coordinator refuses the callback without a second writer or an indefinitely queued promise")
         }
         do {

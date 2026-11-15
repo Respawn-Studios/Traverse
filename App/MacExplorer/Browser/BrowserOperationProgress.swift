@@ -16,11 +16,12 @@ final class OperationProgressMailbox: Sendable {
 @MainActor
 extension BrowserViewController {
     @discardableResult
-    func startOperationPresentation(_ title: String, preparation: UUID? = nil, diagnosticTrace: UUID? = nil) -> Bool {
+    func startOperationPresentation(_ title: String, preparation: UUID? = nil, diagnosticTrace: UUID? = nil,
+                                    reportsAdmissionFailure: Bool = true) -> Bool {
         guard operationPresentationID == nil else { return false }
         let token = UUID()
         guard operationCoordinator.begin(owner: token, preparation: preparation ?? operationPreparationID) else {
-            status.stringValue = "Wait for the current file operation to finish."
+            if reportsAdmissionFailure { status.stringValue = "Wait for the current file operation to finish." }
             return false
         }
         operationPresentationID = token
