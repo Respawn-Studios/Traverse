@@ -1,4 +1,5 @@
 import Foundation
+import ExplorerCore
 
 enum FileNativeOpeningCue: String, Hashable, Sendable, CaseIterable {
     case none, editor, viewer, archive
@@ -54,12 +55,11 @@ struct FileOpeningAppearance: Equatable, Sendable {
 
     enum ArchiveKind: Sendable, Equatable { case zip, tar }
     static func archiveKind(name: String, zipAvailable: Bool, tarAvailable: Bool) -> ArchiveKind? {
-        let lower = name.lowercased()
-        if tarAvailable && ((lower as NSString).pathExtension == "tar"
-            || [".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst"].contains(where: lower.hasSuffix)) {
+        let kind = ArchiveFilename(name)?.kind
+        if tarAvailable && kind?.isTAR == true {
             return .tar
         }
-        if zipAvailable && (lower as NSString).pathExtension == "zip" { return .zip }
+        if zipAvailable && kind == .zip { return .zip }
         return nil
     }
 }

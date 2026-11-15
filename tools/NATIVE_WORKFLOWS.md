@@ -12,6 +12,7 @@ and choose the check that exercises the changed route. See the
 | Archive creation | `native-check create-zip`, `create-tar` |
 | ZIP edits | `native-check zip-add-copy`, `batch-rename` and the relevant editor journey |
 | Compressed TAR | `native-check compressed-tar` |
+| Archive native exports | `native-check archive-export --archive-format zip`; choose TAR/gzip/bzip2 for its concrete producer |
 | Grouped operations | `native-check selection-group` |
 | Saved analyses | `native-check analysis-persistence`; `--incremental-analysis` adds the retained-source refresh pair |
 | Generated chart presentation | `native-check storage-chart` |
@@ -38,11 +39,12 @@ private secret input; the native check does not start a server implicitly.
 Body-transfer, external receiver, sandbox grant, device and installed signature
 validation remain separate from metadata or view checks.
 
-Archive promise controllers can reuse the current Debug app with their existing
-`--ordinary-build` option. They bind its build receipt before launch and refuse
-a changed product. Generated callback checks do not establish a physical Finder
-drag or independently grant destination access. Reuse source-owned controllers
-rather than creating another app, copied source graph or test harness.
+Archive exports use the same `native-check` owner and current Debug build as the
+other journeys. Callback checks do not establish a physical Finder drag. Add
+`--external-promise-receiver` for actual file/folder delivery into its generated
+Finder destination and matching Undo. Build first, then use `--skip-build` while
+that product is current. Neither flow grants access to personal files or
+qualifies a sandboxed distribution.
 
 The local-editor Save/focus journey retains native key-window guards and has no
 offscreen mode. Before automated input, verify the exact generated process,

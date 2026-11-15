@@ -34,6 +34,27 @@ enum ArchivePromiseExportFeature {
     #endif
 }
 
+/// This new handoff is qualified separately from direct TAR extraction and ZIP
+/// promises. Distribution remains held while Development exercises the flow.
+@MainActor enum TARPromiseExportFeature {
+    static let enabled = false
+    #if DEBUG
+    static var qualifying = false
+    #endif
+    static var available: Bool {
+        #if DEBUG
+        let admitted = enabled || qualifying
+        #else
+        let admitted = enabled
+        #endif
+        return admitted && AppFeatureAvailability.policy.edition == .development && !GeneratedSandboxReview.admitted
+            && ArchivePromiseExportFeature.available
+            && (ArchiveExtractionActivation.qualifiesPublicTARFile || ArchiveExtractionActivation.qualifiesPublicTARTree)
+    }
+    static var publicFile: Bool { available && ArchiveExtractionActivation.qualifiesPublicTARFile }
+    static var publicTree: Bool { available && ArchiveExtractionActivation.qualifiesPublicTARTree }
+}
+
 /// Retains handed-off offers independently of archive windows. A provider may
 /// never be consumed: only uncalled offers expire, never a running filesystem
 /// worker. The existing operation coordinator still owns all actual mutations.
@@ -41,12 +62,22 @@ enum ArchivePromiseExportFeature {
     static let shared = ApplicationArchiveExports()
     private var jobs: [UUID: ArchivePromiseExport] = [:]
     private var closing = false
+    private var capacityObservers: [UUID: @MainActor () -> Void] = [:]
     var canOffer: Bool { !closing && jobs.count < 8 }
+    func observeAvailableCapacity(_ action: @escaping @MainActor () -> Void) -> UUID {
+        let id = UUID(); capacityObservers[id] = action; return id
+    }
+    func removeCapacityObserver(_ id: UUID) { capacityObservers[id] = nil }
     func retain(_ job: ArchivePromiseExport) -> Bool {
         guard canOffer, jobs[job.id] == nil else { return false }
         jobs[job.id] = job; return true
     }
-    func release(_ job: ArchivePromiseExport) { if jobs[job.id] === job { jobs[job.id] = nil } }
+    func release(_ job: ArchivePromiseExport) {
+        guard jobs[job.id] === job else { return }
+        let wasFull = jobs.count == 8
+        jobs[job.id] = nil
+        if wasFull, canOffer { Array(capacityObservers.values).forEach { $0() } }
+    }
     func closeAndDrain() async {
         closing = true
         let current = Array(jobs.values)
@@ -155,20 +186,22 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     }
 }
 
-/// One concrete selected-ZIP handoff. Selection preparation is metadata-only;
+/// One concrete selected-archive handoff. Selection preparation is metadata-only;
 /// payload production begins solely after an actual promise write request.
 @MainActor final class ArchivePromiseExport {
     let id = UUID()
-    let roots: [ZIPRootExportSelection], names: [String]
+    private var roots: ArchivePromiseRoots?
+    let rootCount: Int, names: [String]
     let callbackDispatch = ArchivePromiseDispatch()
     private(set) var handed = false
-    private var state: ZIPExportBatchState
+    private var state: ArchiveExportBatchState
     private var sourceAccess: FileAccessLifetimes?
     private var destinationAccess: FileAccessLifetimes?
     private let browser: BrowserViewController, engine: RecoverableFileOperations
     private let publicFilePublication: Bool, publicTreePublication: Bool
     private weak var archiveWindow: NSWindow?
     private let notice: @MainActor (String) -> Void
+    private let workFinished: @MainActor () -> Void
     private let chooser = FolderAccessController(stateDirectory: nil)
     private let queue: OperationQueue
     private struct Request { let url: URL; let completion: ArchivePromiseCompletion }
@@ -182,40 +215,64 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     var beforeRootForVerification: ((Int) async -> Void)?
     var chooseParentForVerification: ((URL) async -> FolderAccessChoice?)?
     var onSettledForVerification: (@MainActor () -> Void)?
+    var nativeDragEndOperationForVerification: UInt?
+    var nativeDragEndPointForVerification: [Double]?
+    private(set) var checkpointForVerification = "offer"
+    private(set) var callbackShapeForVerification: [String: Bool] = [:]
+    private(set) var failureForVerification: String?
     #endif
     #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
     private(set) var outcomesForVerification: [RecoverableOperationResult] = []
     private(set) var parentChoicesForVerification = 0
+    private(set) var callbacksForVerification = 0
     var drainedForVerification: Bool { work == nil && state.isDrained && requests.isEmpty && callbackDispatch.isIdle }
-    var terminalForVerification: Bool { state.isTerminal && sourceAccess == nil && destinationAccess == nil }
+    var terminalForVerification: Bool { state.isTerminal && sourceAccess == nil && destinationAccess == nil && roots == nil }
     var completedForVerification: Int { state.completedCount }
     #endif
 
-    init(roots: [ZIPRootExportSelection], sourceAccess: FileAccessLifetimes,
+    convenience init(roots: [ZIPRootExportSelection], sourceAccess: FileAccessLifetimes,
         browser: BrowserViewController, window: NSWindow?, notice: @escaping @MainActor (String) -> Void) throws {
+        try self.init(roots: .zip(roots), sourceAccess: sourceAccess, browser: browser, window: window, notice: notice)
+    }
+    init(roots: ArchivePromiseRoots, sourceAccess: FileAccessLifetimes,
+        browser: BrowserViewController, window: NSWindow?, notice: @escaping @MainActor (String) -> Void,
+        workFinished: @escaping @MainActor () -> Void = {}) throws {
         guard let engine = browser.recoverableFileOperations else { throw FileOperationFailure.unavailable }
-        self.roots = roots; names = try ZIPRootExportNames.offered(roots); state = try .init(count: roots.count)
+        self.roots = roots; rootCount = roots.count; names = try roots.offeredNames(); state = try .init(count: roots.count)
         self.sourceAccess = sourceAccess; self.browser = browser; self.engine = engine
-        // An offer keeps its admitted producer choices through asynchronous
-        // callbacks; direct extraction switches cannot change an active offer.
-        publicFilePublication = ArchivePromiseExportFeature.publicFilePublication
-        publicTreePublication = ArchivePromiseExportFeature.publicTreePublication
-        archiveWindow = window; self.notice = notice
-        queue = OperationQueue(); queue.maxConcurrentOperationCount = 1; queue.name = "Traverse.ZIPPromiseRequests"
+        // Offers keep their independently admitted producer choices through
+        // asynchronous callbacks; ZIP permission cannot select a TAR producer.
+        switch roots {
+        case .zip:
+            publicFilePublication = ArchivePromiseExportFeature.publicFilePublication
+            publicTreePublication = ArchivePromiseExportFeature.publicTreePublication
+        case .tar(let entries):
+            guard TARPromiseExportFeature.available else { throw FileOperationFailure.unavailable }
+            let file = TARPromiseExportFeature.publicFile, tree = TARPromiseExportFeature.publicTree
+            guard entries.allSatisfy({ entry in
+                entry.singleFileName != nil ? file : entry.singleFolderName != nil && tree
+            }) else { throw FileOperationFailure.unavailable }
+            publicFilePublication = file; publicTreePublication = tree
+        }
+        archiveWindow = window; self.notice = notice; self.workFinished = workFinished
+        queue = OperationQueue(); queue.maxConcurrentOperationCount = 1; queue.name = "Traverse.ArchivePromiseRequests"
     }
     var canHandOff: Bool { !handed && !retired && ApplicationArchiveExports.shared.canOffer }
     var isTerminal: Bool { state.isTerminal && work == nil && callbackDispatch.isIdle && sourceAccess == nil }
     func provider(for item: ZIPArchiveItem, marker: UUID) -> NSFilePromiseProvider? {
-        guard canHandOff, let index = roots.firstIndex(where: { $0.archivePath.utf8.elementsEqual(item.path.utf8) }) else { return nil }
+        provider(forArchivePath: item.path, marker: marker)
+    }
+    func provider(forArchivePath path: String, marker: UUID) -> NSFilePromiseProvider? {
+        guard canHandOff, let roots, let index = roots.index(for: path) else { return nil }
         let inferred = UTType(filenameExtension: (names[index] as NSString).pathExtension)
-        let type = roots[index].kind == .directory ? UTType.folder : (inferred?.conforms(to: .data) == true ? inferred! : .data)
+        let type = roots.isDirectory(at: index) ? UTType.folder : (inferred?.conforms(to: .data) == true ? inferred! : .data)
         let delegate = ArchivePromiseDelegate(index: index, name: names[index], job: self, queue: queue)
         return ArchiveFilePromiseProvider(type: type.identifier, delegate: delegate, marker: marker)
     }
     @discardableResult func handOff(diagnosticTrace: UUID? = nil) -> Bool {
         guard canHandOff, ApplicationArchiveExports.shared.retain(self) else { retireUncalled(); return false }
         handed = true
-        ApplicationDiagnostics.shared.event(.archiveExtract, .requested, trace: id, count: UInt64(roots.count),
+        ApplicationDiagnostics.shared.event(.archiveExtract, .requested, trace: id, count: UInt64(rootCount),
             context: .init(.dragSession, flags: [.sourceObserved]), relatedTrace: diagnosticTrace)
         expiry = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(120)) } catch { return }
@@ -239,23 +296,64 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     }
     func callbackDidDispatch() { releaseIfTerminal(); notifySettledForVerification() }
 
-    func request(_ index: Int, url: URL, completion: ArchivePromiseCompletion) {
+    private func checkpoint(_ value: String) {
+        #if DEBUG
+        checkpointForVerification = value
+        #endif
+    }
+    private func refuse(_ failure: FileOperationFailure, message: String) {
+        notice(message)
+        ApplicationDiagnostics.shared.event(.archiveExtract, .failed, trace: id,
+            error: DiagnosticErrors.operation(failure))
+    }
+
+    /// Flatten a composed file URL without changing its resolved path. Dot
+    /// components remain refused; destination authority is still established
+    /// by the observed parent and the concrete operation engine.
+    static func resolvedDestination(_ supplied: URL) -> URL? {
+        guard supplied.isFileURL, supplied.relativePath.utf8.count <= 8_192,
+              !supplied.relativePath.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+        let url = supplied.absoluteURL
+        guard url.isFileURL, url.baseURL == nil,
+              url.path.utf8.elementsEqual(supplied.path.utf8),
+              url.path.utf8.count <= 8_192, url.lastPathComponent.utf8.count <= 255,
+              !url.lastPathComponent.isEmpty, url.lastPathComponent != ".", url.lastPathComponent != "..",
+              !url.lastPathComponent.contains("/"), !url.lastPathComponent.contains("\0"),
+              url.query == nil, url.fragment == nil,
+              url.standardizedFileURL.path.utf8.elementsEqual(url.path.utf8) else { return nil }
+        return url
+    }
+
+    func request(_ index: Int, url suppliedURL: URL, completion: ArchivePromiseCompletion) {
+        #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
+        callbacksForVerification += 1
+        #endif
+        checkpoint("callback-admission")
         guard handed, !retired, state.entry(index) == .offered else {
             completion.finish(CocoaError(.fileWriteUnknown)); return
         }
-        guard url.isFileURL, url.baseURL == nil,
-              url.path.utf8.count <= 8_192, url.lastPathComponent.utf8.count <= 255,
-              !url.lastPathComponent.isEmpty, url.lastPathComponent != ".", url.lastPathComponent != "..",
-              !url.lastPathComponent.contains("\0"), url.query == nil, url.fragment == nil,
-              url.standardizedFileURL.path.utf8.elementsEqual(url.path.utf8) else {
+        #if DEBUG
+        callbackShapeForVerification = ["fileURL": suppliedURL.isFileURL, "absolute": suppliedURL.baseURL == nil,
+            "directoryURL": suppliedURL.hasDirectoryPath, "directoryRoot": roots?.isDirectory(at: index) == true,
+            "canonicalPath": suppliedURL.standardizedFileURL.path.utf8.elementsEqual(suppliedURL.path.utf8),
+            "noQuery": suppliedURL.query == nil, "noFragment": suppliedURL.fragment == nil,
+            "boundedPath": suppliedURL.path.utf8.count <= 8_192, "boundedName": suppliedURL.lastPathComponent.utf8.count <= 255]
+        #endif
+        checkpoint("callback-url")
+        guard let url = Self.resolvedDestination(suppliedURL) else {
             completion.finish(CocoaError(.fileWriteUnknown))
-            failPending(state.stop(), error: CocoaError(.fileWriteUnknown)); releaseIfTerminal(); return
+            failPending(state.stop(), error: CocoaError(.fileWriteUnknown))
+            refuse(.invalidRequest, message: "Export couldn’t start because the destination couldn’t be verified.")
+            releaseIfTerminal(); return
         }
+        checkpoint("callback-parent")
         #if DEBUG
         if let expected = ArchivePromiseExportFeature.expectedParentForGestureVerification,
            !url.deletingLastPathComponent().standardizedFileURL.path.utf8.elementsEqual(expected.standardizedFileURL.path.utf8) {
             completion.finish(CocoaError(.fileWriteUnknown))
-            failPending(state.stop(), error: CocoaError(.fileWriteUnknown)); releaseIfTerminal(); return
+            failPending(state.stop(), error: CocoaError(.fileWriteUnknown))
+            refuse(.destinationChanged, message: "The destination changed. Drop into its current folder again.")
+            releaseIfTerminal(); return
         }
         #endif
         #if TRAVERSE_SFTP_EDITOR_QA
@@ -267,6 +365,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
             }
         }
         #endif
+        checkpoint("callback-queue")
         guard state.request(index) else { completion.finish(CocoaError(.fileWriteUnknown)); return }
         let key = Data(url.deletingLastPathComponent().path.utf8)
         guard parentKey == nil || parentKey == key else {
@@ -278,10 +377,13 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
         if work == nil { start() }
     }
     private func start() {
+        checkpoint("operation-admission")
         guard !browser.isBrowserSuspended, browser.operationTask == nil,
               !ApplicationFileActivity.gate.isClosed, browser.recoverableFileOperations === engine,
               browser.startOperationPresentation("Exporting selected archive items…", diagnosticTrace: id) else {
-            failPending(state.stop(), error: CocoaError(.fileWriteUnknown)); releaseIfTerminal(); return
+            failPending(state.stop(), error: CocoaError(.fileWriteUnknown))
+            refuse(.unavailable, message: "Finish the current file operation before exporting these items.")
+            releaseIfTerminal(); return
         }
         let task = Task { [self] in await run() }
         work = task; browser.operationTask = task
@@ -294,6 +396,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
             // reacquires actual access before comparing that observation.
             releaseIfTerminal()
             notifySettledForVerification()
+            workFinished()
         }
         while let index = state.next() {
             guard let request = requests[index] else {
@@ -305,9 +408,11 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
             let binding = diagnostics.operationBinding(trace: trace), progress = browser.operationProgressSink
             do {
                 try Task.checkCancellation()
+                checkpoint("operation-state")
                 diagnostics.event(.archiveExtract, .preparing, trace: trace, context: .init(.queueStatePreparation))
                 try await browser.operationCoordinator.prepareOperationState(for: engine)
                 try Task.checkCancellation()
+                checkpoint("destination-access")
                 diagnostics.event(.archiveExtract, .resolving, trace: trace, context: .init(.folderScope))
                 try await acquireParent(for: request.url)
                 diagnostics.event(.archiveExtract, .admitted, trace: trace, context: .init(.queueDestination, flags: [.destinationObserved]))
@@ -324,14 +429,17 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
                 // and publishes only the exact receiver-supplied absent leaf.
                 try Task.checkCancellation()
                 guard !state.stopped else { throw CancellationError() }
-                let plan = try await ZIPRootExtractionPreparation.prepare(roots[index], engine: engine, parent: parent,
+                guard let roots else { throw FileOperationFailure.unavailable }
+                checkpoint("production-plan")
+                let plan = try await roots.prepare(index, engine: engine, parent: parent,
                     name: callbackURL.lastPathComponent, observing: parentObservation,
                     publicFile: publicFilePublication, publicTree: publicTreePublication)
                 guard plan.destination.path.utf8.elementsEqual(callbackURL.path.utf8) else {
                     throw FileOperationFailure.destinationChanged
                 }
                 try Task.checkCancellation()
-                let result = await engine.performZIPRootExport(plan, progress: { binding.receive($0.jobID); progress?($0) })
+                checkpoint("production")
+                let result = await plan.perform(using: engine, progress: { binding.receive($0.jobID); progress?($0) })
                 #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
                 outcomesForVerification.append(result)
                 #endif
@@ -350,6 +458,10 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
                 if Task.isCancelled { failPending(state.stop(), error: CocoaError(.userCancelled)) }
                 notice(summary(failed: !succeeded || state.stopped))
             } catch {
+                #if DEBUG
+                failureForVerification = (error as? FileOperationFailure)?.rawValue
+                    ?? "cocoa-\(Self.callbackFailure(error).code.rawValue)"
+                #endif
                 let discarded = (try? state.finish(index, succeeded: false)) ?? state.stop()
                 requests[index] = nil
                 request.completion.finish(Self.callbackFailure(error))
@@ -433,7 +545,10 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
         guard state.isTerminal, work == nil else { return }
         callbackDispatch.close()
         guard callbackDispatch.isIdle else { return }
-        sourceAccess = nil; destinationAccess = nil; expiry?.cancel(); expiry = nil
+        // TAR selections can retain a prepared spool. Drop the entire input
+        // graph after actual workers/callbacks drain, even if Finder retains
+        // its provider/delegate and therefore this completed job.
+        roots = nil; sourceAccess = nil; destinationAccess = nil; expiry?.cancel(); expiry = nil
         ApplicationArchiveExports.shared.release(self)
     }
     private func notifySettledForVerification() {
@@ -443,9 +558,9 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     }
     private func summary(failed: Bool) -> String {
         let count = state.completedCount
-        let text = failed ? "Export stopped after \(count) of \(roots.count) items. Completed exports remain; inspect Results for any retained work."
-            : count == roots.count ? "Exported \(count) item\(count == 1 ? "" : "s"). The archive is unchanged."
-            : "Exported \(count) of \(roots.count) items requested by the receiving app. The archive is unchanged."
+        let text = failed ? "Export stopped after \(count) of \(rootCount) items. Completed exports remain; inspect Results for any retained work."
+            : count == rootCount ? "Exported \(count) item\(count == 1 ? "" : "s"). The archive is unchanged."
+            : "Exported \(count) of \(rootCount) items requested by the receiving app. The archive is unchanged."
         browser.status.stringValue = text; return text
     }
     private func publish(_ result: RecoverableOperationResult) {

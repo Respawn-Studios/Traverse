@@ -911,9 +911,17 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
                 try UIVerification.require(controller.model.name.hasSuffix(suffix) && controller.model.createTitle == (bzip2 ? "Create TAR.bz2" : gzip ? "Create TAR.gz" : "Create TAR"),
                     "Format choice updates the suggested name and native primary action")
                 if compressed {
+                    let alias = bzip2 ? ".tbz" : ".tgz"
+                    let stem = String(controller.model.name.dropLast(suffix.count))
+                    controller.model.name = stem + alias
+                    try await wait { !controller.model.isPreparing
+                        && controller.model.plan?.destination.lastPathComponent == stem + alias }
+                    try UIVerification.require(controller.model.name == stem + alias,
+                        "An explicit compressed-TAR alias keeps its complete filename")
                     controller.model.chooseOutputFormat(.zip)
                     try await wait { !controller.model.isPreparing && controller.model.plan?.destination.pathExtension == "zip" }
-                    try UIVerification.require(!controller.model.name.contains(".tar."), "Changing gzip back to ZIP removes the complete old suffix")
+                    try UIVerification.require(controller.model.name == stem + ".zip",
+                        "Changing an aliased compressed TAR back to ZIP replaces the complete old suffix")
                     controller.model.chooseOutputFormat(bzip2 ? .tarBzip2 : .tarGzip)
                     controller.model.tarCompression = bzip2 ? .bzip2Fast : .gzipFast
                     try await wait { !controller.model.isPreparing && controller.model.plan?.destination.lastPathComponent.hasSuffix(suffix) == true }

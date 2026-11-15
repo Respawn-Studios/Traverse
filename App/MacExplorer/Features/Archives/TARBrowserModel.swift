@@ -29,7 +29,10 @@ struct TARClipboardSource {
     @Published private(set) var isPreparingPreview=false
     @Published private(set) var notice=""
     @Published private(set) var requiresPreparation = false
-    @Published var selection=Set<TARItemID>()
+    @Published var selection=Set<TARItemID>() {
+        didSet { if selection != oldValue { prepareExternalExport() } }
+    }
+    @Published private(set) var externalExportReady = false
     @Published var query="" { didSet { if !installing && query != oldValue { scheduleQuery() } } }
     @Published var scope=ArchiveNameScope.folder { didSet { if !installing && scope != oldValue { scheduleQuery() } } }
     @Published private(set) var order=TARArchiveOrder()
@@ -57,6 +60,12 @@ struct TARClipboardSource {
     private var token=UUID(),pageToken=UUID(),closed=false,installing=false
     private var readTask:Task<TARArchiveSession,Error>?,queryTask:Task<Page,Error>?
     private var work:Task<Void,Never>?,filterWork:Task<Void,Never>?,selectionWork:Task<Void,Never>?
+    private let exportPreparation = ArchivePromisePreparation<Set<TARItemID>>()
+    private var handedExports: [ArchivePromiseExport] = []
+    #if DEBUG
+    var memberDragHandoffForVerification: ((ArchivePromiseExport) -> Void)?
+    var lastHandedExportForVerification: ArchivePromiseExport? { handedExports.last }
+    #endif
     private var isPreparingDrag = false
     private var createdMemberToReveal: (archive: URL, path: String)?
     private struct Open {let source:URL;weak var browser:BrowserViewController?;let token:UUID;let preparesCompressed:Bool}
@@ -70,6 +79,11 @@ struct TARClipboardSource {
         self.settings=settings;self.reader=reader
         textPreview=ArchiveTextPreviewOwner(tarReader:reader,settings:settings)
         textPreview.onBusy={ [weak self] in self?.isPreviewing=$0 }
+        exportPreparation.changed = { [weak self] in
+            guard let self else { return }
+            externalExportReady = exportPreparation.offer(for: selection) != nil
+        }
+        exportPreparation.refreshRequested = { [weak self] in self?.prepareExternalExport() }
         matching=settings.$symbolTolerantNames.dropFirst().receive(on:RunLoop.main).sink{[weak self]_ in self?.scheduleQuery()}
     }
     var canBack:Bool { !closed && !suspended && (embeddedBack != nil || historyIndex>0) }
@@ -243,14 +257,13 @@ struct TARClipboardSource {
             && permitsEmbeddedAction && browser?.isBrowserSuspended == false && !ApplicationFileActivity.gate.isClosed
     }
     static func isCompressed(_ source: URL) -> Bool {
-        let name = source.lastPathComponent.lowercased()
-        return name.hasSuffix(".tar.gz") || name.hasSuffix(".tgz")
-            || TARBzip2Feature.available && (name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2"))
+        let kind = ArchiveFilename(source.lastPathComponent)?.kind
+        return kind == .tarGzip || TARBzip2Feature.available && kind == .tarBzip2
     }
     static func allowsCompressedEditing(_ source: URL) -> Bool {
-        let name = source.lastPathComponent.lowercased()
-        if name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2") { return TARBzip2Feature.available }
-        return TARGzipEditingFeature.available && (name.hasSuffix(".tar.gz") || name.hasSuffix(".tgz"))
+        let kind = ArchiveFilename(source.lastPathComponent)?.kind
+        if kind == .tarBzip2 { return TARBzip2Feature.available }
+        return TARGzipEditingFeature.available && kind == .tarGzip
     }
     func prepareCompressed() {
         guard canPrepareCompressed, let source, let browser else { return }
@@ -381,13 +394,42 @@ struct TARClipboardSource {
         }
     }
     func canStartMemberDrag(_ ids: Set<TARItemID>) -> Bool {
-        ArchiveMemberDragActivation.available && canCaptureClipboardMembers && selection == ids
+        (ArchiveMemberDragActivation.available || TARPromiseExportFeature.available
+            && exportPreparation.offer(for: ids) != nil) && canCaptureClipboardMembers && selection == ids
             && (1...ArchiveMemberDragSource.maximumItems).contains(ids.count)
             && !ApplicationFileActivity.gate.isClosed
     }
     func captureMemberDrag(_ ids: Set<TARItemID>) -> ArchiveMemberDragOffer? {
         guard canStartMemberDrag(ids) else { return nil }
-        return .init(tar: self, generation: token, page: pageToken, ids: ids)
+        let export = TARPromiseExportFeature.available ? exportPreparation.offer(for: ids) : nil
+        return .init(tar: self, generation: token, page: pageToken, ids: ids, externalExport: export)
+    }
+    private func prepareExternalExport() {
+        exportPreparation.invalidate()
+        guard TARPromiseExportFeature.available, (1...128).contains(selection.count),
+              canCaptureClipboardMembers, ApplicationArchiveExports.shared.canOffer,
+              let session, let source, let browser else { return }
+        let ids = selection, generation = token, page = pageToken
+        exportPreparation.request(ids, source: source, browser: browser, window: window,
+            roots: { .tar(try await session.rootsForExport(ids)) },
+            isCurrent: { [weak self] in
+                guard let self else { return false }
+                return !closed && !suspended && token == generation && pageToken == page
+                    && selection == ids && current && permitsEmbeddedAction
+            }, canPrepare: { [weak self] in self?.canCaptureClipboardMembers == true },
+            notice: { [weak self] in if let self, !closed { notice = $0 } })
+    }
+    func memberDragDidHandOff(_ offer: ArchiveMemberDragOffer) {
+        guard let export = offer.externalExport, export.handed else { return }
+        handedExports.removeAll { $0.isTerminal }
+        if !handedExports.contains(where: { $0 === export }) { handedExports.append(export) }
+        #if DEBUG
+        memberDragHandoffForVerification?(export)
+        #endif
+        externalExportReady = false
+    }
+    func memberDragDidEnd(_ offer: ArchiveMemberDragOffer) {
+        if exportPreparation.prepared === offer.externalExport { prepareExternalExport() }
     }
     func isCurrentMemberDrag(_ offer: ArchiveMemberDragOffer) -> Bool {
         offer.tarModel === self && !closed && !suspended && current && permitsEmbeddedAction
@@ -681,15 +723,19 @@ struct TARClipboardSource {
             }catch{if !closed,currentToken==token{notice=Self.message(error)}}
         }
     }
-    func stop(){createdMemberToReveal=nil;token=UUID();pageToken=UUID();desiredOpen=nil;desiredPage=nil;desiredEmbedded=nil;desiredEmbeddedNavigation=nil;work?.cancel();readTask?.cancel();queryTask?.cancel();filterWork?.cancel();selectionWork?.cancel();textPreview.stop();current=false;requiresPreparation = CompressedTARFeature.available && isCompressedSource;notice="Stopped. Refresh the archive when you’re ready."}
-    func suspend(){suspended=true;stop();textPreview.prepareForVolumeQuiescence()}
+    func stop(){exportPreparation.stop();externalExportReady=false;createdMemberToReveal=nil;token=UUID();pageToken=UUID();desiredOpen=nil;desiredPage=nil;desiredEmbedded=nil;desiredEmbeddedNavigation=nil;work?.cancel();readTask?.cancel();queryTask?.cancel();filterWork?.cancel();selectionWork?.cancel();textPreview.stop();current=false;requiresPreparation = CompressedTARFeature.available && isCompressedSource;notice="Stopped. Refresh the archive when you’re ready."}
+    func suspend(){suspended=true;stop();handedExports.forEach { $0.retireUncalled() };textPreview.prepareForVolumeQuiescence()}
     func resume(){suspended=false;textPreview.resumeAfterVolumeQuiescence();notice="Refresh to read this archive again."}
     func drain()async {
-        if let work{await work.value};if let filterWork{await filterWork.value};if let selectionWork{await selectionWork.value};await textPreview.drain();await reader.drain()
+        if let work{await work.value};if let filterWork{await filterWork.value};if let selectionWork{await selectionWork.value}
+        await exportPreparation.drain()
+        for export in handedExports { await export.drain() }
+        await textPreview.drain();await reader.drain()
         if suspended, let session { await session.close(); self.session=nil }
     }
     func closeAndDrain()async {
-        closed=true;stop();await textPreview.closeAndDrain();await drain()
+        closed=true;stop();handedExports.forEach { $0.retireUncalled() }
+        await textPreview.closeAndDrain();await drain();handedExports = []
         if let session{await session.close()};session=nil;source=nil;summary=nil;compressedSummary=nil;items=[];breadcrumbs=[];browser=nil;matching=nil
     }
     static func message(_ error:Error)->String {

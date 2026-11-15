@@ -6,6 +6,7 @@ same App checks, generated fixtures, product proof and operation owners.
 from __future__ import annotations
 
 import ctypes
+import bz2
 import gzip
 import hashlib
 import io
@@ -127,19 +128,58 @@ def verify_stopped_marked_archive_creation(case: Path) -> Path:
     return verify_native_archive_creation(case, feature, marked_source_create=True)
 
 
-def _run_generated_sftp_finder_promise(command: list[str], case: Path, env: dict[str, str], output) -> subprocess.CompletedProcess:
-    """Drive the existing generated SFTP case through one actual Finder callback."""
-    destination = case / "source/Destination"
+def _write_generated_archive(path: Path, bodies: dict[str, bytes], format: str) -> None:
+    if format == "zip":
+        with zipfile.ZipFile(path, "x", compression=zipfile.ZIP_DEFLATED) as target:
+            for name, body in bodies.items():
+                target.writestr(name, body)
+    else:
+        mode = {"tar": "w", "tar.gz": "w:gz", "tar.bz2": "w:bz2"}[format]
+        with tarfile.open(path, mode, format=tarfile.USTAR_FORMAT) as target:
+            for name, body in bodies.items():
+                member = tarfile.TarInfo(name)
+                member.mode = 0o755 if name.endswith("/") else 0o644
+                member.size = len(body)
+                member.type = tarfile.DIRTYPE if name.endswith("/") else tarfile.REGTYPE
+                target.addfile(member, io.BytesIO(body))
+
+
+def _generated_path_absent(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str, str], output,
+                                  *, archive: bool = False, destination: Path | None = None,
+                                  archive_kinds: tuple[str, ...] = ("file", "folder")) -> subprocess.CompletedProcess:
+    """One ordinary owner, an independent receiver and bounded native controls."""
+    destination = destination or case / "source/Destination"
     process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE,
                                stdout=output, stderr=subprocess.STDOUT)
-    offset, pending, opened, completed, sent = 0, b"", False, False, False
+    offset, pending, opened, phase = 0, b"", False, "file"
     began, settled = time.monotonic(), None
+    delivered, sent, failures, events = [], [], [], []
+    cancelling, controls = False, 0
+    def send(message: bytes, *, close: bool) -> None:
+        nonlocal controls
+        if controls >= (len(archive_kinds) if archive else 1):
+            raise RuntimeError("Generated receiver control count exceeded")
+        if process.stdin is None or process.stdin.closed:
+            raise RuntimeError("Generated receiver control pipe closed")
+        process.stdin.write(message)
+        process.stdin.flush()
+        controls += 1
+        if close:
+            process.stdin.close()
     try:
         while True:
             output.flush()
-            data = (case / "evidence/process.log").read_bytes()
+            data = Path(output.name).read_bytes()
             if len(data) > 2 << 20:
-                raise RuntimeError("Generated SFTP receiver output exceeded its bound")
+                raise RuntimeError("Generated receiver output exceeded its bound")
             pending += data[offset:]
             offset = len(data)
             while b"\n" in pending:
@@ -147,40 +187,58 @@ def _run_generated_sftp_finder_promise(command: list[str], case: Path, env: dict
                 if not line.startswith(b"TRAVERSE_PROMISE "):
                     continue
                 event = json.loads(line[len(b"TRAVERSE_PROMISE "):])
+                events.append(event)
                 kind, values = event.get("event"), event.get("values", {})
                 if kind == "failed":
-                    raise RuntimeError(f"Generated SFTP Finder promise failed at {values.get('stage', 'unknown')}")
-                if kind == "ready" and not opened:
-                    if next(destination.iterdir(), None) is not None:
-                        raise RuntimeError("Generated Finder destination was not empty")
-                    opened = subprocess.run(["/usr/bin/open", "-b", "com.apple.finder", str(destination)],
-                                            capture_output=True, timeout=15).returncode == 0
+                    failures.append(values)
+                    if not cancelling and process.poll() is None and len(sent) < (len(archive_kinds) if archive else 1):
+                        send(b"cancel\n", close=True)
+                        cancelling = True
+                if kind == "ready" and not cancelling:
+                    phase = values.get("kind", "file")
+                    wanted = archive_kinds if archive else ("file",)
+                    if len(sent) >= len(wanted) or phase != wanted[len(sent)]:
+                        raise RuntimeError("Generated receiver phase differs")
                     if not opened:
-                        raise RuntimeError("Could not open the generated Finder destination")
-                    print(f"Drag the selected generated SFTP file into Finder at {destination}; choose that exact folder if prompted.", flush=True)
-                if kind == "write-completed":
-                    if values.get("nativeCallback") is not True or values.get("parentChoices") != 1 or completed:
-                        raise RuntimeError("The generated external callback or parent choice was not exact")
-                    completed = True
+                        if next(destination.iterdir(), None) is not None:
+                            raise RuntimeError("Generated Finder destination was not empty")
+                        subprocess.run(["/usr/bin/open", "-b", "com.apple.finder", str(destination)],
+                                       check=True, capture_output=True, timeout=15)
+                        opened = True
+                    print(f"Generated {phase} drag ready: {destination}", flush=True)
+                if kind == "write-completed" and not cancelling:
+                    if values.get("nativeCallback") is not True or values.get("parentChoices") != (0 if archive else 1) or phase in delivered:
+                        raise RuntimeError("Generated external callback or parent choice differs")
+                    delivered.append(phase)
                     settled = time.monotonic()
-            if completed and not sent and settled is not None and time.monotonic() - settled >= 0.75:
-                leaf = destination / "Generated Promise.txt"
-                expected = b"Traverse generated promise control\n"
-                if read_artifact(leaf, len(expected)) != expected:
-                    raise RuntimeError("Generated Finder output differs from the expected body")
-                if process.stdin is None:
-                    raise RuntimeError("Generated SFTP control pipe closed")
-                process.stdin.write(b"finish\n")
-                process.stdin.flush()
-                process.stdin.close()
-                sent = True
+            if not cancelling and phase in delivered and phase not in sent and settled is not None and time.monotonic() - settled >= 0.75:
+                expected = {"Generated Promise.txt": b"Generated first root\n" if archive else b"Traverse generated promise control\n"}
+                if phase == "folder":
+                    expected = {"Generated Folder/Report.txt": b"Generated folder member\n",
+                                "Generated Folder/Deep/More.txt": b"Generated nested member\n"}
+                    empty = destination / "Generated Folder/Empty"
+                    if empty.is_symlink() or not empty.is_dir() or next(empty.iterdir(), None) is not None:
+                        raise RuntimeError("Generated empty folder differs")
+                for name, body in expected.items():
+                    if read_artifact(destination / name, len(body)) != body:
+                        raise RuntimeError("Generated Finder output differs")
+                sent.append(phase)
+                send(b"finish\n", close=not archive or len(sent) == len(archive_kinds))
             if process.poll() is not None:
                 break
-            if time.monotonic() - began > 300:
-                raise RuntimeError("Generated SFTP Finder gesture deadline; success not inferred")
+            if time.monotonic() - began > (600 if archive else 300):
+                raise RuntimeError("Generated Finder gesture deadline; success not inferred")
             time.sleep(0.1)
+        wanted = list(archive_kinds) if archive else ["file"]
+        receiver = {"passed": not failures and delivered == sent == wanted,
+                    "nativeFailures": failures, "independentDeliveries": delivered,
+                    "controlMessages": controls, "finishedInputs": sent, "additionalParentChoices": 0 if archive else 1,
+                    "events": events}
+        (case / "evidence/finder-receiver.json").write_text(json.dumps(receiver, indent=2) + "\n")
         return subprocess.CompletedProcess(command, process.returncode)
     finally:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
         if process.poll() is None:
             process.terminate()
             try:
@@ -199,8 +257,10 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                  promise_flow: bool = False, folder_flow: bool = False, external_promise_receiver: bool = False,
                  public_tree: bool = False, public_archive: bool = False,
                  incremental_analysis: bool = False, connection_phase: str = "persistence",
-                 marked_source_create: bool = False) -> Path:
+                 marked_source_create: bool = False, archive_format: str = "zip") -> Path:
     """Run existing feature checks in the ordinary app, with generated data only."""
+    if archive_format not in ("zip", "tar", "tar.gz", "tar.bz2") or archive_format != "zip" and feature != "archive-export":
+        raise ValueError("Choose an archive format only for archive-export")
     gzip_tar = feature == "create-targz"
     bzip2_tar = feature == "create-tarbz2"
     if gzip_tar or bzip2_tar:
@@ -232,12 +292,14 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         raise ValueError("Choose the matching existing drive flow for hardware sampling or a random benchmark")
     if folder_flow:
         promise_flow = True
+        if feature == "archive-export" and not external_promise_receiver:
+            raise ValueError("Archive folder-flow selects the actual Finder gesture")
     if external_promise_receiver:
         promise_flow = True
-        if feature != "sftp-batch-download" or any((folder_flow, offscreen, motion, large_interface, interactive,
+        if feature not in ("sftp-batch-download", "archive-export") or folder_flow and feature != "archive-export" or any((offscreen, motion, large_interface, interactive,
                                                      generated_port is not None, generated_fingerprint is not None,
                                                      private_input is not None)):
-            raise ValueError("The generated external promise uses only the visible single-file SFTP Finder flow")
+            raise ValueError("The generated external receiver uses the visible SFTP or archive Finder flow")
     if public_archive and feature not in ("tar-archive", "compressed-tar"):
         raise ValueError("Public TAR candidates reuse the existing plain/compressed TAR flow")
     if marked_source_create and (feature not in ("create-zip", "create-tar") or not offscreen
@@ -245,7 +307,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         raise ValueError("Marked archive creation uses only the generated offscreen ZIP/TAR flow")
     if public_tree and not (feature == "archive-pane" or feature == "sftp-batch-download" and folder_flow):
         raise ValueError("The public-tree candidate reuses archive-pane or the SFTP folder flow")
-    if promise_flow and (feature != "sftp-batch-download" or motion or large_interface or offscreen):
+    if promise_flow and (feature not in ("sftp-batch-download", "archive-export") or motion or large_interface or offscreen):
         raise ValueError("Promise callbacks use the existing visible SFTP receive flow without motion/layout variants")
     if feature == "sftp-connected-actions":
         if generated_port is None or not 1024 < generated_port < 65536 \
@@ -274,6 +336,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         "local-editor": ("editor-native-application", "--check-local-editor", "native-editor-app.json"),
         "operation-access": ("operation-access-recovery", "--check-operation-access", "result.json"),
         "archive-pane": ("traverse-archive-pane-destination", "--check-archive-pane-destination", "result.json"),
+        "archive-export": ("native-archive-export", "--check-archive-promise-export", "native-archive-promise-export.json"),
         "trash-command": ("trash-app-route-generated", "--check-trash-app-route-generated", "result.json"),
         "remote-properties": ("remote-item-properties", "--check-remote-properties", "native-remote-properties.json"),
         "support-details": ("support-details", "--check-support-details", "native.json"),
@@ -328,13 +391,16 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
     if not skip_build:
         build()
     action, flag, report = specifications[feature]
+    archive_kinds = ("folder",) if folder_flow else ("file", "folder")
+    if feature == "archive-export" and external_promise_receiver:
+        action, flag, report = "native-archive-export-finder", "--check-archive-promise-gesture", "native-archive-promise-cold.json"
     if feature == "smb-connected-uploads":
         report = f"connect-live-{generated_flow}.json"
-    elif folder_flow:
+    elif folder_flow and feature != "archive-export":
         report = "native-sftp-folder-drop.json"
-    elif external_promise_receiver:
+    elif external_promise_receiver and feature != "archive-export":
         report = "native-sftp-external-promise.json"
-    elif promise_flow:
+    elif promise_flow and feature != "archive-export":
         report = "native-sftp-promise.json"
     elif incremental_analysis:
         report = "persistence-unchanged-reopen-result.json"
@@ -349,7 +415,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
     for name in directories:
         (case / name).mkdir(mode=0o700)
     marker = {"packet": "traverse-development-v1",
-              "action": "native-sftp-promise-gesture" if external_promise_receiver else action}
+              "action": "native-sftp-promise-gesture" if external_promise_receiver and feature != "archive-export" else action}
     if external_promise_receiver:
         marker["externalPromiseReceiver"] = True
     if marked_source_create:
@@ -363,6 +429,27 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
     # Independent source work may continue while this immutable app is checked.
     (case / "evidence/compiled-inputs.json").write_bytes(compiled_bytes)
     (case / "evidence/controller-inputs.json").write_text(json.dumps(controller_inputs, sort_keys=True) + "\n")
+    archive_export_source, finder_destination = None, None
+    if feature == "archive-export":
+        if external_promise_receiver:
+            bodies = {"Archive/Generated Promise.txt": b"Generated first root\n",
+                      "Archive/Generated Folder/Report.txt": b"Generated folder member\n",
+                      "Archive/Generated Folder/Deep/More.txt": b"Generated nested member\n",
+                      "Archive/Generated Folder/Empty/": b""}
+            (case / "source/Source").mkdir(mode=0o700)
+            destination_name = "Finder Destination " + case.name[:8]
+            finder_destination = case / "source" / destination_name
+            finder_destination.mkdir(mode=0o700)
+            archive_export_source = case / "source/Source" / ("Generated." + archive_format)
+        else:
+            bodies = {"First.txt": b"Generated first root\n", "Last.txt": b"Generated last root\n",
+                      "Folder/Member.txt": b"Generated folder member\n", "Folder/Empty/": b""}
+            archive_export_source = case / "source" / ("Generated." + archive_format)
+            destination_name = "Destination"
+        _write_generated_archive(archive_export_source, bodies, archive_format)
+        (case / "inputs.json").write_text(json.dumps(dict(archiveFormat=archive_format, publicPublication=True,
+            kind="folder" if folder_flow else "both", directAccess=True, destinationName=destination_name,
+            sourceSHA256=hashlib.sha256(archive_export_source.read_bytes()).hexdigest())) + "\n")
     if feature == "selection-group":
         mode = "off-light150" if large_interface or motion_mode == "off" else motion_mode + "-dark"
         items = case / "source/Items"
@@ -519,6 +606,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                 archive.addfile(entry, None if body is None else io.BytesIO(body))
         source = case / "source" / ("Review.tar.gz" if feature == "compressed-tar" else "Review.tar")
         source.write_bytes(gzip.compress(data.getvalue(), mtime=0) if feature == "compressed-tar" else data.getvalue())
+        if feature == "compressed-tar":
+            (case / "source/Review bzip2.tbz").write_bytes(bz2.compress(data.getvalue()))
         if feature == "tar-archive":
             with zipfile.ZipFile(case / "source/Review.zip", mode="x", compression=zipfile.ZIP_DEFLATED) as archive:
                 item = zipfile.ZipInfo("Note.txt", date_time=(2024, 2, 29, 13, 34, 56))
@@ -676,11 +765,13 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                        "--record-analysis-persistence" if feature == "analysis-persistence" else "--check-development-motion")
     env = environment(tooling=False)
     env["MAC_EXPLORER_TEST_ROOT"] = str(case)
-    if feature == "support-details":
+    if feature in ("support-details", "archive-export"):
         env["MAC_EXPLORER_STATE_ROOT"] = str(case / "state")
         env["MAC_EXPLORER_CACHE_ROOT"] = str(case / "cache")
     print(f"Native {feature}: {case}", flush=True)
-    if marked_source_create:
+    if feature == "archive-export" and external_promise_receiver:
+        phases = ("deliver", "cold-undo")
+    elif marked_source_create:
         phases = ("create", "cold-undo")
     elif feature == "analysis-persistence":
         phases = ("unchanged", "unchanged-reopen") if incremental_analysis else ("seed", "reopen", "repair")
@@ -691,7 +782,9 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
     else:
         phases = (None,)
     for phase in phases:
-        if marked_source_create:
+        if feature == "archive-export" and external_promise_receiver:
+            phase_command = command + (["--archive-export-cold-undo"] if phase == "cold-undo" else [])
+        elif marked_source_create:
             phase_command = command + (["--archive-create-cold-undo"] if phase == "cold-undo" else [])
         elif feature == "selection-group":
             phase_command = command + ["--group-phase", phase]
@@ -701,8 +794,9 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             phase_command = command + ([phase] if phase else [])
         log_name = f"process-{phase}.log" if phase else "process.log"
         with (case / "evidence" / log_name).open("xb") as output:
-            if external_promise_receiver:
-                result = _run_generated_sftp_finder_promise(phase_command, case, env, output)
+            if external_promise_receiver and phase != "cold-undo":
+                result = _run_generated_finder_promise(phase_command, case, env, output,
+                    archive=feature == "archive-export", destination=finder_destination, archive_kinds=archive_kinds)
             else:
                 result = subprocess.run(phase_command, cwd=ROOT, env=env, input=private_input,
                                         stdout=output, stderr=subprocess.STDOUT,
@@ -715,7 +809,12 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             phase_value = json.loads(phase_receipt.read_text()) if phase_receipt.is_file() else {}
             if phase_value.get("passed") is not True or phase_value.get("actualOwnerDrain") is not True:
                 raise RuntimeError(f"Native TAR editor {phase or ''} failed at {phase_value.get('failure', 'missing report')}; inspect {case / 'evidence'}")
-        if marked_source_create:
+        if feature == "archive-export" and external_promise_receiver:
+            name = "native-archive-promise-gesture.json" if phase == "deliver" else "native-archive-promise-cold.json"
+            observed = json.loads((case / "evidence" / name).read_bytes())
+            if observed.get("passed") is not True or phase == "deliver" and observed.get("completedKinds") != list(archive_kinds):
+                raise RuntimeError(f"Archive {phase} did not pass; inspect {case / 'evidence'}")
+        elif marked_source_create:
             phase_receipt = case / "evidence/native.json"
             phase_value = json.loads(phase_receipt.read_text()) if phase_receipt.is_file() else {}
             if phase_value.get("passed") is not True or phase_value.get("markedSource") is not True \
@@ -742,14 +841,38 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
     value = json.loads(receipt.read_text()) if receipt.is_file() else {}
     if result.returncode or value.get("passed") is not True:
         stage = next((value[key] for key in ("failure", "failureStage", "line", "failureLine", "stage", "failures")
-                      if value.get(key) is not None), "missing report")
+                      if value.get(key) is not None), "unsuccessful native report" if receipt.is_file() else "missing report")
         failure_type = f" ({value['failureType']})" if value.get("failureType") else ""
         raise RuntimeError(f"Native {feature} failed at {stage}{failure_type}; inspect {case / 'evidence'}")
-    if external_promise_receiver and (value.get("actualFinderReceiver") is not True
+    if external_promise_receiver and feature != "archive-export" and (value.get("actualFinderReceiver") is not True
                                       or value.get("actualReceiverDrag") is not True
                                       or value.get("nativeProviderCallbacks") != 1
                                       or (case / "source/Destination/Generated Promise.txt").exists()):
         raise RuntimeError(f"Generated SFTP Finder promise evidence is incomplete; inspect {case / 'evidence'}")
+    if feature == "archive-export":
+        original = json.loads((case / "inputs.json").read_bytes())["sourceSHA256"]
+        if archive_export_source is None or hashlib.sha256(read_artifact(archive_export_source, 1 << 20)).hexdigest() != original \
+                or value.get("archiveFormat") != archive_format or value.get("drained") is not True or value.get("spoolsDrained") is not True:
+            raise RuntimeError("Archive export changed its source or retained active work")
+        if external_promise_receiver:
+            receiver = json.loads((case / "evidence/finder-receiver.json").read_bytes())
+            if receiver.get("passed") is not True or value.get("undoneKinds") != list(reversed(archive_kinds)) or finder_destination is None \
+                    or not finder_destination.is_dir() or not all(_generated_path_absent(finder_destination / name)
+                        for name in ("Generated Promise.txt", "Generated Folder")):
+                raise RuntimeError("Archive Finder delivery or matching Undo is incomplete")
+        else:
+            state = case / "state"
+            expected = {"Replay/One.txt": b"Generated first root\n", "Partial/Good.txt": b"Generated first root\n",
+                        "Partial/Conflict.txt": b"Existing stays", "ClosedSource/Folder/Member.txt": b"Generated folder member\n"}
+            exact = all(read_artifact(state / name, len(body)) == body for name, body in expected.items())
+            exact &= not any((state / name).exists() for name in ("Replay/Replay.txt", "Partial/Untouched Folder", "ClosedSource/Late.txt",
+                "SessionReuse/Cancelled.txt", "SessionReuse/One.txt", "SessionReuse/Two.txt", "OutOfOrder/Receiver First.txt", "OutOfOrder/Receiver Last.txt"))
+            exact &= all(next((state / name).iterdir(), None) is None for name in
+                ("Stopped", "BoundParent", "OtherParent", "Busy", "PostedCallback", "ClosedSource/Folder/Empty"))
+            if archive_format == "zip":
+                exact &= _generated_path_absent(state / "RepeatedSelection/Again.txt")
+            if not exact or len(value.get("checks", [])) != 12:
+                raise RuntimeError("Independent archive callback outputs differ")
     if compiled["productSHA256"] != product_inputs(APP):
         raise RuntimeError("The checked app changed during native acceptance")
     if feature == "sftp-group-upload" and any(

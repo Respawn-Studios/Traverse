@@ -1,9 +1,9 @@
 import Foundation
 
-/// The callback lifetime of one selected ZIP drag. Each root can be requested
+/// The callback lifetime of one selected archive drag. Each root can be requested
 /// once; async native callbacks do not create independent filesystem writers.
 /// Contains no URLs, access grants, native objects or mutation implementation.
-public struct ZIPExportBatchState: Sendable {
+public struct ArchiveExportBatchState: Sendable {
     public enum Entry: Sendable, Equatable {
         case offered, queued, running, succeeded, failed, retired
     }
@@ -55,9 +55,25 @@ public struct ZIPExportBatchState: Sendable {
 
 /// Stable, bounded flattened names for promises from different archive folders.
 /// The engine still checks the actual callback name and final destination.
-public enum ZIPRootExportNames {
+/// Existing ZIP names remain source-compatible; the state has no format or
+/// filesystem authority and is shared by both concrete archive exporters.
+public typealias ZIPExportBatchState = ArchiveExportBatchState
+
+public enum ArchiveRootExportNames {
+    private struct Root { let name: String; let isFile: Bool }
     public static func offered(_ roots: [ZIPRootExportSelection]) throws -> [String] {
-        guard (1...128).contains(roots.count) else { throw ZIPExportBatchState.Issue.invalidCount }
+        try offered(roots.map { Root(name: $0.name, isFile: $0.kind == .file) })
+    }
+    public static func offeredTAR(_ roots: [TARExtractionSelection]) throws -> [String] {
+        try offered(roots.map { selection in
+            guard let name = selection.singleFileName ?? selection.singleFolderName else {
+                throw TARArchiveFailure.invalidSelection
+            }
+            return Root(name: name, isFile: selection.singleFileName != nil)
+        })
+    }
+    private static func offered(_ roots: [Root]) throws -> [String] {
+        guard (1...128).contains(roots.count) else { throw ArchiveExportBatchState.Issue.invalidCount }
         var used = Set<String>(), names: [String] = []
         for root in roots {
             let base = root.name
@@ -67,7 +83,7 @@ public enum ZIPRootExportNames {
             var number = 1, candidate = base
             while candidate.utf8.count > 255 || used.contains(key(candidate)) {
                 number += 1
-                let ext = root.kind == .file ? (base as NSString).pathExtension : ""
+                let ext = root.isFile ? (base as NSString).pathExtension : ""
                 let suffix = " (\(number))" + (ext.isEmpty || ext.utf8.count > 32 ? "" : "." + ext)
                 let stem = ext.isEmpty || ext.utf8.count > 32 ? base : (base as NSString).deletingPathExtension
                 var prefix = "", bytes = 0
@@ -86,3 +102,5 @@ public enum ZIPRootExportNames {
         value.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
     }
 }
+
+public typealias ZIPRootExportNames = ArchiveRootExportNames

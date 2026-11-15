@@ -392,6 +392,7 @@ final class ApplicationVolumeCoordinator: ObservableObject {
                 await browser.operationPreparationTask?.value
                 for owner in browser.archiveTabs.values { await owner.drain() }
             }
+            await ApplicationZIPBrowser.shared.drain()
             await ApplicationTARBrowser.shared.drain()
             guard await ApplicationCompressedArchives.shared.drain() else {
                 self.message = "A temporary archive copy could not be closed. The drive request was deferred."

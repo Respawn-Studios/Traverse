@@ -20,6 +20,12 @@ enum ArchiveCreationActivation {
 
 enum ArchiveCreationFormat: String, Codable, CaseIterable, Sendable {
     case zip, tar, tarGzip = "tar.gz", tarBzip2 = "tar.bz2"
+    var filenameKind: ArchiveFilename.Kind {
+        switch self { case .zip: .zip; case .tar: .tar; case .tarGzip: .tarGzip; case .tarBzip2: .tarBzip2 }
+    }
+    func filename(addingExtensionTo name: String) -> String {
+        ArchiveFilename(name)?.kind == filenameKind ? name : name + "." + rawValue
+    }
     var displayName: String {
         switch self { case .tarGzip: "TAR.gz"; case .tarBzip2: "TAR.bz2"; default: rawValue.uppercased() }
     }
@@ -213,12 +219,13 @@ enum ZIPMemberRenameFeature {
         guard !closed, !isRunning, !isChoosing, outcome == nil, offersOutputFormats, outputFormat != value else { return }
         guard value != .tarGzip || TARGzipCreationFeature.available else { return }
         guard value != .tarBzip2 || TARBzip2Feature.available else { return }
-        let previousSuffix = "." + outputFormat.rawValue
+        let previousFormat = outputFormat
         outputFormat = value; window?.title = title
         if value == .tarGzip { tarCompression = .gzipBalanced }
         if value == .tarBzip2 { tarCompression = .bzip2Balanced }
-        if name.lowercased().hasSuffix(previousSuffix) {
-            name = String(name.dropLast(previousSuffix.count)) + "." + value.rawValue
+        if ArchiveFilename(name)?.kind == previousFormat.filenameKind,
+           let stem = ArchiveFilename.removingExtension(from: name) {
+            name = stem + "." + value.rawValue
         } else { requestPreview() }
     }
     var duplicateSelection: ZIPMemberSetSelection? {
@@ -349,8 +356,7 @@ enum ZIPMemberRenameFeature {
             let token = generation, chosenParent = parent, chosenFormat = outputFormat, chosenCompression = compression
             let chosenTARCompression = tarCompression
             let keepCurrentTARCompression = keepsCurrentTARCompression && chosenFormat == .tarBzip2 && isMemberCopy
-            let suffix = "." + chosenFormat.rawValue
-            let requestedName = name.lowercased().hasSuffix(suffix) ? name : name + suffix
+            let requestedName = chosenFormat.filename(addingExtensionTo: name)
             let choosesAutomaticName = automaticNameRequested; automaticNameRequested = false
             let chosenSources = sources, retainedSelectionAccess = selectedSourceAccess
             let originalUpdate = updatesOriginal

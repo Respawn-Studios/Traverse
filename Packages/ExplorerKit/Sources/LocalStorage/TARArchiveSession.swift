@@ -24,6 +24,8 @@ public struct TARExtractionSelection: Sendable,CustomStringConvertible,CustomDeb
     internal struct Root: Sendable {let path:String;let kind:TARMemberKind}
     internal let binding:TARSourceBinding,roots:[Root],wholeArchive:Bool
     public var count:Int{roots.count}
+    /// The sealed source archive, never a filesystem URL for a member.
+    public var archiveURL: URL { binding.source }
     public var isWholeArchive:Bool{wholeArchive}
     public var displayNames:[String]{roots.map(\.path)}
     public var singleFileName: String? { singleName(kind: .file) }
@@ -135,6 +137,17 @@ public actor TARArchiveSession {
         let selected = try selectionForExtraction(ids)
         return .init(binding: selected.binding, roots: selected.roots,
             coveredSelectionCount: ids.count - selected.roots.count)
+    }
+
+    /// Immutable selected roots for a native export offer. A selected folder
+    /// absorbs selected descendants. This captures catalog metadata and a
+    /// prepared-copy lease only; no destination or body-production authority.
+    public func rootsForExport(_ ids: Set<TARItemID>) throws -> [TARExtractionSelection] {
+        guard (1...128).contains(ids.count) else { throw TARArchiveFailure.invalidSelection }
+        let selection = try selectionForExtraction(ids)
+        return selection.roots.map {
+            TARExtractionSelection(binding: selection.binding, roots: [$0], wholeArchive: false)
+        }
     }
     public func destinationForMemberChanges(_ folder: TARFolderID) throws -> TARMemberDestination {
         guard let binding else { throw TARArchiveFailure.unsupported }

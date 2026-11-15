@@ -119,8 +119,8 @@ enum ZIPRootExtractionPreparation {
         self.model = model; self.generation = generation; self.page = page; members = .zip(ids)
         self.externalExport = externalExport
     }
-    init(tar: TARBrowserModel, generation: UUID, page: UUID, ids: Set<TARItemID>) {
-        tarModel = tar; self.generation = generation; self.page = page; members = .tar(ids); externalExport = nil
+    init(tar: TARBrowserModel, generation: UUID, page: UUID, ids: Set<TARItemID>, externalExport: ArchivePromiseExport? = nil) {
+        tarModel = tar; self.generation = generation; self.page = page; members = .tar(ids); self.externalExport = externalExport
     }
     var isCurrent: Bool { model?.isCurrentMemberDrag(self) == true || tarModel?.isCurrentMemberDrag(self) == true }
     var canStart: Bool { model?.canStartMemberDrag(ids) == true || tarModel?.canStartMemberDrag(tarIDs) == true }
@@ -168,15 +168,18 @@ enum ZIPRootExtractionPreparation {
             draft = model.captureMemberDrag(ids)
         }
         guard let draft else { return nil }
-        if let item, let provider = draft.externalExport?.provider(for: item, marker: draft.token) { return provider }
+        if let item, let export = draft.externalExport { return export.provider(for: item, marker: draft.token) }
         return opaqueWriter(draft)
     }
-    func writer(tarIDs ids: Set<TARItemID>) -> NSPasteboardWriting? {
+    func writer(tarIDs ids: Set<TARItemID>, item: TARArchiveItem? = nil) -> NSPasteboardWriting? {
         guard let tarModel, table?.window != nil, tarModel.canStartMemberDrag(ids) else { return nil }
-        if draft?.admitted == true || draft?.members != .tar(ids) || draft?.isCurrent != true {
+        if draft?.admitted == true || draft?.members != .tar(ids) || draft?.isCurrent != true
+            || (TARPromiseExportFeature.available && draft?.externalExport == nil && tarModel.externalExportReady) {
             draft = tarModel.captureMemberDrag(ids)
         }
-        return draft.map(opaqueWriter)
+        guard let draft else { return nil }
+        if let item, let export = draft.externalExport { return export.provider(forArchivePath: item.path, marker: draft.token) }
+        return opaqueWriter(draft)
     }
     private func opaqueWriter(_ offer: ArchiveMemberDragOffer) -> NSPasteboardItem {
         let item = NSPasteboardItem(); item.setString(offer.token.uuidString, forType: Self.pasteboardType)
@@ -194,19 +197,29 @@ enum ZIPRootExtractionPreparation {
         #endif
         guard let draft, draft.members == members, draft.isCurrent, draft.canStart,
               table?.window != nil else { active = nil; return }
-        guard let items = board.pasteboardItems, items.count == members.count,
+        // The sealed export catalog absorbs selected descendants into their
+        // selected parent. AppKit gets one promise per remaining root, while
+        // Traverse's private intent keeps the exact original selection.
+        guard let items = board.pasteboardItems, items.count == (draft.externalExport?.rootCount ?? members.count),
               items.allSatisfy({ $0.types.contains(Self.pasteboardType) }) else { active = nil; return }
         active = (sequence,board.name,board.changeCount,items.map(\.types),draft)
         ApplicationDiagnostics.shared.event(.drag, .admitted, trace: draft.token, count: UInt64(members.count), context: .init(.dragSession))
-        if draft.externalExport?.handOff(diagnosticTrace: draft.token) == true { model?.memberDragDidHandOff(draft) }
+        if draft.externalExport?.handOff(diagnosticTrace: draft.token) == true {
+            model?.memberDragDidHandOff(draft); tarModel?.memberDragDidHandOff(draft)
+        }
     }
-    func end(sequence: Int, operation: NSDragOperation = .copy) {
+    func end(sequence: Int, operation: NSDragOperation = .copy, point: NSPoint? = nil) {
         #if DEBUG
         endCountForVerification += 1
         #endif
         guard let active, active.sequence == sequence else { return }
+        #if DEBUG
+        active.offer.externalExport?.nativeDragEndOperationForVerification = operation.rawValue
+        active.offer.externalExport?.nativeDragEndPointForVerification = point.map { [$0.x, $0.y] }
+        #endif
         if operation.isEmpty { active.offer.externalExport?.retireUncalled() }
         active.offer.model?.memberDragDidEnd(active.offer)
+        active.offer.tarModel?.memberDragDidEnd(active.offer)
         self.active = nil; draft = nil
     }
     func retire() {
@@ -258,7 +271,7 @@ enum ZIPRootExtractionPreparation {
         // Never load pasteboard representations in synchronous hover callbacks:
         // even an opaque marker could be replaced with an unbounded payload.
         guard board.name == active.board, board.changeCount == active.revision, let items = board.pasteboardItems,
-              items.count == active.offer.members.count, items.map(\.types) == active.types,
+              items.count == active.types.count, items.map(\.types) == active.types,
               items.allSatisfy({ $0.types.contains(pasteboardType) }),
               board.changeCount == active.revision, !active.offer.admitted,
               active.offer.isCurrent, eligible() else { return nil }

@@ -8,10 +8,9 @@ Here's what we're building, what we'd love to tackle next, and a few ideas that
 keep finding their way onto the whiteboard. Pick an area that excites you and
 come talk to us in [Discussions](https://github.com/Respawn-Studios/Traverse/discussions).
 
-## First stop: the open-source launch
+## Ready to explore
 
-Much of this is already in development builds. We're bringing it together for
-our first public release:
+Our first public releases bring the main pieces together:
 
 - **A workspace that stretches with you.** Tabs, up to four panes, a sidebar you
   can rearrange or tuck away, and readable names even in a narrow pane.
@@ -52,6 +51,10 @@ More writable formats, deeper folder and member editing, and direct actions
 for the things people do most often. The aim is simple: working on a file in an
 archive should feel as ordinary as working on a file in a folder.
 
+Development builds now bring the shared workbench and editor to plain, gzip and
+bzip2 TARs. We're working through their delivery and recovery checks before
+they join a download. XZ and other formats are further down the list.
+
 ### A lightweight editor that earns its place
 
 Richer language support, smarter editing conveniences and better remote editing.
@@ -64,6 +67,10 @@ Faster refreshes that reuse earlier analysis, clearer scan history, richer
 benchmark results, and health information for more drives and enclosures.
 Useful charts should help you spot a change, rather than make you decipher a
 wall of numbers.
+
+The current development work adds a mixed benchmark suite, latency charts and
+comparisons, alongside APFS volume and formatting controls. Disk Utility
+remains the handoff for drive changes that Traverse cannot handle yet.
 
 ## Further down the trail
 

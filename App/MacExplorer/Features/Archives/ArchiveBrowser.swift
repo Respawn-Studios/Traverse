@@ -107,11 +107,7 @@ enum ArchiveOrderingActivation {
     private var checkingWork: Task<Void, Never>?
     private var checkingProgressTask: Task<Void, Never>?
     private var selectionWork: Task<Void, Never>?
-    private var exportPreparation: Task<Void, Never>?
-    private var exportGeneration = UUID()
-    private var desiredExport: Set<ZIPItemID>?
-    private var preparedExport: ArchivePromiseExport?
-    private var preparedExportIDs = Set<ZIPItemID>()
+    private let exportPreparation = ArchivePromisePreparation<Set<ZIPItemID>>()
     private var handedExports: [ArchivePromiseExport] = []
     private var pageGeneration = UUID()
     private struct Visit: Equatable {
@@ -160,6 +156,11 @@ enum ArchiveOrderingActivation {
         self.settings = settings; self.reader = reader
         textPreview = ArchiveTextPreviewOwner(reader: reader, settings: settings)
         textPreview.onBusy = { [weak self] in self?.isPreviewing = $0 }
+        exportPreparation.changed = { [weak self] in
+            guard let self else { return }
+            externalExportReady = exportPreparation.offer(for: selection) != nil
+        }
+        exportPreparation.refreshRequested = { [weak self] in self?.prepareExternalExport() }
         matchingObservation = settings.$symbolTolerantNames.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.applyFilter() }
     }
     var visibleItems: [ZIPArchiveItem] { searchPage?.items ?? page?.items ?? [] }
@@ -589,52 +590,30 @@ enum ArchiveOrderingActivation {
               canStartMemberDrag(ids), visibleItems.filter({ ids.contains($0.id) }).allSatisfy({
                   !$0.isEncrypted && ($0.kind == .directory || $0.method == 0 || $0.method == 8)
               }) else { return nil }
-        let export = ArchivePromiseExportFeature.available && preparedExportIDs == ids
-            && preparedExport?.canHandOff == true ? preparedExport : nil
+        let export = ArchivePromiseExportFeature.available ? exportPreparation.offer(for: ids) : nil
         return ArchiveMemberDragOffer(model: self,generation: generation,page: pageGeneration,ids: ids,externalExport:export)
     }
     func canStartMemberDrag(_ ids: Set<ZIPItemID>) -> Bool {
         ((ArchiveMemberDragActivation.available ||
-            (ArchivePromiseExportFeature.available && preparedExportIDs == ids && preparedExport?.canHandOff == true))
+            (ArchivePromiseExportFeature.available && exportPreparation.offer(for: ids) != nil))
             && canExtractSelection(ids)) || canMoveMembers(ids)
     }
     /// Metadata/source-scope preparation only. At most one actor request runs;
     /// rapid selection changes replace the desired request and reject stale work.
     private func prepareExternalExport() {
-        exportGeneration = UUID(); desiredExport = nil; externalExportReady = false
-        preparedExport?.retireUnlessHanded(); preparedExport = nil; preparedExportIDs = []
+        exportPreparation.invalidate()
         guard ArchivePromiseExportFeature.available, (1...128).contains(selection.count),
-              canExtractSelection(selection), ApplicationArchiveExports.shared.canOffer else { return }
-        desiredExport = selection
-        startExternalExportPreparation()
-    }
-    private func startExternalExportPreparation() {
-        guard exportPreparation == nil, let session, let source, let browser = lastRequest?.browser else { return }
-        exportPreparation = Task { [self] in
-            defer {
-                exportPreparation = nil
-                if desiredExport != nil, !closed, !suspended { startExternalExportPreparation() }
-            }
-            while !closed, !suspended, !Task.isCancelled, let ids = desiredExport {
-                desiredExport = nil; let token = exportGeneration, pageToken = pageGeneration
-                do {
-                    let roots = try await session.rootsForExport(ids)
-                    guard !closed, !suspended, !Task.isCancelled, exportGeneration == token, pageGeneration == pageToken,
-                          selection == ids, canExtractSelection(ids) else { continue }
-                    let access = await browser.accessLifetime(for: [source])
-                    guard !closed, !suspended, !Task.isCancelled, exportGeneration == token, pageGeneration == pageToken,
-                          selection == ids, canExtractSelection(ids), !browser.isBrowserSuspended else { continue }
-                    preparedExport = try ArchivePromiseExport(roots: roots, sourceAccess: access, browser: browser, window: window) { [weak self] in
-                        if let self, !self.closed { self.notice = $0 }
-                    }
-                    preparedExportIDs = ids; externalExportReady = true
-                } catch {
-                    // A missing/unsupported promise must not disable existing
-                    // explicit extraction or leak a failed preparation's lease.
-                    if exportGeneration == token { externalExportReady = false }
-                }
-            }
-        }
+              canExtractSelection(selection), ApplicationArchiveExports.shared.canOffer,
+              let session, let source, let browser = lastRequest?.browser else { return }
+        let ids = selection, token = generation, currentPage = pageGeneration
+        exportPreparation.request(ids, source: source, browser: browser, window: window,
+            roots: { .zip(try await session.rootsForExport(ids)) },
+            isCurrent: { [weak self] in
+                guard let self else { return false }
+                return !closed && !suspended && generation == token && pageGeneration == currentPage
+                    && selection == ids && viewIsCurrent && permitsEmbeddedAction
+            }, canPrepare: { [weak self] in self?.canExtractSelection(ids) == true },
+            notice: { [weak self] in if let self, !closed { notice = $0 } })
     }
     func memberDragDidHandOff(_ offer: ArchiveMemberDragOffer) {
         guard let export = offer.externalExport, export.handed else { return }
@@ -646,7 +625,7 @@ enum ArchiveOrderingActivation {
         externalExportReady = false
     }
     func memberDragDidEnd(_ offer: ArchiveMemberDragOffer) {
-        if preparedExport === offer.externalExport { prepareExternalExport() }
+        if exportPreparation.prepared === offer.externalExport { prepareExternalExport() }
     }
     func isCurrentMemberDrag(_ offer: ArchiveMemberDragOffer) -> Bool {
         offer.model === self && !closed && !suspended && !isLoading && !isPaging && !isChecking && !isQueryPending
@@ -816,13 +795,14 @@ enum ArchiveOrderingActivation {
         desiredEmbedded = nil; desiredEmbeddedNavigation = nil
         checkingTask?.cancel(); checkingWork?.cancel(); checkingProgressTask?.cancel(); contentProgress = nil
         selectionWork?.cancel()
-        exportGeneration = UUID(); desiredExport = nil; externalExportReady = false
-        preparedExport?.retireUnlessHanded(); preparedExport = nil; preparedExportIDs = []; exportPreparation?.cancel()
+        exportPreparation.stop(); externalExportReady = false
         textPreview.stop()
         pageGeneration = UUID(); desiredPage = nil; pageTask?.cancel(); isQueryPending = false
         notice = wasChecking ? "Content check stopped. The archive listing remains available." : wasQuerying ? "Name search stopped. The previous view remains available." : "Archive read stopped. Refresh to try again."
     }
-    func prepareForVolumeQuiescence() { suspended = true; stop(); textPreview.prepareForVolumeQuiescence() }
+    func prepareForVolumeQuiescence() {
+        suspended = true; stop(); handedExports.forEach { $0.retireUncalled() }; textPreview.prepareForVolumeQuiescence()
+    }
     func resumeAfterVolumeQuiescence() { suspended = false; textPreview.resumeAfterVolumeQuiescence() }
     func closeAndDrain() async {
         closed = true; stop(); pageTask?.cancel()
@@ -831,7 +811,7 @@ enum ArchiveOrderingActivation {
         if let work { await work.value }; if let pageTask { await pageTask.value }; if let filterTask { await filterTask.value }
         if let checkingWork { await checkingWork.value }
         if let selectionWork { await selectionWork.value }
-        if let exportPreparation { await exportPreparation.value }
+        await exportPreparation.drain()
         for export in handedExports { await export.drain() }; handedExports = []
         if let session { await session.close() }; session = nil
         await reader.drain(); page = nil; searchPage = nil; summary = nil; selection = []; history = []; lastRequest = nil
@@ -840,7 +820,7 @@ enum ArchiveOrderingActivation {
         if let work { await work.value }; if let filterTask { await filterTask.value }
         if let checkingWork { await checkingWork.value }
         if let selectionWork { await selectionWork.value }
-        if let exportPreparation { await exportPreparation.value }
+        await exportPreparation.drain()
         for export in handedExports { await export.drain() }
         if let pageTask { await pageTask.value }
         // Selection preparation may admit a preview child. Retire its parent
@@ -1326,6 +1306,7 @@ private struct ArchiveNameQueryField: NSViewRepresentable {
         controller?.showWindow(nil); controller?.window?.makeKeyAndOrderFront(nil)
     }
     func prepareForVolumeQuiescence() { controller?.model.prepareForVolumeQuiescence() }
+    func drain() async { await controller?.model.drain(); if let retirement { await retirement.value } }
     func resumeAfterVolumeQuiescence() { controller?.model.resumeAfterVolumeQuiescence() }
     func stopAndDrain() async { controller?.close(); if let retirement { await retirement.value } }
 }
@@ -1334,8 +1315,7 @@ private struct ArchiveNameQueryField: NSViewRepresentable {
     var selectedTARURL:URL? {
         guard TARBrowseFeature.available,orderedSelectedURLs.count==1,!isBrowserSuspended,!isReadOnlyFileSession,
               let url=orderedSelectedURLs.first,let row=rowsByURL[url],displayedEntries.indices.contains(row),displayedEntries[row].kind == .file else{return nil}
-        let name=url.lastPathComponent.lowercased()
-        return url.pathExtension.lowercased()=="tar" || [".tar.gz",".tgz",".tar.bz2",".tbz2",".tar.xz",".txz",".tar.zst",".tzst"].contains(where:{name.hasSuffix($0)}) ? url:nil
+        return ArchiveFilename(url.lastPathComponent)?.kind.isTAR == true ? url:nil
     }
     var selectedArchiveURL:URL? {selectedZIPURL ?? selectedTARURL}
     var selectedZIPURL: URL? {

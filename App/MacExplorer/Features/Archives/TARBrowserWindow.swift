@@ -38,9 +38,9 @@ private struct TARBrowserView:View {
                 Image(systemName:"archivebox").interfaceFont(.title2).foregroundStyle(.secondary)
                 VStack(alignment:.leading,spacing:3) {
                     Text(model.source?.lastPathComponent ?? "TAR Archive").interfaceFont(.title3.weight(.semibold)).lineLimit(1)
-                    Text(model.compressedSizeDescription ?? (model.isCompressedSource ? "Compressed TAR · gzip" : "Uncompressed TAR"))
+                    Text(model.compressedSizeDescription ?? (model.isCompressedSource ? "Compressed " + model.formatName : "Uncompressed TAR"))
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                        .help("Archive is the original gzip size. Prepared TAR includes headers and padding. Files is the sum of recorded member sizes.")
+                        .help("Archive is the original compressed size. Prepared TAR includes headers and padding. Files is the sum of recorded member sizes.")
                 }
                 Spacer();if model.busy{ProgressView().controlSize(.small)}
                 Button("Refresh",action:model.refresh).disabled(model.suspended)
@@ -117,7 +117,7 @@ private struct TARBrowserView:View {
         table.columnAutoresizingStyle = .noColumnAutoresizing;table.dataSource=self;table.delegate=self;table.allowsMultipleSelection=true
         if TARArchiveEditingFeature.available { table.registerForDraggedTypes([.fileURL, ArchiveMemberDragSource.pasteboardType]) }
         table.setDraggingSourceOperationMask(TARArchiveEditingFeature.available ? [.copy, .move] : .copy, forLocal: true)
-        table.setDraggingSourceOperationMask([], forLocal: false)
+        table.setDraggingSourceOperationMask(TARPromiseExportFeature.available ? .copy : [], forLocal: false)
         table.target=self;table.doubleAction = #selector(openSelected(_:));table.onOpen={[weak self]in self?.model?.openSelection()}
         table.onRename = { [weak self] in self?.model?.reviewMutation(.rename) }
         table.nameClickRenameEnabled = { [weak model] in
@@ -232,7 +232,7 @@ private struct TARBrowserView:View {
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
         guard let model, items.indices.contains(row), model.selection.contains(items[row].id),
               items.map(\.id) == model.items.map(\.id) else { return nil }
-        return memberDragSource?.writer(tarIDs: model.selection)
+        return memberDragSource?.writer(tarIDs: model.selection, item: model.items[row])
     }
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession,
         willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
@@ -242,7 +242,11 @@ private struct TARBrowserView:View {
     }
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession,
         endedAt screenPoint: NSPoint, operation: NSDragOperation) {
-        memberDragSource?.end(sequence: session.draggingSequenceNumber, operation: operation)
+        #if DEBUG
+        table.lastDragEndPointForVerification = [screenPoint.x,screenPoint.y]
+        table.lastDragEndOperationForVerification = operation.rawValue
+        #endif
+        memberDragSource?.end(sequence: session.draggingSequenceNumber, operation: operation, point: screenPoint)
     }
     func tableView(_ tableView:NSTableView,viewFor column:NSTableColumn?,row:Int)->NSView? {
         guard items.indices.contains(row),let key=column?.identifier else{return nil};let item=items[row]

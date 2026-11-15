@@ -33,7 +33,7 @@ import LocalStorage
         }.value
         try need(packet.gzip == gzip && (packet.bzip2 ?? false) == bzip2 && !(gzip && bzip2) && packet.creation != packet.firstSave, "tar-cold-exact-profile")
         let parent = root.appendingPathComponent("source/Generated Documents")
-        let source = parent.appendingPathComponent("Editor Archive." + (bzip2 ? "tar.bz2" : gzip ? "tar.gz" : "tar"))
+        let source = parent.appendingPathComponent("Editor Archive." + (bzip2 ? "tbz" : gzip ? "tar.gz" : "tar"))
         let engine = ApplicationOperationCoordinator.shared.engine(at: root.appendingPathComponent("state/history"))
         try await ApplicationOperationCoordinator.shared.prepareOperationState(for: engine)
         try need(try await hash(source) == packet.savedDigest, "tar-cold-current-bytes")
@@ -372,7 +372,7 @@ import LocalStorage
         let tar = ProcessInfo.processInfo.arguments.contains("--tar-editor")
         let gzip = ProcessInfo.processInfo.arguments.contains("--gzip-tar-editor")
         let bzip2 = ProcessInfo.processInfo.arguments.contains("--bzip2-tar-editor")
-        let format = bzip2 ? "TAR.bz2" : gzip ? "TAR.gz" : tar ? "TAR" : "ZIP", suffix = bzip2 ? "tar.bz2" : gzip ? "tar.gz" : tar ? "tar" : "zip"
+        let format = bzip2 ? "TAR.bz2" : gzip ? "TAR.gz" : tar ? "TAR" : "ZIP", suffix = bzip2 ? "tbz" : gzip ? "tar.gz" : tar ? "tar" : "zip"
         if gzip || bzip2 { ApplicationCompressedArchives.shared.cacheDirectoryForVerification = root.appendingPathComponent("cache") }
         let settings = browser.settings, previous = browser.settings.editorPreferences
         let previousMotion = settings.motion

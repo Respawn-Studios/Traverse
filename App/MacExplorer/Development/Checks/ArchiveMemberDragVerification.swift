@@ -173,7 +173,23 @@ import LocalStorage
         try UIVerification.require(ArchiveMemberDragSource.capture(full) != nil,"A late older end invalidated the new source")
         drag.end(sequence:full.draggingSequenceNumber, operation: [])
         try UIVerification.require(ArchiveMemberDragSource.capture(full) == nil,"Ended source retained authority")
-        checks.append("Actual native writer retains bounded opaque private markers alongside qualified native promise flavors;128 selected roots negotiate,129 refuse, and sequence/end checks are exact")
+        if ArchivePromiseExportFeature.available {
+            model.filter = "Selected"; model.applyFilter()
+            try await wait("parent and descendant search rows") { !model.isPaging && model.viewIsCurrent && model.visibleItems.count == 2 }
+            let absorbed = Set(model.visibleItems.map(\.id))
+            try await select(absorbed)
+            try await wait("absorbed root offer") { model.externalExportReady }
+            let writers = rows.table.selectedRowIndexes.compactMap { rows.tableView(rows.table, pasteboardWriterForRow: $0) }
+            try UIVerification.require(writers.count == 1 && writers[0] is NSFilePromiseProvider,
+                "An absorbed child became a second promise or an opaque external row")
+            board.clearContents(); try UIVerification.require(board.writeObjects(writers), "Absorbed root pasteboard refused")
+            sequence += 1; drag.begin(sequence: sequence, ids: absorbed, board: board)
+            let native = Info(board, source: rows.table, sequence: sequence)
+            try UIVerification.require(ArchiveMemberDragSource.capture(native)?.ids == absorbed,
+                "Absorbing an external row changed the sealed private selection")
+            drag.end(sequence: sequence, operation: [])
+        }
+        checks.append("Actual native writer retains bounded opaque private markers alongside qualified native promise flavors;128 roots negotiate,129 refuse, a selected parent absorbs its child into one promise, and sequence/end checks are exact")
 
         model.filter = "Report.txt"; model.applyFilter()
         try await wait("global duplicate-basename matches") { !model.isPaging && model.viewIsCurrent && model.visibleItems.count == 2 }

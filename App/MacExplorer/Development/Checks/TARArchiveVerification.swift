@@ -404,6 +404,10 @@ import LocalStorage
             }
             try await verifyDirectExtraction(browser: browser, source: source)
             checks.append("Direct whole-archive extraction prepares plain/compressed TAR in the shared workbench, preserves the source, avoids an occupied folder and Undoes the exact output")
+            if compressed {
+                try await verifyDirectExtraction(browser: browser, source: location.appendingPathComponent("source/Review bzip2.tbz"))
+                checks.append("The same whole-archive extraction prepares a bzip2 TAR alias, keeps its compound identity and verifies nested/empty delivery, collision naming and Undo")
+            }
             try require(ApplicationFileActivity.gate.activeCount==0 && browser.operationTask==nil && browser.operationPreparationTask==nil)
             try write(["passed":true,"checks":checks,"clips":clips,"interfacePercent":settings.interfaceSize.percent,"activityAfter":0,
                 "metadataOnlyDefault":true,"compressedPreparedExplicitly":compressed,"explicitPreview":true,"explicitExtraction":true,

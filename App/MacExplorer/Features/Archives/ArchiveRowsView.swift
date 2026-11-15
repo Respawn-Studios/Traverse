@@ -469,7 +469,7 @@ import SwiftUI
         table.lastDragEndPointForVerification = [screenPoint.x,screenPoint.y]
         table.lastDragEndOperationForVerification = operation.rawValue
         #endif
-        memberDragSource?.end(sequence: session.draggingSequenceNumber, operation: operation)
+        memberDragSource?.end(sequence: session.draggingSequenceNumber, operation: operation, point: screenPoint)
     }
 
     @objc private func openSelected(_ sender: Any?) {

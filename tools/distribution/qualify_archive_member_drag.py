@@ -53,6 +53,8 @@ def native(args):
     with zipfile.ZipFile(source,'x',compression=zipfile.ZIP_DEFLATED)as archive:
         for name,payload in payloads.items():archive.writestr(name,payload)
         for index in range(130):archive.writestr(f'Item {index:03}.txt',b'')
+        archive.writestr('Selected/',b'')
+        archive.writestr('Selected/Selected Child.txt',b'Generated absorbed child.\n')
     with zipfile.ZipFile(root/'source/Source/Unsupported.zip','x',compression=zipfile.ZIP_BZIP2)as archive:archive.writestr('Unsupported.txt',b'Generated unsupported codec fixture.')
     source_hash=hashlib.sha256(source.read_bytes()).hexdigest()
     original_archives={p.name:hashlib.sha256(p.read_bytes()).hexdigest()for p in (root/'source/Source').iterdir()}

@@ -787,7 +787,9 @@ def main() -> int:
     tests.add_argument("--configuration", choices=("debug", "release"), default="debug",
                        help="SwiftPM optimization configuration; Release uses a separate scratch directory.")
     focused = subcommands.add_parser("native-check", help="Run an existing feature check using the ordinary app and generated files.")
-    focused.add_argument("feature", choices=("startup-analysis", "sidebar-layout", "local-editor", "operation-access", "archive-pane", "trash-command", "remote-properties", "support-details", "transfer-diagnostics", "clipboard-admission", "connection-fields", "server-prompts", "sftp-profiles", "editor-preferences", "drive-benchmark", "drive-status", "editor-lines", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "batch-rename", "selection-group", "zip-add-copy", "zip-rename-copy", "zip-rename-folder-copy", "zip-remove-copy", "zip-remove-folder-copy", "zip-update-rename", "zip-update-tracked", "zip-update-native", "zip-editor-native", "zip-editor-native-recovery", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "zip-update-new-folder", "zip-update-duplicate", "zip-update-move", "zip-update-copy", "zip-new-folder-copy", "zip-update-folder", "zip-update-remove", "zip-update-empty", "zip-update-add", "analysis-persistence", "settings-motion", "help-motion", "tool-windows", "storage-chart", "folder-default", "hover-summary", "connection-metadata", "sftp-batch-download", "sftp-group-upload", "smb-transfer-menus", "connect-model", "smb-connected-uploads", "sftp-connected-actions"))
+    focused.add_argument("feature", choices=("startup-analysis", "sidebar-layout", "local-editor", "operation-access", "archive-pane", "archive-export", "trash-command", "remote-properties", "support-details", "transfer-diagnostics", "clipboard-admission", "connection-fields", "server-prompts", "sftp-profiles", "editor-preferences", "drive-benchmark", "drive-status", "editor-lines", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "batch-rename", "selection-group", "zip-add-copy", "zip-rename-copy", "zip-rename-folder-copy", "zip-remove-copy", "zip-remove-folder-copy", "zip-update-rename", "zip-update-tracked", "zip-update-native", "zip-editor-native", "zip-editor-native-recovery", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "zip-update-new-folder", "zip-update-duplicate", "zip-update-move", "zip-update-copy", "zip-new-folder-copy", "zip-update-folder", "zip-update-remove", "zip-update-empty", "zip-update-add", "analysis-persistence", "settings-motion", "help-motion", "tool-windows", "storage-chart", "folder-default", "hover-summary", "connection-metadata", "sftp-batch-download", "sftp-group-upload", "smb-transfer-menus", "connect-model", "smb-connected-uploads", "sftp-connected-actions"))
+    focused.add_argument("--archive-format", choices=("zip", "tar", "tar.gz", "tar.bz2"), default="zip",
+                         help="Concrete format for the shared archive-export callback/Finder flow.")
     focused.add_argument("--skip-build", action="store_true")
     focused.add_argument("--offscreen", action="store_true",
                          help="Supported generated functional flows without visual, motion or foreground-input qualification.")
@@ -796,7 +798,7 @@ def main() -> int:
     focused.add_argument("--promise-flow", action="store_true",
                          help="Use the existing SFTP receive flow for direct native callbacks; no real server or receiver drag by default.")
     focused.add_argument("--external-promise-receiver", action="store_true",
-                         help="Use the generated SFTP row for one actual Finder promise callback and native parent choice; no server or signed acceptance.")
+                         help="Use generated SFTP or archive rows for actual Finder delivery and Undo; no server or signed acceptance.")
     focused.add_argument("--folder-flow", action="store_true",
                          help="Use the same SFTP receive flow for a folder drop, Cancel, collision and cold Undo; no real server.")
     focused.add_argument("--public-tree", action="store_true",
@@ -928,7 +930,7 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
             test(args.filter, args.configuration, serial=args.serial)
         elif args.command == "native-check":
             zip_edit = args.feature.startswith("zip-")
-            if args.offscreen and not zip_edit and args.feature not in ("tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "batch-rename", "editor-preferences", "smb-transfer-menus", "connect-model", "sftp-group-upload", "transfer-diagnostics", "clipboard-admission", "support-details", "analysis-persistence", "operation-access"):
+            if args.offscreen and not zip_edit and args.feature not in ("archive-export", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "batch-rename", "editor-preferences", "smb-transfer-menus", "connect-model", "sftp-group-upload", "transfer-diagnostics", "clipboard-admission", "support-details", "analysis-persistence", "operation-access"):
                 parser.error("Offscreen functional checks apply only to archive, editor, saved-analysis, diagnostics and connection menu/model flows")
             if args.interactive and (args.feature not in ("sidebar-layout", "smb-transfer-menus", "sftp-group-upload", "zip-update-move", "tar-editor") or args.offscreen):
                 parser.error("Interactive review requires a visible sidebar, SMB menu or SFTP destination flow")
@@ -948,7 +950,7 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
                          external_promise_receiver=args.external_promise_receiver,
                          public_tree=args.public_tree, public_archive=args.public_archive,
                          incremental_analysis=args.incremental_analysis, connection_phase=args.connection_phase,
-                         marked_source_create=args.marked_source_create)
+                         marked_source_create=args.marked_source_create, archive_format=args.archive_format)
         elif args.command == "verify-stopped-marked-archive-create":
             receipt = verify_stopped_marked_archive_creation(args.case)
             print(f"Independent marked archive creation check passed; evidence {receipt}")

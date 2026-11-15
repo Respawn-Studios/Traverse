@@ -26,6 +26,7 @@ python3 -B tools/dev.py native-check archive-pane --skip-build
 python3 -B tools/dev.py native-check tar-archive --skip-build
 python3 -B tools/dev.py native-check create-tarbz2 --skip-build
 python3 -B tools/dev.py native-check tar-bzip2-editor --marked-source-create --large-interface --skip-build
+python3 -B tools/dev.py native-check archive-export --archive-format tar.bz2 --offscreen --skip-build
 ```
 
 Build first when compiled inputs changed. Check `native-check --help` for
@@ -35,11 +36,13 @@ The Development TAR editor flows include a second app process for cold Undo.
 They reuse ordinary editor, workbench and operation owners; they do not enable
 the new routes in distributed editions.
 
-`native_promise_export.py` is a retained, bounded diagnostic for the native ZIP
-promise owner. Its `--ordinary-build` option reuses the current Debug build and
-checks its receipt. It has separate fixture and execution prerequisites, starts
-no server, and does not perform a physical Finder drag or grant filesystem
-access. It is not the default contributor test command.
+`archive-export` runs the shared ZIP/TAR callback checks with generated files,
+including collisions, cancellation, scope drain and cold Undo. Choose `zip`,
+`tar`, `tar.gz` or `tar.bz2` with `--archive-format`. The callback flow opens no
+server and makes no Finder gesture. Add `--external-promise-receiver` without
+`--offscreen` for two real file/folder drags into a uniquely named generated
+Finder destination. That flow independently checks delivery and Undo and keeps
+the same ordinary app; it does not qualify a sandboxed distribution.
 
 Extend the existing package suites and native flows when adding archive
 behavior. Keep generated archives under ignored build storage, and preserve

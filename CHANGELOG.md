@@ -15,6 +15,8 @@ Earlier private-beta version numbers belong to a separate release history.
 - TAR.gz and TAR.bz2 creation through the shared archive publisher, with
   compression choices and guarded Undo. Gzip edits preserve bounded optional
   headers; bzip2 edits keep the current compression setting by default.
+  Common `.tgz`, `.tbz2` and `.tbz` names keep their wrapper identity through
+  opening, editing and creation.
 - A saved Quick Compress format in Operations settings. Development builds
   offer ZIP, TAR, TAR.gz and TAR.bz2; the one-click command uses the selected
   format and numbers occupied names without splitting compound extensions.
@@ -29,6 +31,10 @@ Earlier private-beta version numbers belong to a separate release history.
   Copied text and JSON results include the same completed-call distribution.
 - Deliberate compressed-TAR Open in Development includes bounded preparation.
   Passive restore and return to a changed archive still wait for Prepare.
+- Archive export completion keeps the same selection ready for another drag,
+  while late work cannot replace a newer archive view's message.
+  Early destination/admission refusals leave a source-window explanation and
+  a sanitized diagnostic event.
 - Editor closing follows animation preferences while retaining text until the
   native window closes. Quit joins a Close or its chosen Save already in progress.
 

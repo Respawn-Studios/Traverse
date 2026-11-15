@@ -32,8 +32,30 @@ Plain TAR opens directly. Compressed TAR requires an explicit preparation
 request into the shared private pool, bounded to 128 MiB and four copies. Restoring a tab or searching
 names does not decode it. `ApplicationCompressedArchives` retains actual worker,
 source access and prepared-copy leases through drain and the volume/Quit barrier.
-A prepared spool path is never operation authority. Nesting and outgoing TAR
-promises require separate support.
+A prepared spool path is never operation authority. Nesting requires separate
+support. Outgoing TAR promises have a default-held Development implementation;
+they are not enabled by the extraction or ZIP-promise policy.
+
+ZIP and the held TAR exporter share `ArchivePromisePreparation` for coalesced
+metadata captures and stale-selection rejection. `ArchivePromiseExport` owns
+accepted native callbacks, scopes and actual worker drain. Its concrete
+`ArchivePromiseRoots` adapter selects the existing ZIP or TAR producer without
+interchanging protection policies. Completion drops the captured root graph,
+including a compressed-copy lease, even if the receiver keeps its delegate.
+Selected folders absorb selected descendants into one external row while the
+private internal intent retains the original catalog IDs. Volume quiescence
+retires uncalled offers and waits for accepted work.
+
+Once accepted work releases command admission, the same current selection
+prepares a fresh offer without another click. Completion messages and that
+refresh are bound to the original view identity; a changed or closed visit
+cannot receive a late notice or restart preparation.
+
+AppKit supplies the destination as a URL value. A composed file URL is flattened
+only when its resolved path bytes stay identical; [URL.path](https://developer.apple.com/documentation/foundation/url/path)
+already resolves against its base. Dot components, non-file URLs, query/fragment
+and noncanonical resolved paths refuse. Parent observation and the concrete
+engine still establish destination authority; a URL spelling is never a grant.
 
 In Development, a deliberate ordinary Open includes preparation for a supported
 compressed TAR. The archive owner consumes a nonpersisted presentation token
@@ -46,6 +68,11 @@ prepared sessions keep their ordinary source check and reuse. Distributed
 composition still uses the separate Prepare action.
 
 ## TAR editing in development
+
+Gzip TAR uses `.tar.gz` or `.tgz`; bzip2 TAR uses `.tar.bz2`, `.tbz2` or `.tbz`.
+The shared filename identity keeps those aliases consistent across opening,
+editing and creation names. Recognizing another wrapper's filename does not
+enable its decoder or writer.
 
 Plain and prepared gzip/bzip2 TAR members use the common native editor and archive
 workbench in Development builds. Rename, batch Rename, Remove, Duplicate, Move, Create File/New Folder,
@@ -74,7 +101,7 @@ The gzip wrapper preserves MTIME, OS, FTEXT and opaque extra/name/comment
 fields within a 64 KiB header, recalculates compression flags and header CRC,
 and refuses malformed headers or concatenated streams rather than discard
 their metadata. Fast/Balanced/Smallest choices apply to the complete output.
-Bzip2 accepts `.tar.bz2` and `.tbz2`. It preserves an imported block-size
+Bzip2 accepts `.tar.bz2`, `.tbz2` and `.tbz`. It preserves an imported block-size
 setting unless the user chooses another compression option. Its system codec
 uses a charged heap ceiling of 8 MiB for encoding and 4 MiB for decoding;
 gzip uses 1 MiB. These are codec allocations, not whole-process memory caps.

@@ -253,7 +253,7 @@ enum ArchivePaneDestinationActivation {
                     let reader = ApplicationCompressedArchives.shared.reader(excluding:
                         (browser.developmentStateDirectory.map { [$0] } ?? []) + AppStorageLocations.protectedDirectories)
                     ownedTARReader = reader
-                    let compressed = source.lastPathComponent.lowercased().hasSuffix(".gz") || source.pathExtension.lowercased() == "tgz"
+                    let compressed = TARBrowserModel.isCompressed(source)
                     let work = Task { [source] in
                         try await ArchiveMetadataAdmission.shared.withAdmission {
                             if compressed {

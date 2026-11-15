@@ -93,8 +93,10 @@ original unchanged; Original Update uses recorded staging and recovery. An
 unsupported archive, unsafe name or changed original can refuse the edit.
 Existing folders are not silently merged during ZIP member changes.
 
-Compress to ZIP performs the common compression task with current preferences;
-Compress opens the full options. Extract to the named folder uses a fresh sibling
+Quick Compress performs the common task with current preferences; ZIP is the
+default, and Development adds a saved TAR, TAR.gz or TAR.bz2 choice in Operations.
+The command shows the chosen format and numbers occupied names. Compress… opens
+the full options. Extract to the named folder uses a fresh sibling
 destination; Extract opens the destination review. Copy/Paste from an archive
 to a local pane uses that same checked extraction path. One selected folder
 arrives by its own name; groups retain their archive paths inside a new folder.
@@ -104,7 +106,7 @@ arrives by its own name; groups retain their archive paths inside a new folder.
 | ZIP | Folders, supported text/hex/images, extraction and internal pane copies | ZIP creation and supported member edits; eligible text members open in the editor |
 | Plain TAR | Folders, supported previews, extraction and internal pane copies | Plain TAR creation; member editing in Development |
 | Gzip TAR (`.tar.gz`, `.tgz`) | Prepare before browsing, preview or extraction; deliberate Open also prepares in Development | Creation and member editing in Development |
-| Bzip2 TAR (`.tar.bz2`, `.tbz2`) | Bounded Prepare, folders, supported previews and extraction in Development | Creation and member editing in Development |
+| Bzip2 TAR (`.tar.bz2`, `.tbz2`, `.tbz`) | Bounded Prepare, folders, supported previews and extraction in Development | Creation and member editing in Development |
 
 The Development build adds TAR Rename, batch Rename, Remove, Duplicate, Move,
 Add, Group, Create File/Folder and internal Cut/Copy/Paste, plus text editing in
@@ -122,6 +124,8 @@ request; returning to a changed archive passively asks for Prepare again.
 Encrypted archives, ZIP64 and unsupported member metadata may be refused by a
 particular write route. A ZIP external drag and a remote external drag are
 different capabilities; this guide does not promise remote-to-Finder delivery.
+New TAR-to-Finder support remains held while its native delivery is checked;
+explicit extraction and supported copies into a Traverse pane remain available.
 
 ## Text editor
 
@@ -236,6 +240,13 @@ random file workload. Traverse writes and verifies its own scratch file, reports
 cache/flush choices and cleans up that workload. Quick, Standard and Extended
 sizes trade work for duration. Results compare matching completed workloads;
 they do not measure raw-disk speed or guarantee real-world application performance.
+
+Quick Mix runs the small sequential and random tests together while keeping
+their results separate. Measurement Details shows where completed block calls
+land in the latency distribution, and Copy Results includes that distribution
+in text and JSON. Partial or failed runs keep their progress facts without
+claiming a completed speed result. Shared reports leave out drive names and
+private recovery paths.
 
 Destructive formatting, partitioning and physical APFS volume management are
 not ordinary available workflows. Unsupported operations can hand off to Disk
