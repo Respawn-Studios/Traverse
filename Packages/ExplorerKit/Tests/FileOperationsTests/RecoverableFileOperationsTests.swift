@@ -1808,6 +1808,7 @@ private func waitForRecoveryGate(_ gate: DispatchSemaphore) async -> Bool {
     #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("folder").path))
 }
 
+#if DEBUG
 @Test func nativeDirectoryV12MarkedRootWitnessIsVersionFencedAndColdUndoBounded() async throws {
     let fixture = try RecoveryFixture(); defer { fixture.remove() }
     let source = fixture.source.appendingPathComponent("marked-folder", isDirectory: true)
@@ -1863,6 +1864,8 @@ private func waitForRecoveryGate(_ gate: DispatchSemaphore) async -> Bool {
     #expect(after.identity.sameObject(as: restored.identity))
     #expect(try Data(contentsOf: source.appendingPathComponent("child.txt")) == Data("generated marked child".utf8))
 }
+
+#endif
 
 @Test(arguments: [true, false])
 func nativeDirectoryV12ColdRetrashAcceptsOnlyRootQuarantineRewrite(_ priorMarkPresent: Bool) async throws {
@@ -1928,7 +1931,12 @@ func nativeDirectoryV12ColdRetrashAcceptsOnlyRootQuarantineRewrite(_ priorMarkPr
         func increment() { lock.withLock { count += 1 } }
         var value: Int { lock.withLock { count } }
     }
-    for phase in ["precall", "native-call", "post-sync"] {
+    #if DEBUG
+    let phases = ["precall", "native-call", "post-sync"]
+    #else
+    let phases = ["native-call", "post-sync"]
+    #endif
+    for phase in phases {
         let fixture = try RecoveryFixture(); defer { fixture.remove() }
         let source = fixture.source.appendingPathComponent("folder", isDirectory: true)
         let target = fixture.destination.appendingPathComponent("folder", isDirectory: true)
@@ -1937,11 +1945,13 @@ func nativeDirectoryV12ColdRetrashAcceptsOnlyRootQuarantineRewrite(_ priorMarkPr
         let calls = Calls()
         var hooks = RecoveryHooks()
         if phase == "precall" {
+            #if DEBUG
             hooks.nativeTrashBeforeSourceRecheck = {
                 let bytes = try Data(contentsOf: child)
                 try FileManager.default.removeItem(at: child)
                 try bytes.write(to: child, options: .withoutOverwriting)
             }
+            #endif
         } else if phase == "post-sync" {
             hooks.beforeSync = { _ in
                 let movedChild = target.appendingPathComponent("child.txt")
