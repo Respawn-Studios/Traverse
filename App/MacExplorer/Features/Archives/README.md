@@ -28,12 +28,22 @@ per side. ZIP verifies CRC; TAR has no per-file checksum. Readers retain the
 sealed source selection, revalidate it and use the shared native preview window.
 They do not invoke external preview plug-ins or publish extracted files.
 
-Plain TAR opens directly. Gzip TAR requires explicit Prepare into the shared
-private pool, bounded to 128 MiB and four copies. Restoring a tab or searching
+Plain TAR opens directly. Compressed TAR requires an explicit preparation
+request into the shared private pool, bounded to 128 MiB and four copies. Restoring a tab or searching
 names does not decode it. `ApplicationCompressedArchives` retains actual worker,
 source access and prepared-copy leases through drain and the volume/Quit barrier.
 A prepared spool path is never operation authority. Nesting and outgoing TAR
 promises require separate support.
+
+In Development, a deliberate ordinary Open includes preparation for a supported
+compressed TAR. The archive owner consumes a nonpersisted presentation token
+after pool admission, or immediately for a reused unprepared model. Stop,
+admission failure and a later presentation invalidate that token. It never lives
+in BrowserTab, ArchiveLocation or session history. Merely finding a filename or
+restoring a tab cannot admit preparation. A changed retained source on passive
+return clears its stale rows and requires a fresh Open or Prepare; healthy
+prepared sessions keep their ordinary source check and reuse. Distributed
+composition still uses the separate Prepare action.
 
 ## TAR editing in development
 

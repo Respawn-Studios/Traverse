@@ -11,6 +11,7 @@ import LocalStorage
     #if DEBUG
     // Set by the existing generated native check after its exact scope check.
     var cacheDirectoryForVerification: URL?
+    private(set) var preparationRequestsForVerification = 0
     #endif
 
     private var directory: URL? {
@@ -28,9 +29,12 @@ import LocalStorage
         if pool == nil { pool = TARCompressedPreparationPool(cacheDirectory: directory, activity: ApplicationFileActivity.gate) }
         return TARArchiveReader(activity: ApplicationFileActivity.gate, excludedRoots: roots + [directory], compressedPool: pool)
     }
-    /// Only explicit Prepare creates cache storage, through the existing
-    /// guarded off-main directory owner. Merely opening a tab remains inert.
+    /// Only an explicit preparation request creates cache storage, through the
+    /// guarded off-main owner. Passive tab presentation remains inert.
     func prepareStorage() async throws {
+        #if DEBUG
+        preparationRequestsForVerification += 1
+        #endif
         guard !quiescing, pool != nil, let directory else { throw TARArchiveFailure.busy }
         let base = try AppStoragePreparation.owner(for: directory.deletingLastPathComponent())
         if preparation == nil { preparation = try AppStoragePreparation.owner(for: directory) }
@@ -77,5 +81,14 @@ enum CompressedTARFeature {
         if qualifying { return true }
         #endif
         return TARBrowseFeature.available
+    }
+}
+
+/// A deliberate local Open can include bounded preparation in Development.
+/// Restored locations and distributed builds keep their separate Prepare step.
+@MainActor enum CompressedArchiveOpenFeature {
+    static var available: Bool {
+        AppFeatureAvailability.policy.edition == .development
+            && !GeneratedSandboxReview.admitted && CompressedTARFeature.available
     }
 }

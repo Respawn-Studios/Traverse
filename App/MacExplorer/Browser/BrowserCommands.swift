@@ -156,6 +156,9 @@ extension BrowserViewController {
             operationCoordinator.drives.acknowledgeNavigation(to: entry.url)
             if InlineArchiveFeature.available, let value = try? ArchiveLocation(source: entry.url, format: tar ? .tar : .zip) {
                 navigate(to: .archive(value))
+                // This call follows an admitted, deliberate local Open. The
+                // resulting intent belongs only to this presentation, not history.
+                currentArchive?.prepareForExplicitUserOpen(value)
             } else if tar { ApplicationTARBrowser.shared.show(entry.url, from: self) }
             else { ApplicationZIPBrowser.shared.show(entry.url, from: self) }
             return

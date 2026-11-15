@@ -162,9 +162,11 @@ import LocalStorage
             }
             browser.setFileSelection([source]);browser.fileSelectionDidChange();try require(browser.selectedTARURL==source)
             if compressed {
-                // Exercise the ordinary double-click/Open route as well as
-                // explicit Browse (used for the damaged input below).
+                // A queued explicit Open cannot leak into a later passive
+                // presentation before the archive pool has admitted its model.
                 browser.openSelection(nil)
+                browser.navigate(to: .directory(source.deletingLastPathComponent()))
+                browser.navigate(to: .archive(try ArchiveLocation(source: source, format: .tar)))
             } else {
                 try require(NSApplication.shared.sendAction(#selector(BrowserViewController.browseZIP(_:)),to:browser,from:nil))
             }
@@ -187,7 +189,7 @@ import LocalStorage
                 try await record(window, "tar-prepare") {
                     _ = NSApplication.shared.sendAction(action, to: item.target, from: item)
                 }
-                checks.append("Opening/restoration shows Prepare without decoding or creating cache; native Prepare command explicitly admits the bounded body operation")
+                checks.append("Leaving a queued explicit Open invalidates its preparation intent; passive presentation shows Prepare without cache/body preparation, and the native Prepare command still admits the bounded operation")
                 }
             } else {
                 guard let archive=ApplicationTARBrowser.shared.controller,let native=archive.window else{throw Failure.check(#line)}
@@ -240,7 +242,7 @@ import LocalStorage
             if clipboardHistoryCount > 0 {
                 try await verifyFolderPaste(owner: controller, browser: browser, model: model, rows: rows,
                     board: board, destination: location.appendingPathComponent("source/Paste Destination", isDirectory: true))
-                checks.append("TAR Copy/Paste and shared native row-drop callbacks each copy a folder directly with nested text/empty child and ordinary Undo; stale selection, ZIP Move and duplicate-drop admission refuse")
+                checks.append("TAR Copy/Paste and shared native row-drop callbacks each copy a folder directly with nested text/empty child and ordinary Undo; stale selection and duplicate-drop admission refuse, and TAR offers carry no ZIP identity")
             }
             if compressed || inline {
                 let previousItems = model.items.map(\.id)
@@ -250,8 +252,18 @@ import LocalStorage
                     let bytes = try Data(contentsOf: source)
                     try bytes.write(to: source, options: .atomic)
                 }.value
-                browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.openSelection(nil)
                 if compressed {
+                    let preparations = ApplicationCompressedArchives.shared.preparationRequestsForVerification
+                    browser.navigate(to: .archive(try ArchiveLocation(source: source, format: .tar)))
+                    try await wait { model.requiresPreparation && !model.busy }
+                    try require(model.summary == nil && !model.current
+                        && ApplicationCompressedArchives.shared.preparationRequestsForVerification == preparations)
+                    checks.append("Passive return to a changed prepared source admits no new preparation request; stale rows are unavailable")
+                    browser.navigate(to: .directory(source.deletingLastPathComponent()))
+                    try await wait { !browser.isLoading && browser.rowsByURL[source] != nil }
+                }
+                browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.openSelection(nil)
+                if compressed && !CompressedArchiveOpenFeature.available {
                     try await wait { browser.currentArchive?.tarModelForVerification?.requiresPreparation == true
                         && browser.currentArchive?.tarModelForVerification?.busy == false }
                     guard let reopened = browser.currentArchive?.tarModelForVerification else { throw Failure.check(#line) }
@@ -260,7 +272,18 @@ import LocalStorage
                 }
                 try await wait { model.current && !model.busy && model.items.map(\.id) != previousItems }
                 try require(model.items.map(\.name) == ["Folder", "Note.txt"])
-                checks.append("A replaced source invalidates retained rows on ordinary reopen; compressed TAR returns to explicit Prepare before a new catalog")
+                checks.append("A replaced source invalidates retained rows; a deliberate Development Open prepares the reused compressed owner without a second click")
+                if compressed && CompressedArchiveOpenFeature.available {
+                    browser.currentArchive?.stop()
+                    await browser.currentArchive?.drain()
+                    try require(model.requiresPreparation && !model.current)
+                    browser.navigate(to: .directory(source.deletingLastPathComponent()))
+                    try await wait { !browser.isLoading && browser.rowsByURL[source] != nil }
+                    browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.openSelection(nil)
+                    try await wait { model.current && !model.busy }
+                    try require(model.items.map(\.name) == ["Folder", "Note.txt"])
+                    checks.append("A fresh explicit Open resumes a stopped, reused compressed owner; Stop itself never retries preparation")
+                }
             }
             guard let event=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:.command,timestamp:ProcessInfo.processInfo.systemUptime,
                 windowNumber:window.windowNumber,context:nil,characters:"f",charactersIgnoringModifiers:"f",isARepeat:false,keyCode:3)else{throw Failure.check(#line)}
@@ -282,7 +305,7 @@ import LocalStorage
             checks.append("TAR Properties shares the native listed-item window, copies its recorded path and does not infer a packed size")
             try require(model.canPreviewSelected)
             model.previewOffscreenForVerification = offscreen
-            model.openSelection()
+            model.previewSelected()
             let preview = model.textPreviewForVerification
             try await wait { !model.isPreparingPreview && !preview.isReading && preview.textForVerification == "abc" }
             try require(preview.statusForVerification?.contains("3 UTF-8 bytes") == true
@@ -299,7 +322,7 @@ import LocalStorage
             try await wait { !preview.retainsPresentation }
             await preview.drain()
             try require(!preview.retainsPresentation && preview.textForVerification?.isEmpty != false)
-            checks.append("Ordinary file Open and Text/Hex commands show exact read-only member bytes through one preview owner, then close and drain")
+            checks.append("Explicit Text/Hex previews show exact read-only member bytes through one preview owner, then close and drain; editable Open has its separate native editor flow")
             func requestExtraction()async throws{
                 // Model publication precedes the coalesced AppKit render.
                 // Drive a row only once the actual visible page has arrived.
@@ -511,9 +534,12 @@ import LocalStorage
             try require(peer.lastOperationResult?.disposition == .succeeded && !FileManager().fileExists(atPath: output.path)
                 && browser.clipboardState.scopedItem?.isAlive == true)
         }
-        try require(window.makeFirstResponder(rows.table) && rows.table.validateMenuItem(copy) && !rows.table.validateMenuItem(cut)
-            && NSApp.sendAction(copy.action!, to: rows.table, from: copy))
-        try require(board.types == [ScopedItemClipboardIntent.pasteboardType] && !rows.table.validateMenuItem(paste))
+        try require(window.makeFirstResponder(rows.table) && rows.table.validateMenuItem(copy))
+        try UIVerification.require(rows.table.validateMenuItem(cut) == model.canModifySelectedMembers,
+            "TAR Cut availability must follow its qualified member authoring")
+        try require(NSApp.sendAction(copy.action!, to: rows.table, from: copy))
+        try await wait { !model.isPreparingPreview && board.types == [ScopedItemClipboardIntent.pasteboardType] }
+        try require(board.types == [ScopedItemClipboardIntent.pasteboardType])
         workspace.activate(peer)
         let earlier = peer.lastRecoveryRecordID
         try require(!peer.settings.alwaysReviewArchiveCopies && window.makeFirstResponder(peer.table) && peer.table.validateMenuItem(paste)
@@ -536,8 +562,11 @@ import LocalStorage
         try require(ArchiveMemberDragSource.capture(stale) == nil)
         drag.end(sequence: 1); model.selection = selected
         let drop = try begin(2)
-        try require(ArchiveMemberDragSource.capture(drop) != nil
-            && ArchiveMemberDragSource.capture(drop, for: .moveWithinArchive) == nil)
+        guard let captured = ArchiveMemberDragSource.capture(drop) else {
+            throw UIVerification.Failure(message: "TAR extraction capture refused at " + ArchiveMemberDragSource.lastCaptureReasonForVerification)
+        }
+        try require(captured.tarModel === model && captured.model == nil && captured.ids.isEmpty && captured.tarIDs == selected)
+        try require((ArchiveMemberDragSource.capture(drop, for: .moveWithinArchive) != nil) == model.canMoveMembers(selected))
         workspace.activate(peer); peer.focusBrowserContent()
         peer.dragDrop.selectionDidChange()
         try await wait { peer.dragDrop.hasPreparedDestinationForVerification(destination) }

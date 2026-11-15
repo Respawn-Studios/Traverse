@@ -75,7 +75,10 @@ import LocalStorage
             browser.currentArchive?.source == source && (browser.currentArchive?.hasRenderedCurrentRowsForVerification == true
                 || browser.currentArchive?.tarModelForVerification?.canPrepareCompressed == true)
         }
-        if browser.currentArchive?.tarModelForVerification?.canPrepareCompressed == true {
+        if CompressedArchiveOpenFeature.available {
+            try need(browser.currentArchive?.tarModelForVerification?.canPrepareCompressed != true,
+                "deliberate-compressed-open-still-required-prepare")
+        } else if browser.currentArchive?.tarModelForVerification?.canPrepareCompressed == true {
             browser.currentArchive?.tarModelForVerification?.prepareCompressed()
         }
         try await wait("tar-editor-prepared-page") { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }

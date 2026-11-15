@@ -103,7 +103,7 @@ arrives by its own name; groups retain their archive paths inside a new folder.
 | --- | --- | --- |
 | ZIP | Folders, supported text/hex/images, extraction and internal pane copies | ZIP creation and supported member edits; eligible text members open in the editor |
 | Plain TAR | Folders, supported previews, extraction and internal pane copies | Plain TAR creation; member editing in Development |
-| Gzip TAR (`.tar.gz`, `.tgz`) | Explicit Prepare before browsing, preview or extraction | Creation and member editing in Development |
+| Gzip TAR (`.tar.gz`, `.tgz`) | Prepare before browsing, preview or extraction; deliberate Open also prepares in Development | Creation and member editing in Development |
 | Bzip2 TAR (`.tar.bz2`, `.tbz2`) | Bounded Prepare, folders, supported previews and extraction in Development | Creation and member editing in Development |
 
 The Development build adds TAR Rename, batch Rename, Remove, Duplicate, Move,
@@ -115,9 +115,12 @@ keep the current setting. These additions still need distribution qualification
 and are not part of the published 0.2.0 package.
 
 Archive size, metadata and member-type limits apply. Compressed preparation uses a
-bounded temporary copy and is not started by passive tab restore or filename
-search. Encrypted archives, ZIP64 and unsupported member metadata may be refused
-by a particular write route. A ZIP external drag and a remote external drag are
+bounded temporary copy and is not started by passive tab restore or merely
+searching filenames. In Development, deliberately opening a supported compressed
+TAR, including a search result, also requests preparation. Stop cancels that
+request; returning to a changed archive passively asks for Prepare again.
+Encrypted archives, ZIP64 and unsupported member metadata may be refused by a
+particular write route. A ZIP external drag and a remote external drag are
 different capabilities; this guide does not promise remote-to-Finder delivery.
 
 ## Text editor

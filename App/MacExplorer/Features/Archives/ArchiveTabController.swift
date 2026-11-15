@@ -115,6 +115,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     private var addressNotice: String?
     private var closing: Task<Void, Never>?
     private var presentation = UUID()
+    private var explicitPreparationPresentation: UUID?
     private var restoresScroll = false
     private var updateScheduled = false
     private var lastRecordedState: ArchiveBrowseState?
@@ -473,6 +474,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     func present(_ location: ArchiveLocation, state: ArchiveBrowseState, from browser: BrowserViewController) {
         guard !isClosed, location.source == source, location.format == format else { return }
         addressWork?.cancel(); addressNotice = nil
+        explicitPreparationPresentation = nil
         self.browser = browser; visit = location; desiredState = state; presentation = UUID(); restoresScroll = true
         if let model { present(model); ArchiveTabCatalogPool.shared.touch(self); return }
         guard opening == nil else { return }
@@ -481,6 +483,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
             defer { opening = nil; render() }
             guard await ArchiveTabCatalogPool.shared.admit(self), !isClosed, !Task.isCancelled,
                   let browser = self.browser else {
+                explicitPreparationPresentation = nil
                 if !isClosed { notice.stringValue = "Close another archive or its preview, then Refresh to open this one." }
                 return
             }
@@ -489,11 +492,24 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         }
     }
 
+    func prepareForExplicitUserOpen(_ location: ArchiveLocation) {
+        guard CompressedArchiveOpenFeature.available, !isClosed, isPresented,
+              format == .tar, visit == location, source == location.source,
+              TARBrowserModel.isCompressed(source) else { return }
+        explicitPreparationPresentation = presentation
+        // The same tab may already own an unprepared/stopped model. It needs
+        // no new pool slot, but must consume exactly the same one-shot intent.
+        if let model { present(model) }
+    }
+
     private func present(_ model: Model) {
         guard let browser, !isClosed else { return }
+        let prepares = explicitPreparationPresentation == presentation && isPresented
+        explicitPreparationPresentation = nil
         switch model {
         case .zip(let model, _): model.presentEmbedded(visit, state: desiredState, from: browser)
-        case .tar(let model, _): model.presentEmbedded(visit, state: desiredState, from: browser)
+        case .tar(let model, _): model.presentEmbedded(visit, state: desiredState, from: browser,
+            preparesCompressed: prepares)
         }
         render()
     }
@@ -726,6 +742,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         switch model { case .zip(let m, _): m.refresh(); case .tar(let m, _): m.refresh(); case nil: if let browser { present(visit, state: desiredState, from: browser) } }
     }
     func stop() {
+        explicitPreparationPresentation = nil
         opening?.cancel(); addressWork?.cancel()
         switch model { case .zip(let m, _): m.stop(); case .tar(let m, _): m.stop(); case nil: break }
     }

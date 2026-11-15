@@ -42,7 +42,10 @@ struct TARClipboardSource {
     var embeddedIsPresented: (() -> Bool)?
     private var permitsEmbeddedAction: Bool { embeddedIsPresented?() ?? true }
     var embeddedScrollOffset: Double = 0
-    private struct EmbeddedPresentation { let location:ArchiveLocation;let state:ArchiveBrowseState;let token:UUID }
+    private struct EmbeddedPresentation {
+        let location:ArchiveLocation;let state:ArchiveBrowseState;let token:UUID
+        let preparesCompressed:Bool
+    }
     private var embeddedPresentation:EmbeddedPresentation?,desiredEmbedded:EmbeddedPresentation?
     private var embeddedInstalledToken:UUID?
     private var desiredEmbeddedNavigation:(folder:TARFolderID,token:UUID)?
@@ -432,16 +435,27 @@ struct TARClipboardSource {
         let field:TARArchiveOrder.Field = switch state.sortField {case .size:.size;case .modified:.modified;case .kind:.kind;default:.name}
         return .init(field,descending:!state.ascending)
     }
-    func presentEmbedded(_ location:ArchiveLocation,state:ArchiveBrowseState,from browser:BrowserViewController) {
+    func presentEmbedded(_ location:ArchiveLocation,state:ArchiveBrowseState,from browser:BrowserViewController,
+                         preparesCompressed:Bool=false) {
         guard !closed,!suspended else{return}
         do {try location.validate();try state.validate(format:.tar);guard location.format == .tar else{throw TARArchiveFailure.unsupported}}
         catch {notice=Self.message(error);current=false;return}
-        let presentation=EmbeddedPresentation(location:location,state:state,token:UUID())
+        let prepares = preparesCompressed && CompressedArchiveOpenFeature.available && permitsEmbeddedAction
+            && Self.isCompressed(location.source)
+        let presentation=EmbeddedPresentation(location:location,state:state,token:UUID(),
+            preparesCompressed:prepares && session != nil && !requiresPreparation)
         embeddedPresentation=presentation;embeddedSelectedPaths=state.selectedPaths;embeddedScrollOffset=state.scrollOffset
         installing=true;query=state.query;scope=state.scope == .archive ? .archive:.folder;order=Self.tarOrder(state);installing=false
         window=browser.view.window;self.browser=browser
+        if prepares && requiresPreparation {
+            open(location.source,from:browser,preparesCompressed:true)
+            desiredEmbedded=presentation
+            return
+        }
         if source != location.source || session == nil || desiredOpen != nil || readTask != nil {
-            if source != location.source || work?.isCancelled == true || desiredOpen == nil && readTask == nil {open(location.source,from:browser)}
+            if source != location.source || work?.isCancelled == true || desiredOpen == nil && readTask == nil {
+                open(location.source,from:browser,preparesCompressed:prepares)
+            }
             desiredEmbedded=presentation
         }else{
             desiredEmbedded=presentation;desiredEmbeddedNavigation=nil;desiredPage=nil;pageToken=presentation.token
@@ -463,7 +477,8 @@ struct TARClipboardSource {
         readTask?.cancel();queryTask?.cancel();filterWork?.cancel();selectionWork?.cancel();start()
     }
     func refresh(){if let source,let browser{
-        if let embeddedPresentation {self.embeddedPresentation = .init(location:embeddedPresentation.location,state:embeddedViewState,token:UUID())}
+        if let embeddedPresentation {self.embeddedPresentation = .init(location:embeddedPresentation.location,
+            state:embeddedViewState,token:UUID(),preparesCompressed:false)}
         open(source,from:browser,preparesCompressed:compressedSummary != nil && !requiresPreparation)
     }}
     private func start(){if work==nil{busy=true;work=Task{[self]in await pump()}}}
@@ -480,8 +495,8 @@ struct TARClipboardSource {
                 await textPreview.drain()
                 if let session{await session.close()};session=nil;await reader.drain()
                 guard request.token==token,let browser=request.browser,!browser.isBrowserSuspended else{continue}
-                // Restoring/opening a compressed location never starts a body
-                // decode. Only the explicit Prepare action admits that work.
+                // Passive presentation never starts a body decode. Explicit
+                // Prepare or a qualified deliberate Open admits that work.
                 if requiresPreparation { continue }
                 let access=await browser.accessLifetime(for:[request.source])
                 guard !closed,!suspended,!Task.isCancelled,request.token==token else{continue}
@@ -555,14 +570,25 @@ struct TARClipboardSource {
             }
             if let presentation=desiredEmbedded {
                 desiredEmbedded=nil
+                // Consume this presentation's deliberate Open before any
+                // suspension. Neither a successful read nor a later refresh
+                // can retain permission to prepare another changed source.
+                if embeddedPresentation?.token == presentation.token {
+                    embeddedPresentation = .init(location:presentation.location,state:presentation.state,
+                        token:presentation.token,preparesCompressed:false)
+                }
                 do {
                     let matches=await session.matchesCurrentSourceObservation()
                     guard !closed,!suspended,!Task.isCancelled,embeddedPresentation?.token==presentation.token,
                           pageToken==presentation.token,desiredEmbedded==nil else{continue}
                     if !matches {
-                        // Use the ordinary reader/preparation owner. Compressed
-                        // sources return to explicit Prepare, never a hidden decode.
-                        refresh();return
+                        guard let browser else { return }
+                        // Passive return to a changed compressed source must
+                        // ask again; only this exact deliberate Open can prepare.
+                        let prepares = presentation.preparesCompressed && CompressedArchiveOpenFeature.available
+                            && permitsEmbeddedAction
+                        open(presentation.location.source,from:browser,preparesCompressed:prepares)
+                        return
                     }
                     let folder=try await session.folder(at:presentation.location.folderPath)
                     guard !closed,!suspended,!Task.isCancelled,embeddedPresentation?.token==presentation.token,pageToken==presentation.token,desiredEmbedded==nil else{continue}
