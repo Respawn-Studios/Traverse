@@ -71,6 +71,22 @@ final class ToolWindowChrome: NSViewController {
 
     /// Call for a new presentation only. Returning to an existing window must
     /// preserve its user-selected frame, including when Stage Manager is used.
+    static func initialViewport(size: NSSize, minimum: NSSize, scale: CGFloat,
+                                screen: NSScreen? = nil) -> (size: NSSize, minimum: NSSize) {
+        let factor = min(1.5, max(1, scale))
+        let proposed = NSSize(width: size.width * factor, height: size.height * factor)
+        let maximum: NSSize
+        if let visible = (screen ?? NSScreen.main)?.visibleFrame {
+            maximum = NSWindow.contentRect(forFrameRect: visible.insetBy(dx: 24, dy: 24),
+                styleMask: [.titled, .closable, .resizable]).size
+        } else { maximum = proposed }
+        let floor = NSSize(width: min(minimum.width * factor, max(320, maximum.width)),
+                           height: min(minimum.height * factor, max(240, maximum.height)))
+        return (.init(width: max(floor.width, min(proposed.width, maximum.width)),
+                      height: max(floor.height, min(proposed.height, maximum.height))), floor)
+    }
+
+    /// Position a new window without changing a retained user-selected frame.
     static func position(_ window: NSWindow, relativeTo owner: NSWindow? = nil) {
         let parent = owner === window ? nil : owner
         let screen = parent?.screen ?? window.screen ?? NSScreen.main

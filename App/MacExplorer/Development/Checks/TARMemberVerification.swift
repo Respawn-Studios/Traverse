@@ -15,6 +15,7 @@ import LocalStorage
         try await Task.detached { try Data([0, 1, 255]).write(to: added, options: .withoutOverwriting) }.value
         let board = NSPasteboard(name: .init("Traverse.TAR.MemberCheck." + UUID().uuidString))
         let previousBoard = browser.transferPasteboard
+        let interactive = ProcessInfo.processInfo.arguments.contains("--interactive-tar-member-drag")
         browser.transferPasteboard = board
         defer { browser.transferPasteboard = previousBoard; board.releaseGlobally() }
 
@@ -131,6 +132,16 @@ import LocalStorage
             var shown: ArchiveCreationWindowController
             if transfer == .drag {
                 try choose(["Generated.json"], model: model, table: table)
+                if interactive {
+                    guard let window = browser.view.window else { throw Probe.Failure(stage: "tar-members-native-window") }
+                    window.title = "Generated TAR Move · " + root.lastPathComponent.prefix(8)
+                    window.setContentSize(.init(width: 1080, height: 680)); window.center()
+                    window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+                    try Probe.need(window.makeFirstResponder(table), "tar-members-pointer-focus")
+                    let receipt = ["title": window.title, "from": "Generated.json", "to": "Destination"]
+                    try JSONEncoder().encode(receipt).write(to: root.appendingPathComponent("evidence/tar-drag-ready.json"), options: .withoutOverwriting)
+                    try await Probe.wait("tar-members-pointer-review", seconds: 180) { ApplicationArchiveCreation.shared.controller != nil }
+                } else {
                 guard let rows = table.delegate as? TARMetadataRows, let source = rows.memberDragSource,
                       let writer = source.writer(tarIDs: model.selection),
                       let row = model.items.firstIndex(where: { $0.name == "Destination" }) else {
@@ -143,6 +154,7 @@ import LocalStorage
                     && rows.tableView(table, acceptDrop: info, row: row, dropOperation: .on)
                     && !rows.tableView(table, acceptDrop: info, row: row, dropOperation: .on), "tar-members-native-move-once")
                 source.end(sequence: 914, operation: .move)
+                }
                 shown = try await review()
             } else {
             let capture = NSMenuItem(title: copying ? "Copy" : "Cut",
@@ -188,6 +200,7 @@ import LocalStorage
         }
         return ["TAR Rename, Duplicate, Remove, Group, New Folder and Add share the ordinary review, preserve the source on Cancel, reject an occupied Rename and cold-Undo to the exact original",
             "Native TAR Cut/Copy → navigate → Paste uses an opaque private marker, rejects changed-board and same-folder Cut, keeps Cancel repeatable, refreshes the complete result and retires the marker only after publication; cold Undo restores both edits",
+            interactive ? "The actual native pointer drag from Generated.json onto Destination opens the shared Move review, publishes the exact namespace and cold-Undoes both edits" :
             "TAR local Add and same-archive Move pass the real table delegate callbacks with a private generated drag input and reject duplicate delivery callbacks; actual pointer gestures remain separate acceptance"]
     }
 }

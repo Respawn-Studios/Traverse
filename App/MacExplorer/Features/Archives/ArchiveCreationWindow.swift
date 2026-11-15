@@ -18,6 +18,17 @@ enum ArchiveCreationActivation {
     }
 }
 
+enum ArchiveCreationFormat: String, Sendable {
+    case zip, tar, tarGzip = "tar.gz"
+    var displayName: String { self == .tarGzip ? "TAR.gz" : rawValue.uppercased() }
+}
+enum TARGzipCreationFeature {
+    static var available: Bool {
+        AppFeatureAvailability.policy.edition == .development && AppFeatureAvailability.allows(.tarCreation)
+            && !GeneratedSandboxReview.admitted
+    }
+}
+
 enum ZIPMemberRenameFeature {
     static var available: Bool {
         if GeneratedSandboxReview.nativeTARCreateAdmitted { return false }
@@ -42,11 +53,12 @@ enum ZIPMemberRenameFeature {
 }
 
 @MainActor final class ArchiveCreationModel: ObservableObject, ArchiveAutomaticActionModel {
-    @Published private(set) var outputFormat: ArchiveFormat = .zip
+    @Published private(set) var outputFormat: ArchiveCreationFormat = .zip
     @Published var name: String { didSet { if !installingAutomaticName && !oldValue.utf8.elementsEqual(name.utf8) { requestPreview() } } }
     @Published var memberName = "" { didSet { if !oldValue.utf8.elementsEqual(memberName.utf8) { requestPreview() } } }
     @Published var batchOptions = BatchRenameOptions() { didSet { if oldValue != batchOptions { requestPreview() } } }
     @Published var compression: ZIPCompression = .balanced { didSet { if oldValue != compression { requestPreview() } } }
+    @Published var tarCompression = TARCompression.gzipBalanced { didSet { if oldValue != tarCompression { requestPreview() } } }
     @Published var additionCollisions = ZIPMemberAdditionCollisionPolicy.keepBoth {
         didSet { if oldValue != additionCollisions { requestPreview() } }
     }
@@ -65,7 +77,7 @@ enum ZIPMemberRenameFeature {
     @Published private(set) var preparedAdditions: [ArchiveAddedItemPreview] = []
     private let memberEdit: ArchiveMemberCopyEdit?
     var isMemberCopy: Bool { memberEdit != nil }
-    var formatName: String { memberEdit?.formatName ?? outputFormat.rawValue.uppercased() }
+    var formatName: String { memberEdit?.formatName ?? outputFormat.displayName }
     var memberSelectionPreview: (paths: [String], folders: [String], covered: Int)? { memberEdit?.selectionPreview }
     var isMemberGrouping: Bool { memberEdit?.isGrouping == true }
     var isMemberRename: Bool { memberEdit?.isRename == true }
@@ -160,7 +172,7 @@ enum ZIPMemberRenameFeature {
         if isMemberNewFolder { return updatesOriginal ? "New Folder in \(formatName)" : "New Folder in \(formatName) Copy" }
         if isMemberNewFile { return updatesOriginal ? "Create File in \(formatName)" : "Create File in \(formatName) Copy" }
         if updatesOriginal { return isMemberAddition ? "Add to \(formatName)" : isMemberRemoval ? "Remove from \(formatName)" : "Rename in \(formatName)" }
-        return isMemberAddition ? "Add to \(formatName) Copy" : isMemberRemoval ? "Remove from \(formatName) Copy" : isMemberRename ? "Rename in \(formatName) Copy" : "Create \(outputFormat.rawValue.uppercased())"
+        return isMemberAddition ? "Add to \(formatName) Copy" : isMemberRemoval ? "Remove from \(formatName) Copy" : isMemberRename ? "Rename in \(formatName) Copy" : "Create \(outputFormat.displayName)"
     }
     var createTitle: String {
         if updatesOriginal {
@@ -171,13 +183,14 @@ enum ZIPMemberRenameFeature {
             if isMemberMove { return "Move" }
             return "Update \(formatName)"
         }
-        return isMemberCopy ? "Save \(formatName) Copy" : "Create \(outputFormat.rawValue.uppercased())"
+        return isMemberCopy ? "Save \(formatName) Copy" : "Create \(outputFormat.displayName)"
     }
     var offersOutputFormats: Bool {
         !isMemberCopy && !GeneratedSandboxReview.nativeTARCreateAdmitted && AppFeatureAvailability.allows(.tarCreation)
     }
-    func chooseOutputFormat(_ value: ArchiveFormat) {
+    func chooseOutputFormat(_ value: ArchiveCreationFormat) {
         guard !closed, !isRunning, !isChoosing, outcome == nil, offersOutputFormats, outputFormat != value else { return }
+        guard value != .tarGzip || TARGzipCreationFeature.available else { return }
         let previousSuffix = "." + outputFormat.rawValue
         outputFormat = value; window?.title = title
         if name.lowercased().hasSuffix(previousSuffix) {
@@ -300,6 +313,7 @@ enum ZIPMemberRenameFeature {
         while !closed, pending {
             pending = false
             let token = generation, chosenParent = parent, chosenFormat = outputFormat, chosenCompression = compression
+            let chosenTARCompression = tarCompression
             let suffix = "." + chosenFormat.rawValue
             let requestedName = name.lowercased().hasSuffix(suffix) ? name : name + suffix
             let choosesAutomaticName = automaticNameRequested; automaticNameRequested = false
@@ -415,10 +429,11 @@ enum ZIPMemberRenameFeature {
                             name: chosenMemberName, outputName: chosenName, observing: captured))
                     case nil: break
                     }
-                    if chosenFormat == .tar {
+                    if chosenFormat == .tar || chosenFormat == .tarGzip {
                         guard AppFeatureAvailability.allows(.tarCreation) else { throw FileOperationFailure.unsupported }
+                        guard chosenFormat != .tarGzip || TARGzipCreationFeature.available else { throw FileOperationFailure.unsupported }
                         return .create(try await engine.prepareTARCreation(sources: sources, parent: chosenParent,
-                            name: chosenName, observing: captured))
+                            name: chosenName, compression: chosenFormat == .tarGzip ? chosenTARCompression : .none, observing: captured))
                     }
                     return .create(try await engine.prepareZIPCreation(sources: sources, parent: chosenParent, name: chosenName, compression: chosenCompression, observing: captured))
                 }
@@ -565,9 +580,9 @@ enum ZIPMemberRenameFeature {
     }
     func create() {
         guard canCreate, let browser, let plan, browser.recoverableFileOperations === engine,
-              browser.operationTask == nil, browser.startOperationPresentation(updatesOriginal ? "Updating \(formatName)…" : isMemberCopy ? "Saving \(formatName) copy…" : "Creating \(outputFormat.rawValue.uppercased())…") else { return }
+              browser.operationTask == nil, browser.startOperationPresentation(updatesOriginal ? "Updating \(formatName)…" : isMemberCopy ? "Saving \(formatName) copy…" : "Creating \(outputFormat.displayName)…") else { return }
         isRunning = true; self.plan = nil
-        notice = updatesOriginal ? "Preparing and verifying the updated archive…" : isMemberCopy ? "Creating and checking the archive copy…" : "Creating and verifying the \(outputFormat.rawValue.uppercased())…"
+        notice = updatesOriginal ? "Preparing and verifying the updated archive…" : isMemberCopy ? "Creating and checking the archive copy…" : "Creating and verifying the \(outputFormat.displayName)…"
         let access = lifetime
         let createdPath: String?
         if case .newFile(let selection) = memberEdit {
@@ -611,7 +626,7 @@ enum ZIPMemberRenameFeature {
     }
     func undo() {
         guard canUndo, let browser, let id = outcome?.recordID, browser.recoverableFileOperations === engine,
-              browser.startOperationPresentation(updatesOriginal ? "Undoing \(formatName) update…" : "Undoing \(outputFormat.rawValue.uppercased()) creation…") else { return }
+              browser.startOperationPresentation(updatesOriginal ? "Undoing \(formatName) update…" : "Undoing \(outputFormat.displayName) creation…") else { return }
         undoAttempted = true; isRunning = true; notice = "Checking the archive before Undo…"
         let access = lifetime
         let work = Task { [self, browser] in
@@ -628,7 +643,7 @@ enum ZIPMemberRenameFeature {
             let result = await engine.undo(recordID: id, progress: browser.operationProgressSink); undoOutcome = result
             notice = result.result.disposition == .succeeded ? (updatesOriginal
                 ? "The earlier archive is restored. The edited version remains in recovery."
-                : "\(outputFormat.rawValue.uppercased()) creation undone. Its unchanged archive is retained in recovery; originals are untouched.")
+                : "\(outputFormat.displayName) creation undone. Its unchanged archive is retained in recovery; originals are untouched.")
                 : "Undo could not finish. Changed or uncertain items are preserved; View Results has the details."
             publish(result, browser: browser)
         }
@@ -846,8 +861,9 @@ private struct ArchiveCreationView: View {
             }
             if model.offersOutputFormats {
                 Picker("Format", selection: Binding(get: { model.outputFormat }, set: model.chooseOutputFormat)) {
-                    Text("ZIP").tag(ArchiveFormat.zip)
-                    Text("TAR (uncompressed)").tag(ArchiveFormat.tar)
+                    Text("ZIP").tag(ArchiveCreationFormat.zip)
+                    Text("TAR (uncompressed)").tag(ArchiveCreationFormat.tar)
+                    if TARGzipCreationFeature.available { Text("TAR + gzip").tag(ArchiveCreationFormat.tarGzip) }
                 }.pickerStyle(.segmented).disabled(model.isRunning || model.outcome != nil || model.isChoosing)
             }
             if model.outputFormat == .zip && (!model.isMemberCopy || model.isMemberAddition) { Picker("Compression", selection: $model.compression) {
@@ -855,6 +871,15 @@ private struct ArchiveCreationView: View {
                 Text("Fast").tag(ZIPCompression.fast)
                 Text("Store only").tag(ZIPCompression.store)
             }.pickerStyle(.segmented).disabled(model.isRunning || model.outcome != nil || model.isChoosing) }
+            if model.outputFormat == .tarGzip {
+                Picker("Compression", selection: $model.tarCompression) {
+                    Text("Balanced").tag(TARCompression.gzipBalanced)
+                    Text("Fast").tag(TARCompression.gzipFast)
+                    Text("Smallest").tag(TARCompression.gzipSmallest)
+                }.pickerStyle(.segmented).disabled(model.isRunning || model.outcome != nil || model.isChoosing)
+                Text("Up to 128 MiB before and after compression, including the TAR headers.")
+                    .interfaceFont(.caption).foregroundStyle(.secondary)
+            }
             Text(model.notice).interfaceFont(.callout).textSelection(.enabled).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             Text(model.isMemberBatchRename ? (model.updatesOriginal
                 ? "Folders keep all their contents. One Undo restores every earlier name; existing names are never merged or replaced."
@@ -885,6 +910,7 @@ private struct ArchiveCreationView: View {
                 : model.isDirectoryRename ? "Your original archive stays unchanged. The new copy keeps this folder and everything inside it together, with its new name. Other items are kept."
                 : model.isMemberRename ? "Your original archive stays unchanged. The new copy keeps this item in the same folder with its new name. Archives that cannot be copied safely are left untouched."
                 : model.outputFormat == .tar ? "Uncompressed TAR with portable names, contents, dates and basic permissions. Your originals stay unchanged."
+                : model.outputFormat == .tarGzip ? "gzip-compressed TAR for sharing between devices. Your originals stay unchanged."
                 : "Standard ZIP for sharing between devices.")
                 .interfaceFont(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 .help(model.updatesOriginal ? "The updated archive is checked before it replaces the original. The earlier archive is kept for Undo."
@@ -896,7 +922,7 @@ private struct ArchiveCreationView: View {
     private var completedActions: some View {
         Group {
             Button("View Results…", action: model.viewResults).disabled(!model.canViewResults)
-            Button(model.updatesOriginal ? "Undo \(model.formatName) Update" : model.isMemberCopy ? "Undo Copy" : "Undo \(model.outputFormat.rawValue.uppercased()) Creation", action: model.undo).disabled(!model.canUndo)
+            Button(model.updatesOriginal ? "Undo \(model.formatName) Update" : model.isMemberCopy ? "Undo Copy" : "Undo \(model.outputFormat.displayName) Creation", action: model.undo).disabled(!model.canUndo)
             if model.undoOutcome == nil, model.outcome?.result.disposition == .succeeded { Button("Show in Explorer", action: model.showInExplorer) }
         }
     }
@@ -939,14 +965,15 @@ private struct ArchiveCreationView: View {
         let size = NSSize(width: model.isMemberBatchRename ? 860 : 720,
                           height: model.isMemberBatchRename ? 740 : compactHeight ?? (model.isMemberAddition ? 720 : model.isMemberCopy ? 620 : 540))
         let minimum = NSSize(width: 650, height: compactHeight.map { $0 - 20 } ?? (model.isMemberCopy ? 580 : 500))
-        let window = ToolWindowChrome.makeWindow(title: model.title, size: size, minimumSize: minimum)
+        let viewport = ToolWindowChrome.initialViewport(size: size, minimum: minimum, scale: model.settings.interfaceSize.scale)
+        let window = ToolWindowChrome.makeWindow(title: model.title, size: viewport.size, minimumSize: viewport.minimum)
         window.contentViewController = InterfaceHostingController(rootView: ArchiveCreationView(model: model))
         super.init(window: window); window.delegate = self; model.window = window
         ToolWindowChrome.install(in: window, settings: model.settings)
         // Installing a replacement content controller can apply its fitting
         // size. Set the actual content geometry after the shared chrome exists.
-        window.contentMinSize = minimum
-        window.setContentSize(size)
+        window.contentMinSize = viewport.minimum
+        window.setContentSize(viewport.size)
     }
     required init?(coder: NSCoder) { nil }
     func windowWillClose(_ notification: Notification) { onClose?() }

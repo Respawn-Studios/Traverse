@@ -9,8 +9,8 @@ import LocalStorage
 @MainActor enum ArchiveTextEditorVerification {
     struct Failure: Error { let stage: String }
     static func need(_ value: Bool, _ stage: String) throws { if !value { throw Failure(stage: stage) } }
-    static func wait(_ stage: String, _ ready: () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(10)
+    static func wait(_ stage: String, seconds: Double = 10, _ ready: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(seconds)
         while !ready() { try need(.now < deadline, stage); try await Task.sleep(for: .milliseconds(10)) }
     }
     private static func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }

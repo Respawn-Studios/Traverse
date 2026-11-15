@@ -69,6 +69,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     internal let copyExecutionAuthorization: CopyExecutionAuthorization
     internal let authoredZIPMetadataPolicy: AuthoredZIPMetadataPolicy
     internal let strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy
+    internal let tarGzipCreationPolicy: TARGzipCreationPolicy
     internal let nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy
     internal let authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy
     internal let authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy
@@ -77,6 +78,9 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     }
     @_spi(ArchiveProduction) public var nativeTARCreationAcceptsMarkedSources: Bool {
         strictPortableTARCreationPolicy == .nativeCreateQualification
+    }
+    @_spi(ArchiveProduction) public var nativeTARGzipCreationAcceptsMarkedSources: Bool {
+        tarGzipCreationPolicy == .developmentNativeCreate
     }
     internal let downloadAdoptionPolicy: DownloadAdoptionPolicy
     internal let receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy
@@ -116,9 +120,10 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     public convenience init(journalDirectory: URL, protecting: [URL] = [], activity: (@Sendable () throws -> any Sendable)? = nil,
                             authoredZIPMetadataPolicy: AuthoredZIPMetadataPolicy = .exactSource,
                             strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
+                            tarGzipCreationPolicy: TARGzipCreationPolicy = .held,
                             nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
                             authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
-                  authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
+                            authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
                             downloadAdoptionPolicy: DownloadAdoptionPolicy = .held,
                             receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy = .held,
                             zipOneFilePublicExtractionPolicy: ZIPOneFilePublicExtractionPolicy = .held,
@@ -131,6 +136,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         self.init(journalDirectory: journalDirectory, hooks: RecoveryHooks(), copyExecutionAuthorization: .closed,
                   protecting: protecting, activity: activity, authoredZIPMetadataPolicy: authoredZIPMetadataPolicy,
                   strictPortableTARCreationPolicy: strictPortableTARCreationPolicy,
+                  tarGzipCreationPolicy: tarGzipCreationPolicy,
                   nativeAuthoredCreatePublicMarkPolicy: nativeAuthoredCreatePublicMarkPolicy,
                   authoredZIPOriginalUpdateNativePolicy: authoredZIPOriginalUpdateNativePolicy,
                   authoredTAROriginalUpdatePolicy: authoredTAROriginalUpdatePolicy,
@@ -148,9 +154,10 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                             protecting: [URL] = [], activity: (@Sendable () throws -> any Sendable)? = nil,
                             authoredZIPMetadataPolicy: AuthoredZIPMetadataPolicy = .exactSource,
                             strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
+                            tarGzipCreationPolicy: TARGzipCreationPolicy = .held,
                             nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
                             authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
-                  authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
+                            authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
                             downloadAdoptionPolicy: DownloadAdoptionPolicy = .held,
                             receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy = .held,
                             zipOneFilePublicExtractionPolicy: ZIPOneFilePublicExtractionPolicy = .held,
@@ -164,6 +171,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   qualifiedCopyPreview: qualifiedCopyPreview, protecting: protecting, activity: activity,
                   authoredZIPMetadataPolicy: authoredZIPMetadataPolicy,
                   strictPortableTARCreationPolicy: strictPortableTARCreationPolicy,
+                  tarGzipCreationPolicy: tarGzipCreationPolicy,
                   nativeAuthoredCreatePublicMarkPolicy: nativeAuthoredCreatePublicMarkPolicy,
                   authoredZIPOriginalUpdateNativePolicy: authoredZIPOriginalUpdateNativePolicy,
                   authoredTAROriginalUpdatePolicy: authoredTAROriginalUpdatePolicy,
@@ -251,9 +259,10 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         protecting: [URL] = [], activity: (@Sendable () throws -> any Sendable)? = nil,
         authoredZIPMetadataPolicy: AuthoredZIPMetadataPolicy = .exactSource,
         strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
+        tarGzipCreationPolicy: TARGzipCreationPolicy = .held,
         nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
         authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
-                  authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
+        authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
         receivedDownloadPublicQuarantinePolicy: ReceivedDownloadPublicQuarantinePolicy = .held,
         zipOneFilePublicExtractionPolicy: ZIPOneFilePublicExtractionPolicy = .held,
         tarOneFilePublicExtractionPolicy: TAROneFilePublicExtractionPolicy = .held,
@@ -266,6 +275,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   protecting: protecting, activity: activity,
                   authoredZIPMetadataPolicy: authoredZIPMetadataPolicy,
                   strictPortableTARCreationPolicy: strictPortableTARCreationPolicy,
+                  tarGzipCreationPolicy: tarGzipCreationPolicy,
                   nativeAuthoredCreatePublicMarkPolicy: nativeAuthoredCreatePublicMarkPolicy,
                   authoredZIPOriginalUpdateNativePolicy: authoredZIPOriginalUpdateNativePolicy,
                   authoredTAROriginalUpdatePolicy: authoredTAROriginalUpdatePolicy,
@@ -286,6 +296,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   activity: (@Sendable () throws -> any Sendable)? = nil,
                   authoredZIPMetadataPolicy: AuthoredZIPMetadataPolicy = .exactSource,
                   strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
+                  tarGzipCreationPolicy: TARGzipCreationPolicy = .held,
                   nativeAuthoredCreatePublicMarkPolicy: NativeAuthoredCreatePublicMarkPolicy = .held,
                   authoredZIPOriginalUpdateNativePolicy: AuthoredZIPOriginalUpdateNativePolicy = .held,
                   authoredTAROriginalUpdatePolicy: AuthoredTAROriginalUpdatePolicy = .held,
@@ -308,6 +319,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         self.copyExecutionAuthorization = copyExecutionAuthorization ?? (hooks.groupedCopy.qualification == nil ? .closed : .legacyQualification)
         self.authoredZIPMetadataPolicy = authoredZIPMetadataPolicy
         self.strictPortableTARCreationPolicy = strictPortableTARCreationPolicy
+        self.tarGzipCreationPolicy = tarGzipCreationPolicy
         self.nativeAuthoredCreatePublicMarkPolicy = nativeAuthoredCreatePublicMarkPolicy
         self.authoredZIPOriginalUpdateNativePolicy = authoredZIPOriginalUpdateNativePolicy
         self.authoredTAROriginalUpdatePolicy = authoredTAROriginalUpdatePolicy
@@ -477,7 +489,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                                                                cancellation: cancellation)
             let record: JournalRecord
             switch catalog {
-            case .treeV3(let value) where value.operation == "Create ZIP" || value.operation == "Create TAR":
+            case .treeV3(let value) where value.operation == "Create ZIP" || value.operation == "Create TAR" || value.operation == "Create TAR.gz":
                 // v3 also records other file work. The title alone is not a
                 // sufficient reason to ask the user for destination access.
                 let prefix = ".mac-explorer-recovery-"

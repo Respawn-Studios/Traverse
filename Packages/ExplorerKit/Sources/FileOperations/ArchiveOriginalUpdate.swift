@@ -139,6 +139,7 @@ extension RecoverableFileOperations {
         switch format {
         case .zip: authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage
         case .strictPortableTAR: authoredTAROriginalUpdatePolicy == .developmentNativeStage
+        case .strictPortableTARGzip: false
         }
     }
 
@@ -159,6 +160,7 @@ extension RecoverableFileOperations {
     ) async throws -> ArchiveUpdatePlan {
         try await worker { cancellation in
             if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
+            guard authoredFormat != .strictPortableTARGzip else { throw FileOperationFailure.unsupported }
             guard !sources.isEmpty, sources.count <= 512, sources.first == original,
                   sources.count == selection.urls.count, sources.count == selection.identities.count,
                   original.pathExtension.lowercased() == (authoredFormat == .zip ? "zip" : "tar"),

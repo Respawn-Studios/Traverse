@@ -1,0 +1,145 @@
+import CoreServices
+import CryptoKit
+import Darwin
+import Foundation
+@_spi(ArchiveProduction) @testable import FileOperations
+@testable import LocalStorage
+import Testing
+
+struct TARGzipCreationTests {
+    private struct Fixture {
+        let root: URL, folder: URL, file: URL
+        let bytes = Data((0..<65_539).map { UInt8(truncatingIfNeeded: $0 * 19) })
+        init() throws {
+            root = try LocalStorageTestFixtures.directory()
+            folder = root.appendingPathComponent("Folder 日本", isDirectory: true)
+            file = folder.appendingPathComponent("data.bin")
+            try FileManager().createDirectory(at: folder.appendingPathComponent("Empty"), withIntermediateDirectories: true)
+            try bytes.write(to: file, options: .withoutOverwriting)
+        }
+        func output(_ name: String) throws -> Int32 {
+            let fd = open(root.appendingPathComponent(name).path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            try #require(fd >= 0); return fd
+        }
+    }
+    @Test(arguments: [TARCompression.gzipFast, .gzipBalanced, .gzipSmallest])
+    func sharedPublisherNativeGzipAndColdUndo(compression: TARCompression) async throws {
+        let f = try Fixture(), history = f.root.appendingPathComponent("history")
+        let held = RecoverableFileOperations(journalDirectory: history, strictPortableTARCreationPolicy: .nativeCreateQualification)
+        let observed = try await held.observeSelection([f.folder])
+        await #expect(throws: FileOperationFailure.unsupported) {
+            try await held.prepareTARCreation(sources: [f.folder], parent: f.root, name: "Created.tar.gz", compression: compression, observing: observed)
+        }
+        let engine = RecoverableFileOperations(journalDirectory: history, tarGzipCreationPolicy: .developmentNativeCreate)
+        let plan = try await engine.prepareTARCreation(sources: [f.folder], parent: f.root,
+            name: "Created.tar.gz", compression: compression, observing: observed)
+        let result = await engine.performArchiveCreation(plan)
+        #expect(result.result.disposition == .succeeded)
+        let id = try #require(result.recordID), output = f.root.appendingPathComponent("Created.tar.gz")
+        let bytes = try Data(contentsOf: output)
+        #expect(bytes.prefix(3) == Data([0x1f, 0x8b, 8]))
+        #expect(bytes[4..<8].allSatisfy { $0 == 0 })
+        let process = Process(), pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["-xOf", output.path, "Folder 日本/data.bin"]
+        process.standardOutput = pipe
+        try process.run()
+        let extracted = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+        #expect(process.terminationStatus == 0 && extracted == f.bytes)
+        let cache = f.root.appendingPathComponent("cache")
+        try FileManager().createDirectory(at: cache, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let pool = TARCompressedPreparationPool(cacheDirectory: cache, activity: .init())
+        let session = try await TARArchiveReader(compressedPool: pool).prepareCompressed(output)
+        #expect(session.summary.files == 1 && session.summary.folders == 2)
+        await session.close(); #expect(await pool.closeAndDrain())
+        let cold = RecoverableFileOperations(journalDirectory: history, tarGzipCreationPolicy: .developmentNativeCreate)
+        let undone = await cold.undo(recordID: id)
+        #expect(undone.result.disposition == .succeeded && !FileManager().fileExists(atPath: output.path))
+        #expect(try Data(contentsOf: f.file) == f.bytes)
+    }
+
+    @Test func markedInputKeepsItsProtectionAndOutputKeepsItsOwnStageProtection() async throws {
+        let f = try Fixture(), history = f.root.appendingPathComponent("history")
+        @Sendable func mark(_ url: URL, agent: String) throws {
+            var values = URLResourceValues()
+            values.quarantineProperties = [
+                kLSQuarantineAgentNameKey as String: agent,
+                kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+                kLSQuarantineTimeStampKey as String: Date()
+            ]
+            var target = url; try target.setResourceValues(values)
+        }
+        try mark(f.file, agent: "Generated gzip input")
+        let sourceProperties = try #require(try f.file.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties)
+        var hooks = RecoveryHooks()
+        hooks.archiveProduction.stage = { stage, payload in
+            if stage == .payloadCreated { try mark(payload, agent: "Generated gzip stage") }
+        }
+        let engine = RecoverableFileOperations(journalDirectory: history, hooks: hooks,
+            tarGzipCreationPolicy: .developmentNativeCreate)
+        let selection = try await engine.observeSelection([f.folder])
+        let plan = try await engine.prepareTARCreation(sources: [f.folder], parent: f.root,
+            name: "Marked.tar.gz", compression: .gzipBalanced, observing: selection)
+        let result = await engine.performArchiveCreation(plan)
+        #expect(result.result.disposition == .succeeded)
+        let output = f.root.appendingPathComponent("Marked.tar.gz")
+        let outputProperties = try #require(try output.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties)
+        #expect(outputProperties[kLSQuarantineAgentNameKey as String] as? String == "Generated gzip stage")
+        let inputProperties = try #require(try f.file.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties)
+        #expect((inputProperties as NSDictionary).isEqual(to: sourceProperties))
+        let cold = RecoverableFileOperations(journalDirectory: history)
+        let undone = await cold.undo(recordID: try #require(result.recordID))
+        #expect(undone.result.disposition == .succeeded && !FileManager().fileExists(atPath: output.path))
+        #expect(try Data(contentsOf: f.file) == f.bytes)
+    }
+
+    @Test func corruptionQuotaAndCancellationReturnNoReceipt() throws {
+        for failure in 0..<3 {
+            let f = try Fixture()
+            var hooks = ZIPCreationHooks()
+            if failure == 0 {
+                hooks.beforeValidation = { fd in
+                    var byte: UInt8 = 255
+                    guard pwrite(fd, &byte, 1, 0) == 1 else { throw FileOperationFailure.ioFailure }
+                }
+            } else if failure == 1 { hooks.maximumEncodedBytes = 20 }
+            else { hooks.beforeSourceRead = { _ in throw CancellationError() } }
+            let producer = try PreparedTARCreation([f.folder], compression: .gzipBalanced, check: {}, hooks: hooks)
+            let fd = try f.output("Failed.tar.gz"); defer { close(fd) }
+            #expect(throws: (any Error).self) { try producer.produce(into: fd, check: {}, progress: { _, _ in }) }
+            #expect(try Data(contentsOf: f.file) == f.bytes)
+        }
+    }
+
+    @Test func metadataMustDescribeTheActualEmittedStream() throws {
+        let f = try Fixture(), fd = try f.output("Invalid.tar.gz"); defer { close(fd) }
+        let stream = try TAROutputStream(fd, encoding: .gzip(6), hooks: .init(), check: {})
+        let header = try TARCreationHeader(path: "bad.txt", directory: false, bytes: 0, seconds: 0, index: 0)
+        try stream.write(header.encoded, metadata: true, check: {})
+        // A wrong size cannot be hidden by a correct compression round trip.
+        try stream.write(Data(repeating: 65, count: 512), check: {})
+        try stream.write(Data(repeating: 0, count: 1024), metadata: true, check: {})
+        try stream.finish(check: {})
+        #expect(throws: TAROutputStream.Failure.mismatch) { try stream.verify(check: {}) }
+        #expect(stream.peakCodecHeap > 0 && stream.peakCodecHeap <= 1 << 20)
+    }
+
+    @Test func trailingMembersAndBytesAreRefused() throws {
+        let f = try Fixture(), plainFD = try f.output("Plain.tar"), gzipFD = try f.output("Encoded.tar.gz")
+        defer { close(plainFD); close(gzipFD) }
+        _ = try PreparedTARCreation([f.folder], check: {}).produce(into: plainFD, check: {}, progress: { _, _ in })
+        _ = try PreparedTARCreation([f.folder], compression: .gzipBalanced, check: {}).produce(into: gzipFD, check: {}, progress: { _, _ in })
+        let plain = try Data(contentsOf: f.root.appendingPathComponent("Plain.tar"))
+        let encoded = try Data(contentsOf: f.root.appendingPathComponent("Encoded.tar.gz"))
+        for (index, suffix) in [encoded, Data([0])].enumerated() {
+            let bytes = encoded + suffix, name = "Trailing-\(index).gz"
+            try bytes.write(to: f.root.appendingPathComponent(name), options: .withoutOverwriting)
+            let fd = open(f.root.appendingPathComponent(name).path, O_RDONLY | O_NOFOLLOW)
+            try #require(fd >= 0); defer { close(fd) }
+            #expect(throws: (any Error).self) {
+                try GzipArchiveEncoder.verify(fd, rawBytes: UInt64(plain.count), encodedBytes: UInt64(bytes.count),
+                    expected: Data(SHA256.hash(data: plain)), check: {})
+            }
+        }
+    }
+}

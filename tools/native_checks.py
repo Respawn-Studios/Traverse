@@ -50,13 +50,13 @@ def generated_quarantine(path: Path) -> bytes:
         os.close(descriptor)
 
 
-def verify_native_archive_creation(case: Path, feature: str, *, marked_source_create: bool) -> Path:
+def verify_native_archive_creation(case: Path, feature: str, *, marked_source_create: bool, gzip_tar: bool = False) -> Path:
     """Finish independent archive checks without launching another App process."""
     if feature not in ("create-zip", "create-tar"):
         raise ValueError("Only generated archive creation can use this verification")
     evidence = case / "evidence"
     report = json.loads((evidence / "native.json").read_bytes())
-    expected_format = "tar" if feature == "create-tar" else "zip"
+    expected_format = "tar.gz" if gzip_tar else "tar" if feature == "create-tar" else "zip"
     if report.get("passed") is not True or report.get("format") != expected_format:
         raise RuntimeError("Native archive creation receipt is missing or unsuccessful")
     if marked_source_create:
@@ -76,7 +76,7 @@ def verify_native_archive_creation(case: Path, feature: str, *, marked_source_cr
             raise RuntimeError("Independent generated source mark check failed after cold Undo")
     source_report = json.loads((evidence / "source.json").read_bytes())
     if feature == "create-tar":
-        with tarfile.open(evidence / "Created.tar", mode="r:") as archive:
+        with tarfile.open(evidence / ("Created.tar.gz" if gzip_tar else "Created.tar"), mode="r:gz" if gzip_tar else "r:") as archive:
             members = archive.getmembers()
             if len(members) != source_report["files"] + source_report["folders"] or any(
                     not (member.isfile() or member.isdir()) for member in members):
@@ -201,6 +201,11 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                  incremental_analysis: bool = False, connection_phase: str = "persistence",
                  marked_source_create: bool = False) -> Path:
     """Run existing feature checks in the ordinary app, with generated data only."""
+    gzip_tar = feature == "create-targz"
+    if gzip_tar:
+        if marked_source_create:
+            raise ValueError("gzip TAR has a separate development creation route")
+        feature = "create-tar"
     tar_editor = feature == "tar-editor"
     native_zip_recovery = feature == "zip-editor-native-recovery"
     native_zip_update = feature in ("zip-update-native", "zip-editor-native", "zip-editor-native-recovery")
@@ -564,6 +569,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command += ["--analysis-source", str(case)]
         if feature == "create-tar":
             command.append("--create-tar")
+            if gzip_tar:
+                command.append("--gzip-tar")
     if offscreen:
         command.append("--offscreen")
     if marked_source_create:
@@ -648,7 +655,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         if large_interface:
             command += ["--motion-large", "--motion-light"]
     if interactive:
-        command.append("--interactive-zip-move" if feature == "zip-update-move" else "--interactive-sidebar-review")
+        command.append("--interactive-tar-member-drag" if tar_editor else
+                       "--interactive-zip-move" if feature == "zip-update-move" else "--interactive-sidebar-review")
     if motion:
         command.append("--record-download-motion" if feature == "sftp-batch-download" else
                        "--record-connection-fields" if feature == "connection-fields" else
@@ -729,7 +737,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             (case / "source/Local" / name).read_bytes() != body for name, body in upload_bodies.items()):
         raise RuntimeError("Native upload admission changed its generated local originals")
     if feature in ("create-zip", "create-tar"):
-        verify_native_archive_creation(case, feature, marked_source_create=marked_source_create)
+        verify_native_archive_creation(case, feature, marked_source_create=marked_source_create, gzip_tar=gzip_tar)
     if feature == "batch-rename":
         with zipfile.ZipFile(case / "source/Batch Rename.zip") as original, \
              zipfile.ZipFile(case / "evidence/Batch Edited.zip") as edited:

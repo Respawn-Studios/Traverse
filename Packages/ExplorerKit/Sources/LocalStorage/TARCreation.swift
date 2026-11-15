@@ -1,4 +1,3 @@
-import CryptoKit
 import Darwin
 import Foundation
 @_spi(ArchiveProduction) import FileOperations
@@ -14,6 +13,9 @@ public enum TARCreationFailure: Error, Sendable, Equatable {
         }
     }
     internal static func project(_ error: Error) -> Error {
+        if let failure = error as? TAROutputStream.Failure {
+            return failure == .limit ? Self.limitReached : Self.contentMismatch
+        }
         if let failure = error as? TARArchiveFailure {
             return failure == .limited ? Self.limitReached : Self.unsupportedSource
         }
@@ -27,26 +29,39 @@ public enum TARCreationFailure: Error, Sendable, Equatable {
     }
 }
 
+public enum TARCompression: String, CaseIterable, Sendable {
+    case none, gzipFast, gzipBalanced, gzipSmallest
+    public var displayName: String {
+        switch self { case .none: "Uncompressed TAR"; case .gzipFast: "gzip · Fast"; case .gzipBalanced: "gzip · Balanced"; case .gzipSmallest: "gzip · Smallest" }
+    }
+    public var fileExtension: String { self == .none ? "tar" : "tar.gz" }
+    internal var level: Int32? {
+        switch self { case .none: nil; case .gzipFast: 1; case .gzipBalanced: 6; case .gzipSmallest: 9 }
+    }
+}
+
 /// The same checked portable local inventory as ZIP, with a different encoder.
 /// Only regular files/folders enter it; no shell tool, archive extraction or
 /// second source-body copy is involved in creating an uncompressed TAR.
 internal final class PreparedTARCreation: TARCreationSourceWitness, Sendable {
     let preview: ArchiveProductionPreview
     var hasMarkedSource: Bool { inventory.hasMarkedSource }
+    var authoredArchiveFormat: AuthoredArchiveFormat { compression == .none ? .strictPortableTAR : .strictPortableTARGzip }
     private let inventory: ZIPCreationInventory
     private let headers: [TARCreationHeader]
     private let hooks: ZIPCreationHooks
+    private let compression: TARCompression
 
-    init(_ sources: [URL], allowNativeMarkedSources: Bool = false,
+    init(_ sources: [URL], compression: TARCompression = .none, allowNativeMarkedSources: Bool = false,
          check: @Sendable () throws -> Void, hooks: ZIPCreationHooks = .init()) throws {
-        self.hooks = hooks
+        self.hooks = hooks; self.compression = compression
         do {
             let inventory = try ZIPCreationInventory(sources,
                 allowNativeMarkedSources: allowNativeMarkedSources, check: check)
             var headers: [TARCreationHeader] = [], encodedBytes: UInt64 = 1024, physicalRecords = 0
             var metadataBytes = 1024, nameBytes = 0
             let limits = TARReadLimits()
-            let ceiling = min(hooks.maximumEncodedBytes, 1 << 30)
+            let ceiling = compression == .none ? min(hooks.maximumEncodedBytes, 1 << 30) : TARCompressedDecoder.maximumBytes
             guard ceiling >= encodedBytes else { throw TARCreationFailure.limitReached }
             for (index, node) in inventory.nodes.enumerated() {
                 try check()
@@ -80,78 +95,71 @@ internal final class PreparedTARCreation: TARCreationSourceWitness, Sendable {
 
     func produce(into descriptor: Int32, check: @Sendable () throws -> Void,
                  progress: @Sendable (UInt64, Int) -> Void) throws -> ArchiveProducedNode {
-        let began = ProcessInfo.processInfo.systemUptime
-        func checkpoint() throws {
-            try check()
-            guard ProcessInfo.processInfo.systemUptime - began < 300 else { throw TARCreationFailure.limitReached }
-        }
-        do {
-            try validateInput(check: checkpoint)
-            let initial = try ArchiveProducedFacts.receipt(descriptor, relative: "", hash: nil)
-            guard initial.kind == S_IFREG, initial.size == 0 else { throw FileOperationFailure.destinationChanged }
-            let writer = ZIPFileEncoder(descriptor, hooks: hooks)
-            var hashes: [String: Data] = [:]
-            for (index, node) in inventory.nodes.enumerated() {
-                try checkpoint()
-                let fd = try inventory.open(node, forReading: !node.stamp.directory, check: checkpoint)
-                defer { close(fd) }
-                try writer.write(headers[index].encoded, check: checkpoint)
-                if !node.stamp.directory {
-                    var offset: UInt64 = 0, hash = SHA256()
-                    while offset < UInt64(node.stamp.size) {
-                        try checkpoint(); try hooks.beforeSourceRead?(node.url)
-                        let amount = Int(min(65_536, UInt64(node.stamp.size) - offset))
-                        let bytes = try Self.read(fd, offset: offset, count: amount, check: checkpoint)
-                        try writer.write(bytes, check: checkpoint); hash.update(data: bytes)
-                        offset += UInt64(amount); progress(UInt64(amount), 0)
-                    }
-                    hashes[node.path] = Data(hash.finalize())
-                    let padding = Int((512 - UInt64(node.stamp.size) % 512) % 512)
-                    if padding > 0 { try writer.write(Data(repeating: 0, count: padding), check: checkpoint) }
-                }
-                guard try ZIPInputStamp(fd) == node.stamp else { throw FileOperationFailure.sourceChanged }
-                progress(0, 1)
+        // The synchronous codec retains its check only until this producer
+        // returns. Retire it explicitly before leaving the borrowed lifetime.
+        try withoutActuallyEscaping(check) { check in
+            let began = ProcessInfo.processInfo.systemUptime
+            @Sendable func checkpoint() throws {
+                try check()
+                guard ProcessInfo.processInfo.systemUptime - began < 300 else { throw TARCreationFailure.limitReached }
             }
-            try writer.write(Data(repeating: 0, count: 1024), check: checkpoint)
-            try hooks.beforeValidation?(descriptor)
-            try validateInput(check: checkpoint)
-            var limits = TARReadLimits(); limits.sourceBytes = 1 << 30
-            let parsed: TARParsedDirectory
             do {
-                parsed = try TARMetadataParser.parse(length: writer.count, limits: limits, check: checkpoint,
-                    read: { try Self.read(descriptor, offset: $0, count: $1, check: checkpoint) })
-            } catch { try checkpoint(); throw TARCreationFailure.contentMismatch }
-            guard parsed.records.count == inventory.nodes.count, parsed.logicalBytes == inventory.logical else {
-                throw TARCreationFailure.contentMismatch
-            }
-            for (index, values) in zip(parsed.records, inventory.nodes).enumerated() {
-                let (record, node) = values
-                try checkpoint()
-                guard record.path.utf8.elementsEqual(node.path.utf8),
-                      record.kind == (node.stamp.directory ? .directory : .file),
-                      record.bytes == (node.stamp.directory ? 0 : UInt64(node.stamp.size)),
-                      record.modification?.date == headers[index].modification else {
+                try validateInput(check: checkpoint)
+                let initial = try ArchiveProducedFacts.receipt(descriptor, relative: "", hash: nil)
+                guard initial.kind == S_IFREG, initial.size == 0 else { throw FileOperationFailure.destinationChanged }
+                let encoding: TAROutputStream.Encoding = compression.level.map { .gzip($0) } ?? .plain
+                let writer = try TAROutputStream(descriptor, encoding: encoding, hooks: hooks, check: checkpoint)
+                defer { writer.retire() }
+                for (index, node) in inventory.nodes.enumerated() {
+                    try checkpoint()
+                    let fd = try inventory.open(node, forReading: !node.stamp.directory, check: checkpoint)
+                    defer { close(fd) }
+                    try writer.write(headers[index].encoded, metadata: true, check: checkpoint)
+                    if !node.stamp.directory {
+                        var offset: UInt64 = 0
+                        while offset < UInt64(node.stamp.size) {
+                            try checkpoint(); try hooks.beforeSourceRead?(node.url)
+                            let amount = Int(min(65_536, UInt64(node.stamp.size) - offset))
+                            let bytes = try Self.read(fd, offset: offset, count: amount, check: checkpoint)
+                            try writer.write(bytes, check: checkpoint)
+                            offset += UInt64(amount); progress(UInt64(amount), 0)
+                        }
+                        let padding = Int((512 - UInt64(node.stamp.size) % 512) % 512)
+                        if padding > 0 { try writer.write(Data(repeating: 0, count: padding), check: checkpoint) }
+                    }
+                    guard try ZIPInputStamp(fd) == node.stamp else { throw FileOperationFailure.sourceChanged }
+                    progress(0, 1)
+                }
+                try writer.write(Data(repeating: 0, count: 1024), metadata: true, check: checkpoint)
+                try writer.finish(check: checkpoint)
+                try hooks.beforeValidation?(descriptor)
+                try validateInput(check: checkpoint)
+                let parsed: TARParsedDirectory
+                do {
+                    parsed = try writer.verify(check: checkpoint)
+                } catch { try checkpoint(); throw TARCreationFailure.contentMismatch }
+                guard parsed.records.count == inventory.nodes.count, parsed.logicalBytes == inventory.logical else {
                     throw TARCreationFailure.contentMismatch
                 }
-                if !node.stamp.directory {
-                    var hash = SHA256(), offset: UInt64 = 0
-                    while offset < record.bytes {
-                        let amount = Int(min(65_536, record.bytes - offset))
-                        hash.update(data: try Self.read(descriptor, offset: record.dataOffset + offset, count: amount, check: checkpoint))
-                        offset += UInt64(amount)
+                for (index, values) in zip(parsed.records, inventory.nodes).enumerated() {
+                    let (record, node) = values
+                    try checkpoint()
+                    guard record.path.utf8.elementsEqual(node.path.utf8),
+                          record.kind == (node.stamp.directory ? .directory : .file),
+                          record.bytes == (node.stamp.directory ? 0 : UInt64(node.stamp.size)),
+                          record.modification?.date == headers[index].modification else {
+                        throw TARCreationFailure.contentMismatch
                     }
-                    guard hashes.removeValue(forKey: node.path) == Data(hash.finalize()) else { throw TARCreationFailure.contentMismatch }
                 }
-            }
-            guard hashes.isEmpty else { throw TARCreationFailure.contentMismatch }
-            try validateInput(check: checkpoint)
-            guard fchmod(descriptor, 0o644) == 0 else { throw ZIPCreationInventory.failure() }
-            let result = try ArchiveProducedFacts.receipt(descriptor, relative: "", hash: writer.digest())
-            guard ArchiveProducedFacts.sameObject(initial, result), result.size == Int64(writer.count) else {
-                throw FileOperationFailure.destinationChanged
-            }
-            return result
-        } catch { try validateInput(check: checkpoint); throw TARCreationFailure.project(error) }
+                try validateInput(check: checkpoint)
+                guard fchmod(descriptor, 0o644) == 0 else { throw ZIPCreationInventory.failure() }
+                let result = try ArchiveProducedFacts.receipt(descriptor, relative: "", hash: writer.digest)
+                guard ArchiveProducedFacts.sameObject(initial, result), result.size == Int64(writer.encodedCount) else {
+                    throw FileOperationFailure.destinationChanged
+                }
+                return result
+            } catch { try validateInput(check: checkpoint); throw TARCreationFailure.project(error) }
+        }
     }
 
     private static func read(_ fd: Int32, offset: UInt64, count: Int, check: () throws -> Void) throws -> Data {
@@ -174,17 +182,20 @@ internal final class PreparedTARCreation: TARCreationSourceWitness, Sendable {
 }
 
 extension RecoverableFileOperations {
-    public func prepareTARCreation(sources: [URL], parent: URL, name: String,
+    public func prepareTARCreation(sources: [URL], parent: URL, name: String, compression: TARCompression = .none,
         observing selection: FileOperationSelection) async throws -> ArchiveCreationPlan {
-        try await prepareTARCreation(sources: sources, parent: parent, name: name, observing: selection, hooks: .init())
+        try await prepareTARCreation(sources: sources, parent: parent, name: name, compression: compression, observing: selection, hooks: .init())
     }
-    internal func prepareTARCreation(sources: [URL], parent: URL, name: String,
+    internal func prepareTARCreation(sources: [URL], parent: URL, name: String, compression: TARCompression = .none,
         observing selection: FileOperationSelection, hooks: ZIPCreationHooks) async throws -> ArchiveCreationPlan {
-        guard (name as NSString).pathExtension.lowercased() == "tar" else { throw FileOperationFailure.invalidRequest }
-        let allowNativeMarkedSources = nativeTARCreationAcceptsMarkedSources
+        let lower = name.lowercased()
+        guard compression == .none ? lower.hasSuffix(".tar") : lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz") else {
+            throw FileOperationFailure.invalidRequest
+        }
+        let allowNativeMarkedSources = compression == .none ? nativeTARCreationAcceptsMarkedSources : nativeTARGzipCreationAcceptsMarkedSources
         return try await prepareArchiveCreation(sources: sources, parent: parent, name: name,
-            observing: selection, authoredFormat: .strictPortableTAR) { check in
-            try PreparedTARCreation(sources, allowNativeMarkedSources: allowNativeMarkedSources,
+            observing: selection, authoredFormat: compression == .none ? .strictPortableTAR : .strictPortableTARGzip) { check in
+            try PreparedTARCreation(sources, compression: compression, allowNativeMarkedSources: allowNativeMarkedSources,
                 check: check, hooks: hooks)
         }
     }

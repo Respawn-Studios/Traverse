@@ -144,6 +144,7 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 ? .sourceQualification : .held
         let tarOriginalUpdate: AuthoredTAROriginalUpdatePolicy = TARArchiveEditingFeature.available
             ? .developmentNativeStage : .held
+        let tarGzipCreate: TARGzipCreationPolicy = TARGzipCreationFeature.available ? .developmentNativeCreate : .held
         let protectedNames = [directory.deletingLastPathComponent(),
                               directory.deletingLastPathComponent().appendingPathComponent("private-names", isDirectory: true),
                               directory.deletingLastPathComponent().appendingPathComponent("drive-protection", isDirectory: true),
@@ -194,6 +195,7 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 protecting: protectedNames, activity: ApplicationFileActivity.beginOperation,
                 authoredZIPMetadataPolicy: zipMetadata,
                 strictPortableTARCreationPolicy: portableTAR,
+                tarGzipCreationPolicy: tarGzipCreate,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
                 authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
                 authoredTAROriginalUpdatePolicy: tarOriginalUpdate, downloadAdoptionPolicy: downloadAdoption,
@@ -207,6 +209,7 @@ final class ApplicationOperationCoordinator: ObservableObject {
             engine = RecoverableFileOperations(journalDirectory: directory, protecting: protectedNames,
                 activity: ApplicationFileActivity.beginOperation, authoredZIPMetadataPolicy: zipMetadata,
                 strictPortableTARCreationPolicy: portableTAR,
+                tarGzipCreationPolicy: tarGzipCreate,
                 nativeAuthoredCreatePublicMarkPolicy: authoredPublicMark,
                 authoredZIPOriginalUpdateNativePolicy: zipOriginalUpdate,
                 authoredTAROriginalUpdatePolicy: tarOriginalUpdate,

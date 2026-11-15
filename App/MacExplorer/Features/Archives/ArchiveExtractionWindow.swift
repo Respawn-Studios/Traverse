@@ -539,13 +539,17 @@ private struct ArchiveExtractionView: View {
     var onClose: (() -> Void)?
     init(model: ArchiveExtractionModel) {
         self.model = model
+        let viewport = ToolWindowChrome.initialViewport(
+            size: .init(width: 700, height: model.selectedExtraction ? 520 : 500),
+            minimum: .init(width: 650, height: model.selectedExtraction ? 480 : 460),
+            scale: model.settings.interfaceSize.scale)
         let window = ToolWindowChrome.makeWindow(title: model.title,
-            size: .init(width: 700, height: model.selectedExtraction ? 520 : 500), minimumSize: .zero,
+            size: viewport.size, minimumSize: viewport.minimum,
             content: InterfaceHostingController(rootView: ArchiveExtractionView(model: model)))
         super.init(window: window); window.delegate = self; model.window = window
         ToolWindowChrome.install(in: window, settings: model.settings)
-        window.contentMinSize = .init(width: 650, height: model.selectedExtraction ? 480 : 460)
-        window.setContentSize(.init(width: 700, height: model.selectedExtraction ? 520 : 500))
+        window.contentMinSize = viewport.minimum
+        window.setContentSize(viewport.size)
     }
     required init?(coder: NSCoder) { nil }
     func windowWillClose(_ notification: Notification) { onClose?() }

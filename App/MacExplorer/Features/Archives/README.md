@@ -32,8 +32,8 @@ Plain TAR opens directly. Gzip TAR requires explicit Prepare into the shared
 private pool, bounded to 128 MiB and four copies. Restoring a tab or searching
 names does not decode it. `ApplicationCompressedArchives` retains actual worker,
 source access and prepared-copy leases through drain and the volume/Quit barrier.
-A prepared spool path is never operation authority. Compressed-TAR rewriting
-and creation, nesting and outgoing TAR promises require separate support.
+A prepared spool path is never operation authority. Compressed-TAR rewriting,
+nesting and outgoing TAR promises require separate support.
 
 ## TAR editing in development
 
@@ -57,6 +57,15 @@ keeps the native stage's macOS protection and never copies a source mark over
 it. This source support does not activate TAR editing in a distributed build.
 
 ## Creation and ZIP edits
+
+Development also offers TAR + gzip with Fast, Balanced and Smallest choices.
+It streams the same TAR records through the bounded system zlib encoder, then
+checks a fresh inflate, the emitted metadata and the completed file digest.
+There is no second full TAR spool. Raw TAR and compressed output each stay
+within 128 MiB. A separate default-held engine policy keeps this new authoring
+route out of distributed builds until qualification; gzip Original Update is
+still refused. Native stage protection and the existing cold Undo are shared
+with plain TAR creation.
 
 Compress/Extract shortcuts share the full workbenches and guarded operations.
 Automatic extraction uses a new sibling folder, never an implicit merge.
@@ -100,7 +109,7 @@ for the same destination. Each job retains cancellation, access and exactly-once
 completion through actual drain; a callback grants no folder access itself.
 
 Reuse existing archive package tests and `tools/dev.py native-check` entries:
-`create-zip`, `create-tar`, `zip-add-copy`, `compressed-tar`, `tar-editor`, and relevant editor or
+`create-zip`, `create-tar`, `create-targz`, `zip-add-copy`, `compressed-tar`, `tar-editor`, and relevant editor or
 batch-rename journeys. Independently inspect generated output and original
 identity, conflict refusal, cancellation, interruption and guarded Undo.
 Offscreen functional checks do not establish motion, physical input, external
