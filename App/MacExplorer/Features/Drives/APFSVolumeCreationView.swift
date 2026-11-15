@@ -131,7 +131,7 @@ import SwiftUI
     func dismiss() { subscriptions.removeAll(); permission.set(false); if !isSubmitted { work?.cancel() } }
     func drain() async { if let work { await work.value } }
     func openDiskUtility() {
-        guard let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.DiskUtility"), NSWorkspace.shared.open(application) else {
+        guard DriveDiskUtilityHandoff.open() else {
             notice = "Disk Utility could not be opened."; return
         }
         notice = "Disk Utility opened separately. Select \(target?.name ?? "the intended APFS volume"), then choose Edit → Add APFS Volume. Traverse did not select a device or request creation in Disk Utility."

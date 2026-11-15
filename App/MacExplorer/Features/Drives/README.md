@@ -16,6 +16,8 @@ a visible page or selected device grants no mutation or hardware access.
 `APFSVolumeCreationView.swift` presents an explicit Add Volume review and a Disk
 Utility handoff where in-app creation is unavailable. The handoff does not
 select a device or submit a Disk Utility operation.
+Volumes & Protection also offers a manual Disk Utility handoff for formatting
+or partitioning. It passes no selected target or command to Disk Utility.
 
 `LocalStorage.APFSVolumeCreation` seals one ordinary external/image APFS
 container, validates the name and observed shared space, revalidates the selected
@@ -25,8 +27,8 @@ that operation. There is no erase, partition or privilege-helper fallback.
 A checked unchanged layout and an uncertain layout are different outcomes.
 
 The unwired `LocalStorage.APFSVolumeFormat` candidate is restricted to one
-ordinary APFS member on a generated disk image. Its optional recording hook
-persists an intent after fresh APFS preflight and before native submission,
+ordinary APFS member on a generated disk image. Its mandatory generated-only
+recorder persists an intent after fresh APFS preflight and before native submission,
 records a launched child without blocking pipe draining, and keeps failed
 postlaunch writes uncertain. A compatible APFS replacement stays a provisional,
 unresolved durable job until an independent marker/attachment witness is
@@ -36,7 +38,9 @@ shown as potentially submitted when Drives is opened. Cold inspection is
 read-only and requires the exact generated backing file plus an independent
 attachment verifier; a compatible replacement does not clear an unresolved
 job without generated marker evidence.
-Ordinary Format UI, personal images and physical drives remain held.
+The source and shared Debug build include the recorder admission and cold
+read-only check; native recorder runtime is not yet qualified. Ordinary in-app
+Format UI, personal images and physical drives remain held.
 
 ## File benchmark
 

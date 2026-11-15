@@ -142,10 +142,9 @@ enum DriveHealthFeature {
         didSet { objectWillChange.send(); restartHealthMonitoring() }
     }
     #endif
-    init(reader: any VolumeInspecting, utilityHandoff: @escaping @MainActor () -> Bool = {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.DiskUtility") else { return false }
-        return NSWorkspace.shared.open(url)
-    }) { self.reader = reader; self.utilityHandoff = utilityHandoff; super.init() }
+    init(reader: any VolumeInspecting, utilityHandoff: @escaping @MainActor () -> Bool = { DriveDiskUtilityHandoff.open() }) {
+        self.reader = reader; self.utilityHandoff = utilityHandoff; super.init()
+    }
 
     func show(_ volume: ManagedVolume, settings: BrowserSettings, offscreen: Bool = false) {
         embeddedWindow = nil

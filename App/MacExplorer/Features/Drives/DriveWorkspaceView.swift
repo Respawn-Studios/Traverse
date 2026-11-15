@@ -95,7 +95,8 @@ struct DriveWorkspaceView: View {
         case .volumes:
             if let drives = model.volumeCoordinator {
                 DriveControlsView(drives: drives, settings: settings, inspectQueue: model.inspectQueue, embedded: true,
-                    inspectVolume: { model.selectVolume($0); model.selectPage(.health) }, mediaIDs: model.selectedMediaIDs)
+                    inspectVolume: { model.selectVolume($0); model.selectPage(.health) }, mediaIDs: model.selectedMediaIDs,
+                    manualUtilityAllowed: !benchmark.hasPendingWork && !volumeCreation.isWorking && !model.isReading)
             } else {
                 unavailable("Volume controls are unavailable", "Open Drives from an Explorer window to manage its connected volumes.")
             }

@@ -21,6 +21,7 @@ import LocalStorage
         let model = ApplicationDriveManagement(reader: reader, details: { _, _ in details += 1 })
         let settings = BrowserSettings(persist: false)
         settings.navigationStyle = .glass; settings.appearance = .dark
+        let volumesHandoff = ProcessInfo.processInfo.arguments.contains("--drive-management-volumes")
         let offscreen = ProcessInfo.processInfo.arguments.contains("--offscreen")
         reader.arm(); model.show(settings: settings, offscreen: offscreen)
         try await wait { reader.isHeld }
@@ -60,15 +61,26 @@ import LocalStorage
         try require(!drained && model.window == nil && model.isReading, "Close falsely drained actual reader")
         reader.release(); await drain.value
         try require(model.snapshot == nil && !model.isReading, "Closed overview received a stale result")
-        model.show(settings: settings, offscreen: offscreen); await model.drain()
+        if volumesHandoff { settings.interfaceSize = .init(150); settings.appearance = .light }
+        model.show(settings: settings,
+            drives: volumesHandoff ? ApplicationOperationCoordinator.shared.drives : nil,
+            offscreen: offscreen, initialPage: volumesHandoff ? .volumes : nil)
+        await model.drain()
         reader.fail = true; model.refresh(); await model.drain()
         try require(!model.notice.isEmpty && model.snapshot != nil, "Failed refresh hid uncertainty or lost last observation")
         reader.fail = false; model.refresh(); await model.drain()
         try require(model.notice.isEmpty && model.snapshot?.nodes.count == 8, "Refresh did not recover")
         model.selectRoot(6); model.selectNode(7)
+        if volumesHandoff {
+            try require(model.page == .volumes && model.volumeCoordinator != nil,
+                "Manual Disk Utility handoff layout did not reach embedded Volumes")
+        }
         if let window = model.window {
-            window.title = "Generated Drive Management · read-only layout review"
-            try await UIVerification.snapshot(window, to: root.appendingPathComponent("evidence/overview.png"))
+            window.title = volumesHandoff
+                ? "Generated Drive Management · manual Disk Utility handoff layout"
+                : "Generated Drive Management · read-only layout review"
+            try await UIVerification.snapshot(window, to: root.appendingPathComponent(
+                volumesHandoff ? "evidence/volumes.png" : "evidence/overview.png"))
         }
         let review = ProcessInfo.processInfo.arguments.contains("--drive-management-input")
         if review {
@@ -90,7 +102,8 @@ import LocalStorage
             try await Task.sleep(for: .milliseconds(30))
         }
         try require(nativeCount > 0 && nativeRoots > 0, "Native device discovery returned no observations")
-        return ["passed": true, "actualInputRequired": review, "nativeObservations": nativeCount,
+        return ["passed": true, "actualInputRequired": review, "volumesHandoffRoute": volumesHandoff,
+            "nativeObservations": nativeCount,
             "nativeRoots": nativeRoots, "nativeUnresolved": nativeUnresolved,
             "nativeReadSeconds": ProcessInfo.processInfo.systemUptime - began,
             "maximumConcurrentReaders": reader.maximum, "deviceMutations": 0, "externalAppsOpened": 0,

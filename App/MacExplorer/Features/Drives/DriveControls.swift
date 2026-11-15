@@ -70,12 +70,14 @@ struct DriveStatusView: View {
 
 struct DriveControlsView: View {
     @Environment(\.colorScheme) private var inheritedColorScheme
+    @State private var diskUtilityNotice = ""
     @ObservedObject var drives: ApplicationVolumeCoordinator
     @ObservedObject var settings: BrowserSettings
     var inspectQueue: () -> Void
     var embedded = false
     var inspectVolume: ((ManagedVolume) -> Void)? = nil
     var mediaIDs: Set<UInt64>? = nil
+    var manualUtilityAllowed = true
     private var displayedVolumes: [ManagedVolume] {
         drives.volumes.filter { volume in mediaIDs.map { ids in volume.mediaID.map(ids.contains) == true } ?? true }
     }
@@ -158,6 +160,24 @@ struct DriveControlsView: View {
                                     if volume.canEject && drives.permitsRemoval(volume, action: .eject) { action("Eject when ready", volume, .eject) }
                                 }.disabled(drives.isBusy)
                             } else { Text("System or unsupported volume").interfaceFont(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                    if embedded {
+                        GroupBox("Format or partition") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Use Disk Utility to format a volume or change partitions. Select and review the intended storage there; these changes can erase data.")
+                                    .interfaceFont(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Button("Open Disk Utility…") {
+                                    diskUtilityNotice = DriveDiskUtilityHandoff.open()
+                                        ? "Disk Utility opened separately. Traverse did not select a device or request a format or partition change."
+                                        : "Disk Utility could not be opened."
+                                }.disabled(drives.isBusy || !manualUtilityAllowed)
+                                if !diskUtilityNotice.isEmpty {
+                                    Text(diskUtilityNotice).interfaceFont(.caption)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)

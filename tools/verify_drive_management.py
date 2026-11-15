@@ -45,7 +45,8 @@ def usage():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument('--audit', action='store_true')
-    parser.add_argument('--review', action='store_true'); args = parser.parse_args()
+    parser.add_argument('--review', action='store_true')
+    parser.add_argument('--volumes-handoff', action='store_true'); args = parser.parse_args()
     local_directory('b04-drive-management')
     if args.audit: print(json.dumps(usage(), indent=2)); return
     with (BASE/'.budget.lock').open('a+b') as lock:
@@ -61,8 +62,10 @@ def main():
         'Features/Drives/DriveManagement.swift', 'Features/Drives/DriveWorkspaceView.swift',
         'Features/Drives/DriveWorkspacePage.swift', 'Features/Drives/DriveDetails.swift',
         'Features/Drives/DriveBenchmark.swift', 'Features/Drives/DriveControls.swift',
+        'Features/Drives/DriveDiskUtilityHandoff.swift',
         'Development/Checks/DriveManagementVerification.swift', 'Development/Checks/UIVerification.swift',
         'Shared/Presentation/ToolWindowPresentation.swift', 'Shared/Presentation/ToolPageNavigation.swift',
+        'Application/ApplicationOperationCoordinator.swift', 'Application/ApplicationVolumeCoordinator.swift',
         'App.swift', 'Browser/Menus.swift']]
     inputs += [ROOT/'Packages/ExplorerKit/Sources/LocalStorage'/name for name in ['DriveTopology.swift', 'VolumeLifecycle.swift', 'VolumeInspection.swift']]
     hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
@@ -72,7 +75,9 @@ def main():
                MAC_EXPLORER_TEST_ROOT=str(case))
     print('Generated overview case: '+str(case.relative_to(ROOT)), flush=True)
     command = [str(binary), '-ApplePersistenceIgnoreState', 'YES', '--verify-ui', '--check-drive-management',
-               '--analysis-source', str(case)] + (['--drive-management-input'] if args.review else ['--offscreen'])
+               '--analysis-source', str(case)]
+    if args.volumes_handoff: command.append('--drive-management-volumes')
+    command += ['--drive-management-input'] if args.review else ['--offscreen']
     with (case/'evidence/native.log').open('xb') as output:
         child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT)
         try: result = child.wait(timeout=930 if args.review else 60)
