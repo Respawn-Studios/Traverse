@@ -46,7 +46,7 @@ import QuartzCore
         if case .native = exit.kind { window.makeFirstResponder(nil) }
         window.ignoresMouseEvents = true
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.20 * exit.motion.mode.durationScale
+            context.duration = exit.motion.mode.toolWindowDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             window.animator().alphaValue = 0
         } completionHandler: {

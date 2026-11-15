@@ -24,6 +24,8 @@ enum BrowserMotionMode: String, CaseIterable, Codable, Identifiable, Sendable {
         case .off: 0
         }
     }
+    var toolWindowDuration: TimeInterval { 0.20 * durationScale }
+    func paneDuration(closing: Bool) -> TimeInterval { (closing ? 0.24 : 0.30) * durationScale }
     func initialOpacity(_ full: Double) -> Double { self == .reduced ? 1 - (1 - full) * 0.4 : full }
 }
 

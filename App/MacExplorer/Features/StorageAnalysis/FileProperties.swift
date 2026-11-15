@@ -506,6 +506,9 @@ final class FilePropertiesWindowController: NSWindowController, NSWindowDelegate
     let model: FilePropertiesModel
     let namesEditor: PrivateNamesEditorModel?
     private var choosingDiscard = false
+    #if DEBUG
+    var isChoosingDiscardForVerification: Bool { choosingDiscard }
+    #endif
 
     init(reader: (any FilePropertiesReading)? = nil,
          retainAccess: @escaping @MainActor @Sendable ([URL]) async -> (any Sendable)? = { _ in nil },
@@ -552,7 +555,7 @@ final class FilePropertiesWindowController: NSWindowController, NSWindowDelegate
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard namesEditor?.saving != true else { return false }
         guard namesEditor?.hasChanges == true else { return true }
-        confirmDiscard(in: sender) { sender.close() }; return false
+        confirmDiscard(in: sender) { sender.performClose(nil) }; return false
     }
     private func confirmDiscard(in window: NSWindow, action: @escaping @MainActor () -> Void) {
         guard !choosingDiscard else { return }; choosingDiscard = true

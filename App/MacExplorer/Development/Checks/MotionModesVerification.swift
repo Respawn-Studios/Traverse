@@ -158,7 +158,7 @@
                 let reduced = timings.dropFirst().first?["paneSeconds"] as? Double
             {
                 try UIVerification.require(
-                    full > 0.35 && reduced < full * 0.85, "Reduced pane motion did not materially shorten presentation")
+                    full > 0.20 && reduced < full * 0.85, "Reduced pane motion did not materially shorten presentation")
             }
             return [
                 "passed": true, "modelChecks": modelChecks, "actualPreferenceSaveReopen": true,

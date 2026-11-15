@@ -259,6 +259,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                  incremental_analysis: bool = False, connection_phase: str = "persistence",
                  marked_source_create: bool = False, archive_format: str = "zip") -> Path:
     """Run existing feature checks in the ordinary app, with generated data only."""
+    if feature == "storage-chart-integration" and offscreen:
+        raise ValueError("Chart integration requires its visible native Properties and analysis windows")
     if archive_format not in ("zip", "tar", "tar.gz", "tar.bz2") or archive_format != "zip" and feature != "archive-export":
         raise ValueError("Choose an archive format only for archive-export")
     gzip_tar = feature == "create-targz"
@@ -378,6 +380,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         "window-lifecycle": ("motion-audit", "--check-development-motion", "native.json"),
         "pane-motion": ("motion-audit", "--check-development-motion", "native.json"),
         "storage-chart": ("motion-audit", "--check-development-motion", "native.json"),
+        "storage-chart-integration": ("native-storage-chart-integration", "--check-chart-integration", "native.json"),
         "server-prompts": ("motion-audit", "--check-development-motion", "native.json"),
         "sftp-profiles": ("motion-audit", "--check-development-motion", "native.json"),
         "folder-default": ("folder-default-app-composition", "--check-folder-default-composition", "native-folder-default.json"),
@@ -508,6 +511,15 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         (case / "source/Destination").mkdir(mode=0o700)
         (case / "source/Denied").mkdir(mode=0o500)
         (case / "source/Blocker").write_bytes(b"Generated non-directory.\n")
+    if feature == "storage-chart-integration":
+        steam = case / "source/Steam"
+        for name in ("", "steamapps", "steamapps/common", "steamapps/common/Game", "steamapps/workshop"):
+            (steam / name).mkdir(mode=0o700)
+        for name, body in (("steamapps/common/Game/game.dat", b"G" * 30),
+                           ("steamapps/workshop/item.bin", b"W" * 40)):
+            with (steam / name).open("xb") as output:
+                output.write(body)
+            (steam / name).chmod(0o600)
     if feature == "sftp-group-upload":
         local = case / "source/Local"
         (local / "Folder").mkdir(mode=0o700, parents=True)
@@ -709,6 +721,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command += ["--motion-surface", surface]
     if feature == "storage-chart":
         command += ["--motion-surface", "chart"]
+    if feature == "storage-chart-integration":
+        command += ["--analysis-source", str(case / "source/Steam"), "--without-chart-captures"]
     if feature == "connect-model":
         command += ["--check-smb-connect-model-only", "--analysis-source", str(case)]
     if feature == "support-details":
@@ -846,6 +860,32 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                       if value.get(key) is not None), "unsuccessful native report" if receipt.is_file() else "missing report")
         failure_type = f" ({value['failureType']})" if value.get("failureType") else ""
         raise RuntimeError(f"Native {feature} failed at {stage}{failure_type}; inspect {case / 'evidence'}")
+    if feature == "storage-chart-integration":
+        steam = case / "source/Steam"
+        expected = {"steamapps": None, "steamapps/common": None, "steamapps/common/Game": None,
+                    "steamapps/common/Game/game.dat": 30, "steamapps/workshop": None,
+                    "steamapps/workshop/item.bin": 40}
+        actual = {}
+        for item in steam.rglob("*"):
+            if item.is_symlink():
+                raise RuntimeError("Generated chart source gained a symlink")
+            if item.is_dir():
+                actual[item.relative_to(steam).as_posix()] = None
+            elif item.is_file():
+                actual[item.relative_to(steam).as_posix()] = item.stat().st_size
+            else:
+                raise RuntimeError("Generated chart source gained a special entry")
+        if actual != expected or (steam / "steamapps/common/Game/game.dat").read_bytes() != b"G" * 30 \
+                or (steam / "steamapps/workshop/item.bin").read_bytes() != b"W" * 40:
+            raise RuntimeError("Native chart integration changed its exact two-file source")
+        if value.get("generated_scans") != 1 or value.get("ordinary_classification_revision") != 4 \
+                or value.get("application_layout_capability") is not True \
+                or value.get("layout_explanation_capability") is not True \
+                or value.get("properties_first_groups") is not True \
+                or value.get("properties_viewport_stable") is not True \
+                or value.get("cached_root_stale_query_rejected") is not True \
+                or value.get("gate_active") != 0 or value.get("captures") != []:
+            raise RuntimeError("Native chart integration report omitted its ordinary worker or first-group checks")
     if external_promise_receiver and feature != "archive-export" and (value.get("actualFinderReceiver") is not True
                                       or value.get("actualReceiverDrag") is not True
                                       or value.get("nativeProviderCallbacks") != 1

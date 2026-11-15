@@ -52,6 +52,7 @@ final class WorkspacePaneTransition: NSView {
         wantsLayer = true; layer?.isOpaque = false; layer?.backgroundColor = NSColor.clear.cgColor
         let final = hosts.mapValues { $0.convert($0.bounds, to: parent) }
         let closing = frames.keys.contains { hosts[$0] == nil }
+        let duration = mode.paneDuration(closing: closing)
         // Do not dissolve a still pane merely because its neighbour changed.
         // Its native material and current contents can remain on screen.
         frames = frames.filter { final[$0.key] != $0.value.rect }
@@ -77,7 +78,7 @@ final class WorkspacePaneTransition: NSView {
                                   y: min(max(survivor.midY, from.rect.minY), from.rect.maxY) - from.rect.minY)
                 if mode == .full {
                     animateMask(on: clip.layer, bounds: clip.bounds, seed: end, direction: .zero,
-                                duration: 0.39, closing: true)
+                                duration: duration, closing: true)
                 }
             }
         }
@@ -86,7 +87,6 @@ final class WorkspacePaneTransition: NSView {
         // follow the moving divider, then dissolve into the live final layout.
         // New content is revealed underneath, without snapshotting an empty
         // newly created pane before its listing arrives.
-        let duration = (closing ? 0.39 : 0.48) * mode.durationScale
         if mode == .full, let origin, let arrivingPaneID, let host = hosts[arrivingPaneID], let destination = final[arrivingPaneID] {
             let start = origin.dropFrame.map { NSPoint(x: $0.midX, y: $0.midY) } ?? edgePoint(origin.edge, in: destination)
             let seed = host.convert(start, from: parent)

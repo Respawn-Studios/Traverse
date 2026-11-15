@@ -318,7 +318,57 @@ import Foundation
         try UIVerification.require(!preferences.isVisible && !ToolWindowCloseMotion.isClosing(preferences),
             "Programmatic teardown acquired a user-close fade")
         try UIVerification.require(preferences.alphaValue == 1, "Programmatic teardown retained its opening fade")
+        stage = "properties-discard-close"
+        try await verifyPropertiesDiscardClose(root: root, settings: settings) { stage = "properties-discard/" + $0 }
         stage = "completed"; passed = true
+    }
+    private static func verifyPropertiesDiscardClose(root: URL, settings: BrowserSettings,
+                                                    onStage: (String) -> Void) async throws {
+        let names = ApplicationPrivateNames(directory: root.appendingPathComponent("state/close-names"), settings: settings)
+        let properties = FilePropertiesWindowController(settings: settings, namesOwner: names, copyPaths: { _ in })
+        do {
+            properties.show(urls: [root.appendingPathComponent("source/Upload.txt")])
+            guard let window = properties.window, let editor = properties.namesEditor else { throw Failure.presentation }
+            onStage("ready")
+            try await wait { !editor.loading && window.alphaValue == 1 && window.occlusionState.contains(.visible) }
+            editor.nickname = "Generated unsaved close draft"
+            func choose(_ title: String) throws {
+                guard let sheet = window.attachedSheet,
+                      let button = descendants(sheet.contentView).compactMap({ $0 as? NSButton })
+                        .first(where: { $0.title == title }) else { throw Failure.presentation }
+                button.performClick(nil)
+            }
+            window.performClose(nil)
+            onStage("first-sheet")
+            try await wait { window.attachedSheet != nil }
+            try UIVerification.require(!ToolWindowCloseMotion.isClosing(window), "Dirty Properties faded before its close decision")
+            try choose("Keep Editing")
+            onStage("keep-editing")
+            try await wait { window.attachedSheet == nil && !properties.isChoosingDiscardForVerification }
+            try UIVerification.require(window.isVisible && editor.hasChanges && !ToolWindowCloseMotion.isClosing(window),
+                "Keep Editing lost its draft or closed Properties")
+            window.performClose(nil)
+            onStage("second-sheet")
+            try await wait { window.attachedSheet != nil }
+            try choose("Discard Changes")
+            onStage("accepted-close")
+            var sawClosing = false, sawIntermediateOpacity = false
+            let deadline = CACurrentMediaTime() + 2
+            while window.isVisible && CACurrentMediaTime() < deadline {
+                sawClosing = sawClosing || ToolWindowCloseMotion.isClosing(window)
+                sawIntermediateOpacity = sawIntermediateOpacity || window.alphaValue > 0 && window.alphaValue < 1
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let animated = settings.motion.allows(.windowClosing) && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            try UIVerification.require(!window.isVisible && !editor.hasChanges && editor.source == nil,
+                "Accepted Properties discard retained the draft or its window")
+            try UIVerification.require(!animated || sawClosing && sawIntermediateOpacity,
+                "Accepted Properties discard bypassed the shared native close transition")
+            await names.close()
+        } catch {
+            properties.cancel(); properties.close(); await names.close()
+            throw error
+        }
     }
     private static func descendants(_ view: NSView?) -> [NSView] {
         guard let view else { return [] }; return [view] + view.subviews.flatMap { descendants($0) }

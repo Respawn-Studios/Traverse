@@ -209,7 +209,7 @@ private struct ToolPageEntrance<ID: Equatable & Sendable>: ViewModifier {
         content
             .opacity(revealed || reduceMotion || !enabled || mode == .off ? 1 : ToolPageMotionPolicy.initialOpacity(mode))
             .offset(y: revealed || reduceMotion || !enabled || mode == .off ? 0 : 4 * mode.distanceScale)
-            .animation(reduceMotion || !enabled || mode == .off ? nil : .easeOut(duration: 0.20 * mode.durationScale), value: revealed)
+            .animation(reduceMotion || !enabled || mode == .off ? nil : .easeOut(duration: mode.toolWindowDuration), value: revealed)
             .task(id: identity) {
                 guard !reduceMotion, enabled, mode != .off else { revealed = true; return }
                 var transaction = Transaction(); transaction.disablesAnimations = true
@@ -274,7 +274,7 @@ enum ToolContentMotion {
     static func revealWindow(_ window: NSWindow, motion: BrowserMotionPreferences?) {
         guard let motion else { return }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.20 * motion.mode.durationScale
+            context.duration = motion.mode.toolWindowDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 1
         }
@@ -315,7 +315,7 @@ enum ToolContentMotion {
         let position = CABasicAnimation(keyPath: "transform.translation.y")
         position.fromValue = -4 * motion.mode.distanceScale; position.toValue = 0
         let group = CAAnimationGroup(); group.animations = [opacity, position]
-        group.duration = 0.20 * motion.mode.durationScale; group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        group.duration = motion.mode.toolWindowDuration; group.timingFunction = CAMediaTimingFunction(name: .easeOut)
         view.layer?.add(group, forKey: "tool-content-entrance")
         views.add(view)
     }

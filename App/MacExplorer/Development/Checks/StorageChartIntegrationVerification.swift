@@ -14,8 +14,8 @@ private final class StorageChartQueryHold: @unchecked Sendable {
     }
 }
 
-/// Two retained, generated sources only. Exercises the actual Properties and
-/// full-analysis projection, not a second renderer or independent query owner.
+/// Generated sources only. Exercises the actual Properties and full-analysis
+/// projection, not a second renderer or independent query owner.
 @MainActor
 enum StorageChartIntegrationVerification {
     static var review: FilePropertiesWindowController?
@@ -119,14 +119,42 @@ enum StorageChartIntegrationVerification {
         let began = ProcessInfo.processInfo.systemUptime
         var repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         for _ in 0..<3 { repository.deleteLastPathComponent() }
-        let root = URL(fileURLWithPath: path), prefix = "classification-fixture-"
-        let token = root.lastPathComponent.dropFirst(prefix.count)
-        try require(root.path == root.standardizedFileURL.path
-            && root.deletingLastPathComponent() == repository.appendingPathComponent(".build/b06-analyzer")
-            && root.lastPathComponent.hasPrefix(prefix) && token.count == 32
-            && token.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }, "Generated Steam root required")
+        let root = URL(fileURLWithPath: path)
+        let nativeCase: URL?
+        if let raw = ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"],
+           root == URL(fileURLWithPath: raw).appendingPathComponent("source/Steam") {
+            let candidate = URL(fileURLWithPath: raw)
+            let reservation = candidate.appendingPathComponent("reservation.json")
+            try require(root.path == root.standardizedFileURL.path
+                && candidate.deletingLastPathComponent() == repository.appendingPathComponent(".build/traverse-development")
+                && UUID(uuidString: candidate.lastPathComponent)?.uuidString == candidate.lastPathComponent
+                && candidate.resolvingSymlinksInPath() == candidate
+                && root.resolvingSymlinksInPath() == root
+                && reservation.resolvingSymlinksInPath() == reservation,
+                "Current generated chart source required")
+            let attributes = try FileManager.default.attributesOfItem(atPath: reservation.path)
+            try require(attributes[.type] as? FileAttributeType == .typeRegular
+                && ((attributes[.size] as? NSNumber)?.intValue ?? 4097) <= 4096,
+                "Generated chart reservation must be a small regular file")
+            let marker = try JSONSerialization.jsonObject(with: Data(contentsOf: reservation)) as? [String: Any]
+            try require(marker?["packet"] as? String == "traverse-development-v1"
+                && marker?["action"] as? String == "native-storage-chart-integration"
+                && !layoutExplanations && !applicationLayouts,
+                "Generated chart reservation or worker mode differs")
+            nativeCase = candidate
+        } else {
+            let prefix = "classification-fixture-"
+            let token = root.lastPathComponent.dropFirst(prefix.count)
+            try require(root.path == root.standardizedFileURL.path
+                && root.deletingLastPathComponent() == repository.appendingPathComponent(".build/b06-analyzer")
+                && root.lastPathComponent.hasPrefix(prefix) && token.count == 32
+                && token.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }, "Generated Steam root required")
+            nativeCase = nil
+        }
         try boundaryControls()
-        let preference = try await StorageChartPreferenceVerification.run(evidence: repository.appendingPathComponent(".build/b06-analyzer/evidence-extension-20261018"))
+        let captures = nativeCase?.appendingPathComponent("evidence")
+            ?? repository.appendingPathComponent(".build/b06-analyzer/evidence-extension-20261018")
+        let preference = try await StorageChartPreferenceVerification.run(evidence: captures)
         let settings = preference.settings
         StorageChartIntegration.startAtStorageRolesForQualification = true
         StorageDimensionalChartProbe.enabled = true
@@ -135,12 +163,18 @@ enum StorageChartIntegrationVerification {
             StorageChartIntegration.startAtStorageRolesForQualification = false
             StorageDimensionalChartProbe.enabled = false
         }
-        let storage = try AnalysisResultStorage(directory: repository.appendingPathComponent(".build/b06-analyzer/full-scope-stores-20261018"),
+        let storage = try AnalysisResultStorage(directory: nativeCase?.appendingPathComponent("cache/analysis")
+            ?? repository.appendingPathComponent(".build/b06-analyzer/full-scope-stores-20261018"),
             sessionByteLimit: 64 << 20, preserveAfterClose: true)
         let coordinator = ApplicationStorageAnalysis.shared
-        coordinator.enablePagedForQualification(storage: storage, workerURL: applicationLayouts
-            ? repository.appendingPathComponent(".build/b06-consumer-profile-build/compact-application-layouts/worker") : layoutExplanations
-            ? repository.appendingPathComponent(".build/b06-consumer-profile-build/compact-classification-v3-layouts/worker") : nil)
+        if nativeCase != nil {
+            coordinator.enablePagedForQualification(storage: storage,
+                workerURL: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/storage-scanner-worker"))
+        } else {
+            coordinator.enablePagedForQualification(storage: storage, workerURL: applicationLayouts
+                ? repository.appendingPathComponent(".build/b06-consumer-profile-build/compact-application-layouts/worker") : layoutExplanations
+                ? repository.appendingPathComponent(".build/b06-consumer-profile-build/compact-classification-v3-layouts/worker") : nil)
+        }
         var accesses = 0
         let properties = FilePropertiesWindowController(retainAccess: { _ in
             accesses += 1; return FileAccessLifetimes(leases: [])
@@ -156,6 +190,9 @@ enum StorageChartIntegrationVerification {
         try require(result.classificationRevision == (applicationLayouts || layoutExplanations ? .v3 : .v4) && summary.complete && summary.value.counts.regularFiles == 2 && summary.value.bytes.dataLogical.knownBytes == 70
             && properties.model.attribution?.categories.first(where: { $0.storedTarget == .steamLibraries })?.bytes.dataLogical.knownBytes == 70,
             "Generated source no longer matches the independent two-file oracle")
+        if nativeCase != nil {
+            try require(result.supportsApplicationLayouts, "Bundled scanner did not expose Application Layouts")
+        }
         let scanAccesses = accesses, drill = properties.model.chartDrill
         try await wait("Actual Properties did not create the native chart") { StorageDimensionalChartProbe.latest?.window === properties.window }
         guard let surface = StorageDimensionalChartProbe.latest else { throw StorageScanFailure.invalidOutput }
@@ -234,7 +271,6 @@ enum StorageChartIntegrationVerification {
         let chosenTint = surface.frames[0].slices[0].tint
         try require(surface.frames.last?.slices.max(by: { ($0.bytes ?? 0) < ($1.bytes ?? 0) })?.tint == chosenTint,
             "Integrated child did not inherit its chosen parent color")
-        let captures = repository.appendingPathComponent(".build/b06-analyzer/evidence-extension-20261018")
         let propertyCapture = captures.appendingPathComponent("integrated-properties-" + UUID().uuidString + ".png")
         if captureEvidence, let window = properties.window { try await UIVerification.snapshot(window, to: propertyCapture) }
         guard let installed = drill.current?.value.rows.first(where: { $0.hint == 1 }), let folder = installed.folder,
@@ -283,6 +319,15 @@ enum StorageChartIntegrationVerification {
         try await wait("Logical metric restoration") { drill.current?.value.rankingMetric == .dataLogical && !drill.loading }
         try require(accesses == scanAccesses && coordinator.pagedResultForVerification?.id == result.id && !coordinator.hasWork,
             "Chart navigation/metric changes rescanned or reacquired access")
+        try await settled(surface, depth: 2)
+        for style in StorageChartStyle.allCases {
+            settings.analysisChartStyle = style
+            try await wait("Shared chart style did not update Properties") { surface.style == style }
+        }
+        guard let handoffRoot = surface.frames.first?.slices, !handoffRoot.isEmpty,
+              let handoffReport = properties.model.attribution else {
+            throw UIVerification.Failure(message: "Properties handoff root was not visible")
+        }
         properties.model.openFullAnalysis()
         try await wait("Same-result full analysis handoff") { coordinator.toolWindow?.pagedReadyForVerification == true }
         guard let tool = coordinator.toolWindow, let window = tool.window else { throw StorageScanFailure.invalidOutput }
@@ -291,21 +336,23 @@ enum StorageChartIntegrationVerification {
         try await wait("Full analysis chart unavailable") { StorageDimensionalChartProbe.latest?.window === window }
         guard let full = StorageDimensionalChartProbe.latest else { throw StorageScanFailure.invalidOutput }
         try await settled(full, depth: 1)
+        try await wait("Properties handoff retained its visible chart actions") { surface.window == nil || !surface.interactive }
         try require(coordinator.pagedResultForVerification?.id == result.id && accesses == scanAccesses
-            && full.frames.first?.slices == surface.frames.first?.slices, "Handoff changed result, targets, colors or acquired access")
+            && full.frames.first?.slices == handoffRoot && !drill.canBrowse,
+            "Handoff changed result, targets, colors, acquired access or retained Properties query authority")
         let fullDrill = tool.chartDrillForVerification
         full.activateForQualification(.slice(0))
         try await wait("Full analysis stored drill") { fullDrill.levels.count == 1 && !fullDrill.loading }
         try await settled(full, depth: 2)
         for style in StorageChartStyle.allCases {
             settings.analysisChartStyle = style
-            try await wait("Shared chart style did not update") { full.style == style && surface.style == style }
+            try await wait("Shared chart style did not update full analysis") { full.style == style }
             try require(coordinator.pagedResultForVerification?.id == result.id && accesses == scanAccesses && !coordinator.hasWork,
                 "Presentation style launched scan work")
         }
         full.onStyle(.orbitable)
-        try await wait("Pie style choice did not update settings and both windows") {
-            settings.analysisChartStyle == .orbitable && full.style == .orbitable && surface.style == .orbitable
+        try await wait("Pie style choice did not update settings and full analysis") {
+            settings.analysisChartStyle == .orbitable && full.style == .orbitable
         }
         await settings.drainPreferencesForVerification()
         let savedStyle = try await Task.detached(priority: .utility) { try Data(contentsOf: preference.file) }.value
@@ -328,6 +375,9 @@ enum StorageChartIntegrationVerification {
             "Other explanation changed its literal 70-byte role/name-pattern oracle")
         let layouts = fullDrill.current?.otherExplanation?.applicationLayouts
         try require(!layoutExplanations || layouts != nil, "Qualified layout explanation capability is missing")
+        if nativeCase != nil {
+            try require(layouts != nil, "Bundled scanner did not explain the two Application Layouts")
+        }
         if let layouts {
             try require(layouts[AnalysisApplicationLayout.steamInstalled.rawValue].bytes.dataLogical.knownBytes == 30
                 && layouts[AnalysisApplicationLayout.steamWorkshop.rawValue].bytes.dataLogical.knownBytes == 40,
@@ -367,9 +417,38 @@ enum StorageChartIntegrationVerification {
         // A separate new surface must not replace the weak global probe while
         // the preceding same-surface accounting assertion is still pending.
         if applicationLayouts || result.supportsApplicationLayouts {
-            guard let report = properties.model.attribution else { throw StorageScanFailure.invalidOutput }
-            applicationChecks = try await StorageApplicationLayoutVerification.run(result: result, report: report, capture: captureEvidence ? applicationCapture : nil)
+            applicationChecks = try await StorageApplicationLayoutVerification.run(result: result, report: handoffReport, capture: captureEvidence ? applicationCapture : nil)
             try require(accesses == scanAccesses && !coordinator.hasWork, "Application Layouts started source scan/access work")
+        }
+        if let nativeCase {
+            properties.close(); tool.close()
+            await coordinator.stopAndDrain()
+            await result.waitUntilReadersDrained()
+            await settings.drainPreferencesForVerification()
+            try require(!surface.isAnimating && !full.isAnimating && !drill.canBrowse && !fullDrill.canBrowse
+                && !coordinator.hasWork && result.activeReaderCount == 0 && ApplicationFileActivity.gate.activeCount == 0,
+                "Generated chart close retained native drivers, readers or source authority")
+            let report: [String: Any] = ["passed": true,
+                "checks": preference.checks + applicationChecks + ["bounded chart depth and remainder",
+                    "actual Properties first Folders and App Libraries queries", "stable Properties chart and scroll viewport",
+                    "cached Folders and App Libraries roots without new readers", "superseded query cannot replace cached folder root",
+                    "native stored drill, Back and ancestor navigation", "same-result full-analysis handoff",
+                    "shared style and persisted preference without rescan", "explicit Other and Application Layouts partition",
+                    "capacity display preserves chart and result", "close and reader drain"],
+                "captures": captureEvidence ? [propertyCapture.lastPathComponent, fullCapture.lastPathComponent,
+                    accountingCapture.lastPathComponent, applicationCapture.lastPathComponent] : [],
+                "generated_scans": 1, "ordinary_dimensional_chart": true,
+                "ordinary_classification_revision": result.classificationRevision.rawValue,
+                "layout_explanation_capability": layouts != nil,
+                "application_layout_capability": result.supportsApplicationLayouts,
+                "properties_first_groups": true, "properties_viewport_stable": true,
+                "cached_root_stale_query_rejected": true,
+                "initial_group": "Storage Roles (qualification only)",
+                "gate_active": ApplicationFileActivity.gate.activeCount,
+                "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began]
+            try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+                .write(to: nativeCase.appendingPathComponent("evidence/native.json"), options: .withoutOverwriting)
+            return report
         }
         // Supersede both views with a generated wide result. Observe prefixes;
         // they may draw known bytes but must never offer a stored-result drill.
