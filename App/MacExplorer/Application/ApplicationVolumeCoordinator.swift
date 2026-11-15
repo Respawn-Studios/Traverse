@@ -98,6 +98,7 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     /// passive read creates no state; unresolved or unreadable records keep
     /// native Format admission closed, while ordinary drive discovery remains.
     func loadNativeDriveJobIfNeeded() {
+        guard AppFeatureAvailability.allows(.apfsVolumeCreation) else { return }
         guard !nativeDriveJobLoaded, nativeDriveJobTask == nil else { return }
         nativeDriveJobReady = false
         nativeDriveJobIssue = "Checking saved drive jobs…"
@@ -149,7 +150,16 @@ final class ApplicationVolumeCoordinator: ObservableObject {
         let args = ProcessInfo.processInfo.arguments
         guard args.contains("--verify-drive-lifecycle"), args.contains("--apfs-format"),
               generatedFormatJobIsAdmissible(owner: owner) else { return nil }
-        return nativeDriveJobStore?.recording(owner: owner, attachmentCurrent: attachmentCurrent)
+        guard let recording = nativeDriveJobStore?.recording(owner: owner, attachmentCurrent: attachmentCurrent) else { return nil }
+        nativeDriveJobReady = false
+        nativeDriveJobIssue = "A native APFS Format check is in progress. Its saved outcome must be checked before another request."
+        return recording
+    }
+
+    func reloadNativeDriveJobAfterRecording() async {
+        if let task = nativeDriveJobTask { await task.value }
+        nativeDriveJobLoaded = false
+        await waitForNativeDriveJobLoad()
     }
     #endif
 

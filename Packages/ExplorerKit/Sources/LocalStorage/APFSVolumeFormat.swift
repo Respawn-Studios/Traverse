@@ -82,6 +82,14 @@ public enum APFSVolumeFormatRecoveryInspection: Sendable {
 /// gate. After Process.run succeeds, this owner waits for the child and then
 /// reconciles; Stop, timeout and a nonzero exit never claim data was restored.
 public final class APFSVolumeFormat: @unchecked Sendable {
+    /// The full target seal is the last potentially blocking authority check.
+    /// An earlier image inquiry must not make that target observation stale.
+    static func launchPermitted(ownerStillCurrent: () -> Bool, targetStillCurrent: () -> Bool,
+                                expiresAt: TimeInterval, cancelled: () -> Bool) -> Bool {
+        func live() -> Bool { !cancelled() && ProcessInfo.processInfo.systemUptime < expiresAt }
+        guard live(), ownerStillCurrent(), live(), targetStillCurrent() else { return false }
+        return live()
+    }
     private let lock = NSLock()
     private var occupied = false
     private let inspector: any VolumeInspecting
@@ -162,14 +170,16 @@ public final class APFSVolumeFormat: @unchecked Sendable {
             catch { throw APFSVolumeFormatFailure.recoveryUnavailable }
             terminal = try await withTaskCancellationHandler {
                 try await tool.eraseVolume(device: current.info.device, name: plan.name, admission: submission,
-                                           permitted: { permitted() && recovery.ownerStillCurrent()
-                                               && ProcessInfo.processInfo.systemUptime < plan.expiresAt
-                                               && !cancellation.isCancelled }, submitted: {
+                                           permitted: {
+                                               Self.launchPermitted(ownerStillCurrent: recovery.ownerStillCurrent,
+                                                   targetStillCurrent: permitted, expiresAt: plan.expiresAt,
+                                                   cancelled: { cancellation.isCancelled })
+                                           }, submitted: {
                                                recovery.didSubmit(); submitted()
                                            })
             } onCancel: {
-                cancellation.cancel()
                 submission.cancel()
+                cancellation.cancel()
             }
             didSubmit = true
             // The old volume UUID may have been replaced by eraseVolume. Parse

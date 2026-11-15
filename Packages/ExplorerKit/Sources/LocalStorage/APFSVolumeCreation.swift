@@ -156,8 +156,8 @@ public final class APFSVolumeCreation: @unchecked Sendable {
                                           permitted: { permitted() && ProcessInfo.processInfo.systemUptime < plan.expiresAt
                                               && !cancellation.isCancelled }, submitted: submitted)
                 } onCancel: {
-                    cancellation.cancel()
                     submission.cancel()
+            cancellation.cancel()
                 }
             }
             catch {

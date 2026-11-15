@@ -421,6 +421,8 @@ enum NativeDriveLifecycleVerification {
             attachmentCurrent: { formatSeal.imageAndOuterCurrent() }) else {
             throw UIVerification.Failure(message: "Generated APFS Format durable recorder was not admitted")
         }
+        try require(!drives.generatedFormatJobIsAdmissible(owner: generatedOwner),
+                    "An issued Format recorder left a second request admitted")
         try require(recording.ownerStillCurrent(), "Generated APFS Format job owner is stale")
         try evidence.write(["phase": "intent", "request": "one-apfs-volume-erase", "imageInode": receipt.imageInode,
                             "siblingUUID": initial.volumeUUID!.uuidString, "targetUUID": added.id.uuidString,
@@ -436,6 +438,10 @@ enum NativeDriveLifecycleVerification {
                             "status": formatted.toolExitStatus.map { Int($0) } as Any? ?? NSNull(),
                             "diskutilErrorCode": formatted.diskutilErrorCode as Any? ?? NSNull(),
                             "submissionReceipt": evidence.submittedRecorded], leaf: "apfs-format-terminal.json")
+        await drives.reloadNativeDriveJobAfterRecording()
+        try require(!formatted.submitted || !drives.generatedFormatJobIsAdmissible(owner: generatedOwner)
+                    && !drives.nativeDriveJobIssue.isEmpty,
+                    "A submitted unresolved Format job remained clean in its warm coordinator")
         try require(!formatted.submitted || evidence.submittedRecorded,
                     "Generated APFS Format submission receipt was not durable")
         guard let newVolume = formatted.formatted else {

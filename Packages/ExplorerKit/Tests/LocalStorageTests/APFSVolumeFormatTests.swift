@@ -96,6 +96,31 @@ struct APFSVolumeFormatTests {
         #expect(!String(reflecting: plan).contains("Generated"))
     }
 
+    @Test func launchChecksTheTargetAfterThePotentiallySlowImageInquiry() {
+        var targetCurrent = true, calls: [String] = []
+        let allowed = APFSVolumeFormat.launchPermitted(ownerStillCurrent: {
+            calls.append("image")
+            targetCurrent = false
+            return true
+        }, targetStillCurrent: {
+            calls.append("target")
+            return targetCurrent
+        }, expiresAt: ProcessInfo.processInfo.systemUptime + 60, cancelled: { false })
+        #expect(!allowed && calls == ["image", "target"])
+    }
+
+    @Test func expiredOrCancelledLaunchChecksDoNotQueryMoreAuthority() {
+        var queries = 0, cancelled = false
+        #expect(!APFSVolumeFormat.launchPermitted(ownerStillCurrent: { queries += 1; return true },
+            targetStillCurrent: { queries += 1; return true }, expiresAt: 0, cancelled: { false }))
+        #expect(queries == 0)
+        #expect(!APFSVolumeFormat.launchPermitted(ownerStillCurrent: {
+            queries += 1; cancelled = true; return true
+        }, targetStillCurrent: { queries += 1; return true },
+            expiresAt: ProcessInfo.processInfo.systemUptime + 60, cancelled: { cancelled }))
+        #expect(queries == 1)
+    }
+
     @Test func onlyOneReplacementWithUnchangedSiblingCanReconcile() {
         let before = container()
         let replacement = volume(replacementID, device: "disk30s3", name: "Erase Me")

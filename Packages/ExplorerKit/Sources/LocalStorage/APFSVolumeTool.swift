@@ -11,18 +11,25 @@ final class APFSVolumeTool: Sendable {
     /// queue. Once launch begins, cancellation cannot claim to stop the child.
     final class MutationAdmission: @unchecked Sendable {
         enum Decision: Equatable { case launch, cancelled, unavailable }
-        private enum State: Equatable { case open, cancelled, refused, launching }
+        private enum State: Equatable { case open, checking, cancelled, refused, launching }
         private let lock = NSLock()
         private var state = State.open
-        func cancel() { lock.withLock { if state == .open { state = .cancelled } } }
+        func cancel() { lock.withLock { if state == .open || state == .checking { state = .cancelled } } }
         func beginIfAllowed(_ permitted: () -> Bool) -> Decision {
-            lock.withLock {
+            let prior = lock.withLock { () -> Decision? in
                 switch state {
                 case .cancelled: return .cancelled
-                case .refused, .launching: return .unavailable
-                case .open: break
+                case .checking, .refused, .launching: return .unavailable
+                case .open: state = .checking; return nil
                 }
-                guard permitted() else { state = .refused; return .unavailable }
+            }
+            if let prior { return prior }
+            // Permission can include bounded native inquiries. Cancellation
+            // must stay responsive while that real check finishes.
+            let allowed = permitted()
+            return lock.withLock {
+                if state == .cancelled { return .cancelled }
+                guard state == .checking, allowed else { state = .refused; return .unavailable }
                 state = .launching
                 return .launch
             }

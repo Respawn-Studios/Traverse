@@ -82,6 +82,35 @@ struct APFSVolumeCreationTests {
         #expect(launched.beginIfAllowed({ true }) == .unavailable)
     }
 
+    @Test func cancellationDoesNotWaitForAnInFlightAuthorityInquiry() async throws {
+        let admission = APFSVolumeTool.MutationAdmission()
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let cancelled = DispatchSemaphore(value: 0)
+        func signalled(_ semaphore: DispatchSemaphore, by timeout: DispatchTime) async -> Bool {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(returning: semaphore.wait(timeout: timeout) == .success)
+                }
+            }
+        }
+        defer { release.signal() }
+        let decision = Task.detached {
+            admission.beginIfAllowed {
+                entered.signal()
+                _ = release.wait(timeout: .now() + 10)
+                return true
+            }
+        }
+        try #require(await signalled(entered, by: .now() + 5))
+        let cancelling = Task.detached { admission.cancel(); cancelled.signal() }
+        let returned = await signalled(cancelled, by: .now() + 2)
+        release.signal()
+        await cancelling.value
+        #expect(returned)
+        #expect(await decision.value == .cancelled)
+        #expect(admission.beginIfAllowed({ true }) == .cancelled)
+    }
+
     @Test func toolDiagnosticsRetainOnlyFixedNumericErrorSuffix() {
         #expect(APFSVolumeTool.numericErrorCode(Data("Started on disk9\nError starting APFS operation: permission refused (-69501)\n".utf8)) == -69501)
         #expect(APFSVolumeTool.numericErrorCode(Data("Error: -69493: You can't add any more APFS Volumes to its APFS Container\n".utf8)) == -69493)
