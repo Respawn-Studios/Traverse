@@ -2,7 +2,8 @@
 
 This directory holds the artwork and real app captures used around the project.
 [Branding](branding/README.md) has the banner and existing app icon;
-[screenshots](screenshots/README.md) show the workspace with demo folders.
+[screenshots](screenshots/README.md) show the workspace with demo folders;
+[tutorials](tutorials/README.md) show the public app in motion.
 Runtime resources stay with the app, and rough development recordings stay local.
 
 Use these subdirectories when material is ready:
