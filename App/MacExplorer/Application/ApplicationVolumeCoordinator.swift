@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import ExplorerCore
 import LocalStorage
 
@@ -98,7 +99,13 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     /// passive read creates no state; unresolved or unreadable records keep
     /// native Format admission closed, while ordinary drive discovery remains.
     func loadNativeDriveJobIfNeeded() {
-        guard AppFeatureAvailability.allows(.apfsVolumeCreation) else { return }
+        // The signed cold visit reads the saved job while every drive mutation
+        // capability stays closed. It must still observe an unresolved intent.
+        if GeneratedDriveImageReview.requested {
+            guard GeneratedDriveImageReview.admitted else { return }
+        } else {
+            guard AppFeatureAvailability.allows(.apfsVolumeCreation) else { return }
+        }
         guard !nativeDriveJobLoaded, nativeDriveJobTask == nil else { return }
         nativeDriveJobReady = false
         nativeDriveJobIssue = "Checking saved drive jobs…"
@@ -120,7 +127,7 @@ final class ApplicationVolumeCoordinator: ObservableObject {
         }
     }
 
-    #if DEBUG
+    #if DEBUG || TRAVERSE_DRIVE_IMAGE_QA
     /// Generated verification waits for the same passive admission read that
     /// ordinary drive presentation starts. A failed or unresolved read never
     /// becomes a clean slot merely because the check has waited for it.
@@ -139,6 +146,7 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     /// The warm route uses the same predicate before obtaining its recorder.
     func generatedFormatJobIsAdmissible(owner: APFSVolumeFormatGeneratedOwner) -> Bool {
         guard owner.validate() else { return false }
+        if GeneratedDriveImageReview.requested && !GeneratedDriveImageReview.warmAdmitted { return false }
         if !nativeDriveJobLoaded { loadNativeDriveJobIfNeeded() }
         return nativeFormatSavedJobIsClean()
     }
@@ -147,9 +155,17 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     /// recorder. It does not submit anything and grants no Format UI action.
     func generatedFormatRecording(owner: APFSVolumeFormatGeneratedOwner,
                                   attachmentCurrent: @escaping @Sendable () -> Bool) -> NativeDriveJobStore.Recording? {
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        guard let selected = GeneratedDriveImageReview.selection, selected.phase == .warm,
+              owner.fixtureID == UUID(uuidString: selected.caseID),
+              owner.imagePath == selected.fixtureRoot.appendingPathComponent("fixture.dmg").path,
+              owner.ownerUID == geteuid(),
+              generatedFormatJobIsAdmissible(owner: owner) else { return nil }
+        #else
         let args = ProcessInfo.processInfo.arguments
         guard args.contains("--verify-drive-lifecycle"), args.contains("--apfs-format"),
               generatedFormatJobIsAdmissible(owner: owner) else { return nil }
+        #endif
         guard let recording = nativeDriveJobStore?.recording(owner: owner, attachmentCurrent: attachmentCurrent) else { return nil }
         nativeDriveJobReady = false
         nativeDriveJobIssue = "A native APFS Format check is in progress. Its saved outcome must be checked before another request."

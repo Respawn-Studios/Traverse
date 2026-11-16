@@ -106,11 +106,12 @@ def health_service_declared(info: dict) -> bool:
 
 
 def requested(env: dict[str, str]) -> bool:
-    from . import archive_drive_qa, remote_editor_qa
+    from . import archive_drive_qa, drive_image_qa, remote_editor_qa
     qa = remote_editor_qa.admitted_build(env)
     archive = archive_drive_qa.admitted_build(env)
+    drive = drive_image_qa.admitted_build(env)
     return env.get('PRODUCT_BUNDLE_IDENTIFIER') == 'com.respawnstudios.traverse' \
-        or qa is not None or archive is not None
+        or qa is not None or archive is not None or drive is not None
 
 
 def rust_source_path_arguments(enabled: bool) -> tuple[str, ...]:

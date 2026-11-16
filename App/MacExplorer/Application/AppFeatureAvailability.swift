@@ -7,6 +7,9 @@ enum AppFeatureAvailability {
     static let policy = ProductCapabilities(edition: edition)
 
     static func allows(_ feature: ProductCapabilities.Feature) -> Bool {
+        if GeneratedDriveImageReview.requested {
+            return GeneratedDriveImageReview.warmAdmitted && feature == .apfsVolumeCreation
+        }
         if GeneratedArchiveDriveReview.requested {
             guard GeneratedArchiveDriveReview.archiveAdmitted else { return false }
             switch feature {

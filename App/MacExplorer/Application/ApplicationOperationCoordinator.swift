@@ -84,6 +84,18 @@ final class ApplicationOperationCoordinator: ObservableObject {
     }
 
     func engine(at directory: URL) -> RecoverableFileOperations {
+        if GeneratedDriveImageReview.requested {
+            // The role never constructs a browser. If a later caller asks for
+            // one, keep even its fallback history inside the generated case
+            // and refuse every mutation at the operation activity boundary.
+            let inert = GeneratedDriveImageReview.selection?.stateDirectory
+                .appendingPathComponent("operation-recovery", isDirectory: true)
+                ?? Bundle.main.bundleURL.appendingPathComponent("inert-recovery", isDirectory: true)
+            return RecoverableFileOperations(journalDirectory: inert,
+                protecting: [inert.deletingLastPathComponent()],
+                activity: { throw FileOperationFailure.unavailable },
+                authoredZIPMetadataPolicy: .exactSource, nativeTrashPolicy: .held)
+        }
         let archiveQA = GeneratedArchiveDriveReview.archiveAdmitted
         let archiveFixturePhase: ArchiveFixturePhase? = switch GeneratedArchiveDriveReview.selection?.phase {
         case .archiveWarm: .warmForward

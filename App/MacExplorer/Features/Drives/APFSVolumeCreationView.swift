@@ -30,6 +30,9 @@ import SwiftUI
     }
     #endif
     nonisolated static func permitsInAppCreation(_ target: ManagedVolume?) -> Bool {
+        // The signed image role calls the backend through its sealed runner;
+        // no ordinary Drives sheet may obtain this capability.
+        if GeneratedDriveImageReview.requested { return false }
         guard AppFeatureAvailability.allows(.apfsVolumeCreation), let target, target.deviceKind == .diskImage else { return false }
         return target.volumeUUID != nil && target.mediaID != nil && target.group != nil && target.url != nil
     }

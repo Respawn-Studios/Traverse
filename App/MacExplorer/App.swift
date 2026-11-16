@@ -18,6 +18,13 @@ enum MacExplorerApplication {
                 Darwin.exit(71)
             }
         }
+        if GeneratedDriveImageReview.requested {
+            guard let selection = GeneratedDriveImageReview.selection,
+                  GeneratedDriveImageReview.consumePhasePermit(selection) else {
+                fputs("TRAVERSE_DRIVE_IMAGE_QUALIFICATION_LAUNCH_REFUSED\n", stderr)
+                Darwin.exit(71)
+            }
+        }
         #if DEBUG && TRAVERSE_GATEB_NATIVE_QUALIFICATION && !MAC_EXPLORER_DISTRIBUTION
         // Children use the same isolated, signed qualification image. Their
         // exact private case and parent witness are checked by each child.
@@ -181,7 +188,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
     #endif
 
-    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        !GeneratedDriveImageReview.requested
+    }
 
     #if TRAVERSE_SFTP_EDITOR_QA
     private func containerReviewStartupAccepted() async -> Bool {
@@ -203,6 +212,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if TRAVERSE_DRIVE_IMAGE_QA && MAC_EXPLORER_DISTRIBUTION && !DEBUG
+        guard let selection = GeneratedDriveImageReview.selection else {
+            fputs("TRAVERSE_DRIVE_IMAGE_QUALIFICATION_LAUNCH_REFUSED\n", stderr)
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        Task { @MainActor in await SignedDriveImageVerification.run(selection: selection) }
+        #else
         #if TRAVERSE_ARCHIVE_DRIVE_QA
         guard let selection = GeneratedArchiveDriveReview.selection else {
             fputs("TRAVERSE_ARCHIVE_DRIVE_QUALIFICATION_LAUNCH_REFUSED\n", stderr)
@@ -762,6 +779,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
             self.finishLaunching(settings: BrowserSettings(persist: !verification), verification: verification)
         }
         #endif
+        #endif
     }
 
     private func finishLaunching(settings: BrowserSettings, verification: Bool) {
@@ -879,6 +897,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if GeneratedDriveImageReview.requested { return false }
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--verify-ui") && ProcessInfo.processInfo.arguments.contains("--offscreen") {
             print("MAC_EXPLORER_CONTROLLED_REOPEN_IGNORED")
@@ -896,12 +915,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         browserWindow?.invalidatePendingSearchOpen()
     }
     func application(_ application:NSApplication, open urls:[URL]) {
+        if GeneratedDriveImageReview.requested { return }
         #if DEBUG
         if !didFinishForIncomingVerification { incomingBeforeDidFinishForVerification = true }
         #endif
         incomingFolders.receive(urls)
     }
     func applicationDidBecomeActive(_ notification: Notification) {
+        if GeneratedDriveImageReview.requested { return }
         #if DEBUG
         // A sealed qualification process never starts ordinary update/shortcut
         // activation work, including activation before the runner task executes.
@@ -926,6 +947,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        // This role has no ordinary health, benchmark, sharing or browser
+        // owner to tear down. A submitted APFS child must finish first.
+        let operations = ApplicationOperationCoordinator.shared
+        return operations.activeOwner == nil && !operations.drives.isBusy
+            && ApplicationFileActivity.gate.activeCount == 0 ? .terminateNow : .terminateCancel
+        #else
         #if DEBUG
         // A utility may automatically quit hidden apps. Keep a bounded,
         // explicitly requested offscreen check alive until it writes its result;
@@ -1161,6 +1189,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         // terminateLater can enter a nested loop while the caller is itself a
         // MainActor task, starving the task that must flush and reply.
         return .terminateCancel
+        #endif
     }
 
     /// A slow native file check may outlive cancellation. Its actual owner stays

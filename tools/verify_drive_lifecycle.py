@@ -35,6 +35,25 @@ class Fixture:
     _IMAGE_SIZES = {512 << 20: "512MiB", 1 << 30: "1GiB"}
 
     @classmethod
+    def prepared(cls, root: Path) -> "Fixture":
+        """Read a sealed generated owner before its only image is created."""
+        root = root.absolute()
+        marker = read_json(root / "owner.json")
+        job = str(uuid.UUID(marker.get("jobID", ""))).upper()
+        if (root.resolve() != root or root.parent != ROOT / ".build/fixtures"
+                or root.name != "drive-lifecycle-" + job
+                or marker != {"jobID": job, "bytes": 1 << 30}):
+            raise RuntimeError("Prepared generated fixture owner refused")
+        instance = cls.__new__(cls)
+        instance.job, instance.root, instance.image_bytes = job, root, 1 << 30
+        instance.root_id = identity(root)
+        instance.image, instance.image_id, instance.mount = root / "fixture.dmg", None, None
+        instance.validate()
+        if os.path.lexists(instance.image) or instance.attachment() is not None:
+            raise RuntimeError("Prepared fixture already has an image or attachment")
+        return instance
+
+    @classmethod
     def preserved(cls, root: Path) -> "Fixture":
         root = root.absolute()
         marker = read_json(root / "owner.json")
@@ -63,11 +82,17 @@ class Fixture:
             instance.mount = instance.os_mount_path(mounts[0]["mount-point"])
         return instance
 
-    def __init__(self, *, image_bytes: int = 512 << 20) -> None:
+    def __init__(self, *, image_bytes: int = 512 << 20, job: str | None = None) -> None:
         if type(image_bytes) is not int or image_bytes not in self._IMAGE_SIZES:
             raise RuntimeError("Fixture size must be exactly 512 MiB or 1 GiB")
+        if job is not None:
+            try:
+                if str(uuid.UUID(job)).upper() != job:
+                    raise ValueError("Noncanonical generated job")
+            except (TypeError, ValueError, AttributeError):
+                raise RuntimeError("Generated fixture job must be a canonical UUID") from None
         self.image_bytes = image_bytes
-        self.job = str(uuid.uuid4()).upper()
+        self.job = job or str(uuid.uuid4()).upper()
         self.root = local_directory("fixtures") / ("drive-lifecycle-" + self.job)
         self.root.mkdir(mode=0o700)
         self.root_id = identity(self.root)

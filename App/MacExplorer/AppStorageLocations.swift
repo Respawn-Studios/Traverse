@@ -51,6 +51,13 @@ enum AppStorageLocations {
         caches = library.appendingPathComponent("Caches", isDirectory: true)
         mode = "portable"
         #endif
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        guard let selection = GeneratedDriveImageReview.selection else { return nil }
+        let library = selection.caseRoot.appendingPathComponent("source/Library", isDirectory: true)
+        support = library.appendingPathComponent("Application Support", isDirectory: true)
+        caches = library.appendingPathComponent("Caches", isDirectory: true)
+        mode = "portable"
+        #endif
         #if DEBUG
             // A dedicated generated adapter may replace only these bases. Ordinary
             // launches and distribution builds ignore environment storage overrides.

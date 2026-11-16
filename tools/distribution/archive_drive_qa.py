@@ -14,9 +14,7 @@ import os
 from pathlib import Path
 import plistlib
 import stat
-import subprocess
 import sys
-import time
 import uuid
 
 sys.dont_write_bytecode = True
@@ -24,10 +22,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'tools'))
 import development as development_owner
 from build_architecture import named
-from distribution import remote_editor_qa
-from distribution.preflight import entitlements, signing
-from distribution.traverse_packet import TOOLING, CLANG_CACHE, SWIFT_CACHE, directory
-from native_build_inputs import digest, source_inputs
+from distribution import remote_editor_qa, signed_local_qa
 
 ROOT = REPO / '.build/traverse-development'
 PREFIX = 'local.macexplorer.archive-drive.qa.'
@@ -227,73 +222,21 @@ def prepare(tag: str) -> dict:
 
 
 def source_inventory() -> dict[str, str]:
-    values = dict(source_inputs())
-    for name in ['Distribution/Info.plist', 'Distribution/DirectParent.entitlements',
-                 'tools/distribution/archive_drive_qa.py', 'tools/build_storage_worker.py',
-                 'tools/distribution/sandbox.py', 'tools/distribution/remote_editor_qa.py']:
-        values[name] = digest(REPO / name)
-    return dict(sorted(values.items()))
+    return signed_local_qa.source_inventory((
+        'tools/distribution/archive_drive_qa.py',
+        'tools/distribution/drive_image_qa.py',
+    ))
 
 
 def inspect(tag: str) -> dict:
     case, admission = admitted_case(tag)
-    from distribution import helper_symbols
-    from distribution.sandbox import compiled_tree_receipt
-    app = case / 'Products/Release/Mac Explorer.app'
-    inputs = owned_json(case / 'evidence/build-inputs.json', maximum=1 << 20)
-    info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
-    scanner = app / 'Contents/Helpers/storage-scanner-worker'
-    subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '--deep', str(app)],
-                   capture_output=True, check=True, timeout=30)
-    subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(scanner)],
-                   capture_output=True, check=True, timeout=30)
-    parent = signing(app)
-    child = signing(scanner)
-    parent_arches = subprocess.run(['/usr/bin/lipo', '-archs',
-        str(app / 'Contents/MacOS/Mac Explorer')], check=True, capture_output=True,
-        text=True, timeout=30).stdout.strip().split()
-    scanner_arches = subprocess.run(['/usr/bin/lipo', '-archs', str(scanner)],
-        check=True, capture_output=True, text=True, timeout=30).stdout.strip().split()
-    helpers = sorted(p.name for p in scanner.parent.iterdir())
-    symbols = {name: compiled_tree_receipt(case / 'Products/Release' / name)
-        for name in ['Mac Explorer.app.dSYM', 'storage-scanner-worker.dSYM']
-        if (case / 'Products/Release' / name).is_dir()
-        and not (case / 'Products/Release' / name).is_symlink()}
-    symbol_match = {
-        'parent': helper_symbols.validate(app / 'Contents/MacOS/Mac Explorer',
-            case / 'Products/Release/Mac Explorer.app.dSYM'),
-        'scanner': helper_symbols.validate(scanner,
-            case / 'Products/Release/storage-scanner-worker.dSYM'),
-    }
-    checks = dict(identity=info.get('CFBundleIdentifier') == identifier(tag)
-            and parent['Identifier'] == identifier(tag),
-        case=info.get('TraverseArchiveDriveQualificationCase') == tag
-            and info.get('TraverseArchiveDriveQualificationRoot') == str(case)
-            and info.get('TraverseArchiveDriveQualificationOnly') is True,
-        channel=info.get('MacExplorerDistributionChannel') == 'qualification'
-            and info.get('MacExplorerAccessPolicy') == 'local-user-v1'
-            and info.get('MacExplorerStorageMode') == 'portable'
-            and info.get('TraverseArchiveDriveArchitecture') == ARCHITECTURE.name,
-        thinArchitecture=parent_arches == [ARCHITECTURE.name]
-            and scanner_arches == [ARCHITECTURE.name],
-        noShippingMetadata=not any(key in info for key in ['MacExplorerReleasePurpose',
-            'TraversePublicUpdaterVersion', 'TraversePrivateUpdaterVersion']),
-        noFinderRegistration='CFBundleDocumentTypes' not in info and 'CFBundleURLTypes' not in info,
-        noNetworkHelpers=helpers == ['storage-scanner-worker'],
-        exactSymbols=set(symbols) == {'Mac Explorer.app.dSYM', 'storage-scanner-worker.dSYM'},
-        emptyParentRights=entitlements(app) == {}, emptyScannerRights=entitlements(scanner) == {},
-        hardenedParent=parent['runtime'] is True, hardenedScanner=child['runtime'] is True,
-        developerID=parent['TeamIdentifier'] == TEAM and child['TeamIdentifier'] == TEAM
-            and parent['authorities'] and parent['authorities'][0].startswith('Developer ID Application: '),
-        noDebugShim=not (app / 'Contents/MacOS/Mac Explorer.debug.dylib').exists(),
-        sourceMatch=inputs.get('sourceSHA256') == source_inventory())
-    result = dict(passed=all(checks.values()), checks=checks, sourceInputs=len(inputs.get('sourceSHA256', {})),
-                  app=compiled_tree_receipt(app), symbols=symbols,
-                  symbolMatch=symbol_match,
-                  signer=admission['signingIdentity'])
-    if not result['passed']:
-        raise ValueError('Archive/drive QA artifact inspection failed')
-    return result
+    def role_info_valid(info: dict) -> bool:
+        return info.get('TraverseArchiveDriveQualificationCase') == tag \
+            and info.get('TraverseArchiveDriveQualificationRoot') == str(case) \
+            and info.get('TraverseArchiveDriveQualificationOnly') is True \
+            and not any(key.startswith('TraverseDriveImageQualification') for key in info)
+    return signed_local_qa.inspect(case, admission, identifier(tag), role_info_valid,
+                                   source_inventory, 'Archive/drive QA')
 
 
 def issue_phase(tag: str, phase: str) -> dict:
@@ -353,89 +296,8 @@ def issue_phase(tag: str, phase: str) -> dict:
 
 def build(tag: str) -> dict:
     case, admission = admitted_case(tag)
-    if (case / 'evidence/build-result.json').exists():
-        raise ValueError('A built case is immutable; reserve another for a rebuild')
-    if (case / 'Products').exists():
-        raise ValueError('A retained product already occupies this case')
-    source = source_inventory()
-    put(case / 'evidence/build-inputs.json', dict(sourceSHA256=source,
-        sourceInputs=len(source), case=tag, bundleIdentifier=identifier(tag),
-        appLaunches=0, driveMutations=0))
-    tooling = TOOLING
-    product = case / 'Products/Release'
-    for path in [tooling / 'tmp', tooling / 'packages', tooling / 'package-cache',
-                 CLANG_CACHE, SWIFT_CACHE, product]:
-        directory(path)
-    env = os.environ.copy()
-    env.pop('CFFIXED_USER_HOME', None)
-    env.update(TMPDIR=str(tooling / 'tmp') + '/',
-        CLANG_MODULE_CACHE_PATH=str(CLANG_CACHE),
-        SWIFTPM_MODULECACHE_OVERRIDE=str(SWIFT_CACHE),
-        SWIFTPM_NETRC_DATA='')
-    command = ['/usr/bin/xcodebuild', '-project', str(REPO / 'MacExplorer.xcodeproj'),
-        '-scheme', 'MacExplorer', '-configuration', 'Release',
-        '-destination', 'platform=macOS,arch=' + ARCHITECTURE.name,
-        '-xcconfig', str(case / 'ArchiveDrive.xcconfig'),
-        '-derivedDataPath', str(REPO / '.build/xcode-release'),
-        '-clonedSourcePackagesDirPath', str(tooling / 'packages'), '-skipPackageUpdates',
-        '-disableAutomaticPackageResolution', '-disablePackageRepositoryCache',
-        '-packageCachePath', str(tooling / 'package-cache'), '-packageAuthorizationProvider', 'netrc',
-        '-jobs', '4', 'CODE_SIGN_STYLE=Manual', 'CODE_SIGN_IDENTITY=' + admission['signingIdentity'],
-        'DEVELOPMENT_TEAM=' + TEAM, 'CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO',
-        'ARCHS=' + ARCHITECTURE.name, 'TRAVERSE_BUILD_ARCH=' + ARCHITECTURE.name,
-        'ONLY_ACTIVE_ARCH=YES',
-        'OTHER_CODE_SIGN_FLAGS=--timestamp=none', 'CONFIGURATION_BUILD_DIR=' + str(product),
-        'SWIFT_TREAT_WARNINGS_AS_ERRORS=YES', 'COMPILER_INDEX_STORE_ENABLE=NO',
-        'CLANG_MODULE_CACHE_PATH=' + str(CLANG_CACHE),
-        'SWIFT_MODULE_CACHE_PATH=' + str(SWIFT_CACHE), 'build']
-    started = time.monotonic()
-    failure = None
-    log = case / 'evidence/build.log'
-    with log.open('xb') as output:
-        child = subprocess.Popen(command, cwd=REPO, env=env, stdin=subprocess.DEVNULL,
-                                 stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-        while child.poll() is None:
-            if time.monotonic() - started > 1200 or log.stat().st_size > (32 << 20):
-                failure = 'Build deadline or log limit reached'
-            if failure is None:
-                try:
-                    development_owner.audit()
-                    from distribution.sandbox import editor_release_audit
-                    editor_release_audit(case)
-                except Exception as error:
-                    failure = 'Build resource audit failed: ' + type(error).__name__
-            if failure is not None:
-                child.terminate()
-                try: child.wait(timeout=5)
-                except subprocess.TimeoutExpired: child.kill(); child.wait(timeout=5)
-                break
-            time.sleep(1)
-    result = dict(case=tag, actualBuildExit=child.returncode, elapsedSeconds=time.monotonic()-started,
-                  appLaunches=0, driveMutations=0, log=str(log.relative_to(REPO)))
-    if child.returncode != 0 or failure is not None:
-        result.update(passed=False, failure=failure or 'Xcode build failed')
-        put(case / 'evidence/build-result.json', result)
-        return result
-    if source_inventory() != source:
-        result.update(passed=False, failure='Source changed during build')
-        put(case / 'evidence/build-result.json', result)
-        return result
-    try:
-        app = product / 'Mac Explorer.app'
-        subprocess.run(['/usr/bin/codesign', '--force', '--sign', admission['signingIdentity'],
-            '--timestamp=none', '--options', 'runtime', '--entitlements',
-            str(REPO / 'Distribution/DirectParent.entitlements'), str(app)],
-            capture_output=True, check=True, timeout=30, stdin=subprocess.DEVNULL)
-        for artifact in [app, product / 'Mac Explorer.app.dSYM', product / 'storage-scanner-worker.dSYM']:
-            if not artifact.is_dir() or artifact.is_symlink():
-                raise ValueError('Missing exact archive/drive QA app or symbols')
-        inspected = inspect(tag)
-        result.update(passed=True, inspected=inspected)
-    except Exception as error:
-        result.update(passed=False, failure='Signing or inspection failed',
-                      failureType=type(error).__name__)
-    put(case / 'evidence/build-result.json', result)
-    return result
+    return signed_local_qa.build(case, tag, admission, 'ArchiveDrive.xcconfig',
+        source_inventory, lambda: inspect(tag), put, 'Archive/drive QA')
 
 
 def main() -> None:
