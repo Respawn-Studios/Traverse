@@ -33,8 +33,10 @@ Build first when compiled inputs changed. Check `native-check --help` for
 available flows and their options; an offscreen check does not establish
 foreground input, Finder drag delivery or signed distribution behavior.
 The Development TAR editor flows include a second app process for cold Undo.
-They reuse ordinary editor, workbench and operation owners; they do not enable
-the new routes in distributed editions.
+They reuse ordinary editor, workbench and operation owners. Running a check
+does not change edition admission. The next direct-build source admits its
+qualified TAR workbench separately; public 0.2.0 remains unchanged, and
+packaged-app acceptance is still required.
 
 `archive-export` runs the shared ZIP/TAR callback checks with generated files,
 including collisions, cancellation, scope drain and cold Undo. Choose `zip`,

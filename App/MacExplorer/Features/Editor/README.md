@@ -216,8 +216,9 @@ original-archive Undo, stale refusal, Reload, copy-follow and copy Undo.
 `native-check tar-editor`, `tar-gzip-editor` and `tar-bzip2-editor` cover the same
 lifecycle with separate v18, v19 and v20 original-update admission. The compressed
 variants reuse the bounded codec, TAR layout and publisher. TAR editing is
-Development-only until distribution qualification. Installed signature and
-sandbox source grants require separate validation.
+qualified in Development and the next direct-build source, including signed
+operation and restart/Undo checks. It is not part of public 0.2.0. Packaged-app
+acceptance and sandbox source grants require separate validation.
 
 The existing Explorer/Custom Control-alias preference also applies to local and
 remote editor menus: Save/Save As/Close, Undo/Redo, Cut/Copy/Paste, Select All,

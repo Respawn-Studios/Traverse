@@ -5,6 +5,11 @@ extraction and journaled publication stay in ExplorerKit. Edition and operation
 admission are controlled by `AppFeatureAvailability` and the concrete engine
 policy. Source support does not establish signed or installed availability.
 
+The current Development and qualified direct-build source share the TAR
+workbench described below. Its operation and restart/Undo checks have passed;
+packaged-app acceptance remains separate. These additions are not in public
+0.2.0. TAR-to-Finder promises still have their own held gate.
+
 | Source | Responsibility |
 | --- | --- |
 | `ArchiveBrowser.swift`, `ArchiveRowsView.swift` | ZIP metadata browsing and native rows |
@@ -28,8 +33,8 @@ per side. ZIP verifies CRC; TAR has no per-file checksum. Readers retain the
 sealed source selection, revalidate it and use the shared native preview window.
 They do not invoke external preview plug-ins or publish extracted files.
 
-Plain TAR opens directly. Compressed TAR requires an explicit preparation
-request into the shared private pool, bounded to 128 MiB and four copies. Restoring a tab or searching
+Plain TAR opens directly. Compressed TAR uses the shared private preparation
+pool, bounded to 128 MiB and four copies. Restoring a tab or searching
 names does not decode it. `ApplicationCompressedArchives` retains actual worker,
 source access and prepared-copy leases through drain and the volume/Quit barrier.
 A prepared spool path is never operation authority. Nesting requires separate
@@ -58,17 +63,18 @@ already resolves against its base. Dot components, non-file URLs, query/fragment
 and noncanonical resolved paths refuse. Parent observation and the concrete
 engine still establish destination authority; a URL spelling is never a grant.
 
-In Development, a deliberate ordinary Open includes preparation for a supported
-compressed TAR. The archive owner consumes a nonpersisted presentation token
-after pool admission, or immediately for a reused unprepared model. Stop,
+In Development and the qualified direct workbench, a deliberate ordinary Open
+includes preparation for a supported compressed TAR. The archive owner consumes
+a nonpersisted presentation token after pool admission, or immediately for a
+reused unprepared model. Stop,
 admission failure and a later presentation invalidate that token. It never lives
 in BrowserTab, ArchiveLocation or session history. Merely finding a filename or
 restoring a tab cannot admit preparation. A changed retained source on passive
 return clears its stale rows and requires a fresh Open or Prepare; healthy
-prepared sessions keep their ordinary source check and reuse. Distributed
-composition still uses the separate Prepare action.
+prepared sessions keep their ordinary source check and reuse. Compositions that
+do not admit deliberate-open preparation keep the separate Prepare action.
 
-## TAR editing in development
+## TAR editing
 
 Gzip TAR uses `.tar.gz` or `.tgz`; bzip2 TAR uses `.tar.bz2`, `.tbz2` or `.tbz`.
 The shared filename identity keeps those aliases consistent across opening,
@@ -76,8 +82,9 @@ editing and creation names. Recognizing another wrapper's filename does not
 enable its decoder or writer.
 
 Plain and prepared gzip/bzip2 TAR members use the common native editor and archive
-workbench in Development builds. Rename, batch Rename, Remove, Duplicate, Move, Create File/New Folder,
-Group and Add all use one `TARMemberMutation`, including Cut/Paste and local
+workbench in Development and the qualified direct source. Rename, batch Rename,
+Remove, Duplicate, Move, Create File/New Folder, Group and Add all use one
+`TARMemberMutation`, including Cut/Paste and local
 file drops. The browser seals catalog selections; the table never writes files.
 Batch Rename shares the local/ZIP naming controls and Before/After table. It
 applies a captured set simultaneously, allows name swaps, keeps unchanged raw
@@ -110,11 +117,12 @@ Cancellation is checked around codec calls; one bzip2 block can finish inside
 a call before Stop is observed. Work stays on the existing bounded worker.
 
 Save and Save TAR Copy use the existing guarded archive engine. TAR original
-replacement has its own default-held policy and v18 history; gzip has v19 and bzip2 v20,
+replacement has its own admitted policy and v18 history; gzip has v19 and bzip2 v20,
 independent of ZIP v13. The earlier archive stays available for cold Undo; an interrupted
 retained-original step has an explicit, revalidated Restore action. The writer
 keeps the native stage's macOS protection and never copies a source mark over
-it. This source support does not activate TAR editing in a distributed build.
+it. Application composition admits these qualified direct routes separately
+from sandboxed editions and external promises.
 Initializing protection on a new Update payload has a separate default-held
 policy from Create. Only an empty owned private stage is eligible; existing
 stage protection and source metadata are never replaced. A consumed plan drops
@@ -124,13 +132,13 @@ edit without another Prepare click.
 
 ## Creation and ZIP edits
 
-Development also offers TAR + gzip and TAR + bzip2 with Fast, Balanced and
-Smallest choices. Both stream the same TAR records through bounded system
+Development and the qualified direct source also offer TAR + gzip and TAR +
+bzip2 with Fast, Balanced and Smallest choices. Both stream the same TAR records through bounded system
 codecs, then check a fresh decode, the emitted metadata and the completed file digest.
 There is no second full TAR spool. Raw TAR and compressed output each stay
-within 128 MiB. A separate default-held engine policy keeps this new authoring
-route out of distributed builds until qualification. Native stage protection and the existing cold Undo are shared
-with plain TAR creation.
+within 128 MiB. Each engine policy defaults to held; the qualified direct
+composition explicitly admits the supported authoring routes. Native stage
+protection and the existing cold Undo are shared with plain TAR creation.
 
 Compress/Extract shortcuts share the full workbenches and guarded operations.
 Automatic extraction uses a new sibling folder, never an implicit merge.
@@ -182,7 +190,7 @@ Offscreen functional checks do not establish motion, physical input, external
 receiver behavior or sandbox grants. See [file operations](../../../../docs/FILE_OPERATIONS.md)
 and the [engineering guide](../../../../docs/engineering/README.md).
 
-The two TAR editor journeys reuse the same ordinary Development engine. They
-include a second app process for the final edit/Create Undos. The existing
+The TAR editor journeys reuse the ordinary editor, workbench and operation
+owners. They include a second app process for the final edit/Create Undos. The existing
 `--marked-source-create` option also covers generated marked editor inputs;
 it grants no installed-app or OS-container scope.
