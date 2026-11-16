@@ -152,20 +152,43 @@ def _generated_path_absent(path: Path) -> bool:
     return False
 
 
+def _finder_payload_names(parent: Path) -> set[str]:
+    """Finder may save its view state; no other extra output is ignored."""
+    names = {item.name for item in parent.iterdir()}
+    if '.DS_Store' in names:
+        facts = (parent / '.DS_Store').lstat()
+        if not stat.S_ISREG(facts.st_mode) or facts.st_uid != os.getuid() \
+                or facts.st_nlink != 1 or facts.st_mode & 0o111 or facts.st_size > 64 << 10:
+            raise RuntimeError('Generated Finder metadata differs')
+    return names - {'.DS_Store'}
+
+
 def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str, str], output,
                                   *, archive: bool = False, destination: Path | None = None,
-                                  archive_kinds: tuple[str, ...] = ("file", "folder")) -> subprocess.CompletedProcess:
+                                  archive_kinds: tuple[str, ...] = ("file", "folder"),
+                                  archive_routes: tuple[tuple[str, str, Path], ...] | None = None,
+                                  on_launch=None, audit=None, signal_on_uncertainty: bool = True) -> subprocess.CompletedProcess:
     """One ordinary owner, an independent receiver and bounded native controls."""
     destination = destination or case / "source/Destination"
+    routes = archive_routes if archive_routes is not None else tuple(
+        (kind, kind, destination) for kind in (archive_kinds if archive else ("file",)))
+    if not 1 <= len(routes) <= 6 or len({route[0] for route in routes}) != len(routes) \
+            or archive_routes is not None and not archive:
+        raise ValueError("Generated receiver routes differ")
+    for route, kind, parent in routes:
+        if not route or kind not in ("file", "folder") or parent.is_symlink() or not parent.is_dir() \
+                or parent.resolve() != parent or not parent.is_relative_to(case / "source"):
+            raise ValueError("Generated receiver destination differs")
     process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE,
                                stdout=output, stderr=subprocess.STDOUT)
-    offset, pending, opened, phase = 0, b"", False, "file"
+    offset, pending, opened, phase, phase_kind = 0, b"", set(), None, None
     began, settled = time.monotonic(), None
     delivered, sent, failures, events = [], [], [], []
     cancelling, controls = False, 0
+    last_audit = began
     def send(message: bytes, *, close: bool) -> None:
         nonlocal controls
-        if controls >= (len(archive_kinds) if archive else 1):
+        if controls >= len(routes):
             raise RuntimeError("Generated receiver control count exceeded")
         if process.stdin is None or process.stdin.closed:
             raise RuntimeError("Generated receiver control pipe closed")
@@ -175,7 +198,12 @@ def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str,
         if close:
             process.stdin.close()
     try:
+        if on_launch is not None:
+            on_launch(process.pid)
         while True:
+            if audit is not None and time.monotonic() - last_audit >= 1:
+                audit()
+                last_audit = time.monotonic()
             output.flush()
             data = Path(output.name).read_bytes()
             if len(data) > 2 << 20:
@@ -191,29 +219,34 @@ def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str,
                 kind, values = event.get("event"), event.get("values", {})
                 if kind == "failed":
                     failures.append(values)
-                    if not cancelling and process.poll() is None and len(sent) < (len(archive_kinds) if archive else 1):
+                    if not cancelling and process.poll() is None and len(sent) < len(routes):
                         send(b"cancel\n", close=True)
                         cancelling = True
                 if kind == "ready" and not cancelling:
-                    phase = values.get("kind", "file")
-                    wanted = archive_kinds if archive else ("file",)
-                    if len(sent) >= len(wanted) or phase != wanted[len(sent)]:
+                    phase_kind = values.get("kind", "file")
+                    phase = values.get("route") if archive_routes is not None else phase_kind
+                    if len(sent) >= len(routes) or (phase, phase_kind) != routes[len(sent)][:2] \
+                            or phase in delivered:
                         raise RuntimeError("Generated receiver phase differs")
-                    if not opened:
-                        if next(destination.iterdir(), None) is not None:
+                    destination = routes[len(sent)][2]
+                    if destination not in opened:
+                        if (_finder_payload_names(destination) if archive_routes is not None
+                                else next(destination.iterdir(), None)):
                             raise RuntimeError("Generated Finder destination was not empty")
                         subprocess.run(["/usr/bin/open", "-b", "com.apple.finder", str(destination)],
                                        check=True, capture_output=True, timeout=15)
-                        opened = True
+                        opened.add(destination)
                     print(f"Generated {phase} drag ready: {destination}", flush=True)
                 if kind == "write-completed" and not cancelling:
-                    if values.get("nativeCallback") is not True or values.get("parentChoices") != (0 if archive else 1) or phase in delivered:
+                    if phase is None or values.get("nativeCallback") is not True \
+                            or values.get("parentChoices") != (0 if archive else 1) or phase in delivered \
+                            or archive_routes is not None and values.get("route") != phase:
                         raise RuntimeError("Generated external callback or parent choice differs")
                     delivered.append(phase)
                     settled = time.monotonic()
             if not cancelling and phase in delivered and phase not in sent and settled is not None and time.monotonic() - settled >= 0.75:
                 expected = {"Generated Promise.txt": b"Generated first root\n" if archive else b"Traverse generated promise control\n"}
-                if phase == "folder":
+                if phase_kind == "folder":
                     expected = {"Generated Folder/Report.txt": b"Generated folder member\n",
                                 "Generated Folder/Deep/More.txt": b"Generated nested member\n"}
                     empty = destination / "Generated Folder/Empty"
@@ -222,30 +255,43 @@ def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str,
                 for name, body in expected.items():
                     if read_artifact(destination / name, len(body)) != body:
                         raise RuntimeError("Generated Finder output differs")
+                if archive_routes is not None:
+                    expected_leaves = {"Generated Promise.txt" if kind == "file" else "Generated Folder"
+                        for route, kind, parent in routes if route in delivered and parent == destination}
+                    if _finder_payload_names(destination) != expected_leaves:
+                        raise RuntimeError("Generated Finder destination has an extra output")
                 sent.append(phase)
-                send(b"finish\n", close=not archive or len(sent) == len(archive_kinds))
+                send(b"finish\n", close=len(sent) == len(routes))
             if process.poll() is not None:
                 break
             if time.monotonic() - began > (600 if archive else 300):
                 raise RuntimeError("Generated Finder gesture deadline; success not inferred")
             time.sleep(0.1)
-        wanted = list(archive_kinds) if archive else ["file"]
+        wanted = [route for route, _, _ in routes]
         receiver = {"passed": not failures and delivered == sent == wanted,
                     "nativeFailures": failures, "independentDeliveries": delivered,
                     "controlMessages": controls, "finishedInputs": sent, "additionalParentChoices": 0 if archive else 1,
                     "events": events}
-        (case / "evidence/finder-receiver.json").write_text(json.dumps(receiver, indent=2) + "\n")
+        receiver_path = case / "evidence/finder-receiver.json"
+        descriptor = os.open(receiver_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w") as receipt:
+            receipt.write(json.dumps(receiver, indent=2) + "\n")
         return subprocess.CompletedProcess(command, process.returncode)
     finally:
         if process.stdin is not None and not process.stdin.closed:
             process.stdin.close()
         if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            if not signal_on_uncertainty:
+                # EOF asks the existing native owner to cancel and drain. A
+                # signed acceptance never turns an uncertain close into a kill.
+                process.wait(timeout=30)
+            else:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
 
 
 def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: bool, large_interface: bool = False,

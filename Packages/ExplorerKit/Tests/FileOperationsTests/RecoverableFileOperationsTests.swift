@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-@_spi(ArchiveProduction) @_spi(ApplicationOwnership) @testable import FileOperations
+@_spi(ArchiveProduction) @_spi(ApplicationOwnership) @_spi(ArchiveFixtureOperations) @testable import FileOperations
 import Testing
 
 private struct RecoveryFixture {
@@ -80,6 +80,95 @@ private final class ArchiveFixtureNeverProduce: ArchiveFileProducer, @unchecked 
 }
 
 @Suite(.serialized) struct ArchiveFixtureAdmissionTests {
+    @Test func tarPromiseBudgetIncludesExactSourcesAndFinderMetadata() throws {
+        let fixture = try ArchiveFixtureGateFixture(); defer { fixture.remove() }
+        let baseline = UInt64(try Data(contentsOf: fixture.file).count)
+        func engine(_ bytes: UInt64) -> RecoverableFileOperations {
+            RecoverableFileOperations(journalDirectory: fixture.journal, protecting: [], activity: nil,
+                tarOneFilePublicExtractionPolicy: .sourceQualification,
+                tarTreePublicExtractionPolicy: .sourceQualification,
+                archiveFixtureRoot: fixture.root, archiveFixturePhase: .warmForward,
+                archiveFixtureOperations: .publicTARExtraction, archiveFixtureBaselineBytes: bytes)
+        }
+        let nodes = engine(baseline)
+        let one = ArchiveProductionPreview(files: 1, folders: 0, logicalBytes: 1,
+            longestPathBytes: 1, largestFileBytes: 1)
+        let eightySix = ArchiveProductionPreview(files: 86, folders: 0, logicalBytes: 86,
+            longestPathBytes: 1, largestFileBytes: 1)
+        try nodes.reserveTARFixturePreview(eightySix)
+        #expect(throws: FileOperationFailure.unsupported) {
+            try nodes.reserveTARFixturePreview(one)
+        }
+        let bytes = engine(baseline)
+        let available = (4 << 20) - baseline - (256 << 10)
+        let full = ArchiveProductionPreview(files: 4, folders: 0, logicalBytes: available,
+            longestPathBytes: 1, largestFileBytes: 1 << 20)
+        try bytes.reserveTARFixturePreview(full)
+        #expect(throws: FileOperationFailure.unsupported) {
+            try bytes.reserveTARFixturePreview(one)
+        }
+        #expect(throws: FileOperationFailure.unsupported) {
+            try engine(0).requireTARFixturePreview(one)
+        }
+        #expect(throws: FileOperationFailure.unsupported) {
+            try engine((3 << 20) + 1).requireTARFixturePreview(one)
+        }
+    }
+
+    @Test func tarPromiseProfileCannotReuseAuthoredOrGenericReceiveActions() async throws {
+        let fixture = try ArchiveFixtureGateFixture(); defer { fixture.remove() }
+        let promise = RecoverableFileOperations(journalDirectory: fixture.journal, protecting: [], activity: nil,
+            tarOneFilePublicExtractionPolicy: .sourceQualification, tarTreePublicExtractionPolicy: .sourceQualification,
+            archiveFixtureRoot: fixture.root, archiveFixturePhase: .warmForward,
+            archiveFixtureOperations: .publicTARExtraction,
+            archiveFixtureBaselineBytes: UInt64(try Data(contentsOf: fixture.file).count))
+        let authored = fixture.engine(.warmForward)
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await authored.checkTARPromiseDestination(source: fixture.file, parent: fixture.output,
+                name: "Denied.txt")
+        }
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await promise.checkReceivedFileDestination(parent: fixture.output, name: "Denied.txt")
+        }
+        #expect(try await promise.checkTARPromiseDestination(source: fixture.file,
+            parent: fixture.output, name: "Allowed.txt").urls == [fixture.output])
+        let selection = try await promise.observeSelection([fixture.file])
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await promise.prepareArchiveCreation(sources: [fixture.file], parent: fixture.output,
+                name: "Denied.tar", observing: selection) { _ in ArchiveFixtureNeverProduce() }
+        }
+        let generic = await promise.perform(.createFolder(parent: fixture.output, name: "Denied"))
+        #expect(generic.result.items.first?.status == .failed(.unsupported))
+        for _ in 0..<6 {
+            #expect(try await promise.worker(archiveAction: .tarForward) { _ in 1 } == 1)
+        }
+        await #expect(throws: FileOperationFailure.unavailable) {
+            _ = try await promise.worker(archiveAction: .tarForward) { _ in 1 }
+        }
+        #expect(try await promise.observeSelection([fixture.file]).urls == [fixture.file])
+        let cold = RecoverableFileOperations(journalDirectory: fixture.journal, protecting: [], activity: nil,
+            tarOneFilePublicExtractionPolicy: .sourceQualification, tarTreePublicExtractionPolicy: .sourceQualification,
+            archiveFixtureRoot: fixture.root, archiveFixturePhase: .coldInverse,
+            archiveFixtureOperations: .publicTARExtraction,
+            archiveFixtureBaselineBytes: UInt64(try Data(contentsOf: fixture.file).count))
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await cold.checkTARPromiseDestination(source: fixture.file, parent: fixture.output,
+                name: "Denied.txt")
+        }
+        for _ in 0..<6 {
+            #expect(try await cold.worker(archiveAction: .inverse) { _ in 1 } == 1)
+        }
+        await #expect(throws: FileOperationFailure.unavailable) {
+            _ = try await cold.worker(archiveAction: .inverse) { _ in 1 }
+        }
+        let malformed = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: .init(),
+            archiveFixtureOperations: .publicTARExtraction)
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await malformed.observeSelection([fixture.file])
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+    }
+
     @Test func phasesAdmitOnlyTheirArchiveActionsAndRetainOrdinaryBehavior() async throws {
         let fixture = try ArchiveFixtureGateFixture(); defer { fixture.remove() }
         let warm = fixture.engine(.warmForward)

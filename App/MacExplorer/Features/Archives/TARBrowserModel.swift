@@ -62,7 +62,7 @@ struct TARClipboardSource {
     private var work:Task<Void,Never>?,filterWork:Task<Void,Never>?,selectionWork:Task<Void,Never>?
     private let exportPreparation = ArchivePromisePreparation<Set<TARItemID>>()
     private var handedExports: [ArchivePromiseExport] = []
-    #if DEBUG
+    #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
     var memberDragHandoffForVerification: ((ArchivePromiseExport) -> Void)?
     var lastHandedExportForVerification: ArchivePromiseExport? { handedExports.last }
     #endif
@@ -398,9 +398,23 @@ struct TARClipboardSource {
             && (1...ArchiveMemberDragSource.maximumItems).contains(ids.count)
             && !ApplicationFileActivity.gate.isClosed
     }
+    private func canPrepareExternalPromise(_ ids: Set<TARItemID>) -> Bool {
+        #if TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !DEBUG
+        if GeneratedArchiveDriveReview.tarPromisesForwardAdmitted {
+            return selection == ids && selectedSupported && session != nil && source != nil
+                && permitsEmbeddedAction && current && !busy && !isPreviewing && !isPreparingPreview
+                && !suspended && !closed && !ApplicationFileActivity.gate.isClosed
+                && browser?.isBrowserSuspended == false
+                && browser?.recoverableFileOperations != nil
+                && browser?.canRunExclusiveFileCommand == true
+        }
+        #endif
+        return canCaptureClipboardMembers && selection == ids
+    }
     func canStartMemberDrag(_ ids: Set<TARItemID>) -> Bool {
-        (((ArchiveMemberDragActivation.available || TARPromiseExportFeature.available
-            && exportPreparation.offer(for: ids) != nil) && canExtractMemberDrag(ids))
+        ((ArchiveMemberDragActivation.available && canExtractMemberDrag(ids))
+            || (TARPromiseExportFeature.available && exportPreparation.offer(for: ids) != nil
+                && canPrepareExternalPromise(ids))
             || canMoveMembers(ids)) && selection == ids
             && (1...ArchiveMemberDragSource.maximumItems).contains(ids.count)
             && !ApplicationFileActivity.gate.isClosed
@@ -413,8 +427,15 @@ struct TARClipboardSource {
     private func prepareExternalExport() {
         exportPreparation.invalidate()
         guard TARPromiseExportFeature.available, (1...128).contains(selection.count),
-              canCaptureClipboardMembers, ApplicationArchiveExports.shared.canOffer,
+              canPrepareExternalPromise(selection), ApplicationArchiveExports.shared.canOffer,
               let session, let source, let browser else { return }
+        #if TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !DEBUG
+        guard GeneratedArchiveDriveReview.tarPromisesForwardAdmitted,
+              let fixture = GeneratedArchiveDriveReview.selection?.fixtureRoot,
+              source.deletingLastPathComponent().path == fixture.path,
+              ["Promise.tar", "Promise.tar.gz", "Promise.tar.bz2"].contains(source.lastPathComponent),
+              GeneratedArchiveDriveReview.permitsFixtureLocations([source]) else { return }
+        #endif
         let ids = selection, generation = token, page = pageToken
         exportPreparation.request(ids, source: source, browser: browser, window: window,
             roots: { .tar(try await session.rootsForExport(ids)) },
@@ -422,14 +443,14 @@ struct TARClipboardSource {
                 guard let self else { return false }
                 return !closed && !suspended && token == generation && pageToken == page
                     && selection == ids && current && permitsEmbeddedAction
-            }, canPrepare: { [weak self] in self?.canCaptureClipboardMembers == true },
+            }, canPrepare: { [weak self] in self?.canPrepareExternalPromise(ids) == true },
             notice: { [weak self] in if let self, !closed { notice = $0 } })
     }
     func memberDragDidHandOff(_ offer: ArchiveMemberDragOffer) {
         guard let export = offer.externalExport, export.handed else { return }
         handedExports.removeAll { $0.isTerminal }
         if !handedExports.contains(where: { $0 === export }) { handedExports.append(export) }
-        #if DEBUG
+        #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
         memberDragHandoffForVerification?(export)
         #endif
         externalExportReady = false

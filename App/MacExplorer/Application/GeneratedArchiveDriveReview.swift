@@ -15,7 +15,18 @@ enum GeneratedArchiveDriveReview {
     enum Suite: String, Sendable {
         case authored
         case tarMembers = "tar-members"
-        var jobsMaximum: Int { self == .authored ? 12 : 42 }
+        case tarPromises = "tar-promises"
+        var jobsMaximum: Int {
+            switch self {
+            case .authored: 12
+            case .tarMembers: 42
+            case .tarPromises: 6
+            }
+        }
+        var phaseNames: Set<String> {
+            self == .tarPromises ? ["archive-warm", "archive-cold"]
+                : ["archive-warm", "archive-cold", "drive-read-only"]
+        }
     }
 
     struct Selection: Sendable {
@@ -26,6 +37,8 @@ enum GeneratedArchiveDriveReview {
         let journalDirectory: URL
         let phase: Phase
         let suite: Suite
+        let promiseSourceSHA256: [String: String]?
+        let promiseInputBytesTotal: Int?
     }
 
     static let requested: Bool = {
@@ -63,7 +76,8 @@ enum GeneratedArchiveDriveReview {
               CommandLine.arguments[1] == "--verify-ui",
               CommandLine.arguments[2] == "--check-archive-drive-qa",
               CommandLine.arguments[3] == "--phase",
-              let phase = Phase(rawValue: CommandLine.arguments[4]) else { return nil }
+              let phase = Phase(rawValue: CommandLine.arguments[4]),
+              suite.phaseNames.contains(phase.rawValue) else { return nil }
 
         // #filePath binds the app to the ordinary source tree used to compile
         // it. The case path is fixed in Info and repeated in the launch env.
@@ -89,9 +103,20 @@ enum GeneratedArchiveDriveReview {
               (phase == .driveReadOnly || ownedDirectory(fixture, privateMode: true)) else { return nil }
         let state = source.appendingPathComponent("Library/Application Support", isDirectory: true)
             .appendingPathComponent(bundleID, isDirectory: true)
+        var promiseSourceSHA256: [String: String]?
+        var promiseInputBytesTotal: Int?
+        if suite == .tarPromises {
+            guard let scope = GeneratedSignedReviewAdmission.privateFields(evidence.appendingPathComponent("runtime-scope.json")),
+                  let hashes = promiseHashes(in: scope),
+                  let bytes = GeneratedSignedReviewAdmission.exactInteger(scope["archiveInputBytesTotal"]),
+                  0 < bytes, bytes <= 3 << 20 else { return nil }
+            promiseSourceSHA256 = hashes
+            promiseInputBytesTotal = bytes
+        }
         return Selection(caseID: caseID, bundleID: bundleID, caseRoot: root, fixtureRoot: fixture,
             journalDirectory: state.appendingPathComponent("operation-recovery", isDirectory: true),
-            phase: phase, suite: suite)
+            phase: phase, suite: suite, promiseSourceSHA256: promiseSourceSHA256,
+            promiseInputBytesTotal: promiseInputBytesTotal)
         #else
         return nil
         #endif
@@ -102,9 +127,37 @@ enum GeneratedArchiveDriveReview {
         guard let phase = selection?.phase else { return false }
         return phase == .archiveWarm || phase == .archiveCold
     }
-    static var archiveForwardAdmitted: Bool { selection?.phase == .archiveWarm }
+    static var archiveForwardAdmitted: Bool {
+        selection?.phase == .archiveWarm && selection?.suite != .tarPromises
+    }
     static var archiveColdAdmitted: Bool { selection?.phase == .archiveCold }
     static var driveAdmitted: Bool { selection?.phase == .driveReadOnly }
+    static var tarPromisesAdmitted: Bool { archiveAdmitted && selection?.suite == .tarPromises }
+    static var tarPromisesForwardAdmitted: Bool { tarPromisesAdmitted && selection?.phase == .archiveWarm }
+
+    private static func promiseHashes(in scope: [String: Any]) -> [String: String]? {
+        guard let hashes = scope["archiveInputSHA256"] as? [String: String],
+              Set(hashes.keys) == Set(["Promise.tar", "Promise.tar.gz", "Promise.tar.bz2"]),
+              hashes.values.allSatisfy({ value in
+                  value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+              }) else { return nil }
+        return hashes
+    }
+
+    /// Exact source/parent pairing is checked before looking up access or
+    /// offering a chooser. These paths carry no permission in another suite.
+    static func permitsTARPromiseParent(_ parent: URL, source: URL) -> Bool {
+        guard tarPromisesForwardAdmitted, let selected = selection,
+              source.isFileURL, parent.isFileURL,
+              source.path == source.standardizedFileURL.path,
+              parent.path == parent.standardizedFileURL.path,
+              source.deletingLastPathComponent().path == selected.fixtureRoot.path else { return false }
+        let destinations = ["Promise.tar": "Finder TAR Destination", "Promise.tar.gz": "Finder GZIP Destination",
+                            "Promise.tar.bz2": "Finder BZIP2 Destination"]
+        guard let destination = destinations[source.lastPathComponent],
+              parent.path == selected.fixtureRoot.appendingPathComponent(destination).path else { return false }
+        return permitsFixtureLocations([source, parent])
+    }
 
     /// Keep the native review's access/available-name preparation inside its
     /// generated source before it asks the operation engine for a plan.
@@ -151,17 +204,25 @@ enum GeneratedArchiveDriveReview {
                                           "archiveForwardJobsMaximum", "archiveColdUndosMaximum",
                                           "generatedFileMaximumBytes", "generatedTotalMaximumBytes",
                                           "driveMutationMaximum", "networkSessionsMaximum", "trashJobsMaximum"])
-            if selected.suite == .tarMembers {
+            if selected.suite != .authored {
                 keys.insert("archiveSuite")
                 keys.insert("generatedFixtureEntriesMaximum")
                 guard scope["archiveSuite"] as? String == selected.suite.rawValue,
-                      GeneratedSignedReviewAdmission.exactInteger(scope["generatedFixtureEntriesMaximum"]) == 192 else { return false }
+                      GeneratedSignedReviewAdmission.exactInteger(scope["generatedFixtureEntriesMaximum"])
+                        == (selected.suite == .tarMembers ? 192 : 96) else { return false }
+            }
+            if selected.suite == .tarPromises {
+                keys.insert("archiveInputSHA256")
+                keys.insert("archiveInputBytesTotal")
+                guard let hashes = promiseHashes(in: scope), hashes == selected.promiseSourceSHA256,
+                      let expectedBytes = selected.promiseInputBytesTotal, 0 < expectedBytes, expectedBytes <= 3 << 20,
+                      GeneratedSignedReviewAdmission.exactInteger(scope["archiveInputBytesTotal"]) == expectedBytes else { return false }
             }
             guard Set(scope.keys) == keys,
                   scope["packet"] as? String == "archive-drive-runtime-scope-v1",
                   scope["fixtureRoot"] as? String == selected.fixtureRoot.path,
                   let ceilings = scope["phaseLaunchCeiling"] as? [String: Any],
-                  Set(ceilings.keys) == Set(["archive-warm", "archive-cold", "drive-read-only"]),
+                  Set(ceilings.keys) == selected.suite.phaseNames,
                   ceilings.values.allSatisfy({ GeneratedSignedReviewAdmission.exactInteger($0) == 1 }),
                   GeneratedSignedReviewAdmission.exactInteger(scope["archiveForwardJobsMaximum"]) == selected.suite.jobsMaximum,
                   GeneratedSignedReviewAdmission.exactInteger(scope["archiveColdUndosMaximum"]) == selected.suite.jobsMaximum,

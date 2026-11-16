@@ -190,7 +190,11 @@ public enum AuthoredTAROriginalUpdatePolicy: Sendable, Equatable {
 @_spi(ArchiveProduction) public protocol PublicQuarantineZIPExtractionFileProducer:
     PublicQuarantineArchiveExtractionFileProducer {}
 @_spi(ArchiveProduction) public protocol PublicQuarantineTARExtractionFileProducer:
-    PublicQuarantineArchiveExtractionFileProducer {}
+    PublicQuarantineArchiveExtractionFileProducer {
+    /// The sealed archive that produced this one member. A caller-supplied
+    /// fixture URL cannot stand in for a different producer's source.
+    var archiveSourceURL: URL { get }
+}
 
 /// Existing prepared local Create producer reports only whether an observed
 /// source mark requires a native mark on its fresh stage.
@@ -229,6 +233,7 @@ public final class ArchiveCreationPlan: @unchecked Sendable {
     internal let publicQuarantineReceivedFile: Bool
     internal let publicZIPExtractionFile: Bool
     internal let publicTARExtractionFile: Bool
+    internal let archiveSourceURL: URL?
     internal let receivedOrigin: ReceivedItemOrigin
     private let lock = NSLock()
     private var consumed = false
@@ -236,7 +241,8 @@ public final class ArchiveCreationPlan: @unchecked Sendable {
                   parentIdentity: EntrySnapshot, producer: any ArchiveFileProducer, engine: UUID,
                   authoredFormat: AuthoredArchiveFormat?, receivedFile: Bool = false,
                   receivedOrigin: ReceivedItemOrigin = .download, publicQuarantineReceivedFile: Bool = false,
-                  publicZIPExtractionFile: Bool = false, publicTARExtractionFile: Bool = false) {
+                  publicZIPExtractionFile: Bool = false, publicTARExtractionFile: Bool = false,
+                  archiveSourceURL: URL? = nil) {
         self.sources = sources; self.destination = destination; self.sourcesIdentity = sourcesIdentity
         directorySources = zip(sources, sourcesIdentity).compactMap { $0.1.isDirectory ? $0.0 : nil }
         parent = destination.deletingLastPathComponent()
@@ -247,6 +253,7 @@ public final class ArchiveCreationPlan: @unchecked Sendable {
         self.publicQuarantineReceivedFile = publicQuarantineReceivedFile
         self.publicZIPExtractionFile = publicZIPExtractionFile
         self.publicTARExtractionFile = publicTARExtractionFile
+        self.archiveSourceURL = archiveSourceURL
         files = producer.preview.files; folders = producer.preview.folders; logicalBytes = producer.preview.logicalBytes
     }
     internal func consume(by engine: UUID) -> Bool {
@@ -493,12 +500,14 @@ extension RecoverableFileOperations {
         let reporter = OperationProgressReporter(callback: progress)
         let result: RecoverableOperationResult
         do {
-            result = try await worker(progress: reporter, archiveAction: .forward) { cancellation in
+            result = try await worker(progress: reporter,
+                archiveAction: plan.publicTARExtractionFile ? .tarForward : .forward) { cancellation in
                 if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
                 guard plan.consume(by: self.continuationSession) else { throw FileOperationFailure.invalidRequest }
                 defer { plan.producer.finished() }
                 try self.validateCopyExecutionSession(locations: plan.sources + [plan.destination], directories: [plan.parent] + Array(plan.sourceParents.keys))
                 try self.validateArchiveCreation(plan, cancellation: cancellation)
+                if plan.publicTARExtractionFile { try self.reserveTARFixturePreview(plan.producer.preview) }
                 return self.createArchive(plan, cancellation: cancellation).result
             }
         } catch { result = archiveCreationFailure(error, plan: plan, record: nil) }
@@ -507,7 +516,8 @@ extension RecoverableFileOperations {
     }
     internal func validateArchiveCreation(_ plan: ArchiveCreationPlan, cancellation: OperationCancellation) throws {
         try cancellation.check()
-        try requireArchiveFixturePaths(plan.sources + [plan.destination])
+        try requireArchiveFixturePaths(plan.sources + [plan.destination]
+            + (plan.archiveSourceURL.map { [$0] } ?? []))
         switch plan.authoredFormat {
         case .zip:
             guard !plan.receivedFile, !(plan.producer is any StrictPortableTARFileProducer) else {
@@ -555,12 +565,17 @@ extension RecoverableFileOperations {
             }
         }
         if plan.publicTARExtractionFile {
+            let tarProducer = plan.producer as? any PublicQuarantineTARExtractionFileProducer
             guard !plan.publicQuarantineReceivedFile, !plan.publicZIPExtractionFile, plan.receivedFile,
                   plan.receivedOrigin == .tarExtraction,
                   tarOneFilePublicExtractionPolicy == .sourceQualification,
-                  plan.producer is any PublicQuarantineTARExtractionFileProducer else {
+                  let archiveSourceURL = plan.archiveSourceURL,
+                  tarProducer?.archiveSourceURL == archiveSourceURL else {
                 throw FileOperationFailure.unsupported
             }
+            try requireTARFixturePreview(plan.producer.preview)
+        } else if plan.archiveSourceURL != nil {
+            throw FileOperationFailure.invalidRequest
         }
         let target = try DirectoryAnchor(plan.parent, resolve: false)
         guard target.identity.sameObject(as: plan.parentIdentity), try NativeRenameVolume.qualified(in: target) != nil else { throw FileOperationFailure.destinationChanged }

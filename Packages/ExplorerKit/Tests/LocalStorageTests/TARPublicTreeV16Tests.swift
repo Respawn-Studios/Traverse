@@ -5,20 +5,31 @@ import ExplorerCore
 import Foundation
 import XCTest
 import zlib
-@_spi(ArchiveProduction) @_spi(Qualification) @testable import FileOperations
+@_spi(ArchiveProduction) @_spi(ArchiveFixtureOperations) @_spi(Qualification) @testable import FileOperations
 @testable import LocalStorage
 
 private struct PublicTARTreeFixture {
     let root: URL, source: URL, parent: URL, journal: URL, cache: URL
     let compressed: Bool
 
-    init(compressed: Bool = false, marked: Bool = true) throws {
+    init(compressed: Bool = false, marked: Bool = true, signedFixture: Bool = false) throws {
         root = try LocalStorageTestFixtures.directory()
         self.compressed = compressed
-        source = root.appendingPathComponent(compressed ? "Generated.tar.gz" : "Generated.tar")
-        parent = root.appendingPathComponent("Destination", isDirectory: true)
-        journal = root.appendingPathComponent("history", isDirectory: true)
-        cache = root.appendingPathComponent("cache", isDirectory: true)
+        let fixture = root.appendingPathComponent("source/Operation Root", isDirectory: true)
+        let input = signedFixture ? fixture : root
+        source = input.appendingPathComponent(compressed ? "Generated.tar.gz" : "Generated.tar")
+        parent = input.appendingPathComponent("Destination", isDirectory: true)
+        journal = signedFixture ? root.appendingPathComponent("source/Library/operation-recovery", isDirectory: true)
+            : root.appendingPathComponent("history", isDirectory: true)
+        cache = signedFixture ? root.appendingPathComponent("source/Library/cache", isDirectory: true)
+            : root.appendingPathComponent("cache", isDirectory: true)
+        if signedFixture {
+            for path in [root.appendingPathComponent("source", isDirectory: true), fixture,
+                         root.appendingPathComponent("source/Library", isDirectory: true)] {
+                try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700])
+            }
+        }
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: false,
@@ -40,6 +51,15 @@ private struct PublicTARTreeFixture {
     func engine(publicTree: Bool, hooks: RecoveryHooks = .init()) -> RecoverableFileOperations {
         .init(journalDirectory: journal, hooks: hooks,
             tarTreePublicExtractionPolicy: publicTree ? .sourceQualification : .held)
+    }
+    func signedEngine(_ phase: ArchiveFixturePhase) throws -> RecoverableFileOperations {
+        let baselineBytes = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard baselineBytes > 0 else { throw FileOperationFailure.invalidRequest }
+        return .init(journalDirectory: journal, protecting: [], activity: nil,
+            tarOneFilePublicExtractionPolicy: .held, tarTreePublicExtractionPolicy: .sourceQualification,
+            archiveFixtureRoot: root.appendingPathComponent("source/Operation Root", isDirectory: true),
+            archiveFixturePhase: phase, archiveFixtureOperations: .publicTARExtraction,
+            archiveFixtureBaselineBytes: UInt64(baselineBytes))
     }
 
     func selection(folder: Bool = false) async throws -> (TARExtractionSelection, TARCompressedPreparationPool?) {
@@ -121,6 +141,36 @@ private struct PublicTARTreeFixture {
 }
 
 final class TARPublicTreeV16Tests: XCTestCase, @unchecked Sendable {
+    func testSignedPromiseProfileAdmitsGeneratedFolderAndColdUndo() async throws {
+        let f = try PublicTARTreeFixture(signedFixture: true)
+        let original = Data(SHA256.hash(data: try Data(contentsOf: f.source)))
+        let warm = try f.signedEngine(.warmForward)
+        let (selection, _) = try await f.selection(folder: true)
+        let target = f.parent.appendingPathComponent("Exported Folder", isDirectory: true)
+        let parentObservation = try await warm.checkTARPromiseDestination(source: f.source,
+            parent: f.parent, name: target.lastPathComponent)
+        let sourceObservation = try await warm.observeSelection([f.source])
+        let plan = try await warm.prepareTARExtraction(source: f.source, parent: f.parent,
+            name: target.lastPathComponent, observing: sourceObservation, members: selection,
+            observingParent: parentObservation, directly: true, publicQuarantineTreeV16: true)
+        let made = await warm.performArchiveExtraction(plan)
+        XCTAssertEqual(made.result.disposition, .succeeded, "\(made.result.items.map(\.status))")
+        let id = try XCTUnwrap(made.recordID)
+        XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent("Report.txt")), Data("Fixture".utf8))
+        for node in [target, target.appendingPathComponent("Report.txt")] {
+            XCTAssertNotNil(try node.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties)
+        }
+        let catalog = try await warm.inspectGeneratedPublicCatalog(recordID: id)
+        XCTAssertEqual(catalog.version, 16)
+        XCTAssertEqual(catalog.purpose, "tarTree")
+        XCTAssertEqual(Data(SHA256.hash(data: try Data(contentsOf: f.source))), original)
+        let cold = try f.signedEngine(.coldInverse)
+        let undone = await cold.undo(recordID: id)
+        XCTAssertEqual(undone.result.disposition, .succeeded, "\(undone.result.items.map(\.status))")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+        XCTAssertEqual(Data(SHA256.hash(data: try Data(contentsOf: f.source))), original)
+    }
+
     func testMarkedPlainTreeNeedsOwnGateAndColdUndoChecksEveryNode() async throws {
         let f = try PublicTARTreeFixture()
         let original = Data(SHA256.hash(data: try Data(contentsOf: f.source)))

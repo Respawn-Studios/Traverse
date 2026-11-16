@@ -22,8 +22,29 @@ extension RecoverableFileOperations {
     /// its own absent-name and live-parent checks and has independent Undo.
     @discardableResult public func checkReceivedFileDestinations(parent: URL, names: [String],
         observing expectedParent: FileOperationSelection? = nil) async throws -> FileOperationSelection {
-        try await worker { cancellation in
+        try await checkReceivedFileDestinations(parent: parent, names: names,
+            observing: expectedParent, archiveAction: nil, archiveSource: nil)
+    }
+    /// A signed TAR promise may preflight only its selected archive and exact
+    /// callback leaf inside the generated fixture. Ordinary receivers use the
+    /// existing method and do not acquire this fixture operation class.
+    @_spi(ArchiveFixtureOperations) public func checkTARPromiseDestination(
+        source: URL, parent: URL, name: String,
+        observing expectedParent: FileOperationSelection? = nil
+    ) async throws -> FileOperationSelection {
+        try await checkReceivedFileDestinations(parent: parent, names: [name],
+            observing: expectedParent, archiveAction: .tarRead, archiveSource: source)
+    }
+    private func checkReceivedFileDestinations(parent: URL, names: [String],
+        observing expectedParent: FileOperationSelection?, archiveAction: ArchiveFixtureAction?,
+        archiveSource: URL?) async throws -> FileOperationSelection {
+        try await worker(archiveAction: archiveAction) { cancellation in
             guard !names.isEmpty, names.count <= 16 else { throw FileOperationFailure.invalidRequest }
+            if archiveAction == .tarRead {
+                guard self.archiveFixtureOperations == .publicTARExtraction,
+                      let archiveSource, names.count == 1 else { throw FileOperationFailure.unsupported }
+                try self.requireArchiveFixturePaths([archiveSource, parent.appendingPathComponent(names[0])])
+            }
             let target = try DirectoryAnchor(parent)
             if let expectedParent {
                 guard expectedParent.urls.count == 1, expectedParent.identities.count == 1,
@@ -54,9 +75,14 @@ extension RecoverableFileOperations {
         publicQuarantineV1: Bool = false,
         publicZIPExtractionV1: Bool = false,
         publicTARExtractionV17: Bool = false,
+        archiveSource: URL? = nil,
         makeProducer: @escaping @Sendable (@Sendable () throws -> Void) throws -> any ArchiveFileProducer) async throws -> ReceivedFilePlan {
-        try await worker { cancellation in
+        try await worker(archiveAction: publicTARExtractionV17 ? .tarRead : nil) { cancellation in
             if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
+            guard publicTARExtractionV17 == (archiveSource != nil) else { throw FileOperationFailure.invalidRequest }
+            if let archiveSource {
+                try self.requireArchiveFixturePaths([archiveSource, parent.appendingPathComponent(name)])
+            }
             if publicQuarantineV1 {
                 guard origin == .download,
                       self.receivedDownloadPublicQuarantinePolicy == .sourceQualification else {
@@ -91,14 +117,18 @@ extension RecoverableFileOperations {
             let protection = try HistoryProtection(self.directory, cancellation: cancellation, protecting: self.protectedLocations)
             try protection.requireEntry(parent: target, name: name); try requireAbsent(name, in: target.fd); try cancellation.check()
             let producer = try makeProducer({ try cancellation.check() }), preview = producer.preview
+            do { try self.requireTARFixturePreview(preview) }
+            catch { producer.finished(); throw error }
             if publicQuarantineV1 && !(producer is any PublicQuarantineReceivedFileProducer) {
                 throw FileOperationFailure.unsupported
             }
             if publicZIPExtractionV1 && !(producer is any PublicQuarantineZIPExtractionFileProducer) {
                 throw FileOperationFailure.unsupported
             }
-            if publicTARExtractionV17 && !(producer is any PublicQuarantineTARExtractionFileProducer) {
-                throw FileOperationFailure.unsupported
+            if publicTARExtractionV17 {
+                guard let producer = producer as? any PublicQuarantineTARExtractionFileProducer,
+                      let archiveSource,
+                      producer.archiveSourceURL == archiveSource else { throw FileOperationFailure.unsupported }
             }
             guard preview.files == 1, preview.folders == 0, preview.longestPathBytes == 0,
                   preview.logicalBytes <= 1 << 30 else { throw FileOperationFailure.unsupported }
@@ -106,7 +136,7 @@ extension RecoverableFileOperations {
                 sourceParents: [:], parentIdentity: target.identity, producer: producer, engine: self.continuationSession,
                 authoredFormat: nil, receivedFile: true, receivedOrigin: origin,
                 publicQuarantineReceivedFile: publicQuarantineV1, publicZIPExtractionFile: publicZIPExtractionV1,
-                publicTARExtractionFile: publicTARExtractionV17)
+                publicTARExtractionFile: publicTARExtractionV17, archiveSourceURL: archiveSource)
             try self.validateArchiveCreation(plan, cancellation: cancellation); return ReceivedFilePlan(plan)
         }
     }

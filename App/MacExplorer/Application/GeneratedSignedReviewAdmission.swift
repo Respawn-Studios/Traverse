@@ -48,6 +48,10 @@ enum GeneratedSignedReviewAdmission {
         return (fields, after, data)
     }
 
+    /// Read an exact role's bounded scope before its one-use consumption. The
+    /// caller must bind these selected fields to that same consumed scope.
+    static func privateFields(_ url: URL) -> [String: Any]? { privateJSON(url)?.0 }
+
     /// The host issues one attempt after sealing a signed artifact and exact
     /// scope. A failed launch consumes that attempt before AppKit is created.
     static func consume(caseID: String, bundleID: String, caseRoot: URL, phase: String,

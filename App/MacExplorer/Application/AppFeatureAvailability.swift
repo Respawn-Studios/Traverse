@@ -13,8 +13,14 @@ enum AppFeatureAvailability {
         if GeneratedArchiveDriveReview.requested {
             guard GeneratedArchiveDriveReview.archiveAdmitted else { return false }
             switch feature {
-            case .archiveTabs, .tarBrowsing, .archiveTextPreview:
+            case .archiveTabs, .tarBrowsing:
                 return true
+            case .archiveTextPreview:
+                return !GeneratedArchiveDriveReview.tarPromisesAdmitted
+            case .archiveExternalPromises:
+                return GeneratedArchiveDriveReview.tarPromisesForwardAdmitted
+            case .archiveTARTreeExtraction, .archiveTARSingleFileExtraction:
+                return GeneratedArchiveDriveReview.tarPromisesAdmitted
             case .tarCreation, .authoredZIPChanges, .archiveMemberChanges:
                 return GeneratedArchiveDriveReview.archiveForwardAdmitted
             default:

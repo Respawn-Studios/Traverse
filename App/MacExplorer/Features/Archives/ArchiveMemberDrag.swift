@@ -213,14 +213,19 @@ enum ZIPRootExtractionPreparation {
         endCountForVerification += 1
         #endif
         guard let active, active.sequence == sequence else { return }
+        #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
+        let observedExport = active.offer.externalExport
+        #endif
         #if DEBUG
-        active.offer.externalExport?.nativeDragEndOperationForVerification = operation.rawValue
         active.offer.externalExport?.nativeDragEndPointForVerification = point.map { [$0.x, $0.y] }
         #endif
         if operation.isEmpty { active.offer.externalExport?.retireUncalled() }
         active.offer.model?.memberDragDidEnd(active.offer)
         active.offer.tarModel?.memberDragDidEnd(active.offer)
         self.active = nil; draft = nil
+        #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
+        observedExport?.recordNativeDragEndForVerification(operation)
+        #endif
     }
     func retire() {
         active?.offer.externalExport?.retireUncalled(); draft?.externalExport?.retireUnlessHanded()

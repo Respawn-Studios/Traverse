@@ -1,6 +1,6 @@
 import AppKit
 import Combine
-@_spi(ArchiveProduction) @_spi(ApplicationOwnership) import FileOperations
+@_spi(ArchiveProduction) @_spi(ApplicationOwnership) @_spi(ArchiveFixtureOperations) import FileOperations
 import ExplorerCore
 import LocalStorage
 
@@ -138,9 +138,11 @@ final class ApplicationOperationCoordinator: ObservableObject {
         let zipTree: ZIPTreePublicExtractionPolicy =
             !archiveQA && ArchiveExtractionActivation.qualifiesPublicZIPTree ? .sourceQualification : .held
         let tarTree: TARTreePublicExtractionPolicy =
-            !archiveQA && ArchiveExtractionActivation.qualifiesPublicTARTree ? .sourceQualification : .held
+            (GeneratedArchiveDriveReview.tarPromisesAdmitted
+                || !archiveQA && ArchiveExtractionActivation.qualifiesPublicTARTree) ? .sourceQualification : .held
         let tarFile: TAROneFilePublicExtractionPolicy =
-            !archiveQA && ArchiveExtractionActivation.qualifiesPublicTARFile ? .sourceQualification : .held
+            (GeneratedArchiveDriveReview.tarPromisesAdmitted
+                || !archiveQA && ArchiveExtractionActivation.qualifiesPublicTARFile) ? .sourceQualification : .held
         let zipOriginalUpdate: AuthoredZIPOriginalUpdateNativePolicy =
             archiveQA || NativeLocalProtectionPolicy.authoredZIPOriginalUpdateAvailable ? .qualifiedNativeStage : .held
         #if DEBUG
@@ -190,7 +192,20 @@ final class ApplicationOperationCoordinator: ObservableObject {
                               directory.deletingLastPathComponent().appendingPathComponent("sftp-remote-actions", isDirectory: true),
                               directory.deletingLastPathComponent().appendingPathComponent("remote-downloads", isDirectory: true)]
             + AppStorageLocations.protectedDirectories
-        if GeneratedSandboxReview.nativeAuthoredOriginalUpdateAdmitted {
+        if GeneratedArchiveDriveReview.tarPromisesAdmitted {
+            guard let selected = GeneratedArchiveDriveReview.selection,
+                  let baselineBytes = selected.promiseInputBytesTotal,
+                  baselineBytes > 0, baselineBytes <= 3 << 20,
+                  let fixturePhase = archiveFixturePhase else {
+                fatalError("TAR promise QA refused an unselected fixture phase")
+            }
+            engine = RecoverableFileOperations(journalDirectory: directory, protecting: protectedNames,
+                activity: ApplicationFileActivity.beginOperation,
+                tarOneFilePublicExtractionPolicy: tarFile, tarTreePublicExtractionPolicy: tarTree,
+                archiveFixtureRoot: selected.fixtureRoot, archiveFixturePhase: fixturePhase,
+                archiveFixtureOperations: .publicTARExtraction,
+                archiveFixtureBaselineBytes: UInt64(baselineBytes))
+        } else if GeneratedSandboxReview.nativeAuthoredOriginalUpdateAdmitted {
             #if TRAVERSE_SFTP_EDITOR_QA
             engine = RecoverableFileOperations(journalDirectory: directory,
                 qualifyingNativeZIPRetainedOriginalCheckpoint: GeneratedZIPRetainedCheckpoint.shared.afterRetainedOriginal,

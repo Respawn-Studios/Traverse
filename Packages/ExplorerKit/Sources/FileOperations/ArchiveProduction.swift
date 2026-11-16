@@ -32,6 +32,11 @@ import Foundation
     case zipExtraction(sourceMarked: Bool)
     case tarExtraction(sourceMarked: Bool)
 
+    internal var isTARExtraction: Bool {
+        if case .tarExtraction = self { return true }
+        return false
+    }
+
     internal var requiresMarkOnEveryNode: Bool {
         switch self {
         case .receivedFolder: true
@@ -68,11 +73,14 @@ public struct ArchiveAddedItemPreview: Sendable, Equatable {
 @_spi(ArchiveProduction) public struct ArchiveProductionPreview: Sendable {
     public let files: Int, folders: Int, longestPathBytes: Int
     public let logicalBytes: UInt64
+    /// Present only when a concrete producer has counted each source file.
+    /// The signed TAR fixture rejects an absent fact before production.
+    public let largestFileBytes: UInt64?
     public let addedItems: [ArchiveAddedItemPreview]
     public init(files: Int, folders: Int, logicalBytes: UInt64, longestPathBytes: Int,
-                addedItems: [ArchiveAddedItemPreview] = []) {
+                addedItems: [ArchiveAddedItemPreview] = [], largestFileBytes: UInt64? = nil) {
         self.files = files; self.folders = folders; self.logicalBytes = logicalBytes; self.longestPathBytes = longestPathBytes
-        self.addedItems = addedItems
+        self.addedItems = addedItems; self.largestFileBytes = largestFileBytes
     }
 }
 @_spi(ArchiveProduction) public struct ArchiveProducedNode: Sendable {
@@ -181,8 +189,10 @@ extension RecoverableFileOperations {
         observing selection: FileOperationSelection, observingParent expectedParent: FileOperationSelection? = nil,
         format: ArchiveSourceFormat = .zip, publicQuarantineTreeV16: Bool = false,
         makeProducer: @escaping @Sendable (@Sendable () throws -> Void) throws -> any ArchiveDirectoryProducer) async throws -> ArchiveExtractionPlan {
-        try await worker { cancellation in
+        let tarPublic = format == .tar && publicQuarantineTreeV16
+        return try await worker(archiveAction: tarPublic ? .tarRead : nil) { cancellation in
             if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
+            try self.requireArchiveFixturePaths([source, parent.appendingPathComponent(name)])
             try validateName(name)
             let target = try DirectoryAnchor(parent)
             if let expectedParent {
@@ -202,6 +212,10 @@ extension RecoverableFileOperations {
             try protection.requireEntry(source); try protection.requireEntry(parent: target, name: name)
             try requireAbsent(name, in: target.fd); try cancellation.check()
             let producer = try makeProducer({ try cancellation.check() }), preview = producer.preview
+            if tarPublic {
+                do { try self.requireTARFixturePreview(preview) }
+                catch { producer.finished(); throw error }
+            }
             if publicQuarantineTreeV16 {
                 let qualified: Bool
                 switch (format, producer.publicProducedTreeV16) {
@@ -236,12 +250,16 @@ extension RecoverableFileOperations {
         let reporter = OperationProgressReporter(callback: progress)
         let result: RecoverableOperationResult
         do {
-            result = try await worker(progress: reporter) { cancellation in
+            let tarPublic = plan.archiveFormat == .tar && plan.publicProducedTreeV16?.isTARExtraction == true
+            result = try await worker(progress: reporter,
+                archiveAction: tarPublic ? .tarForward : nil) { cancellation in
                 if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
+                try self.requireArchiveFixturePaths([plan.source, plan.destination].compactMap { $0 })
                 guard plan.consume(by: self.continuationSession) else { throw FileOperationFailure.invalidRequest }
                 defer { plan.producer.finished() }
                 try self.validateCopyExecutionSession(locations: [plan.source, plan.destination].compactMap { $0 }, directories: [plan.parent])
                 try self.validateArchiveExtraction(plan, cancellation: cancellation)
+                if tarPublic { try self.reserveTARFixturePreview(plan.producer.preview) }
                 return self.extractArchive(plan, cancellation: cancellation)
             }
         } catch { result = archiveFailure(error, plan: plan, record: nil) }
@@ -258,6 +276,10 @@ extension RecoverableFileOperations {
     }
     internal func validateArchiveExtraction(_ plan: DirectoryProductionPlan, cancellation: OperationCancellation) throws {
         try cancellation.check()
+        try requireArchiveFixturePaths([plan.source, plan.destination].compactMap { $0 })
+        if plan.archiveFormat == .tar && plan.publicProducedTreeV16?.isTARExtraction == true {
+            try requireTARFixturePreview(plan.producer.preview)
+        }
         guard plan.publicProducedTreeV16 == plan.producer.publicProducedTreeV16 else { throw FileOperationFailure.invalidRequest }
         if let purpose = plan.publicProducedTreeV16 {
             guard plan.producer is any PublicQuarantineTreeProducerV16 else { throw FileOperationFailure.invalidRequest }

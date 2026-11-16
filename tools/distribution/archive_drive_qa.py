@@ -33,7 +33,41 @@ TEAM = remote_editor_qa.DEVELOPER_ID_TEAM
 ARCHITECTURE = named('arm64')
 NAME = 'Traverse Archive and Drive Review (Generated)'
 PHASE_CEILING = {'archive-warm': 1, 'archive-cold': 1, 'drive-read-only': 1}
-SUITE_JOBS = {'authored': 12, 'tar-members': 42}
+SUITE_JOBS = {'authored': 12, 'tar-members': 42, 'tar-promises': 6}
+
+
+def phase_ceiling(suite: str) -> dict[str, int]:
+    if suite not in SUITE_JOBS:
+        raise ValueError('Unknown archive/drive QA suite')
+    return {phase: count for phase, count in PHASE_CEILING.items()
+            if suite != 'tar-promises' or phase != 'drive-read-only'}
+
+
+def fixture_archive_witnesses(case: Path) -> dict[str, dict]:
+    root = case / 'source/Operation Root'
+    owned_directory(root)
+    result = {}
+    for name in ('Promise.tar', 'Promise.tar.gz', 'Promise.tar.bz2'):
+        descriptor = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() \
+                    or before.st_nlink != 1 or not 0 < before.st_size <= 1 << 20:
+                raise ValueError('Unsafe generated TAR source')
+            data = os.read(descriptor, (1 << 20) + 1)
+            after = os.fstat(descriptor)
+            witness = lambda facts: (facts.st_dev, facts.st_ino, facts.st_uid, facts.st_nlink,
+                facts.st_mode, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+            if len(data) != before.st_size or witness(before) != witness(after):
+                raise ValueError('Generated TAR source changed during admission')
+            result[name] = {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
+        finally:
+            os.close(descriptor)
+    return result
+
+
+def fixture_archive_hashes(case: Path) -> dict[str, str]:
+    return {name: value['sha256'] for name, value in fixture_archive_witnesses(case).items()}
 
 
 def canonical(value: str) -> str:
@@ -92,8 +126,8 @@ def expected_info(case: Path) -> dict:
         TraverseArchiveDriveQualificationRoot=str(case),
         TraverseArchiveDriveArchitecture=ARCHITECTURE.name)
     admission = owned_json(case / 'evidence/archive-drive-admission.json')
-    if admission.get('archiveSuite') == 'tar-members':
-        info['TraverseArchiveDriveQualificationSuite'] = 'tar-members'
+    if admission.get('archiveSuite', 'authored') != 'authored':
+        info['TraverseArchiveDriveQualificationSuite'] = admission['archiveSuite']
     return info
 
 
@@ -130,14 +164,14 @@ def admitted_case(tag: str) -> tuple[Path, dict]:
                        'master': development_owner.MASTER.name}:
         raise ValueError('Wrong archive/drive QA reservation')
     admission = owned_json(case / 'evidence/archive-drive-admission.json')
-    member_suite = admission.get('archiveSuite') == 'tar-members'
+    suite = admission.get('archiveSuite', 'authored')
     expected_admission = dict(packet=PACKET, case=tag, bundleIdentifier=identifier(tag),
         caseRoot=str(case), generatedOperationRoot=str(case / 'source/Operation Root'),
         repoLocalLibrary=str(case / 'source/Library'),
         signingIdentity=admission.get('signingIdentity'), teamIdentifier=TEAM,
-        phaseLaunchCeiling=PHASE_CEILING)
-    if member_suite:
-        expected_admission['archiveSuite'] = 'tar-members'
+        phaseLaunchCeiling=phase_ceiling(suite))
+    if suite != 'authored':
+        expected_admission['archiveSuite'] = suite
     if admission != expected_admission \
             or not isinstance(admission['signingIdentity'], str) \
             or len(admission['signingIdentity']) != 40 \
@@ -213,8 +247,8 @@ def prepare(tag: str, suite: str = 'authored') -> dict:
         bundleIdentifier=identifier(tag), caseRoot=str(case),
         generatedOperationRoot=str(case / 'source/Operation Root'),
         repoLocalLibrary=str(case / 'source/Library'), signingIdentity=identity,
-        teamIdentifier=TEAM, phaseLaunchCeiling=PHASE_CEILING)
-    if suite == 'tar-members':
+        teamIdentifier=TEAM, phaseLaunchCeiling=phase_ceiling(suite))
+    if suite != 'authored':
         admission['archiveSuite'] = suite
     put(case / 'evidence/archive-drive-admission.json', admission)
     info = expected_info(case)
@@ -235,6 +269,7 @@ def source_inventory() -> dict[str, str]:
     return signed_local_qa.source_inventory((
         'tools/distribution/archive_drive_qa.py',
         'tools/distribution/drive_image_qa.py',
+        'tools/native_checks.py',
     ))
 
 
@@ -257,6 +292,8 @@ def issue_phase(tag: str, phase: str) -> dict:
     case, admission = admitted_case(tag)
     suite = admission.get('archiveSuite', 'authored')
     jobs = SUITE_JOBS[suite]
+    if phase not in phase_ceiling(suite):
+        raise ValueError('Archive suite does not admit this phase')
     built = owned_json(case / 'evidence/build-result.json', maximum=1 << 20)
     observed = inspect(tag)
     if built.get('passed') is not True \
@@ -269,13 +306,28 @@ def issue_phase(tag: str, phase: str) -> dict:
                      'archiveForwardJobsMaximum', 'archiveColdUndosMaximum',
                      'generatedFileMaximumBytes', 'generatedTotalMaximumBytes',
                      'driveMutationMaximum', 'networkSessionsMaximum', 'trashJobsMaximum'}
-    if suite == 'tar-members':
+    if suite != 'authored':
         expected_keys.add('archiveSuite')
         expected_keys.add('generatedFixtureEntriesMaximum')
         if scope.get('archiveSuite') != suite \
                 or type(scope.get('generatedFixtureEntriesMaximum')) is not int \
-                or scope['generatedFixtureEntriesMaximum'] != 192:
-            raise ValueError('Archive member QA runtime suite differs')
+                or scope['generatedFixtureEntriesMaximum'] != (192 if suite == 'tar-members' else 96):
+            raise ValueError('Archive QA runtime suite differs')
+    if suite == 'tar-promises':
+        expected_keys.add('archiveInputSHA256')
+        expected_keys.add('archiveInputBytesTotal')
+        hashes = scope.get('archiveInputSHA256')
+        names = {'Promise.tar', 'Promise.tar.gz', 'Promise.tar.bz2'}
+        if not isinstance(hashes, dict) or set(hashes) != names \
+                or any(not isinstance(value, str) or len(value) != 64
+                    or any(ch not in '0123456789abcdef' for ch in value) for value in hashes.values()):
+            raise ValueError('Presealed TAR source hashes differ')
+        witnesses = fixture_archive_witnesses(case)
+        if hashes != {name: value['sha256'] for name, value in witnesses.items()}:
+            raise ValueError('Presealed TAR source hashes differ')
+        if type(scope.get('archiveInputBytesTotal')) is not int \
+                or scope['archiveInputBytesTotal'] != sum(value['bytes'] for value in witnesses.values()):
+            raise ValueError('Presealed TAR source byte count differs')
     try:
         expires = datetime.strptime(scope['expiresUTC'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
     except (KeyError, TypeError, ValueError):
@@ -286,7 +338,7 @@ def issue_phase(tag: str, phase: str) -> dict:
             or scope['caseRoot'] != str(case) \
             or scope['fixtureRoot'] != str(case / 'source/Operation Root') \
             or scope['artifactTreeSHA256'] != observed['app']['treeSHA256'] \
-            or scope['phaseLaunchCeiling'] != PHASE_CEILING \
+            or scope['phaseLaunchCeiling'] != phase_ceiling(suite) \
             or any(type(value) is not int for value in scope['phaseLaunchCeiling'].values()) \
             or type(scope['archiveForwardJobsMaximum']) is not int \
             or scope['archiveForwardJobsMaximum'] != jobs \

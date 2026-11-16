@@ -265,7 +265,7 @@ extension RecoverableFileOperations {
     /// inspector. This neither enumerates history nor constructs a writer.
     @_spi(Qualification) public func inspectGeneratedPublicCatalog(recordID: UUID) async throws
         -> GeneratedPublicCatalogObservation {
-        try await worker { cancellation in
+        try await worker(archiveAction: .read) { cancellation in
             let catalog = try OperationHistoryInspector.record(self.directory, id: recordID,
                 cancellation: cancellation)
             guard let record = catalog.legacy, record.id == recordID,

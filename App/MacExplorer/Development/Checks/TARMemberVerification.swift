@@ -68,7 +68,18 @@ import LocalStorage
         Array(model.breadcrumbs.dropFirst().map(\.name))
     }
     static func open(_ source: URL, browser: BrowserViewController, folder: [String] = []) async throws -> Context {
+        #if TRAVERSE_ARCHIVE_DRIVE_QA && !DEBUG
+        let promiseSource: Bool
+        if let selected = GeneratedArchiveDriveReview.selection,
+           GeneratedArchiveDriveReview.tarPromisesForwardAdmitted {
+            promiseSource = source.deletingLastPathComponent().path == selected.fixtureRoot.path
+                && ["Promise.tar", "Promise.tar.gz", "Promise.tar.bz2"].contains(source.lastPathComponent)
+                && GeneratedArchiveDriveReview.permitsFixtureLocations([source])
+        } else { promiseSource = false }
+        try need(admitted(source) || promiseSource, "tar-members-generated-archive-scope")
+        #else
         try need(admitted(source), "tar-members-generated-archive-scope")
+        #endif
         browser.navigate(to: .directory(source.deletingLastPathComponent()))
         try await wait("tar-members-local-page", seconds: 30) { !browser.isLoading && browser.rowsByURL[source] != nil }
         browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.focusBrowserContent()

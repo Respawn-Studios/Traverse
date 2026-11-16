@@ -122,7 +122,9 @@ internal final class PreparedTARDirectory: PublicQuarantineTreeProducerV16,@unch
         self.publicQuarantineTree = publicQuarantineTree
         expectedQuarantineSHA256=security.exactDigest
         wasCompressed = compressed != nil; spool = compressed
-        preview = .init(files:files.count,folders:folders.count,logicalBytes:logical,longestPathBytes:max(files.map{$0.path.utf8.count}.max() ?? 0,folders.map{$0.utf8.count}.max() ?? 0))
+        preview = .init(files:files.count,folders:folders.count,logicalBytes:logical,
+            longestPathBytes:max(files.map{$0.path.utf8.count}.max() ?? 0,folders.map{$0.utf8.count}.max() ?? 0),
+            largestFileBytes:files.map{$0.record.bytes}.max() ?? 0)
     }
     private func activeSpool() throws -> TARCompressedSpoolLease? {
         let value = spoolLock.withLock { spool }
@@ -375,15 +377,18 @@ internal final class PreparedTARDirectory: PublicQuarantineTreeProducerV16,@unch
 
 private final class PreparedTARFile: PublicQuarantineTARExtractionFileProducer, Sendable {
     let preview: ArchiveProductionPreview
+    let archiveSourceURL: URL
     private let archive: PreparedTARDirectory
 
     init(_ selection: TARExtractionSelection, check: @Sendable () throws -> Void,
         publicQuarantineFile: Bool = false) throws {
         guard selection.singleFileName != nil else { throw TARArchiveFailure.invalidSelection }
+        archiveSourceURL = selection.archiveURL
         archive = try PreparedTARDirectory(selection.binding.source, selection: selection, check: check,
             publicQuarantineFile: publicQuarantineFile)
         guard archive.preview.files == 1 else { throw TARArchiveFailure.invalidSelection }
-        preview = .init(files: 1, folders: 0, logicalBytes: archive.preview.logicalBytes, longestPathBytes: 0)
+        preview = .init(files: 1, folders: 0, logicalBytes: archive.preview.logicalBytes,
+            longestPathBytes: 0, largestFileBytes: archive.preview.largestFileBytes)
     }
     func validate(check: @Sendable () throws -> Void) throws { try archive.validate(check: check) }
     func produce(into destination: Int32, check: @Sendable () throws -> Void,
@@ -410,7 +415,7 @@ extension RecoverableFileOperations {
         observing destination: FileOperationSelection) async throws -> ReceivedFilePlan {
         guard selection.singleFileName != nil else { throw TARArchiveFailure.invalidSelection }
         return try await prepareReceivedFile(parent: parent, name: name, observing: destination,
-            origin: .tarExtraction, publicTARExtractionV17: true) { check in
+            origin: .tarExtraction, publicTARExtractionV17: true, archiveSource: selection.archiveURL) { check in
             try PreparedTARFile(selection, check: check, publicQuarantineFile: true)
         }
     }

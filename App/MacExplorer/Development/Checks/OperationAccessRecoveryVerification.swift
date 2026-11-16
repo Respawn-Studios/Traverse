@@ -2183,7 +2183,7 @@ import Foundation
 import AppKit
 import CoreServices
 import CryptoKit
-import FileOperations
+@_spi(Qualification) import FileOperations
 import LocalStorage
 
 /// The authored phase of the existing signed access/recovery checks. It drives
@@ -2237,6 +2237,30 @@ import LocalStorage
         let afterSHA256: String
         let nativeMutationHeld: Bool
     }
+    private struct PromiseStep: Codable, Sendable {
+        let recordID: UUID
+        let route: String
+        let nodes: [String: Observation]
+    }
+    private struct PromiseReceipt: Codable, Sendable {
+        let phase: String
+        let pid: Int32
+        let inputs: [String: Observation]
+        let steps: [PromiseStep]
+    }
+    private struct PromiseRoute: Sendable {
+        let format: String
+        let kind: String
+        let destination: String
+        var id: String { format + "/" + kind }
+        var leaf: String { kind == "file" ? "Generated Promise.txt" : "Generated Folder" }
+    }
+    private static let promiseRoutes: [PromiseRoute] = [
+        ("tar", "Finder TAR Destination"), ("tar.gz", "Finder GZIP Destination"),
+        ("tar.bz2", "Finder BZIP2 Destination")
+    ].flatMap { format, destination in ["file", "folder"].map {
+        PromiseRoute(format: format, kind: $0, destination: destination)
+    } }
     nonisolated private static let expectedInputs = [
         "Source/Notes.txt": Data("before\n".utf8),
         "Source/Nested/Config.json": Data("{\"generated\":true}\n".utf8)
@@ -2573,6 +2597,240 @@ import LocalStorage
             }
         }
     }
+    private static func promiseReport(_ event: String, _ values: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["event": event, "values": values,
+            "monotonicSeconds": ProcessInfo.processInfo.systemUptime], options: [.sortedKeys]) else { return }
+        FileHandle.standardOutput.write(Data("TRAVERSE_PROMISE ".utf8) + data + Data([10]))
+    }
+    private static func promiseInputs(_ selection: GeneratedArchiveDriveReview.Selection) async throws -> [String: Observation] {
+        try await Task.detached {
+            let names = ["Promise.tar", "Promise.tar.gz", "Promise.tar.bz2"]
+            let parents = ["Finder TAR Destination", "Finder GZIP Destination", "Finder BZIP2 Destination"]
+            let entries = Set(try FileManager.default.contentsOfDirectory(atPath: selection.fixtureRoot.path))
+            if entries.contains(".DS_Store") {
+                var facts = stat()
+                let metadata = selection.fixtureRoot.appendingPathComponent(".DS_Store")
+                guard lstat(metadata.path, &facts) == 0, facts.st_mode & S_IFMT == S_IFREG,
+                      facts.st_uid == geteuid(), facts.st_nlink == 1, facts.st_mode & 0o111 == 0,
+                      facts.st_size <= 64 << 10 else {
+                    throw Refusal.check("promise-finder-metadata")
+                }
+            }
+            guard entries.subtracting([".DS_Store"]) == Set(names + parents) else {
+                throw Refusal.check("promise-exact-fixture-root")
+            }
+            let result = try Dictionary(uniqueKeysWithValues: names.map { ($0, try observe(selection.fixtureRoot.appendingPathComponent($0))) })
+            guard let hashes = selection.promiseSourceSHA256,
+                  result.mapValues(\.sha256) == hashes,
+                  result.values.reduce(0, { $0 + $1.bytes }) == selection.promiseInputBytesTotal else {
+                throw Refusal.check("promise-presealed-source-hashes")
+            }
+            return result
+        }.value
+    }
+    private static func promiseNodes(_ route: PromiseRoute, selection: GeneratedArchiveDriveReview.Selection) async throws -> [String: Observation] {
+        try await Task.detached {
+            let parent = selection.fixtureRoot.appendingPathComponent(route.destination)
+            let bodies = route.kind == "file" ? ["Generated Promise.txt": "Generated first root\n"]
+                : ["Generated Folder/Report.txt": "Generated folder member\n",
+                   "Generated Folder/Deep/More.txt": "Generated nested member\n"]
+            var result: [String: Observation] = [:]
+            for (name, text) in bodies {
+                let file = parent.appendingPathComponent(name)
+                guard OperationAccessFixtureIO.readRegular(file, maximum: 1024) == Data(text.utf8) else {
+                    throw Refusal.check("promise-delivered-content")
+                }
+                result[name] = try observe(file)
+            }
+            if route.kind == "folder" {
+                let folders = ["Generated Folder": ["Report.txt", "Deep", "Empty"],
+                               "Generated Folder/Deep": ["More.txt"], "Generated Folder/Empty": []]
+                for (name, children) in folders {
+                    let file = parent.appendingPathComponent(name)
+                    var before = stat(), after = stat()
+                    guard lstat(file.path, &before) == 0, before.st_uid == geteuid(), before.st_mode & S_IFMT == S_IFDIR,
+                          Set(try FileManager.default.contentsOfDirectory(atPath: file.path)) == Set(children) else {
+                        throw Refusal.check("promise-delivered-directory")
+                    }
+                    let marked = try URL(fileURLWithPath: file.path).resourceValues(forKeys: [.quarantinePropertiesKey])
+                        .quarantineProperties?.isEmpty == false
+                    guard lstat(file.path, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+                          before.st_mode == after.st_mode, before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+                          before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec else {
+                        throw Refusal.check("promise-directory-changed-during-observation")
+                    }
+                    result[name] = Observation(sha256: "", bytes: 0, publiclyMarked: marked,
+                        device: Int64(after.st_dev), inode: after.st_ino, mode: UInt32(after.st_mode),
+                        modifiedSeconds: Int64(after.st_mtimespec.tv_sec), modifiedNanoseconds: Int64(after.st_mtimespec.tv_nsec))
+                }
+            }
+            guard result.values.allSatisfy(\.publiclyMarked) else { throw Refusal.check("promise-public-property") }
+            return result
+        }.value
+    }
+    private static func promiseWarm(_ selection: GeneratedArchiveDriveReview.Selection,
+        browser: BrowserViewController, engine: RecoverableFileOperations, stage: inout String) async throws {
+        try require(GeneratedArchiveDriveReview.tarPromisesForwardAdmitted && TARPromiseExportFeature.available
+            && !ArchiveCreationActivation.available && !TARArchiveEditingFeature.available
+            && !ZIPMemberRenameFeature.available, "promise-only-forward-capabilities")
+        let fresh = try await promiseInputs(selection)
+        let freshHistory = try await engine.inspectExistingHistory()
+        try require(fresh.values.allSatisfy { !$0.publiclyMarked }
+            && freshHistory.records.isEmpty, "promise-fresh-source-and-history")
+        try await write(PromiseReceipt(phase: "warm-attempt", pid: getpid(), inputs: fresh, steps: []),
+            name: "promise-warm-attempt.json", root: selection.caseRoot)
+        try await Task.detached {
+            for name in fresh.keys {
+                var source = selection.fixtureRoot.appendingPathComponent(name), values = URLResourceValues()
+                values.quarantineProperties = [kLSQuarantineAgentNameKey as String: "Traverse generated fixture",
+                    kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+                    kLSQuarantineTimeStampKey as String: Date()]
+                try source.setResourceValues(values)
+            }
+        }.value
+        let inputs = try await promiseInputs(selection)
+        try require(inputs.values.allSatisfy(\.publiclyMarked), "promise-source-public-property")
+        var steps: [PromiseStep] = []
+        for route in promiseRoutes {
+            stage = route.id + "/open"
+            try require(try await promiseInputs(selection) == inputs, "promise-before-open-sources-unchanged")
+            let source = selection.fixtureRoot.appendingPathComponent("Promise." + route.format)
+            let context = try await TARMemberActionDriver.open(source, browser: browser, folder: ["Archive"])
+            try require(try await promiseInputs(selection) == inputs, "promise-opened-sources-unchanged")
+            var handed: ArchivePromiseExport?, handoffs = 0
+            context.model.memberDragHandoffForVerification = { export in
+                handoffs += 1; handed = export
+                promiseReport("gesture-admitted", ["route": route.id, "providers": export.rootCount,
+                    "ordinaryArchiveRows": true])
+                export.onNativeDragEndForVerification = { [weak export] operation in
+                    guard let export else { return }
+                    promiseReport("native-drag-ended", ["route": route.id, "operation": operation,
+                        "delegateEntries": export.writeDelegateEntriesForVerification,
+                        "acceptedCallbacks": export.callbacksForVerification])
+                }
+                var reported = false
+                export.onSettledForVerification = { [weak export] in
+                    guard !reported, let export else { return }; reported = true
+                    if export.completedForVerification == 1, let id = export.outcomesForVerification.first?.recordID {
+                        promiseReport("write-completed", ["route": route.id, "recordID": id.uuidString,
+                            "parentChoices": export.parentChoicesForVerification, "nativeCallback": true])
+                    } else {
+                        let codes = export.outcomesForVerification.flatMap { outcome in
+                            outcome.result.items.compactMap { item -> String? in
+                                if case .failed(let failure) = item.status { return failure.rawValue }
+                                return nil
+                            }
+                        }
+                        var fields: [String: Any] = ["route": route.id, "stage": "promise-request",
+                            "completed": export.completedForVerification, "callbacks": export.callbacksForVerification,
+                            "delegateEntries": export.writeDelegateEntriesForVerification,
+                            "endEvents": export.nativeDragEndEventsForVerification,
+                            "checkpoint": export.checkpointForVerification, "codes": codes]
+                        if let failure = export.failureForVerification { fields["issue"] = failure }
+                        if let operation = export.nativeDragEndOperationForVerification { fields["endOperation"] = operation }
+                        promiseReport("failed", fields)
+                    }
+                }
+            }
+            try TARMemberActionDriver.choose([route.leaf], model: context.model, table: context.table, browser: browser)
+            try await wait("promise-real-table-ready") { context.model.externalExportReady && context.table.numberOfSelectedRows == 1 }
+            guard let window = browser.view.window else { throw Refusal.check("promise-browser-window") }
+            let screen = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .init(x: 0, y: 0, width: 1440, height: 900)
+            window.setFrame(.init(x: screen.minX + 24, y: screen.midY - 300, width: min(760, screen.width * 0.56),
+                                  height: min(600, screen.height - 80)), display: true)
+            window.title = "Signed TAR drag · " + selection.caseID.prefix(8) + " · " + route.id
+            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            stage = route.id + "/waiting-for-drag"
+            promiseReport("ready", ["route": route.id, "kind": route.kind, "ordinaryArchiveRows": true])
+            let control = await Task.detached(priority: .utility) { try? FileHandle.standardInput.read(upToCount: 7) }.value
+            try require(control == Data("finish\n".utf8), "promise-control-cancelled")
+            stage = route.id + "/verify-delivery"
+            guard handoffs == 1, let export = handed else { throw Refusal.check("promise-one-real-handoff") }
+            await export.drain()
+            if let inspection = browser.recoveryInspectionTask { await inspection.value }
+            try await wait("promise-history-owner-idle") { browser.operationCoordinator.inspectionCount == 0 }
+            try require(export.drainedForVerification && export.completedForVerification == 1
+                && export.callbacksForVerification == 1 && export.outcomesForVerification.count == 1
+                && export.parentChoicesForVerification == 0 && export.writeDelegateEntriesForVerification == 1
+                && export.nativeDragEndEventsForVerification == 1
+                && export.nativeDragEndOperationForVerification == NSDragOperation.copy.rawValue,
+                "promise-exact-callback-and-native-drag-drain")
+            guard let outcome = export.outcomesForVerification.first, outcome.result.disposition == .succeeded,
+                  let id = outcome.recordID else { throw Refusal.check("promise-completed-record") }
+            let history = try await engine.inspectExistingHistory()
+            try require(history.records.count == steps.count + 1 && history.records.contains {
+                $0.id == id && $0.operation == "Extract TAR" && $0.state == "committed" && $0.canUndo && !$0.canRecover
+            }, "promise-complete-forward-history")
+            let catalog = try await engine.inspectGeneratedPublicCatalog(recordID: id)
+            try require(catalog.version == (route.kind == "file" ? 17 : 16) && catalog.requiresPublicQuarantine,
+                "promise-public-catalog-version")
+            steps.append(PromiseStep(recordID: id, route: route.id, nodes: try await promiseNodes(route, selection: selection)))
+            try require(try await promiseInputs(selection) == inputs, "promise-sources-unchanged")
+            context.model.memberDragHandoffForVerification = nil
+            await ApplicationArchiveExports.shared.closeAndDrain()
+            try await write(PromiseReceipt(phase: "warm-prefix", pid: getpid(), inputs: inputs, steps: steps),
+                name: "promise-prefix-" + String(steps.count) + ".json", root: selection.caseRoot)
+        }
+        try require(steps.count == 6 && Set(steps.map(\.recordID)).count == 6, "promise-exact-six-deliveries")
+        try await write(PromiseReceipt(phase: "warm-completed", pid: getpid(), inputs: inputs, steps: steps),
+            name: "promise-warm.json", root: selection.caseRoot)
+    }
+    private static func promiseCold(_ selection: GeneratedArchiveDriveReview.Selection,
+        browser: BrowserViewController, engine: RecoverableFileOperations, stage: inout String) async throws {
+        let receipt = try await Task.detached {
+            guard let data = OperationAccessFixtureIO.readRegular(selection.caseRoot.appendingPathComponent("evidence/promise-warm.json"),
+                maximum: 1 << 20) else { throw Refusal.check("promise-warm-receipt") }
+            return try JSONDecoder().decode(PromiseReceipt.self, from: data)
+        }.value
+        try require(receipt.phase == "warm-completed" && receipt.pid != getpid()
+            && receipt.steps.map(\.route) == promiseRoutes.map(\.id)
+            && Set(receipt.steps.map(\.recordID)).count == 6, "promise-true-cold-process-and-sequence")
+        let warm = try await Task.detached {
+            guard let data = OperationAccessFixtureIO.readRegular(selection.caseRoot.appendingPathComponent("evidence/archive-warm-result.json"),
+                maximum: 4096) else { throw Refusal.check("promise-warm-terminal-receipt") }
+            return try JSONDecoder().decode(Outcome.self, from: data)
+        }.value
+        try require(warm.passed && warm.phase == "archive-warm" && warm.stage == "completed"
+            && warm.pid == receipt.pid, "promise-warm-owner-drain-confirmed")
+        let history = try await engine.inspectExistingHistory()
+        try require(history.records.count == 6 && Set(history.records.map(\.id)) == Set(receipt.steps.map(\.recordID))
+            && history.records.allSatisfy { $0.state == "committed" && $0.canUndo && !$0.canRecover }, "promise-exact-cold-history")
+        try require(try await promiseInputs(selection) == receipt.inputs, "promise-cold-sources-unchanged")
+        try await write(PromiseReceipt(phase: "cold-attempt", pid: getpid(), inputs: receipt.inputs, steps: []),
+            name: "promise-cold-attempt.json", root: selection.caseRoot)
+        for index in receipt.steps.indices.reversed() {
+            let step = receipt.steps[index], route = promiseRoutes[index]
+            stage = route.id + "/cold-undo"
+            try require(try await promiseNodes(route, selection: selection) == step.nodes, "promise-cold-exact-output")
+            let catalog = try await engine.inspectGeneratedPublicCatalog(recordID: step.recordID)
+            try require(catalog.version == (route.kind == "file" ? 17 : 16) && catalog.requiresPublicQuarantine,
+                "promise-cold-catalog-contract")
+            let current = try await engine.inspectExistingHistory()
+            guard let record = current.records.first(where: { $0.id == step.recordID && $0.canUndo }) else {
+                throw Refusal.check("promise-cold-record")
+            }
+            var result: RecoverableOperationResult?
+            browser.startRecoveryOperation(record, rollback: false, presentsResult: false) { result = $0 }
+            try await wait("promise-native-cold-undo") { result != nil || browser.view.window?.attachedSheet != nil }
+            try require(browser.view.window?.attachedSheet == nil && result?.result.disposition == .succeeded,
+                "promise-cold-undo-without-chooser")
+            await browser.operationTask?.value
+            let absent = await Task.detached {
+                var facts = stat()
+                let file = selection.fixtureRoot.appendingPathComponent(route.destination).appendingPathComponent(route.leaf)
+                return lstat(file.path, &facts) < 0 && errno == ENOENT
+            }.value
+            try require(absent, "promise-cold-delivery-absent")
+            let after = try await engine.inspectExistingHistory()
+            try require(after.records.contains { $0.id == step.recordID && $0.state == "undone" && !$0.canUndo && !$0.canRecover },
+                "promise-terminal-undo-record")
+            try await write(PromiseReceipt(phase: "cold-prefix", pid: getpid(), inputs: receipt.inputs, steps: [step]),
+                name: "promise-cold-" + String(6 - index) + ".json", root: selection.caseRoot)
+        }
+        try require(try await promiseInputs(selection) == receipt.inputs, "promise-final-sources-unchanged")
+        try await write(PromiseReceipt(phase: "cold-completed", pid: getpid(), inputs: receipt.inputs, steps: receipt.steps),
+            name: "promise-cold.json", root: selection.caseRoot)
+    }
     private static func warm(_ selection: GeneratedArchiveDriveReview.Selection,
         browser: BrowserViewController, engine: RecoverableFileOperations, stage: inout String) async throws {
         let initial = try await inputs(selection.fixtureRoot)
@@ -2841,11 +3099,16 @@ import LocalStorage
             browser.navigate(to: .directory(selection.fixtureRoot))
             try await wait("review-folder") { !browser.isLoading && browser.orderingTask == nil }
             switch selection.phase {
-            case .archiveWarm: try await warm(selection, browser: browser, engine: engine, stage: &stage)
-            case .archiveCold: try await cold(selection, browser: browser, engine: engine, stage: &stage)
+            case .archiveWarm:
+                if selection.suite == .tarPromises { try await promiseWarm(selection, browser: browser, engine: engine, stage: &stage) }
+                else { try await warm(selection, browser: browser, engine: engine, stage: &stage) }
+            case .archiveCold:
+                if selection.suite == .tarPromises { try await promiseCold(selection, browser: browser, engine: engine, stage: &stage) }
+                else { try await cold(selection, browser: browser, engine: engine, stage: &stage) }
             case .driveReadOnly: throw Refusal.check("archive-phase")
             }
             try require(await ApplicationLocalTextEditors.shared.prepareForTermination(), "editor-owner-drain")
+            await ApplicationArchiveExports.shared.closeAndDrain()
             await ApplicationArchiveCreation.shared.closeAndDrain()
             await ArchiveTabCatalogPool.shared.closeAndDrain()
             try require(await ApplicationCompressedArchives.shared.closeAndDrain(), "compressed-owner-drain")
@@ -2864,6 +3127,10 @@ import LocalStorage
             else if let failure = error as? FileOperationFailure { code = failure.rawValue }
             else { code = "operation-refused" }
             let browser = owner?.browser
+            if selection.suite == .tarPromises {
+                promiseReport("failed", ["stage": stage, "refusal": code])
+                await ApplicationArchiveExports.shared.closeAndDrain()
+            }
             browser?.operationPreparationTask?.cancel(); browser?.operationTask?.cancel()
             await browser?.operationPreparationTask?.value; await browser?.operationTask?.value
             await ApplicationArchiveCreation.shared.closeAndDrain()

@@ -36,8 +36,14 @@ public enum ArchiveFixturePhase: Sendable, Equatable {
     case warmForward, coldInverse
 }
 
+/// The generated signed promise review has a separate operation vocabulary.
+/// Neither profile grants a producer policy or filesystem access by itself.
+@_spi(ArchiveFixtureOperations) public enum ArchiveFixtureOperations: Sendable, Equatable {
+    case authored, publicTARExtraction
+}
+
 internal enum ArchiveFixtureAction: Equatable {
-    case read, forward, inverse
+    case read, forward, inverse, tarRead, tarForward
 }
 
 /// Opt-in, serial off-main operations with explicit retention and manual recovery.
@@ -49,11 +55,16 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     /// cannot enable any operation or relax an existing producer policy.
     internal let archiveFixtureRoot: URL?
     internal let archiveFixturePhase: ArchiveFixturePhase?
+    internal let archiveFixtureOperations: ArchiveFixtureOperations
+    internal let archiveFixtureBaselineBytes: UInt64
     internal let continuationSession = UUID()
     private let queue: OperationQueue
     private let activity: (@Sendable () throws -> any Sendable)?
     private let admissionLock = NSLock()
     private var submissions = 0
+    private var tarFixtureForwardAttempts = 0, tarFixtureInverseAttempts = 0
+    private var tarFixtureReservedBytes: UInt64 = 0
+    private var tarFixtureReservedNodes = 0
     private var previewReservation: UUID?
     private var enabledCopyPreview: ProductionCopySession?
     internal let qualifiedCopyPreview: QualifiedCopyPreviewScope?
@@ -182,6 +193,25 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   tarTreePublicExtractionPolicy: tarTreePublicExtractionPolicy,
                   nativeTrashPolicy: nativeTrashPolicy,
                   localTextRetirementPolicy: localTextRetirementPolicy)
+    }
+    /// Only a generated signed TAR promise visit supplies this profile.
+    /// Existing authored fixture callers retain the ordinary initializer.
+    @_spi(ArchiveFixtureOperations) public convenience init(
+        journalDirectory: URL, protecting: [URL], activity: (@Sendable () throws -> any Sendable)?,
+        tarOneFilePublicExtractionPolicy: TAROneFilePublicExtractionPolicy,
+        tarTreePublicExtractionPolicy: TARTreePublicExtractionPolicy,
+        archiveFixtureRoot: URL, archiveFixturePhase: ArchiveFixturePhase,
+        archiveFixtureOperations: ArchiveFixtureOperations,
+        archiveFixtureBaselineBytes: UInt64
+    ) {
+        self.init(journalDirectory: journalDirectory, hooks: RecoveryHooks(),
+                  copyExecutionAuthorization: .closed, protecting: protecting, activity: activity,
+                  archiveFixtureRoot: archiveFixtureRoot, archiveFixturePhase: archiveFixturePhase,
+                  archiveFixtureOperations: archiveFixtureOperations,
+                  archiveFixtureBaselineBytes: archiveFixtureBaselineBytes,
+                  tarOneFilePublicExtractionPolicy: tarOneFilePublicExtractionPolicy,
+                  tarTreePublicExtractionPolicy: tarTreePublicExtractionPolicy,
+                  nativeTrashPolicy: .held, localTextRetirementPolicy: .held)
     }
     public convenience init(journalDirectory: URL, qualifiedCopyPreview: QualifiedCopyPreviewScope,
                             protecting: [URL] = [], activity: (@Sendable () throws -> any Sendable)? = nil,
@@ -345,6 +375,8 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   activity: (@Sendable () throws -> any Sendable)? = nil,
                   archiveFixtureRoot: URL? = nil,
                   archiveFixturePhase: ArchiveFixturePhase? = nil,
+                  archiveFixtureOperations: ArchiveFixtureOperations = .authored,
+                  archiveFixtureBaselineBytes: UInt64 = 0,
                   authoredZIPMetadataPolicy: AuthoredZIPMetadataPolicy = .exactSource,
                   strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
                   tarGzipCreationPolicy: TARGzipCreationPolicy = .held,
@@ -369,6 +401,12 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         protectedLocations = protecting
         self.archiveFixtureRoot = archiveFixtureRoot
         self.archiveFixturePhase = archiveFixturePhase
+        self.archiveFixtureOperations = archiveFixtureOperations
+        self.archiveFixtureBaselineBytes = archiveFixtureBaselineBytes
+        if archiveFixtureOperations == .publicTARExtraction,
+           archiveFixtureBaselineBytes > 0, archiveFixtureBaselineBytes <= 3 << 20 {
+            tarFixtureReservedBytes = archiveFixtureBaselineBytes + (256 << 10)
+        }
         self.legacy = legacy
         self.activity = activity
         self.hooks = hooks
@@ -444,6 +482,34 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     throw FileOperationFailure.invalidRequest
                 }
             } else if errno != ENOENT { throw FileOperationFailure.invalidRequest }
+        }
+    }
+
+    /// The six signed promise deliveries start from exactly three archives
+    /// and three Finder parents. Reserve four possible Finder metadata files
+    /// (one at the root and one per parent), leaving 86 produced nodes under
+    /// the 96-entry scope. Their full 64 KiB allowances and the exact sealed
+    /// source bytes are reserved before any output is planned.
+    internal func requireTARFixturePreview(_ preview: ArchiveProductionPreview) throws {
+        guard archiveFixtureRoot != nil, archiveFixtureOperations == .publicTARExtraction else { return }
+        guard archiveFixtureBaselineBytes > 0, archiveFixtureBaselineBytes <= 3 << 20,
+              let largest = preview.largestFileBytes, largest <= 1 << 20,
+              preview.logicalBytes <= (4 << 20) - archiveFixtureBaselineBytes - (256 << 10),
+              preview.files >= 0, preview.folders >= 0,
+              preview.files <= 86, preview.folders <= 86 - preview.files else {
+            throw FileOperationFailure.unsupported
+        }
+    }
+    internal func reserveTARFixturePreview(_ preview: ArchiveProductionPreview) throws {
+        guard archiveFixtureRoot != nil, archiveFixtureOperations == .publicTARExtraction else { return }
+        try requireTARFixturePreview(preview)
+        try admissionLock.withLock {
+            guard tarFixtureReservedBytes <= (4 << 20) - preview.logicalBytes,
+                  tarFixtureReservedNodes <= 86 - (preview.files + preview.folders) else {
+                throw FileOperationFailure.unsupported
+            }
+            tarFixtureReservedBytes += preview.logicalBytes
+            tarFixtureReservedNodes += preview.files + preview.folders
         }
     }
 
@@ -658,6 +724,23 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 record = value
             default: return nil
             }
+            if self.archiveFixtureRoot != nil {
+                switch self.archiveFixtureOperations {
+                case .authored:
+                    guard ["Create ZIP", "Create TAR", "Create TAR.gz", "Create TAR.bz2"].contains(record.operation)
+                        || ArchiveUpdateProfile.isUpdate(record.version)
+                            && record.operation == ArchiveUpdateProfile.title(version: record.version) else {
+                        throw FileOperationFailure.unsupported
+                    }
+                case .publicTARExtraction:
+                    guard record.operation == "Extract TAR",
+                          record.version == 17
+                            || record.version == 16
+                                && record.producedTreeV16?.isTARExtraction == true else {
+                        throw FileOperationFailure.unsupported
+                    }
+                }
+            }
             try self.requireArchiveFixturePaths(record.locations
                 + record.steps.flatMap { [$0.source, $0.destination] }
                 + record.areas.map(\.url))
@@ -719,10 +802,20 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 guard let record = try journal.openEdit(recordID) else { throw FileOperationFailure.recoveryUncertain }
                 if self.archiveFixtureRoot != nil {
                     let title = record.snapshot.operation
-                    let authoredCreate = ["Create ZIP", "Create TAR", "Create TAR.gz", "Create TAR.bz2"].contains(title)
-                    let authoredUpdate = ArchiveUpdateProfile.isUpdate(record.snapshot.version)
-                        && title == ArchiveUpdateProfile.title(version: record.snapshot.version)
-                    guard authoredCreate || authoredUpdate else { throw FileOperationFailure.unsupported }
+                    switch self.archiveFixtureOperations {
+                    case .authored:
+                        let authoredCreate = ["Create ZIP", "Create TAR", "Create TAR.gz", "Create TAR.bz2"].contains(title)
+                        let authoredUpdate = ArchiveUpdateProfile.isUpdate(record.snapshot.version)
+                            && title == ArchiveUpdateProfile.title(version: record.snapshot.version)
+                        guard authoredCreate || authoredUpdate else { throw FileOperationFailure.unsupported }
+                    case .publicTARExtraction:
+                        guard !recovering, !restoringInterruptedOriginalZIP, title == "Extract TAR",
+                              record.snapshot.version == 17
+                                || record.snapshot.version == 16
+                                    && record.snapshot.producedTreeV16?.isTARExtraction == true else {
+                            throw FileOperationFailure.unsupported
+                        }
+                    }
                     try self.requireArchiveFixturePaths(record.locations
                         + record.steps.flatMap { [$0.source, $0.destination] }
                         + record.areas.map(\.url))
@@ -1263,19 +1356,46 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                                       activation: UUID? = nil, ignoringCancellation: Bool = false,
                                       archiveAction: ArchiveFixtureAction? = nil,
                                       _ action: @escaping @Sendable (OperationCancellation) throws -> T) async throws -> T {
-        if archiveFixtureRoot != nil || archiveFixturePhase != nil {
+        if archiveFixtureRoot != nil || archiveFixturePhase != nil || archiveFixtureOperations != .authored
+            || archiveFixtureBaselineBytes != 0 {
             guard let archiveFixtureRoot, let archiveFixturePhase, let archiveAction,
-                  archiveFixtureRoot.isFileURL,
-                  archiveAction == .read
-                    || archiveAction == .forward && archiveFixturePhase == .warmForward
-                    || archiveAction == .inverse && archiveFixturePhase == .coldInverse else {
+                  archiveFixtureRoot.isFileURL else {
                 throw FileOperationFailure.unsupported
             }
+            guard archiveFixtureOperations == .publicTARExtraction
+                    ? archiveFixtureBaselineBytes > 0 && archiveFixtureBaselineBytes <= 3 << 20
+                    : archiveFixtureBaselineBytes == 0 else {
+                throw FileOperationFailure.unsupported
+            }
+            let admitted: Bool
+            switch archiveFixtureOperations {
+            case .authored:
+                admitted = archiveAction == .read
+                    || archiveAction == .forward && archiveFixturePhase == .warmForward
+                    || archiveAction == .inverse && archiveFixturePhase == .coldInverse
+            case .publicTARExtraction:
+                admitted = archiveAction == .read
+                    || archiveAction == .tarRead && archiveFixturePhase == .warmForward
+                    || archiveAction == .tarForward && archiveFixturePhase == .warmForward
+                    || archiveAction == .inverse && archiveFixturePhase == .coldInverse
+            }
+            guard admitted else { throw FileOperationFailure.unsupported }
         }
         let admitted = admissionLock.withLock { () -> Bool in
             guard activation == previewReservation else { return false }
             if activation != nil, submissions != 0 { return false }
             guard submissions < OperationLimits.maximumSubmissions else { return false }
+            if archiveFixtureRoot != nil && archiveFixtureOperations == .publicTARExtraction {
+                switch archiveAction {
+                case .some(.tarForward):
+                    guard tarFixtureForwardAttempts < 6 else { return false }
+                    tarFixtureForwardAttempts += 1
+                case .some(.inverse):
+                    guard tarFixtureInverseAttempts < 6 else { return false }
+                    tarFixtureInverseAttempts += 1
+                default: break
+                }
+            }
             submissions += 1; return true
         }
         guard admitted else { throw FileOperationFailure.unavailable }

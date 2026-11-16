@@ -1,5 +1,5 @@
 import AppKit
-import FileOperations
+@_spi(ArchiveFixtureOperations) import FileOperations
 import LocalStorage
 import UniformTypeIdentifiers
 
@@ -47,7 +47,14 @@ enum ArchivePromiseExportFeature {
         #else
         let admitted = enabled
         #endif
-        return admitted && AppFeatureAvailability.policy.edition == .development && !GeneratedSandboxReview.admitted
+        let ordinary = admitted && AppFeatureAvailability.policy.edition == .development
+            && !GeneratedSandboxReview.admitted
+        #if TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !DEBUG
+        let signedPromiseReview = GeneratedArchiveDriveReview.tarPromisesForwardAdmitted
+        #else
+        let signedPromiseReview = false
+        #endif
+        return (ordinary || signedPromiseReview)
             && ArchivePromiseExportFeature.available
             && (ArchiveExtractionActivation.qualifiesPublicTARFile || ArchiveExtractionActivation.qualifiesPublicTARTree)
     }
@@ -86,7 +93,7 @@ enum ArchivePromiseExportFeature {
         current.forEach { $0.retireUncalled() }
         closing = false
     }
-    #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
+    #if DEBUG || TRAVERSE_SFTP_EDITOR_QA || TRAVERSE_ARCHIVE_DRIVE_QA
     var countForVerification: Int { jobs.count }
     #endif
 }
@@ -110,6 +117,13 @@ final class ArchivePromiseDispatch: @unchecked Sendable {
     private let lock = NSLock()
     private var pending = 0, closed = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
+    private var writeDelegateEntries = 0
+    var writeDelegateEntriesForVerification: Int { lock.withLock { writeDelegateEntries } }
+    func recordWriteDelegateEntryForVerification() {
+        lock.withLock { if writeDelegateEntries < 128 { writeDelegateEntries += 1 } }
+    }
+    #endif
     var isIdle: Bool { lock.withLock { pending == 0 } }
     func begin() -> Bool {
         lock.withLock {
@@ -153,6 +167,9 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     nonisolated func operationQueue(for provider: NSFilePromiseProvider) -> OperationQueue { queue }
     nonisolated func filePromiseProvider(_ provider: NSFilePromiseProvider, writePromiseTo url: URL,
         completionHandler: @escaping (Error?) -> Void) {
+        #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
+        dispatch.recordWriteDelegateEntryForVerification()
+        #endif
         let completion = ArchivePromiseCompletion(completionHandler)
         guard lock.withLock({ if requested { return false }; requested = true; return true }) else {
             completion.finish(CocoaError(.fileWriteUnknown)); return
@@ -214,14 +231,19 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     #if DEBUG
     var beforeRootForVerification: ((Int) async -> Void)?
     var chooseParentForVerification: ((URL) async -> FolderAccessChoice?)?
-    var onSettledForVerification: (@MainActor () -> Void)?
-    var nativeDragEndOperationForVerification: UInt?
     var nativeDragEndPointForVerification: [Double]?
-    private(set) var checkpointForVerification = "offer"
     private(set) var callbackShapeForVerification: [String: Bool] = [:]
+    #endif
+    #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
+    var onSettledForVerification: (@MainActor () -> Void)?
+    var onNativeDragEndForVerification: (@MainActor (UInt) -> Void)?
+    private(set) var nativeDragEndOperationForVerification: UInt?
+    private(set) var nativeDragEndEventsForVerification = 0
+    var writeDelegateEntriesForVerification: Int { callbackDispatch.writeDelegateEntriesForVerification }
+    private(set) var checkpointForVerification = "offer"
     private(set) var failureForVerification: String?
     #endif
-    #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
+    #if DEBUG || TRAVERSE_SFTP_EDITOR_QA || TRAVERSE_ARCHIVE_DRIVE_QA
     private(set) var outcomesForVerification: [RecoverableOperationResult] = []
     private(set) var parentChoicesForVerification = 0
     private(set) var callbacksForVerification = 0
@@ -296,8 +318,16 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     }
     func callbackDidDispatch() { releaseIfTerminal(); notifySettledForVerification() }
 
+    #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
+    func recordNativeDragEndForVerification(_ operation: NSDragOperation) {
+        nativeDragEndOperationForVerification = operation.rawValue
+        nativeDragEndEventsForVerification += 1
+        onNativeDragEndForVerification?(operation.rawValue)
+    }
+    #endif
+
     private func checkpoint(_ value: String) {
-        #if DEBUG
+        #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
         checkpointForVerification = value
         #endif
     }
@@ -329,7 +359,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
     }
 
     func request(_ index: Int, url suppliedURL: URL, completion: ArchivePromiseCompletion) {
-        #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
+        #if DEBUG || TRAVERSE_SFTP_EDITOR_QA || TRAVERSE_ARCHIVE_DRIVE_QA
         callbacksForVerification += 1
         #endif
         checkpoint("callback-admission")
@@ -366,6 +396,21 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
                   url.deletingLastPathComponent().path.utf8.elementsEqual(expected.path.utf8) else {
                 completion.finish(CocoaError(.fileWriteUnknown))
                 failPending(state.stop(), error: CocoaError(.fileWriteUnknown)); releaseIfTerminal(); return
+            }
+        }
+        #endif
+        #if TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !DEBUG
+        if GeneratedArchiveDriveReview.tarPromisesAdmitted {
+            guard GeneratedArchiveDriveReview.tarPromisesForwardAdmitted,
+                  let roots, case let .tar(entries) = roots, entries.indices.contains(index),
+                  let source = entries.first?.archiveURL,
+                  entries.allSatisfy({ $0.archiveURL == source }),
+                  names.indices.contains(index), names[index] == url.lastPathComponent,
+                  GeneratedArchiveDriveReview.permitsTARPromiseParent(url.deletingLastPathComponent(), source: source),
+                  GeneratedArchiveDriveReview.permitsFixtureLocations([url]) else {
+                completion.finish(CocoaError(.fileWriteUnknown))
+                failPending(state.stop(), error: CocoaError(.fileWriteUnknown))
+                releaseIfTerminal(); return
             }
         }
         #endif
@@ -445,7 +490,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
                 try Task.checkCancellation()
                 checkpoint("production")
                 let result = await plan.perform(using: engine, progress: { binding.receive($0.jobID); progress?($0) })
-                #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
+                #if DEBUG || TRAVERSE_SFTP_EDITOR_QA || TRAVERSE_ARCHIVE_DRIVE_QA
                 outcomesForVerification.append(result)
                 #endif
                 let succeeded = result.result.disposition == .succeeded && result.recordID != nil
@@ -463,7 +508,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
                 if Task.isCancelled { failPending(state.stop(), error: CocoaError(.userCancelled)) }
                 notice(summary(failed: !succeeded || state.stopped))
             } catch {
-                #if DEBUG
+                #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
                 failureForVerification = (error as? FileOperationFailure)?.rawValue
                     ?? "cocoa-\(Self.callbackFailure(error).code.rawValue)"
                 #endif
@@ -512,7 +557,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
                     throw FileOperationFailure.accessDenied
                 }
                 let choice: FolderAccessChoice?
-                #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
+                #if DEBUG || TRAVERSE_SFTP_EDITOR_QA || TRAVERSE_ARCHIVE_DRIVE_QA
                 parentChoicesForVerification += 1
                 #endif
                 #if DEBUG
@@ -531,8 +576,22 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
             parent = chosen; destinationAccess = access
         }
         guard let parent else { throw FileOperationFailure.accessDenied }
+        #if TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !DEBUG
+        if GeneratedArchiveDriveReview.tarPromisesAdmitted {
+            guard let roots, case let .tar(entries) = roots, let source = entries.first?.archiveURL,
+                  GeneratedArchiveDriveReview.permitsTARPromiseParent(parent, source: source) else {
+                throw FileOperationFailure.invalidRequest
+            }
+            parentObservation = try await engine.checkTARPromiseDestination(source: source, parent: parent,
+                name: leaf.lastPathComponent, observing: parentObservation)
+        } else {
+            parentObservation = try await engine.checkReceivedFileDestination(parent: parent,
+                name: leaf.lastPathComponent, observing: parentObservation)
+        }
+        #else
         parentObservation = try await engine.checkReceivedFileDestination(parent: parent, name: leaf.lastPathComponent,
             observing: parentObservation)
+        #endif
         try Task.checkCancellation()
         if let selectedParent {
             // Keep the actual chosen URL for later drops in this browser
@@ -557,7 +616,7 @@ final class ArchivePromiseDelegate: NSObject, NSFilePromiseProviderDelegate, @un
         ApplicationArchiveExports.shared.release(self)
     }
     private func notifySettledForVerification() {
-        #if DEBUG
+        #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
         if drainedForVerification && state.isTerminal { onSettledForVerification?() }
         #endif
     }
