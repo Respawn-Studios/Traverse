@@ -119,7 +119,7 @@ import StorageAnalysis
                 state.checks += try await BrowserShortcutVerification.run(browser, fixture: root, output: output,
                     interactive: !args.contains("--offscreen"))
                 state.checks += try await InlinePreviewVerification.run(in: testRoot, renderKnownFixtures: !args.contains("--offscreen"))
-                state.checks += try await WorkspaceNavigationVerification.run(in: testRoot)
+                state.checks += try await WorkspaceNavigationVerification.run(in: testRoot).checks
                 state.checks += try await WorkspaceTransferVerification.run(in: testRoot)
                 state.checks += try await SearchFoundationVerification.run(in: testRoot)
                 try requireControlledWindowsHidden("substantial workflows")

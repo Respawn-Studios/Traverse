@@ -30,7 +30,11 @@ private final class WorkspaceFixtureTabDrag: NSObject, NSDraggingInfo {
 
 @MainActor
 enum WorkspaceNavigationVerification {
-    static func run(in testRoot: URL, settings inheritedSettings: BrowserSettings? = nil) async throws -> [String] {
+    struct Outcome {
+        let checks: [String]
+        let clips: [[String: Any]]
+    }
+    static func run(in testRoot: URL, settings inheritedSettings: BrowserSettings? = nil) async throws -> Outcome {
         guard let declared = ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"],
               testRoot.standardizedFileURL == URL(fileURLWithPath: declared, isDirectory: true).standardizedFileURL,
               testRoot.standardizedFileURL == testRoot.resolvingSymlinksInPath().standardizedFileURL else {
@@ -94,7 +98,10 @@ enum WorkspaceNavigationVerification {
                 && abs(frame.minX - expected.minX) <= 0.5 && abs(frame.minY - expected.minY) <= 0.5
                 && abs(frame.width - expected.width) <= 0.5 && abs(frame.height - expected.height) <= 0.5
         }
-        let window = NSWindow(contentRect: NSRect(x: 50, y: 50, width: 1400, height: 900),
+        let recordsMotion = ProcessInfo.processInfo.arguments.contains("pane-motion")
+            && !ProcessInfo.processInfo.arguments.contains("--offscreen")
+        let contentSize = NSSize(width: 1400, height: 900)
+        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: 50, y: 50), size: contentSize),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.isRestorable = false
@@ -105,7 +112,7 @@ enum WorkspaceNavigationVerification {
             window.close()
         }
         window.contentViewController = workspace
-        window.setContentSize(NSSize(width: 1400, height: 900))
+        window.setContentSize(contentSize)
         window.contentView?.layoutSubtreeIfNeeded()
         workspace.didConstructPaneHostForVerification = nil
         if let host = workspace.paneHosts[primary.paneID] {
@@ -129,6 +136,22 @@ enum WorkspaceNavigationVerification {
             || ProcessInfo.processInfo.arguments.contains("pane-motion"))
             && !ProcessInfo.processInfo.arguments.contains("--offscreen")
         if visibleFilterQualification { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        var clips: [[String: Any]] = []
+        func record(_ label: String, action: @MainActor () throws -> Void) async throws {
+            guard recordsMotion else { try action(); return }
+            // Keep the wide functional control intact. Only the recorded
+            // action uses this compact, admitted WindowServer canvas.
+            let originalFrame = window.frame
+            defer { window.setFrame(originalFrame, display: true); window.contentView?.layoutSubtreeIfNeeded() }
+            window.setContentSize(NSSize(width: 1120, height: 740))
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.title = "Panes · generated review · motion audit"
+            let movie = try await NativeMotionRecorder.record(window: window, root: testRoot, label: label,
+                sampling: .diagnostic(for: window), includingChildWindows: false, action: action)
+            try JSONEncoder().encode(movie).write(to: testRoot.appendingPathComponent("evidence/\(label).json"),
+                options: .withoutOverwriting)
+            clips.append(DevelopmentMotionVerification.clip(label, report: movie, field: nil, window: window))
+        }
         workspace.startBrowser(primary)
         try await waitUntil("Initial generated pane listing") { primary.rowsByURL[firstFile] != nil && !primary.isLoading && primary.orderingTask == nil }
         var checks: [String] = []
@@ -142,22 +165,24 @@ enum WorkspaceNavigationVerification {
         }
         let singlePaneColumns = (viewport: primary.folderScroll.contentSize.width,
             name: singleName.width, date: singleDate.width, scale: InterfaceMetrics.scale)
-        let didSplit = workspace.splitActive(at: .trailing)
-        let geometry = "window=\(window.contentView?.bounds.size ?? .zero), workspace=\(workspace.view.bounds.size), tree=\(workspace.paneTreeHost.bounds.size), primaryHost=\(workspace.paneHosts[primary.paneID]?.bounds.size ?? .zero), screen=\(window.screen?.visibleFrame.size ?? .zero), canChange=\(workspace.canChangePaneLayout), primaryBusy=\(primary.hasPendingFileOperation), suspended=\(primary.isBrowserSuspended)"
-        try require(didSplit, "Two-pane split failed in an adequately sized window: " + geometry)
         let paneMotion = visibleFilterQualification && settings.motion.allows(.panes)
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if paneMotion {
-            guard let picture = workspace.paneTransitionFramesForVerification[primary.paneID]?.image,
-                  let bitmap = picture.representations.first as? NSBitmapImageRep,
-                  let empty = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2) else {
-                throw UIVerification.Failure(message: "Native pane transition picture missing")
+        try await record("pane-split") {
+            let didSplit = workspace.splitActive(at: .trailing)
+            let geometry = "window=\(window.contentView?.bounds.size ?? .zero), workspace=\(workspace.view.bounds.size), tree=\(workspace.paneTreeHost.bounds.size), primaryHost=\(workspace.paneHosts[primary.paneID]?.bounds.size ?? .zero), screen=\(window.screen?.visibleFrame.size ?? .zero), canChange=\(workspace.canChangePaneLayout), primaryBusy=\(primary.hasPendingFileOperation), suspended=\(primary.isBrowserSuspended)"
+            try require(didSplit, "Two-pane split failed in an adequately sized window: " + geometry)
+            if paneMotion {
+                guard let picture = workspace.paneTransitionFramesForVerification[primary.paneID]?.image,
+                      let bitmap = picture.representations.first as? NSBitmapImageRep,
+                      let empty = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2) else {
+                    throw UIVerification.Failure(message: "Native pane transition picture missing")
+                }
+                if primary.contentSurface?.isUsingOpaqueSurface == false {
+                    try require(empty.alphaComponent < 0.02, "Pane transition captured an opaque material backplate")
+                }
+                try require(!workspace.paneTransitionHasOpaqueBackdropForVerification,
+                    "Pane transition painted an opaque background over native material")
             }
-            if primary.contentSurface?.isUsingOpaqueSurface == false {
-                try require(empty.alphaComponent < 0.02, "Pane transition captured an opaque material backplate")
-            }
-            try require(!workspace.paneTransitionHasOpaqueBackdropForVerification,
-                "Pane transition painted an opaque background over native material")
         }
         let peer = workspace.activeBrowser
         try require(workspace.paneHosts.values.filter(\.showsFocusOutline).count == 1
@@ -312,12 +337,15 @@ enum WorkspaceNavigationVerification {
         try require(host.draggingUpdated(authenticated) == .move && host.proposedEdge == .bottom,
                     "Leaving and re-entering a valid edge lost the current snap session")
         let untouched = workspace.paneHosts[primary.paneID]!
-        let untouchedFrame = untouched.convert(untouched.bounds, to: workspace.paneTreeHost)
-        try require(host.performDragOperation(authenticated), "Authenticated edge drop failed")
-        if paneMotion {
-            try require(untouched.convert(untouched.bounds, to: workspace.paneTreeHost) == untouchedFrame
-                && workspace.paneTransitionFramesForVerification[primary.paneID] == nil,
-                "Splitting another pane repainted an unchanged pane")
+        try await record("pane-split-neighbour") {
+            let untouchedFrame = untouched.convert(untouched.bounds, to: workspace.paneTreeHost)
+            authenticated.draggingLocation = host.convert(NSPoint(x: host.bounds.midX, y: host.bounds.minY + 8), to: nil)
+            try require(host.performDragOperation(authenticated), "Authenticated edge drop failed")
+            if paneMotion {
+                try require(untouched.convert(untouched.bounds, to: workspace.paneTreeHost) == untouchedFrame
+                    && workspace.paneTransitionFramesForVerification[primary.paneID] == nil,
+                    "Splitting another pane repainted an unchanged pane")
+            }
         }
         let moved = workspace.activeBrowser
         moved.permitsBackgroundVerification = true
@@ -344,10 +372,26 @@ enum WorkspaceNavigationVerification {
                     "A center drop unexpectedly requested an edge split")
         checks.append("Foreign source strings, stale drag sequences and center drops have no split authority; all four edge outlines stay inside the pane")
 
-        try require(workspace.splitActive(at: .top), "Fourth pane stretch failed in a sufficiently sized workspace")
-        workspace.activeBrowser.permitsBackgroundVerification = true
+        var fourthVisitBeforeLoading: UUID?
+        try await record("pane-split-unaffected") {
+            guard let stable = workspace.paneHosts[primary.paneID] else {
+                throw UIVerification.Failure(message: "Unchanged pane disappeared before fourth split")
+            }
+            let before = stable.convert(stable.bounds, to: workspace.paneTreeHost), visit = primary.sessionID
+            try require(workspace.splitActive(at: .top), "Fourth pane stretch failed in a sufficiently sized workspace")
+            workspace.activeBrowser.permitsBackgroundVerification = true
+            fourthVisitBeforeLoading = workspace.activeBrowser.sessionID
+            if paneMotion {
+                try require(stable.convert(stable.bounds, to: workspace.paneTreeHost) == before
+                    && primary.sessionID == visit
+                    && workspace.paneTransitionFramesForVerification[primary.paneID] == nil,
+                    "Fourth split enrolled a pane whose geometry and visit were unchanged")
+            }
+        }
         let fourthPane = workspace.activeBrowser
-        let fourthInitialVisit = fourthPane.sessionID
+        guard let fourthInitialVisit = fourthVisitBeforeLoading else {
+            throw UIVerification.Failure(message: "Fourth pane's initial visit was not observed")
+        }
         try await waitUntil("Fourth pane native tab presentation") {
             fourthPane.sessionID != fourthInitialVisit && fourthPane.tabStrip.selectionButton(for: fourthPane.activeID) != nil
                 && !fourthPane.isLoading && fourthPane.orderingTask == nil
@@ -458,7 +502,9 @@ enum WorkspaceNavigationVerification {
                 closing.folderFilter.isPresented && closing.folderFilter.displayedField.currentEditor() is NSTextView
             }
         }
-        try require(workspace.closeLastTab(in: closing), "Explicit last-tab Close failed to collapse its pane")
+        try await record("pane-close-last-tab") {
+            try require(workspace.closeLastTab(in: closing), "Explicit last-tab Close failed to collapse its pane")
+        }
         try require(!workspace.browsers.values.contains(where: { $0.tabs.contains(where: { $0.id == closedID }) })
                     && workspace.browsers.values.reduce(0, { $0 + $1.tabs.count }) == totalBeforeClose - 1,
                     "Explicit Close Tab merged rather than closed its requested tab")
@@ -477,6 +523,11 @@ enum WorkspaceNavigationVerification {
         checks.append("Explicit last-tab Close collapses only its pane, removes that tab and retains its current visit in bounded Reopen history; filter popup/editor and scoped key monitoring retire with it")
 
         let allTabs = Set(workspace.browsers.values.flatMap { $0.tabs.map(\.id) })
+        if workspace.browsers.count > 1 {
+            try await record("pane-close-and-merge") {
+                try require(workspace.closeActivePane(), "Close Pane failed to merge tabs")
+            }
+        }
         while workspace.browsers.count > 1 { try require(workspace.closeActivePane(), "Close Pane failed to merge tabs") }
         try require(Set(workspace.activeBrowser.tabs.map(\.id)) == allTabs && !workspace.closeActivePane(),
                     "Close Pane lost tabs or removed the final pane")
@@ -505,7 +556,7 @@ enum WorkspaceNavigationVerification {
                 try await Task.detached { try data.write(to: owned.appendingPathComponent("workspace-native-narrow.png"), options: .withoutOverwriting) }.value
             }
         }
-        return checks
+        return .init(checks: checks, clips: clips)
     }
 
     private static func capture(_ workspace: BrowserWorkspaceController, window: NSWindow, owned: URL, name: String) async throws {

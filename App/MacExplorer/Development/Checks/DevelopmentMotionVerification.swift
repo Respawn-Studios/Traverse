@@ -210,7 +210,9 @@ import StorageAnalysis
                 additionalChecks = review.checks; clips = review.clips
             } else if surface == "pane-motion" {
                 checkpoint = "actual-pane-layout-motion"
-                additionalChecks["paneMotion"] = try await WorkspaceNavigationVerification.run(in: candidate, settings: settings)
+                let review = try await WorkspaceNavigationVerification.run(in: candidate, settings: settings)
+                additionalChecks["paneMotion"] = review.checks
+                clips = review.clips
             } else if surface == "window-lifecycle" {
                 checkpoint = "actual-tool-window-lifecycle"
                 try await DevelopmentToolWindowChecks.verifyWindowLifecycle(root: candidate, settings: settings)
