@@ -140,8 +140,13 @@ internal func verifiedTree(parent: Int32, name: String, cancellation: OperationC
         if guarded != nil || requiresMaterialized { try GuardedTrashPolicy.requireMaterialized(value) }
         copyComparison?.appendContent(Data(relative.utf8))
         copyComparison?.appendContent(Data("\(before.type)".utf8))
-        copyComparison?.appendMetadata(Data(relative.utf8))
+        copyComparison?.beginMetadataNode(relative)
         copyComparison?.appendMetadata(Data("\(before.mode)|\(value.st_flags)|\(before.modifiedSeconds)|\(before.modifiedNanos)".utf8))
+        if copyComparison?.diagnoseMetadataFamilies == true {
+            copyComparison?.appendMetadata(Data("\(before.mode)".utf8), family: .mode)
+            copyComparison?.appendMetadata(Data("\(value.st_flags)".utf8), family: .flags)
+            copyComparison?.appendMetadata(Data("\(before.modifiedSeconds)|\(before.modifiedNanos)".utf8), family: .modificationTime)
+        }
         copyComparison?.appendOwnership(Data(relative.utf8))
         copyComparison?.appendOwnership(Data("\(value.st_uid)|\(value.st_gid)".utf8))
         var security = CopySecurity()
@@ -193,7 +198,12 @@ internal func verifiedTree(parent: Int32, name: String, cancellation: OperationC
             // retain it in the full fingerprint and do not remove or rewrite the attribute.
             if attribute == CopySecurity.quarantineName { security.quarantine = SecurityAttribute(data) }
             else if attribute == CopySecurity.provenanceName { security.provenance = SecurityAttribute(data) }
-            else { copyComparison?.appendMetadata(bytes); copyComparison?.appendMetadata(data) }
+            else {
+                copyComparison?.appendMetadata(bytes); copyComparison?.appendMetadata(data)
+                let family: CopyOrdinaryMetadataFamily = attribute == "com.apple.ResourceFork" ? .resourceFork : .otherExtendedAttributes
+                copyComparison?.appendMetadata(bytes, family: family)
+                copyComparison?.appendMetadata(data, family: family)
+            }
             let family: NativeTrashInputFamily
             if attribute == "com.apple.macl" { family = .osAccessAttribute }
             else if attribute == CopySecurity.quarantineName { family = .quarantine }
@@ -218,8 +228,10 @@ internal func verifiedTree(parent: Int32, name: String, cancellation: OperationC
             var aclLength: ssize_t = 0
             guard let aclText = acl_to_text(acl, &aclLength) else { throw posixFailure() }
             defer { acl_free(UnsafeMutableRawPointer(aclText)) }
-            append(Data(bytes: aclText, count: aclLength), relative: relative, family: .acl)
-            copyComparison?.appendMetadata(Data(bytes: aclText, count: aclLength))
+            let aclData = Data(bytes: aclText, count: aclLength)
+            append(aclData, relative: relative, family: .acl)
+            copyComparison?.appendMetadata(aclData)
+            copyComparison?.appendMetadata(aclData, family: .acl)
         } else {
             // Darwin returns ENOENT for an existing descriptor with no extended ACL.
             // The descriptor and directory entry are revalidated below; unsupported ACL
@@ -227,6 +239,7 @@ internal func verifiedTree(parent: Int32, name: String, cancellation: OperationC
             guard errno == ENOENT else { throw posixFailure() }
             append(Data(), relative: relative, family: .acl)
             copyComparison?.appendMetadata(Data())
+            copyComparison?.appendMetadata(Data(), family: .acl)
         }
         if before.type == S_IFREG {
             let linkCount = Data("link-count:\(value.st_nlink)".utf8)

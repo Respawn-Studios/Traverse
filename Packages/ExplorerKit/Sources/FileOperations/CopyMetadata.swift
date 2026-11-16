@@ -103,14 +103,31 @@ internal final class NativeCopyReceipts: @unchecked Sendable {
     }
 }
 
+/// Closed, transient categories for generated copy diagnosis. The values and
+/// names of attributes never leave the comparison, and these hashes are not
+/// stored in the operation journal or emitted through diagnostics.
+internal enum CopyOrdinaryMetadataFamily: String, CaseIterable, Sendable {
+    case mode, flags, modificationTime, resourceFork, otherExtendedAttributes, acl
+}
+
 /// Additional transient comparison projections; VerifiedTree's persisted full digest
 /// and its historical byte encoding stay unchanged.
 internal final class CopyComparison {
     struct Node { let identity: EntrySnapshot; let security: CopySecurity; let ownership: CopyOwnership }
+    let diagnoseMetadataFamilies: Bool
     private var content = SHA256()
     private var metadata = SHA256()
     private var ownership = SHA256()
+    private var modeMetadata = SHA256()
+    private var flagsMetadata = SHA256()
+    private var modificationTimeMetadata = SHA256()
+    private var resourceForkMetadata = SHA256()
+    private var otherExtendedAttributesMetadata = SHA256()
+    private var aclMetadata = SHA256()
     private(set) var nodes: [String: Node] = [:]
+    init(diagnoseMetadataFamilies: Bool = false) {
+        self.diagnoseMetadataFamilies = diagnoseMetadataFamilies
+    }
     var contentDigest: Data { Data(content.finalize()) }
     var metadataDigest: Data { Data(metadata.finalize()) }
     var ownershipDigest: Data { Data(ownership.finalize()) }
@@ -120,6 +137,41 @@ internal final class CopyComparison {
     func appendContent(_ data: Data) { append(data, to: &content) }
     func appendMetadata(_ data: Data) { append(data, to: &metadata) }
     func appendOwnership(_ data: Data) { append(data, to: &ownership) }
+    func beginMetadataNode(_ relative: String) {
+        let path = Data(relative.utf8)
+        appendMetadata(path)
+        if diagnoseMetadataFamilies {
+            for family in CopyOrdinaryMetadataFamily.allCases { appendMetadata(path, family: family) }
+        }
+    }
+    func appendMetadata(_ data: Data, family: CopyOrdinaryMetadataFamily) {
+        guard diagnoseMetadataFamilies else { return }
+        switch family {
+        case .mode: append(data, to: &modeMetadata)
+        case .flags: append(data, to: &flagsMetadata)
+        case .modificationTime: append(data, to: &modificationTimeMetadata)
+        case .resourceFork: append(data, to: &resourceForkMetadata)
+        case .otherExtendedAttributes: append(data, to: &otherExtendedAttributesMetadata)
+        case .acl: append(data, to: &aclMetadata)
+        }
+    }
+    private func metadataDigest(for family: CopyOrdinaryMetadataFamily) -> Data {
+        switch family {
+        case .mode: Data(modeMetadata.finalize())
+        case .flags: Data(flagsMetadata.finalize())
+        case .modificationTime: Data(modificationTimeMetadata.finalize())
+        case .resourceFork: Data(resourceForkMetadata.finalize())
+        case .otherExtendedAttributes: Data(otherExtendedAttributesMetadata.finalize())
+        case .acl: Data(aclMetadata.finalize())
+        }
+    }
+    /// Compare fixed families without exposing any path or attribute value.
+    /// A changed aggregate with no listed family means this projection missed a
+    /// component; it is never permission to admit a copy.
+    func differingMetadataFamilies(from other: CopyComparison) throws -> [CopyOrdinaryMetadataFamily] {
+        guard diagnoseMetadataFamilies, other.diagnoseMetadataFamilies else { throw FileOperationFailure.invalidRequest }
+        return CopyOrdinaryMetadataFamily.allCases.filter { metadataDigest(for: $0) != other.metadataDigest(for: $0) }
+    }
     func record(_ relative: String, identity: EntrySnapshot, security: CopySecurity, ownership: CopyOwnership) throws {
         let key = relative.hasPrefix("/") ? String(relative.dropFirst()) : relative
         guard nodes.count < OperationLimits.maximumNodes, nodes[key] == nil else { throw FileOperationFailure.copyMetadataMismatch }

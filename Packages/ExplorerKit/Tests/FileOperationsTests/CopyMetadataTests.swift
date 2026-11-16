@@ -43,6 +43,118 @@ private func setMetadataAttribute(_ url: URL, _ name: String, _ value: String) t
 }
 private let fixtureQuarantine = "0083;67000000;MacExplorerGeneratedFixture;00000000-0000-0000-0000-000000000001"
 
+/// This opt-in fixture admits only a fresh image whose exact host-side identity
+/// was recorded by the separately reviewed image controller. That controller
+/// proves the mounted device belongs to the image. The package test never mounts
+/// or detaches a volume.
+private struct Fat32CopyFixture {
+    private struct Marker: Decodable {
+        let version: Int
+        let jobID: String
+        let imageBytes: Int64
+        let imageDev: Int64
+        let imageIno: UInt64
+        let rootDev: Int64
+        let rootIno: UInt64
+        let mountDev: Int64
+        let mountIno: UInt64
+        let filesystem: String
+        let format: String
+    }
+    private let root: DirectoryAnchor
+    private let mount: DirectoryAnchor
+    private let marker: Marker
+    private let markerData: Data
+    private static let markerName = ".fat32-copy-owner-v1.json"
+    private static let imageBytes: Int64 = 128 * 1024 * 1024
+
+    init() throws {
+        guard let raw = ProcessInfo.processInfo.environment["MAC_EXPLORER_FAT32_COPY_TEST_ROOT"] else {
+            throw FileOperationFailure.invalidRequest
+        }
+        let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let repository = package.deletingLastPathComponent().deletingLastPathComponent()
+        let base = repository.appendingPathComponent(".build/integrity-volumes", isDirectory: true)
+        let requested = URL(fileURLWithPath: raw, isDirectory: true)
+        guard raw == requested.path, requested.deletingLastPathComponent().path == base.path,
+              let id = UUID(uuidString: requested.lastPathComponent), id.uuidString == requested.lastPathComponent else {
+            throw FileOperationFailure.invalidRequest
+        }
+        let anchoredRoot = try DirectoryAnchor(requested, resolve: false)
+        var rootStat = stat(), markerStat = stat()
+        guard fstat(anchoredRoot.fd, &rootStat) == 0, rootStat.st_uid == geteuid(), rootStat.st_mode & 0o077 == 0,
+              fstatat(anchoredRoot.fd, Self.markerName, &markerStat, AT_SYMLINK_NOFOLLOW) == 0,
+              markerStat.st_mode & S_IFMT == S_IFREG, markerStat.st_uid == geteuid(),
+              markerStat.st_nlink == 1, (1...2048).contains(markerStat.st_size) else {
+            throw FileOperationFailure.invalidRequest
+        }
+        let data = try OperationJournal.read(name: Self.markerName, anchor: anchoredRoot)
+        guard let shape = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(shape.keys) == Set(["version", "jobID", "imageBytes", "imageDev", "imageIno",
+                                      "rootDev", "rootIno", "mountDev", "mountIno", "filesystem", "format"]) else {
+            throw FileOperationFailure.invalidRequest
+        }
+        let decoded = try JSONDecoder().decode(Marker.self, from: data)
+        guard decoded.version == 1, decoded.jobID == id.uuidString, decoded.imageBytes == Self.imageBytes,
+              decoded.rootDev == Int64(anchoredRoot.identity.device), decoded.rootIno == anchoredRoot.identity.inode,
+              decoded.filesystem == "msdos", decoded.format == "FAT32" else {
+            throw FileOperationFailure.invalidRequest
+        }
+        let anchoredMount = try DirectoryAnchor(anchoredRoot.url.appendingPathComponent("mount", isDirectory: true), resolve: false)
+        root = anchoredRoot; mount = anchoredMount; marker = decoded; markerData = data
+        try validate()
+    }
+
+    func validate() throws {
+        try root.validate(); try mount.validate()
+        guard try OperationJournal.read(name: Self.markerName, anchor: root) == markerData,
+              Int64(mount.identity.device) == marker.mountDev, mount.identity.inode == marker.mountIno,
+              mount.identity.device != root.identity.device else { throw FileOperationFailure.destinationChanged }
+        var image = stat(), filesystem = statfs()
+        guard fstatat(root.fd, "fixture.dmg", &image, AT_SYMLINK_NOFOLLOW) == 0,
+              image.st_mode & S_IFMT == S_IFREG, image.st_uid == geteuid(), image.st_nlink == 1,
+              image.st_size == Self.imageBytes, Int64(image.st_dev) == marker.imageDev,
+              image.st_ino == marker.imageIno, fstatfs(mount.fd, &filesystem) == 0 else {
+            throw FileOperationFailure.destinationChanged
+        }
+        let kind = withUnsafePointer(to: &filesystem.f_fstypename) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSNAMELEN)) { String(cString: $0) }
+        }
+        guard kind == "msdos", filesystem.f_flags & UInt32(MNT_LOCAL) != 0 else {
+            throw FileOperationFailure.destinationChanged
+        }
+    }
+
+    func createCase(_ label: String, rich: Bool) throws -> (source: URL, destination: URL, journal: URL) {
+        try validate()
+        guard label == "plain" || label == "rich" else { throw FileOperationFailure.invalidRequest }
+        let name = label + "-" + UUID().uuidString
+        let sourceDirectory = root.url.appendingPathComponent(name, isDirectory: true)
+        let destinationDirectory = mount.url.appendingPathComponent(name, isDirectory: true)
+        try FileManager().createDirectory(at: sourceDirectory, withIntermediateDirectories: false)
+        try FileManager().createDirectory(at: destinationDirectory, withIntermediateDirectories: false)
+        let source = sourceDirectory.appendingPathComponent("generated.bin")
+        try Data("Traverse generated FAT32 copy fixture\n".utf8).write(to: source, options: .withoutOverwriting)
+        if rich {
+            try setMetadataAttribute(source, "com.macexplorer.generated-test", "generated attribute")
+            try setMetadataAttribute(source, "com.apple.ResourceFork", "generated fork")
+        }
+        let fd = open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw posixFailure() }
+        defer { close(fd) }
+        var times = [timespec(tv_sec: 1_700_000_001, tv_nsec: 123_456_789),
+                     timespec(tv_sec: 1_700_000_001, tv_nsec: 123_456_789)]
+        guard futimens(fd, &times) == 0 else { throw posixFailure() }
+        let observed = try EntrySnapshot(fd: fd)
+        guard observed.modifiedSeconds == 1_700_000_001, observed.modifiedNanos == 123_456_789 else {
+            throw FileOperationFailure.unsupported
+        }
+        try validate()
+        return (source, destinationDirectory, root.url.appendingPathComponent("journal-" + name))
+    }
+}
+
 /// Injects only at the generated payload's publish rename, before its native post-walk.
 private final class MetadataPublicationMark: @unchecked Sendable {
     private enum Injection { case publication, laterEdit, none }
@@ -94,6 +206,105 @@ private final class MetadataPublicationMark: @unchecked Sendable {
 }
 
 @Suite(.serialized) struct CopyMetadataTests {
+    @Test func generatedCopyDifferenceReportsOnlyFixedMetadataFamilies() async throws {
+        let f = try MetadataFixture(); defer { f.remove() }
+        let result = await f.service().perform(.copy(sources: [f.source], destinationDirectory: f.destination))
+        #expect(result.result.disposition == .succeeded)
+        let copied = f.destination.appendingPathComponent("source")
+
+        func differences() throws -> (CopyComparison, CopyComparison) {
+            let source = CopyComparison(diagnoseMetadataFamilies: true),
+                destination = CopyComparison(diagnoseMetadataFamilies: true)
+            _ = try verifiedTree(f.source, cancellation: .init(), copyComparison: source)
+            _ = try verifiedTree(copied, cancellation: .init(), copyComparison: destination)
+            #expect(source.contentDigest == destination.contentDigest)
+            return (source, destination)
+        }
+
+        let baseline = try differences()
+        #expect(baseline.0.metadataDigest == baseline.1.metadataDigest)
+        #expect(try baseline.0.differingMetadataFamilies(from: baseline.1).isEmpty)
+
+        try FileManager().setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_001)], ofItemAtPath: copied.path)
+        let timeChanged = try differences()
+        #expect(timeChanged.0.metadataDigest != timeChanged.1.metadataDigest)
+        #expect(try timeChanged.0.differingMetadataFamilies(from: timeChanged.1) == [.modificationTime])
+
+        try setMetadataAttribute(copied, "com.macexplorer.generated-test", "generated attribute")
+        let attributeChanged = try differences()
+        #expect(try attributeChanged.0.differingMetadataFamilies(from: attributeChanged.1) == [.modificationTime, .otherExtendedAttributes])
+
+        try setMetadataAttribute(copied, "com.apple.ResourceFork", "generated fork")
+        let forkChanged = try differences()
+        #expect(try forkChanged.0.differingMetadataFamilies(from: forkChanged.1) == [.modificationTime, .resourceFork, .otherExtendedAttributes])
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["MAC_EXPLORER_RUN_FAT32_COPY_TESTS"] == "1",
+                   "Requires one separately admitted owned 128 MiB FAT32 image and fixed fixture marker."))
+    func generatedFAT32CopyDiagnosesMetadataWithoutTouchingOtherVolumes() async throws {
+        let fixture = try Fat32CopyFixture()
+        // Two fresh, tiny, generated sources. A third copy and one Undo belong
+        // only to a later reviewed portable-policy candidate.
+        for (label, rich) in [("plain", false), ("rich", true)] {
+            let item = try fixture.createCase(label, rich: rich)
+            let sourceComparison = CopyComparison(diagnoseMetadataFamilies: true)
+            let before = try verifiedTree(item.source, cancellation: .init(), copyComparison: sourceComparison)
+            let operation = RecoverableFileOperations(journalDirectory: item.journal)
+            let result = await operation.perform(.copy(sources: [item.source], destinationDirectory: item.destination), metadataPolicy: .strict)
+            try fixture.validate()
+            let status = try #require(result.result.items.first { $0.role == .transfer }?.status)
+            let recordID = try #require(result.recordID)
+            let record = try #require(try OperationJournal(item.journal).inspectRecord(recordID))
+            let publicCopy = item.destination.appendingPathComponent(item.source.lastPathComponent)
+            #expect(before.matches(try verifiedTree(item.source, cancellation: .init())))
+
+            var families: [CopyOrdinaryMetadataFamily] = []
+            var contentEqual = false, staged = false, sidecar = false
+            let area = try #require(record.areas.count == 1 ? record.areas[0] : nil)
+            let prefix = ".mac-explorer-recovery-"
+            guard area.url.deletingLastPathComponent() == item.destination,
+                  area.url.lastPathComponent.hasPrefix(prefix),
+                  UUID(uuidString: String(area.url.lastPathComponent.dropFirst(prefix.count))) != nil else {
+                throw FileOperationFailure.invalidRequest
+            }
+            if let anchor = try? DirectoryAnchor(area.url, resolve: false) {
+                var sibling = stat()
+                if fstatat(anchor.fd, "._payload", &sibling, AT_SYMLINK_NOFOLLOW) == 0 { sidecar = true }
+                else { #expect(errno == ENOENT) }
+                let destinationComparison = CopyComparison(diagnoseMetadataFamilies: true)
+                if let stagedTree = try? verifiedTree(parent: anchor.fd, name: "payload", cancellation: .init(),
+                                                        copyComparison: destinationComparison) {
+                    staged = true
+                    contentEqual = sourceComparison.contentDigest == destinationComparison.contentDigest
+                    families = try sourceComparison.differingMetadataFamilies(from: destinationComparison)
+                    #expect(stagedTree.identity.device == anchor.identity.device)
+                }
+            }
+            let statusName: String
+            switch status {
+            case .failed(let failure): statusName = failure.rawValue
+            case .succeeded: statusName = "succeeded"
+            case .skipped: statusName = "skipped"
+            case .cancelled: statusName = "cancelled"
+            case .notStarted: statusName = "notStarted"
+            }
+            print("FAT32_COPY_FAMILY variant=\(label) status=\(statusName) staged=\(staged) contentEqual=\(contentEqual) families=\(families.map(\.rawValue).joined(separator: ",")) appleDouble=\(sidecar)")
+
+            if label == "plain" {
+                #expect(status == .failed(.copyMetadataMismatch))
+                #expect(record.state == "needsReview" && staged && contentEqual)
+                #expect(families.contains(.modificationTime))
+                #expect(!FileManager().fileExists(atPath: publicCopy.path))
+            } else if case .failed = status {
+                #expect(record.state == "needsReview")
+                #expect(!FileManager().fileExists(atPath: publicCopy.path))
+            } else {
+                #expect(status == .succeeded)
+                #expect(FileManager().fileExists(atPath: publicCopy.path))
+            }
+        }
+    }
+
     @Test func realNativeQuarantineCopiesWithActualFingerprintAndUndo() async throws {
         let f = try MetadataFixture(); defer { f.remove() }
         try setMetadataAttribute(f.source, CopySecurity.quarantineName, fixtureQuarantine)
