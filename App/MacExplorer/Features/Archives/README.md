@@ -8,7 +8,8 @@ policy. Source support does not establish signed or installed availability.
 The current Development and qualified direct-build source share the TAR
 workbench described below. Its operation and restart/Undo checks have passed;
 packaged-app acceptance remains separate. These additions are not in public
-0.2.0. TAR-to-Finder promises still have their own held gate.
+0.2.0. Native TAR-to-Finder file/folder delivery and cold Undo are also qualified
+for the next direct source, with separate holds for scoped and Store editions.
 
 | Source | Responsibility |
 | --- | --- |
@@ -38,10 +39,10 @@ pool, bounded to 128 MiB and four copies. Restoring a tab or searching
 names does not decode it. `ApplicationCompressedArchives` retains actual worker,
 source access and prepared-copy leases through drain and the volume/Quit barrier.
 A prepared spool path is never operation authority. Nesting requires separate
-support. Outgoing TAR promises have a default-held Development implementation;
-they are not enabled by the extraction or ZIP-promise policy.
+support. Outgoing TAR promises have their own qualified Development/direct gate;
+extraction or ZIP-promise availability alone cannot enable them in another edition.
 
-ZIP and the held TAR exporter share `ArchivePromisePreparation` for coalesced
+ZIP and TAR exporters share `ArchivePromisePreparation` for coalesced
 metadata captures and stale-selection rejection. `ArchivePromiseExport` owns
 accepted native callbacks, scopes and actual worker drain. Its concrete
 `ArchivePromiseRoots` adapter selects the existing ZIP or TAR producer without

@@ -36,11 +36,15 @@ Earlier private-beta version numbers belong to a separate release history.
   while late work cannot replace a newer archive view's message.
   Early destination/admission refusals leave a source-window explanation and
   a sanitized diagnostic event.
+- Drag files and folders from plain, gzip or bzip2 TARs into Finder in the next
+  direct build, with guarded Undo after restart. The same export owner handles
+  ZIP and TAR delivery.
 - Editor closing follows animation preferences while retaining text until the
   native window closes. Quit joins a Close or its chosen Save already in progress.
 
 ### Fixed
 
+- Read-only bzip2 TAR browsing no longer depends on editing being enabled.
 - Moving TAR members within the same archive no longer depends on extraction
   being available. Internal moves keep their own checked drag path.
 - Saving a copy of an edited, marked ZIP uses a fresh macOS protection mark

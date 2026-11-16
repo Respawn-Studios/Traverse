@@ -71,8 +71,8 @@ import LocalStorage
         let publicPublication = input?["publicPublication"] as? Bool == true
         let format = input?["archiveFormat"] as? String ?? "zip"
         guard ["zip", "tar", "tar.gz", "tar.bz2"].contains(format), format == "zip" || publicPublication else { exit(2) }
-        TARPromiseExportFeature.qualifying = format != "zip"
-        guard format != "zip" || !TARPromiseExportFeature.available else { exit(2) }
+        TARPromiseExportFeature.qualifying = format != "zip" && !TARPromiseExportFeature.enabled
+        guard format == "zip" || TARPromiseExportFeature.available else { exit(2) }
         ArchivePromiseExportFeature.qualifyingPublications = publicPublication
         let settings = BrowserSettings(persist: false)
         settings.autoRefreshFolders = false; settings.folderSummariesEnabled = false; settings.reviewsRecoveryAtStartup = false
@@ -122,6 +122,11 @@ import LocalStorage
     private static func verify(_ root: URL, owner: BrowserWindowController, logger: DiagnosticRecorder,
         format: String, publicPublication: Bool, checks: inout [String]) async throws {
         let browser = owner.browser, source = root.appendingPathComponent("source/Generated." + format), access = CountedAccess()
+        if format != "zip", TARPromiseExportFeature.enabled {
+            try UIVerification.require(!TARPromiseExportFeature.qualifying
+                && TARPromiseExportFeature.available && TARArchiveEditingFeature.available,
+                "Ordinary TAR editing and native export are not available together")
+        }
         openedAccess = access
         guard let window = owner.window else { throw UIVerification.Failure(message: "Generated owner missing") }
         window.setFrame(.init(x: -12_000, y: -12_000, width: 1_000, height: 700), display: true)

@@ -2690,8 +2690,8 @@ import LocalStorage
         }.value
         let inputs = try await promiseInputs(selection)
         try require(inputs.values.allSatisfy(\.publiclyMarked), "promise-source-public-property")
-        // Check every format before requesting the first real gesture. A later
-        // read-only codec refusal must not waste the owner's earlier drags.
+        // Check every codec in the read-only role before requesting any manual
+        // drag, so a later opening refusal cannot strand earlier deliveries.
         for format in ["tar", "tar.gz", "tar.bz2"] {
             stage = format + "/readiness-preflight"
             let source = selection.fixtureRoot.appendingPathComponent("Promise." + format)

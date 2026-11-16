@@ -125,8 +125,9 @@ request; returning to a changed archive passively asks for Prepare again.
 Encrypted archives, ZIP64 and unsupported member metadata may be refused by a
 particular write route. A ZIP external drag and a remote external drag are
 different capabilities; this guide does not promise remote-to-Finder delivery.
-New TAR-to-Finder support remains held while its native delivery is checked;
-explicit extraction and supported copies into a Traverse pane remain available.
+The upcoming direct build also lets you drag files and folders from plain,
+gzip or bzip2 TARs into Finder, with guarded Undo after restart. This is separate
+from supported archive copies into a Traverse pane and is not in public 0.2.0.
 
 ## Text editor
 

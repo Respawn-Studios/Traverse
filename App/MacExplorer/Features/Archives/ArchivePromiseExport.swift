@@ -34,10 +34,10 @@ enum ArchivePromiseExportFeature {
     #endif
 }
 
-/// This new handoff is qualified separately from direct TAR extraction and ZIP
-/// promises. Distribution remains held while Development exercises the flow.
+/// Native file/folder delivery and cold Undo have their own qualification,
+/// separate from direct extraction and ZIP. Scoped and Store editions stay held.
 @MainActor enum TARPromiseExportFeature {
-    static let enabled = false
+    static let enabled = true
     #if DEBUG
     static var qualifying = false
     #endif
@@ -47,7 +47,8 @@ enum ArchivePromiseExportFeature {
         #else
         let admitted = enabled
         #endif
-        let ordinary = admitted && AppFeatureAvailability.policy.edition == .development
+        let edition = AppFeatureAvailability.policy.edition
+        let ordinary = admitted && (edition == .development || edition == .directPublic)
             && !GeneratedSandboxReview.admitted
         #if TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !DEBUG
         let signedPromiseReview = GeneratedArchiveDriveReview.tarPromisesForwardAdmitted
