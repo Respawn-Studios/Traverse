@@ -33,6 +33,7 @@ TEAM = remote_editor_qa.DEVELOPER_ID_TEAM
 ARCHITECTURE = named('arm64')
 NAME = 'Traverse Archive and Drive Review (Generated)'
 PHASE_CEILING = {'archive-warm': 1, 'archive-cold': 1, 'drive-read-only': 1}
+SUITE_JOBS = {'authored': 12, 'tar-members': 42}
 
 
 def canonical(value: str) -> str:
@@ -90,6 +91,9 @@ def expected_info(case: Path) -> dict:
         TraverseArchiveDriveQualificationCase=case.name,
         TraverseArchiveDriveQualificationRoot=str(case),
         TraverseArchiveDriveArchitecture=ARCHITECTURE.name)
+    admission = owned_json(case / 'evidence/archive-drive-admission.json')
+    if admission.get('archiveSuite') == 'tar-members':
+        info['TraverseArchiveDriveQualificationSuite'] = 'tar-members'
     return info
 
 
@@ -126,14 +130,15 @@ def admitted_case(tag: str) -> tuple[Path, dict]:
                        'master': development_owner.MASTER.name}:
         raise ValueError('Wrong archive/drive QA reservation')
     admission = owned_json(case / 'evidence/archive-drive-admission.json')
-    if set(admission) != {'packet', 'case', 'bundleIdentifier', 'caseRoot',
-                         'generatedOperationRoot', 'repoLocalLibrary', 'signingIdentity',
-                         'teamIdentifier', 'phaseLaunchCeiling'} \
-            or admission != dict(packet=PACKET, case=tag, bundleIdentifier=identifier(tag),
-                caseRoot=str(case), generatedOperationRoot=str(case / 'source/Operation Root'),
-                repoLocalLibrary=str(case / 'source/Library'),
-                signingIdentity=admission.get('signingIdentity'), teamIdentifier=TEAM,
-                phaseLaunchCeiling=PHASE_CEILING) \
+    member_suite = admission.get('archiveSuite') == 'tar-members'
+    expected_admission = dict(packet=PACKET, case=tag, bundleIdentifier=identifier(tag),
+        caseRoot=str(case), generatedOperationRoot=str(case / 'source/Operation Root'),
+        repoLocalLibrary=str(case / 'source/Library'),
+        signingIdentity=admission.get('signingIdentity'), teamIdentifier=TEAM,
+        phaseLaunchCeiling=PHASE_CEILING)
+    if member_suite:
+        expected_admission['archiveSuite'] = 'tar-members'
+    if admission != expected_admission \
             or not isinstance(admission['signingIdentity'], str) \
             or len(admission['signingIdentity']) != 40 \
             or any(ch not in '0123456789ABCDEF' for ch in admission['signingIdentity']):
@@ -189,7 +194,9 @@ def admitted_build(env: dict[str, str]) -> Path | None:
     return case
 
 
-def prepare(tag: str) -> dict:
+def prepare(tag: str, suite: str = 'authored') -> dict:
+    if suite not in SUITE_JOBS:
+        raise ValueError('Unknown archive/drive QA suite')
     case = case_path(tag)
     owned_directory(ROOT, private=False)
     owned_directory(development_owner.MASTER)
@@ -202,11 +209,14 @@ def prepare(tag: str) -> dict:
         (case / relative).mkdir(mode=0o700)
     put(case / 'reservation.json', {'packet': 'traverse-development-v1',
         'action': ACTION, 'master': development_owner.MASTER.name})
-    put(case / 'evidence/archive-drive-admission.json', dict(packet=PACKET, case=tag,
+    admission = dict(packet=PACKET, case=tag,
         bundleIdentifier=identifier(tag), caseRoot=str(case),
         generatedOperationRoot=str(case / 'source/Operation Root'),
         repoLocalLibrary=str(case / 'source/Library'), signingIdentity=identity,
-        teamIdentifier=TEAM, phaseLaunchCeiling=PHASE_CEILING))
+        teamIdentifier=TEAM, phaseLaunchCeiling=PHASE_CEILING)
+    if suite == 'tar-members':
+        admission['archiveSuite'] = suite
+    put(case / 'evidence/archive-drive-admission.json', admission)
     info = expected_info(case)
     descriptor = os.open(case / 'ArchiveDriveInfo.plist', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'wb') as output:
@@ -234,6 +244,7 @@ def inspect(tag: str) -> dict:
         return info.get('TraverseArchiveDriveQualificationCase') == tag \
             and info.get('TraverseArchiveDriveQualificationRoot') == str(case) \
             and info.get('TraverseArchiveDriveQualificationOnly') is True \
+            and info.get('TraverseArchiveDriveQualificationSuite', 'authored') == admission.get('archiveSuite', 'authored') \
             and not any(key.startswith('TraverseDriveImageQualification') for key in info)
     return signed_local_qa.inspect(case, admission, identifier(tag), role_info_valid,
                                    source_inventory, 'Archive/drive QA')
@@ -243,7 +254,9 @@ def issue_phase(tag: str, phase: str) -> dict:
     """Issue one exact attempt only after an owner scope and signed seal exist."""
     if phase not in PHASE_CEILING:
         raise ValueError('Unknown archive/drive QA phase')
-    case, _ = admitted_case(tag)
+    case, admission = admitted_case(tag)
+    suite = admission.get('archiveSuite', 'authored')
+    jobs = SUITE_JOBS[suite]
     built = owned_json(case / 'evidence/build-result.json', maximum=1 << 20)
     observed = inspect(tag)
     if built.get('passed') is not True \
@@ -256,6 +269,13 @@ def issue_phase(tag: str, phase: str) -> dict:
                      'archiveForwardJobsMaximum', 'archiveColdUndosMaximum',
                      'generatedFileMaximumBytes', 'generatedTotalMaximumBytes',
                      'driveMutationMaximum', 'networkSessionsMaximum', 'trashJobsMaximum'}
+    if suite == 'tar-members':
+        expected_keys.add('archiveSuite')
+        expected_keys.add('generatedFixtureEntriesMaximum')
+        if scope.get('archiveSuite') != suite \
+                or type(scope.get('generatedFixtureEntriesMaximum')) is not int \
+                or scope['generatedFixtureEntriesMaximum'] != 192:
+            raise ValueError('Archive member QA runtime suite differs')
     try:
         expires = datetime.strptime(scope['expiresUTC'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
     except (KeyError, TypeError, ValueError):
@@ -269,9 +289,9 @@ def issue_phase(tag: str, phase: str) -> dict:
             or scope['phaseLaunchCeiling'] != PHASE_CEILING \
             or any(type(value) is not int for value in scope['phaseLaunchCeiling'].values()) \
             or type(scope['archiveForwardJobsMaximum']) is not int \
-            or scope['archiveForwardJobsMaximum'] != 12 \
+            or scope['archiveForwardJobsMaximum'] != jobs \
             or type(scope['archiveColdUndosMaximum']) is not int \
-            or scope['archiveColdUndosMaximum'] != 12 \
+            or scope['archiveColdUndosMaximum'] != jobs \
             or type(scope['generatedFileMaximumBytes']) is not int \
             or not 1 <= scope['generatedFileMaximumBytes'] <= (1 << 20) \
             or type(scope['generatedTotalMaximumBytes']) is not int \
@@ -305,10 +325,13 @@ def main() -> None:
     parser.add_argument('action', choices=['prepare', 'build', 'inspect', 'issue-phase'])
     parser.add_argument('--case', required=True)
     parser.add_argument('--phase', choices=sorted(PHASE_CEILING))
+    parser.add_argument('--suite', choices=sorted(SUITE_JOBS))
     args = parser.parse_args()
     if (args.action == 'issue-phase') != (args.phase is not None):
         parser.error('--phase is required only for issue-phase')
-    result = prepare(args.case) if args.action == 'prepare' else build(args.case) if args.action == 'build' \
+    if args.suite is not None and args.action != 'prepare':
+        parser.error('--suite is available only for prepare')
+    result = prepare(args.case, args.suite or 'authored') if args.action == 'prepare' else build(args.case) if args.action == 'build' \
         else issue_phase(args.case, args.phase) if args.action == 'issue-phase' else inspect(args.case)
     print(json.dumps(result, indent=2, sort_keys=True))
     if result.get('passed') is False:

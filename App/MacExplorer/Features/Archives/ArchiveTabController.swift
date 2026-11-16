@@ -870,6 +870,8 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     #endif
     #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
     var zipModelForVerification: ArchiveBrowserModel? { if case .zip(let m, _) = model { return m }; return nil }
+    #endif
+    #if DEBUG || TRAVERSE_SFTP_EDITOR_QA || (TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION)
     var tarModelForVerification: TARBrowserModel? { if case .tar(let m, _) = model { return m }; return nil }
     #endif
 }

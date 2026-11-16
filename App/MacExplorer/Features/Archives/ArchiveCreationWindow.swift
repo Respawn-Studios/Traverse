@@ -276,6 +276,8 @@ enum ZIPMemberRenameFeature {
     #if DEBUG
     var chooseSourcesForVerification: ((NSOpenPanel) async -> [URL]?)?
     var undoAttemptedForVerification: Bool { undoAttempted }
+    #endif
+    #if DEBUG || (TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !TRAVERSE_SFTP_EDITOR_QA)
     var previewIsPendingForVerification: Bool { pending || prepareWork != nil || previewWork != nil }
     #endif
     init(sources: [URL], browser: BrowserViewController, engine: RecoverableFileOperations,

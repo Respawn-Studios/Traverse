@@ -124,7 +124,7 @@ enum ZIPRootExtractionPreparation {
     }
     var isCurrent: Bool { model?.isCurrentMemberDrag(self) == true || tarModel?.isCurrentMemberDrag(self) == true }
     var canStart: Bool { model?.canStartMemberDrag(ids) == true || tarModel?.canStartMemberDrag(tarIDs) == true }
-    var canExtract: Bool { model?.canExtractSelection(ids) == true || tarModel?.canStartMemberDrag(tarIDs) == true }
+    var canExtract: Bool { model?.canExtractSelection(ids) == true || tarModel?.canExtractMemberDrag(tarIDs) == true }
     func copy(to browser: BrowserViewController, destination: ArchiveExtractionDestination,
         isCurrent: @escaping @MainActor () -> Bool) -> Bool {
         if let model { return model.extractDropped(self, to: browser, destination: destination, isCurrent: isCurrent) }

@@ -40,6 +40,8 @@ Earlier private-beta version numbers belong to a separate release history.
 
 ### Fixed
 
+- Moving TAR members within the same archive no longer depends on extraction
+  being available. Internal moves keep their own checked drag path.
 - Saving a copy of an edited, marked ZIP uses a fresh macOS protection mark
   without copying the source's security attributes. The original stays intact
   and the new copy supports guarded Undo.

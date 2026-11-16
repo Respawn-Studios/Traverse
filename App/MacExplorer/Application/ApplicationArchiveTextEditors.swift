@@ -126,7 +126,7 @@ enum TARArchiveEditingFeature {
         return documents.isEmpty && opening.isEmpty
     }
     func resumeAfterCancelledTermination() { reviewingTermination = false }
-    #if DEBUG
+    #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
     func documentForVerification(source: URL, path: String) -> ArchiveTextDocumentController? {
         documents.values.first { $0.document.opened.archiveURL == source && $0.document.opened.archivePath == path }?.document
     }

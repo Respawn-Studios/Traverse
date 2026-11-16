@@ -393,9 +393,15 @@ struct TARClipboardSource {
             } catch { paste.report(error) }
         }
     }
+    func canExtractMemberDrag(_ ids: Set<TARItemID>) -> Bool {
+        canCaptureClipboardMembers && selection == ids
+            && (1...ArchiveMemberDragSource.maximumItems).contains(ids.count)
+            && !ApplicationFileActivity.gate.isClosed
+    }
     func canStartMemberDrag(_ ids: Set<TARItemID>) -> Bool {
-        (ArchiveMemberDragActivation.available || TARPromiseExportFeature.available
-            && exportPreparation.offer(for: ids) != nil) && canCaptureClipboardMembers && selection == ids
+        (((ArchiveMemberDragActivation.available || TARPromiseExportFeature.available
+            && exportPreparation.offer(for: ids) != nil) && canExtractMemberDrag(ids))
+            || canMoveMembers(ids)) && selection == ids
             && (1...ArchiveMemberDragSource.maximumItems).contains(ids.count)
             && !ApplicationFileActivity.gate.isClosed
     }
@@ -441,7 +447,7 @@ struct TARClipboardSource {
     }
     @discardableResult func extractDropped(_ offer: ArchiveMemberDragOffer, to target: BrowserViewController,
         destination: ArchiveExtractionDestination, isCurrent: @escaping @MainActor () -> Bool) -> Bool {
-        guard isCurrentMemberDrag(offer), canStartMemberDrag(offer.tarIDs), let session, let source,
+        guard isCurrentMemberDrag(offer), canExtractMemberDrag(offer.tarIDs), let session, let source,
               let origin = browser, target.canStartArchiveExtraction, isCurrent(),
               ApplicationArchiveExtraction.shared.canAcceptPreparedSelection else { return false }
         busy = true; isPreparingDrag = true; notice = "Preparing the selected items for copying…"

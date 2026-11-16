@@ -2201,6 +2201,11 @@ import LocalStorage
         let modifiedSeconds: Int64
         let modifiedNanoseconds: Int64
     }
+    private struct Member: Codable, Equatable, Sendable {
+        let kind: String
+        let bytes: Int
+        let sha256: String?
+    }
     private struct Step: Codable, Sendable {
         let recordID: UUID
         let kind: String
@@ -2208,6 +2213,8 @@ import LocalStorage
         let output: String
         let before: Observation?
         let after: Observation
+        let membersBefore: [String: Member]?
+        let membersAfter: [String: Member]?
     }
     private struct Receipt: Codable, Sendable {
         let phase: String
@@ -2407,19 +2414,164 @@ import LocalStorage
         }
     }
     private static func retainedStep(_ id: UUID, kind: String, format: ArchiveCreationFormat,
-        file: URL, before: Observation?, engine: RecoverableFileOperations) async throws -> Step {
+        file: URL, before: Observation?, engine: RecoverableFileOperations,
+        membersBefore: [String: Member]? = nil, membersAfter: [String: Member]? = nil) async throws -> Step {
         let history = try await engine.inspectExistingHistory()
         guard let record = history.records.first(where: { $0.id == id }) else { throw Refusal.check("record-missing") }
         try require(record.state == "committed" && record.canUndo && !record.canRecover,
             "committed-record-not-uncertain")
-        if kind == "update" {
+        if kind == "update" || kind.hasPrefix("member-") {
             try require(!record.canRestoreOriginalArchive && record.operation == "Update " + format.displayName,
                 "format-specific-update-contract")
         }
         let observation = try await observeFile(file)
         try require(observation.publiclyMarked && observation.bytes <= 1 << 20, "authored-public-mark")
         return Step(recordID: id, kind: kind, format: format.rawValue,
-            output: file.lastPathComponent, before: before, after: observation)
+            output: file.lastPathComponent, before: before, after: observation,
+            membersBefore: membersBefore, membersAfter: membersAfter)
+    }
+    private static func formats(for suite: GeneratedArchiveDriveReview.Suite) -> [ArchiveCreationFormat] {
+        suite == .authored ? ArchiveCreationFormat.allCases : ArchiveCreationFormat.allCases.filter { $0 != .zip }
+    }
+    private static let memberActions = ["new-folder", "new-file", "add", "replace", "duplicate", "rename", "batch-rename",
+                                        "group", "copy", "cut", "delegate-drag", "remove"]
+    private static func members(of file: URL, format: ArchiveCreationFormat) async throws -> [String: Member] {
+        let reader = ApplicationCompressedArchives.shared.reader(excluding: AppStorageLocations.protectedDirectories)
+        if format != .tar { try await ApplicationCompressedArchives.shared.prepareStorage() }
+        let session = try await (format == .tar ? reader.open(file) : reader.prepareCompressed(file))
+        do {
+            let page = try await session.searchNames("")
+            try require(!page.hasNext && page.total <= 32, "bounded-member-namespace")
+            var result: [String: Member] = [:]
+            for item in page.items {
+                try require(result[item.path] == nil, "unique-member-path")
+                switch item.kind {
+                case .directory:
+                    result[item.path] = Member(kind: "directory", bytes: 0, sha256: nil)
+                case .file:
+                    let selection = try await session.selectionForTextPreview(item.id)
+                    let document = try await reader.openTextForEdit(selection)
+                    let bytes = Data(document.contents.text.utf8)
+                    try require(bytes.count <= 1024 && UInt64(bytes.count) == item.logicalBytes, "bounded-member-text")
+                    result[item.path] = Member(kind: "file", bytes: bytes.count,
+                        sha256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+                default: throw Refusal.check("unexpected-generated-member-kind")
+                }
+            }
+            await session.close()
+            return result
+        } catch { await session.close(); throw error }
+    }
+    private static func textMember(_ text: String) -> Member {
+        let bytes = Data(text.utf8)
+        return Member(kind: "file", bytes: bytes.count,
+            sha256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+    }
+    private static func initialMembers(notes: String) -> [String: Member] {
+        let directory = Member(kind: "directory", bytes: 0, sha256: nil)
+        return ["Source": directory, "Source/Empty": directory, "Source/Nested": directory,
+            "Source/Nested/Config.json": textMember("{\"generated\":true}\n"),
+            "Source/Notes.txt": textMember(notes)]
+    }
+    private static func memberSuffix(_ selection: GeneratedArchiveDriveReview.Selection,
+        browser: BrowserViewController, engine: RecoverableFileOperations, inputs: [String: Observation],
+        steps: inout [Step], stage: inout String) async throws {
+        let directory = Member(kind: "directory", bytes: 0, sha256: nil)
+        let config = textMember("{\"generated\":true}\n")
+        for format in formats(for: .tarMembers) {
+            let source = selection.fixtureRoot.appendingPathComponent("Review." + format.rawValue)
+            var expected = initialMembers(notes: "before\nsigned edit " + format.rawValue + "\n")
+            func move(_ from: String, to: String) throws {
+                guard let member = expected.removeValue(forKey: from), expected[to] == nil else {
+                    throw Refusal.check("fixed-member-sequence")
+                }
+                expected[to] = member
+            }
+            for action in memberActions {
+                stage = format.rawValue + "/member-" + action
+                try require(try await members(of: source, format: format) == expected, "exact-members-before-action")
+                let beforeMembers = expected
+                let before = try await observeFile(source)
+                let id: UUID
+                switch action {
+                case "new-folder":
+                    id = try await TARMemberActionDriver.perform(.newFolder, source: source, browser: browser,
+                        folder: ["Source"], name: "Destination")
+                    expected["Source/Destination"] = directory
+                case "new-file":
+                    id = try await TARMemberActionDriver.perform(.newFile, source: source, browser: browser,
+                        folder: ["Source"], name: "Created.json")
+                    expected["Source/Created.json"] = textMember("")
+                    try await wait("created-member-native-editor") {
+                        guard let document = ApplicationLocalTextEditors.shared.archiveDocumentForVerification(
+                            source: source, path: "Source/Created.json") else { return false }
+                        return document.opened.archiveURL == source && document.opened.archivePath == "Source/Created.json"
+                            && nativeEditor() === document.window && document.window.surface.textView.string == ""
+                            && document.window.language.titleOfSelectedItem == "JSON"
+                    }
+                    guard let editor = nativeEditor(), editor.window?.isDocumentEdited == false else {
+                        throw Refusal.check("created-member-editor-is-clean")
+                    }
+                    editor.window?.performClose(nil)
+                    try await wait("created-member-editor-close-drain") {
+                        ApplicationLocalTextEditors.shared.documentReservationCount == 0
+                            && !ApplicationLocalTextEditors.shared.hasFileWork
+                    }
+                case "add":
+                    id = try await TARMemberActionDriver.perform(.add, source: source, browser: browser,
+                        folder: ["Source"], addedSource: selection.fixtureRoot.appendingPathComponent("Source/Nested/Config.json"),
+                        nativeAddDrop: true)
+                    expected["Source/Config.json"] = config
+                case "replace":
+                    id = try await TARMemberActionDriver.perform(.add, source: source, browser: browser,
+                        folder: ["Source"], addedSource: selection.fixtureRoot.appendingPathComponent("Source/Notes.txt"), replaceFiles: true)
+                    expected["Source/Notes.txt"] = textMember("before\n")
+                case "duplicate":
+                    id = try await TARMemberActionDriver.perform(.duplicate, source: source, browser: browser,
+                        folder: ["Source"], names: ["Config.json"])
+                    expected["Source/Config (1).json"] = config
+                case "rename":
+                    id = try await TARMemberActionDriver.perform(.rename, source: source, browser: browser,
+                        folder: ["Source"], names: ["Notes.txt"], name: "Renamed.txt")
+                    try move("Source/Notes.txt", to: "Source/Renamed.txt")
+                case "batch-rename":
+                    id = try await TARMemberActionDriver.perform(.rename, source: source, browser: browser,
+                        folder: ["Source"], names: ["Renamed.txt", "Config (1).json"], batchPrefix: "Batch ")
+                    try move("Source/Renamed.txt", to: "Source/Batch Renamed.txt")
+                    try move("Source/Config (1).json", to: "Source/Batch Config (1).json")
+                case "group":
+                    id = try await TARMemberActionDriver.perform(.group, source: source, browser: browser,
+                        folder: ["Source"], names: ["Batch Renamed.txt", "Batch Config (1).json"], name: "Grouped")
+                    expected["Source/Grouped"] = directory
+                    try move("Source/Batch Renamed.txt", to: "Source/Grouped/Batch Renamed.txt")
+                    try move("Source/Batch Config (1).json", to: "Source/Grouped/Batch Config (1).json")
+                case "copy":
+                    id = try await TARMemberActionDriver.transfer(.copy, source: source, browser: browser,
+                        from: ["Source", "Grouped"], names: ["Batch Renamed.txt"], destination: ["Source", "Destination"])
+                    expected["Source/Destination/Batch Renamed.txt"] = textMember("before\n")
+                case "cut":
+                    id = try await TARMemberActionDriver.transfer(.cut, source: source, browser: browser,
+                        from: ["Source", "Grouped"], names: ["Batch Config (1).json"], destination: ["Source", "Destination"])
+                    try move("Source/Grouped/Batch Config (1).json", to: "Source/Destination/Batch Config (1).json")
+                case "delegate-drag":
+                    id = try await TARMemberActionDriver.transfer(.drag, source: source, browser: browser,
+                        from: ["Source"], names: ["Config.json"], destination: ["Source", "Destination"])
+                    try move("Source/Config.json", to: "Source/Destination/Config.json")
+                case "remove":
+                    id = try await TARMemberActionDriver.perform(.remove, source: source, browser: browser,
+                        folder: ["Source", "Grouped"], names: ["Batch Renamed.txt"])
+                    try require(expected.removeValue(forKey: "Source/Grouped/Batch Renamed.txt") != nil, "fixed-removed-member")
+                default: throw Refusal.check("fixed-member-action")
+                }
+                let actual = try await members(of: source, format: format)
+                try require(actual == expected, "exact-members-after-action")
+                steps.append(try await retainedStep(id, kind: "member-" + action, format: format,
+                    file: source, before: before, engine: engine, membersBefore: beforeMembers, membersAfter: actual))
+                try await requireInputs(selection.fixtureRoot, unchanged: inputs)
+                try await write(Receipt(phase: format.rawValue + "-member-" + action, pid: getpid(), inputs: inputs, steps: steps),
+                    name: "authored-prefix-" + String(steps.count) + ".json", root: selection.caseRoot)
+            }
+        }
     }
     private static func warm(_ selection: GeneratedArchiveDriveReview.Selection,
         browser: BrowserViewController, engine: RecoverableFileOperations, stage: inout String) async throws {
@@ -2434,7 +2586,7 @@ import LocalStorage
         try require(before.values.allSatisfy(\.publiclyMarked), "marked-generated-inputs")
         try require((try await engine.inspectExistingHistory()).records.isEmpty, "fresh-authored-history")
         var steps: [Step] = []
-        for format in ArchiveCreationFormat.allCases {
+        for format in formats(for: selection.suite) {
             stage = format.rawValue + "/create-review"
             browser.navigate(to: .directory(selection.fixtureRoot))
             try await wait(stage) { !browser.isLoading && browser.orderingTask == nil }
@@ -2471,8 +2623,13 @@ import LocalStorage
             guard outcome.result.disposition == .succeeded,
                   let createID = outcome.recordID else { throw Refusal.check("create-result") }
             let output = selection.fixtureRoot.appendingPathComponent("Review." + format.rawValue)
+            stage = format.rawValue + "/verify-created-members"
+            let createdMembers = selection.suite == .tarMembers ? try await members(of: output, format: format) : nil
+            if let createdMembers {
+                try require(createdMembers == initialMembers(notes: "before\n"), "exact-created-members")
+            }
             let made = try await retainedStep(createID, kind: "create", format: format, file: output,
-                before: nil, engine: engine)
+                before: nil, engine: engine, membersAfter: createdMembers)
             steps.append(made)
             await ApplicationArchiveCreation.shared.closeAndDrain()
             stage = format.rawValue + "/editor"
@@ -2488,29 +2645,36 @@ import LocalStorage
             try require(editor.window?.isDocumentEdited == false && editor.saveButton.isEnabled,
                 "editor-save-confirmed")
             guard let updateID = browser.lastRecoveryRecordID, updateID != createID else { throw Refusal.check("editor-update-record") }
+            stage = format.rawValue + "/verify-saved-members"
+            let editedMembers = selection.suite == .tarMembers ? try await members(of: output, format: format) : nil
+            if let editedMembers {
+                try require(editedMembers == initialMembers(notes: edited), "exact-edited-members")
+            }
             steps.append(try await retainedStep(updateID, kind: "update", format: format, file: output,
-                before: made.after, engine: engine))
-            let copied = edited + "saved copy\n"
-            editor.surface.textView.insertText(copied,
-                replacementRange: .init(location: 0, length: editor.surface.textView.string.utf16.count))
-            try await wait("copy-edit-ready") { editor.window?.isDocumentEdited == true && editor.saveAsButton.isEnabled }
-            stage = format.rawValue + "/copy-cancel"
-            try await copyChoice(editor, name: nil, cancel: true)
-            try await wait("copy-cancel-idle") { !ApplicationLocalTextEditors.shared.hasFileWork }
-            let afterCancel = try await engine.inspectExistingHistory()
-            try require(editor.window?.isDocumentEdited == true && afterCancel.records.count == steps.count,
-                "copy-cancel-retained-draft")
-            stage = format.rawValue + "/save-copy"
-            let copy = selection.fixtureRoot.appendingPathComponent("Edited Copy." + format.rawValue)
-            try await copyChoice(editor, name: copy.lastPathComponent, cancel: false)
-            try await wait("editor-copy-terminal") { !ApplicationLocalTextEditors.shared.hasFileWork }
-            try require(editor.window?.isDocumentEdited == false && editor.saveButton.isEnabled,
-                "editor-copy-confirmed")
-            guard let copyID = browser.lastRecoveryRecordID, copyID != updateID else { throw Refusal.check("editor-copy-record") }
-            steps.append(try await retainedStep(copyID, kind: "copy", format: format, file: copy,
-                before: nil, engine: engine))
-            let unchanged = try await observeFile(output)
-            try require(unchanged == steps[steps.count - 2].after, "save-copy-kept-original")
+                before: made.after, engine: engine, membersBefore: createdMembers, membersAfter: editedMembers))
+            if selection.suite == .authored {
+                let copied = edited + "saved copy\n"
+                editor.surface.textView.insertText(copied,
+                    replacementRange: .init(location: 0, length: editor.surface.textView.string.utf16.count))
+                try await wait("copy-edit-ready") { editor.window?.isDocumentEdited == true && editor.saveAsButton.isEnabled }
+                stage = format.rawValue + "/copy-cancel"
+                try await copyChoice(editor, name: nil, cancel: true)
+                try await wait("copy-cancel-idle") { !ApplicationLocalTextEditors.shared.hasFileWork }
+                let afterCancel = try await engine.inspectExistingHistory()
+                try require(editor.window?.isDocumentEdited == true && afterCancel.records.count == steps.count,
+                    "copy-cancel-retained-draft")
+                stage = format.rawValue + "/save-copy"
+                let copy = selection.fixtureRoot.appendingPathComponent("Edited Copy." + format.rawValue)
+                try await copyChoice(editor, name: copy.lastPathComponent, cancel: false)
+                try await wait("editor-copy-terminal") { !ApplicationLocalTextEditors.shared.hasFileWork }
+                try require(editor.window?.isDocumentEdited == false && editor.saveButton.isEnabled,
+                    "editor-copy-confirmed")
+                guard let copyID = browser.lastRecoveryRecordID, copyID != updateID else { throw Refusal.check("editor-copy-record") }
+                steps.append(try await retainedStep(copyID, kind: "copy", format: format, file: copy,
+                    before: nil, engine: engine))
+                let unchanged = try await observeFile(output)
+                try require(unchanged == steps[steps.count - 2].after, "save-copy-kept-original")
+            }
             editor.window?.performClose(nil)
             try await wait("editor-native-close-drain") {
                 ApplicationLocalTextEditors.shared.documentReservationCount == 0
@@ -2520,7 +2684,18 @@ import LocalStorage
             try await write(Receipt(phase: format.rawValue + "-committed", pid: getpid(), inputs: before, steps: steps),
                 name: "authored-prefix-" + String(steps.count) + ".json", root: selection.caseRoot)
         }
-        try require(steps.count == 12 && Set(steps.map(\.recordID)).count == 12, "exact-forward-job-count")
+        if selection.suite == .tarMembers {
+            try await memberSuffix(selection, browser: browser, engine: engine, inputs: before, steps: &steps, stage: &stage)
+        }
+        try require(steps.count == selection.suite.jobsMaximum
+            && Set(steps.map(\.recordID)).count == selection.suite.jobsMaximum, "exact-forward-job-count")
+        if selection.suite == .tarMembers {
+            let history = try await engine.inspectExistingHistory()
+            try require(history.records.count == steps.count
+                && Set(history.records.map(\.id)) == Set(steps.map(\.recordID))
+                && history.records.allSatisfy { $0.state == "committed" && $0.canUndo && !$0.canRecover },
+                "complete-member-forward-history")
+        }
         try await write(Receipt(phase: "warm-completed", pid: getpid(), inputs: before, steps: steps),
             name: "authored-warm.json", root: selection.caseRoot)
     }
@@ -2531,8 +2706,9 @@ import LocalStorage
                 maximum: 1 << 20) else { throw Refusal.check("warm-receipt") }
             return try JSONDecoder().decode(Receipt.self, from: data)
         }.value
-        try require(receipt.phase == "warm-completed" && receipt.pid != getpid() && receipt.steps.count == 12
-            && Set(receipt.steps.map(\.recordID)).count == 12, "true-cold-process-and-jobs")
+        try require(receipt.phase == "warm-completed" && receipt.pid != getpid()
+            && receipt.steps.count == selection.suite.jobsMaximum
+            && Set(receipt.steps.map(\.recordID)).count == selection.suite.jobsMaximum, "true-cold-process-and-jobs")
         let warm = try await Task.detached {
             guard let data = OperationAccessFixtureIO.readRegular(selection.caseRoot.appendingPathComponent("evidence/archive-warm-result.json"),
                 maximum: 4096) else { throw Refusal.check("warm-terminal-receipt") }
@@ -2540,17 +2716,38 @@ import LocalStorage
         }.value
         try require(warm.passed && warm.phase == "archive-warm" && warm.stage == "completed"
             && warm.pid == receipt.pid, "warm-owner-drain-confirmed")
+        let kinds = selection.suite == .authored ? ["create", "update", "copy"] : ["create", "update"]
+        var sequence = formats(for: selection.suite).flatMap { format in kinds.map { (format, $0) } }
+        if selection.suite == .tarMembers {
+            sequence += formats(for: selection.suite).flatMap { format in memberActions.map { (format, "member-" + $0) } }
+        }
+        try require(sequence.count == receipt.steps.count, "fixed-authored-sequence-count")
         for (index, step) in receipt.steps.enumerated() {
-            let format = ArchiveCreationFormat.allCases[index / 3]
-            let kind = ["create", "update", "copy"][index % 3]
+            let (format, kind) = sequence[index]
             try require(step.format == format.rawValue && step.kind == kind
                 && step.output == (kind == "copy" ? "Edited Copy." : "Review.") + format.rawValue,
                 "fixed-authored-job-sequence")
-            if kind == "update" {
-                try require(step.before == receipt.steps[index - 1].after, "exact-update-before-image")
+            if kind == "update" || kind.hasPrefix("member-") {
+                let previous = receipt.steps[..<index].last { $0.output == step.output }
+                try require(previous != nil && step.before == previous?.after, "exact-update-before-image")
+                if selection.suite == .tarMembers {
+                    try require(step.membersBefore != nil && step.membersAfter != nil
+                        && step.membersBefore == previous?.membersAfter, "member-namespace-receipt")
+                }
             } else { try require(step.before == nil, "new-copy-has-no-replacement") }
+            if selection.suite == .tarMembers && kind == "create" {
+                try require(step.membersBefore == nil && step.membersAfter == initialMembers(notes: "before\n"),
+                    "member-setup-create-namespace")
+            }
         }
         try await requireInputs(selection.fixtureRoot, unchanged: receipt.inputs)
+        if selection.suite == .tarMembers {
+            let history = try await engine.inspectExistingHistory()
+            try require(history.records.count == receipt.steps.count
+                && Set(history.records.map(\.id)) == Set(receipt.steps.map(\.recordID))
+                && history.records.allSatisfy { $0.state == "committed" && $0.canUndo && !$0.canRecover },
+                "complete-member-cold-admission-history")
+        }
         try await write(Receipt(phase: "cold-attempt", pid: getpid(), inputs: receipt.inputs, steps: []),
             name: "authored-cold-attempt.json", root: selection.caseRoot)
         for (index, step) in receipt.steps.reversed().enumerated() {
@@ -2560,12 +2757,15 @@ import LocalStorage
             let file = selection.fixtureRoot.appendingPathComponent(step.output)
             let current = try await observeFile(file)
             try require(current == step.after && current.publiclyMarked, "cold-exact-output")
+            if let expected = step.membersAfter, let format = ArchiveCreationFormat(rawValue: step.format) {
+                try require(try await members(of: file, format: format) == expected, "cold-exact-member-namespace")
+            }
             let history = try await engine.inspectExistingHistory()
             guard let record = history.records.first(where: { $0.id == step.recordID }),
                   record.state == "committed", record.canUndo
             else { throw Refusal.check("cold-record-and-parent") }
             let requirement = try await engine.undoAccessRequirement(recordID: step.recordID)
-            if step.kind == "update" {
+            if step.kind == "update" || step.kind.hasPrefix("member-") {
                 // Original updates already bind their retained archive and
                 // parent. The separate folder-grant requirement is for newly
                 // produced outputs, not these native replacement records.
@@ -2584,6 +2784,9 @@ import LocalStorage
             if let expected = step.before {
                 let restored = try await observeFile(file)
                 try require(restored == expected && restored.publiclyMarked, "exact-earlier-archive-restored")
+                if let expectedMembers = step.membersBefore, let format = ArchiveCreationFormat(rawValue: step.format) {
+                    try require(try await members(of: file, format: format) == expectedMembers, "exact-earlier-member-namespace")
+                }
             } else {
                 let absent = await Task.detached {
                     var facts = stat(); return lstat(file.path, &facts) < 0 && errno == ENOENT
@@ -2598,6 +2801,13 @@ import LocalStorage
                 root: selection.caseRoot)
         }
         try await requireInputs(selection.fixtureRoot, unchanged: receipt.inputs)
+        if selection.suite == .tarMembers {
+            let history = try await engine.inspectExistingHistory()
+            try require(history.records.count == receipt.steps.count
+                && Set(history.records.map(\.id)) == Set(receipt.steps.map(\.recordID))
+                && history.records.allSatisfy { $0.state == "undone" && !$0.canUndo && !$0.canRecover },
+                "complete-member-inverse-history")
+        }
         try await write(Receipt(phase: "cold-completed", pid: getpid(), inputs: receipt.inputs, steps: receipt.steps),
             name: "authored-cold.json", root: selection.caseRoot)
     }
@@ -2647,6 +2857,10 @@ import LocalStorage
         } catch {
             let code: String
             if case Refusal.check(let detail) = error { code = detail }
+            else if let failure = error as? TARMemberActionDriver.Failure {
+                code = String(failure.stage.prefix(while: { $0 != ":" }))
+            }
+            else if let failure = error as? TARArchiveFailure { code = "archive-reader-" + failure.rawValue }
             else if let failure = error as? FileOperationFailure { code = failure.rawValue }
             else { code = "operation-refused" }
             let browser = owner?.browser

@@ -101,7 +101,7 @@ final class ApplicationLocalTextEditors {
                             report: { [weak browser] message in browser?.status.stringValue = message })
     }
 
-    #if DEBUG
+    #if DEBUG || TRAVERSE_ARCHIVE_DRIVE_QA
     func archiveDocumentForVerification(source: URL, path: String) -> ArchiveTextDocumentController? {
         archiveEditors.documentForVerification(source: source, path: path)
     }

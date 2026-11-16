@@ -2,7 +2,7 @@ import AppKit
 import FileOperations
 import ObjectiveC
 
-#if DEBUG
+#if DEBUG || (TRAVERSE_ARCHIVE_DRIVE_QA && MAC_EXPLORER_DISTRIBUTION && !TRAVERSE_SFTP_EDITOR_QA)
 /// Only a private generated-fixture pasteboard. No native drag session, Finder
 /// transfer, external application or production mutation is started by this probe.
 @MainActor
@@ -40,7 +40,9 @@ final class FixtureDraggingInfo: NSObject, NSDraggingInfo {
                                 classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
                                 using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
 }
+#endif
 
+#if DEBUG
 /// Timer target enters from a native run-loop callback after the verification
 /// Task has suspended, so no Swift Task executor frame surrounds the pump.
 @MainActor

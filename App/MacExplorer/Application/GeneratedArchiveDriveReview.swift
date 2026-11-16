@@ -12,6 +12,12 @@ enum GeneratedArchiveDriveReview {
         case driveReadOnly = "drive-read-only"
     }
 
+    enum Suite: String, Sendable {
+        case authored
+        case tarMembers = "tar-members"
+        var jobsMaximum: Int { self == .authored ? 12 : 42 }
+    }
+
     struct Selection: Sendable {
         let caseID: String
         let bundleID: String
@@ -19,6 +25,7 @@ enum GeneratedArchiveDriveReview {
         let fixtureRoot: URL
         let journalDirectory: URL
         let phase: Phase
+        let suite: Suite
     }
 
     static let requested: Bool = {
@@ -39,6 +46,9 @@ enum GeneratedArchiveDriveReview {
         let info = Bundle.main.infoDictionary ?? [:]
         guard let caseID = info["TraverseArchiveDriveQualificationCase"] as? String,
               UUID(uuidString: caseID)?.uuidString == caseID else { return nil }
+        let suiteValue = info["TraverseArchiveDriveQualificationSuite"]
+        guard suiteValue == nil || suiteValue is String,
+              let suite = Suite(rawValue: suiteValue as? String ?? "authored") else { return nil }
         let bundleID = identifierPrefix + caseID.lowercased().replacingOccurrences(of: "-", with: "")
         guard info["TraverseArchiveDriveQualificationOnly"] as? Bool == true,
               Bundle.main.bundleIdentifier == bundleID,
@@ -81,7 +91,7 @@ enum GeneratedArchiveDriveReview {
             .appendingPathComponent(bundleID, isDirectory: true)
         return Selection(caseID: caseID, bundleID: bundleID, caseRoot: root, fixtureRoot: fixture,
             journalDirectory: state.appendingPathComponent("operation-recovery", isDirectory: true),
-            phase: phase)
+            phase: phase, suite: suite)
         #else
         return nil
         #endif
@@ -136,18 +146,25 @@ enum GeneratedArchiveDriveReview {
             bundleID: selected.bundleID, caseRoot: selected.caseRoot,
             phase: selected.phase.rawValue, prefix: "archive-drive-",
             packet: "archive-drive-phase-permit-v1") { scope in
-            guard Set(scope.keys) == Set(["packet", "case", "bundleIdentifier", "caseRoot", "fixtureRoot",
+            var keys = Set(["packet", "case", "bundleIdentifier", "caseRoot", "fixtureRoot",
                                           "artifactTreeSHA256", "expiresUTC", "phaseLaunchCeiling",
                                           "archiveForwardJobsMaximum", "archiveColdUndosMaximum",
                                           "generatedFileMaximumBytes", "generatedTotalMaximumBytes",
-                                          "driveMutationMaximum", "networkSessionsMaximum", "trashJobsMaximum"]),
+                                          "driveMutationMaximum", "networkSessionsMaximum", "trashJobsMaximum"])
+            if selected.suite == .tarMembers {
+                keys.insert("archiveSuite")
+                keys.insert("generatedFixtureEntriesMaximum")
+                guard scope["archiveSuite"] as? String == selected.suite.rawValue,
+                      GeneratedSignedReviewAdmission.exactInteger(scope["generatedFixtureEntriesMaximum"]) == 192 else { return false }
+            }
+            guard Set(scope.keys) == keys,
                   scope["packet"] as? String == "archive-drive-runtime-scope-v1",
                   scope["fixtureRoot"] as? String == selected.fixtureRoot.path,
                   let ceilings = scope["phaseLaunchCeiling"] as? [String: Any],
                   Set(ceilings.keys) == Set(["archive-warm", "archive-cold", "drive-read-only"]),
                   ceilings.values.allSatisfy({ GeneratedSignedReviewAdmission.exactInteger($0) == 1 }),
-                  GeneratedSignedReviewAdmission.exactInteger(scope["archiveForwardJobsMaximum"]) == 12,
-                  GeneratedSignedReviewAdmission.exactInteger(scope["archiveColdUndosMaximum"]) == 12,
+                  GeneratedSignedReviewAdmission.exactInteger(scope["archiveForwardJobsMaximum"]) == selected.suite.jobsMaximum,
+                  GeneratedSignedReviewAdmission.exactInteger(scope["archiveColdUndosMaximum"]) == selected.suite.jobsMaximum,
                   let fileMaximum = GeneratedSignedReviewAdmission.exactInteger(scope["generatedFileMaximumBytes"]),
                   let totalMaximum = GeneratedSignedReviewAdmission.exactInteger(scope["generatedTotalMaximumBytes"]),
                   0 < fileMaximum, fileMaximum <= (1 << 20),
