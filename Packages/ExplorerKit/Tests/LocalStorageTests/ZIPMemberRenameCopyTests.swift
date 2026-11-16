@@ -2780,7 +2780,7 @@ final class ZIPMemberRenameCopyTests: XCTestCase {
         XCTAssertEqual(try Self.attribute("com.apple.quarantine", on: source), sourceMark)
     }
 
-    func testPublicCreateStagePolicyDoesNotAdmitZIPMemberCopy() async throws {
+    func testQualifiedPublicStageMarksZIPMemberTextCopyWithoutCopyingSourceMark() async throws {
         let f = try Fixture()
         try Self.pythonZIP.write(to: f.archive, options: .withoutOverwriting)
         let sourceMark = Data("0086;65000001;TraverseGenerated;".utf8)
@@ -2788,17 +2788,103 @@ final class ZIPMemberRenameCopyTests: XCTestCase {
             $0.baseAddress, $0.count, 0, XATTR_CREATE) }) == 0 else {
             throw FileOperationFailure.ioFailure
         }
-        let service = RecoverableFileOperations(journalDirectory: f.root.appendingPathComponent("journal"),
+        let original = try Data(contentsOf: f.archive)
+        let history = f.root.appendingPathComponent("journal")
+        let service = RecoverableFileOperations(journalDirectory: history,
             authoredZIPMetadataPolicy: .nativeCreate,
             nativeAuthoredCreatePublicMarkPolicy: .sourceQualification)
-        let member = try await f.member()
-        let plan = try await service.prepareZIPMemberRenameCopy(member, to: "After.txt",
-            outputName: "Held Native Copy.zip", observing: try await service.observeSelection([f.archive]))
+        let opened = try await f.textDocument()
+        let edited = try TextDocumentValue.edited("publicly marked copy\n", format: opened.contents.format)
+        let plan = try await service.prepareZIPMemberTextReplacementCopy(opened, contents: edited,
+            outputName: "Public Native Copy.zip", observing: try await service.observeSelection([f.archive]))
         let result = await service.performArchiveCreation(plan)
-        XCTAssertEqual(result.result.items.first?.status, .failed(.copyMetadataMismatch))
+        XCTAssertEqual(result.result.disposition, .succeeded)
+        let outputMark = try XCTUnwrap(Self.attribute("com.apple.quarantine", on: plan.destination))
+        XCTAssertNotEqual(outputMark, sourceMark)
+        let properties = try XCTUnwrap(try plan.destination.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties)
+        XCTAssertEqual(properties[kLSQuarantineAgentNameKey as String] as? String, "Traverse")
+        XCTAssertNotNil(properties[kLSQuarantineTimeStampKey as String] as? Date)
+        XCTAssertNil(properties[kLSQuarantineTypeKey as String])
+        XCTAssertEqual(try Self.decoded(Data(contentsOf: plan.destination), named: "Folder/Before.txt"), edited.encoded)
+        XCTAssertEqual(try Self.attribute("com.apple.quarantine", on: f.archive), sourceMark)
+        XCTAssertEqual(try Data(contentsOf: f.archive), original)
+        let cold = RecoverableFileOperations(journalDirectory: history)
+        let undone = await cold.undo(recordID: try XCTUnwrap(result.recordID))
+        XCTAssertEqual(undone.result.disposition, .succeeded)
         XCTAssertFalse(FileManager.default.fileExists(atPath: plan.destination.path))
         XCTAssertEqual(try Self.attribute("com.apple.quarantine", on: f.archive), sourceMark)
-        XCTAssertEqual(try Data(contentsOf: f.archive), Self.pythonZIP)
+    }
+
+    func testQualifiedPublicZIPMemberCopyRetainsSourceAndRecoveryOnChangedStage() async throws {
+        let f = try Fixture()
+        try Self.pythonZIP.write(to: f.archive, options: .withoutOverwriting)
+        let sourceMark = Data("0086;65000001;TraverseGenerated;".utf8)
+        guard sourceMark.withUnsafeBytes({ setxattr(f.archive.path, "com.apple.quarantine",
+            $0.baseAddress, $0.count, 0, XATTR_CREATE) }) == 0 else {
+            throw FileOperationFailure.ioFailure
+        }
+        let original = try Data(contentsOf: f.archive)
+        var hooks = RecoveryHooks()
+        hooks.archiveProduction.stage = { stage, payload in
+            guard stage == .payloadCreated else { return }
+            let malformed = Data("not-a-quarantine-mark".utf8)
+            guard malformed.withUnsafeBytes({ setxattr(payload.path, "com.apple.quarantine",
+                $0.baseAddress, $0.count, 0, XATTR_CREATE) }) == 0 else {
+                throw FileOperationFailure.ioFailure
+            }
+        }
+        let history = f.root.appendingPathComponent("journal")
+        let service = RecoverableFileOperations(journalDirectory: history, hooks: hooks,
+            authoredZIPMetadataPolicy: .nativeCreate,
+            nativeAuthoredCreatePublicMarkPolicy: .sourceQualification)
+        let opened = try await f.textDocument()
+        let edited = try TextDocumentValue.edited("changed stage copy\n", format: opened.contents.format)
+        let plan = try await service.prepareZIPMemberTextReplacementCopy(opened, contents: edited,
+            outputName: "Changed Stage Copy.zip", observing: try await service.observeSelection([f.archive]))
+        let result = await service.performArchiveCreation(plan)
+        XCTAssertEqual(result.result.disposition, .failed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: plan.destination.path))
+        XCTAssertEqual(try Self.attribute("com.apple.quarantine", on: f.archive), sourceMark)
+        XCTAssertEqual(try Data(contentsOf: f.archive), original)
+        let record = try XCTUnwrap(OperationJournal(history).inspectRecord(try XCTUnwrap(result.recordID)))
+        XCTAssertEqual(record.state, "needsReview")
+        XCTAssertTrue(record.steps.isEmpty)
+    }
+
+    func testQualifiedPublicZIPMemberCopyRetainsMarkedStageAfterProductionInterruption() async throws {
+        let f = try Fixture()
+        try Self.pythonZIP.write(to: f.archive, options: .withoutOverwriting)
+        let sourceMark = Data("0086;65000001;TraverseGenerated;".utf8)
+        guard sourceMark.withUnsafeBytes({ setxattr(f.archive.path, "com.apple.quarantine",
+            $0.baseAddress, $0.count, 0, XATTR_CREATE) }) == 0 else {
+            throw FileOperationFailure.ioFailure
+        }
+        let original = try Data(contentsOf: f.archive)
+        var hooks = RecoveryHooks()
+        hooks.archiveProduction.stage = { stage, _ in
+            if stage == .produced { throw FileOperationFailure.ioFailure }
+        }
+        let history = f.root.appendingPathComponent("journal")
+        let service = RecoverableFileOperations(journalDirectory: history, hooks: hooks,
+            authoredZIPMetadataPolicy: .nativeCreate,
+            nativeAuthoredCreatePublicMarkPolicy: .sourceQualification)
+        let opened = try await f.textDocument()
+        let edited = try TextDocumentValue.edited("interrupted public copy\n", format: opened.contents.format)
+        let plan = try await service.prepareZIPMemberTextReplacementCopy(opened, contents: edited,
+            outputName: "Interrupted Public Copy.zip", observing: try await service.observeSelection([f.archive]))
+        let result = await service.performArchiveCreation(plan)
+        XCTAssertNotEqual(result.result.disposition, .succeeded)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: plan.destination.path))
+        XCTAssertEqual(try Self.attribute("com.apple.quarantine", on: f.archive), sourceMark)
+        XCTAssertEqual(try Data(contentsOf: f.archive), original)
+        let record = try XCTUnwrap(OperationJournal(history).inspectRecord(try XCTUnwrap(result.recordID)))
+        XCTAssertEqual(record.state, "needsReview")
+        XCTAssertTrue(record.steps.isEmpty)
+        let area = try XCTUnwrap(record.areas.first)
+        let retained = area.url.appendingPathComponent("payload")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: retained.path))
+        let retainedMark = try XCTUnwrap(Self.attribute("com.apple.quarantine", on: retained))
+        XCTAssertNotEqual(retainedMark, sourceMark)
     }
 
     func testNativeStageCandidateRefusesUnrecognizedStageQuarantine() async throws {

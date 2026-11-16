@@ -40,6 +40,9 @@ Earlier private-beta version numbers belong to a separate release history.
 
 ### Fixed
 
+- Saving a copy of an edited, marked ZIP uses a fresh macOS protection mark
+  without copying the source's security attributes. The original stays intact
+  and the new copy supports guarded Undo.
 - Creating a folder and finishing Rename keep the current listing visible while
   its replacement loads.
 - Pane transitions leave unchanged neighbours still, preserve Glass backgrounds

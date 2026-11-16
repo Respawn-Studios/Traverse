@@ -663,14 +663,18 @@ extension RecoverableFileOperations {
                     throw FileOperationFailure.unsupported
                 }
                 nativeCreateMarkedSource = source.hasMarkedSource
-            } else if nativeCreate && authoredZIP == nil {
-                let source = plan.producer as? any NativeZIPCreationSourceWitness
-                if nativeAuthoredCreatePublicMarkPolicy == .sourceQualification && source == nil {
-                    throw FileOperationFailure.unsupported
+            } else if nativeCreate {
+                if let authoredZIP {
+                    nativeCreateMarkedSource = authoredZIP.hasMarkedSource
+                } else {
+                    let source = plan.producer as? any NativeZIPCreationSourceWitness
+                    if nativeAuthoredCreatePublicMarkPolicy == .sourceQualification && source == nil {
+                        throw FileOperationFailure.unsupported
+                    }
+                    nativeCreateMarkedSource = source?.hasMarkedSource == true
                 }
-                nativeCreateMarkedSource = source?.hasMarkedSource == true
             } else { nativeCreateMarkedSource = false }
-            if nativeArchiveCreate, authoredZIP == nil, nativeCreateMarkedSource,
+            if nativeArchiveCreate, nativeCreateMarkedSource,
                nativeAuthoredCreatePublicMarkPolicy == .sourceQualification {
                 try prepareNativeAuthoredPublicStageMark(descriptor, parent: area, name: "payload")
             }
