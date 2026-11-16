@@ -43,10 +43,93 @@ private func setMetadataAttribute(_ url: URL, _ name: String, _ value: String) t
 }
 private let fixtureQuarantine = "0083;67000000;MacExplorerGeneratedFixture;00000000-0000-0000-0000-000000000001"
 
+private enum Fat32MountProof {
+    static func device(_ value: String, whole: Bool) -> Bool {
+        let pattern = whole ? #"^/dev/disk[0-9]+$"# : #"^/dev/disk[0-9]+(s[0-9]+)?$"#
+        return value.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    static func imageGraph(_ data: Data, imagePath: String, mountPath: String,
+                           imageDevice: String, volumeDevice: String, owner: UInt32) -> Bool {
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let images = (plist as? [String: Any])?["images"] as? [[String: Any]] else { return false }
+        let matches = images.filter { $0["image-path"] as? String == imagePath }
+        guard matches.count == 1, matches[0]["owner-uid"] as? Int == Int(owner),
+              let entities = matches[0]["system-entities"] as? [[String: Any]],
+              let first = entities.first?["dev-entry"] as? String, first == imageDevice,
+              device(imageDevice, whole: true), device(volumeDevice, whole: false),
+              volumeDevice == imageDevice || volumeDevice.hasPrefix(imageDevice + "s") else { return false }
+        let mounted = entities.filter { $0["mount-point"] != nil }
+        return mounted.count == 1 && mounted[0]["mount-point"] as? String == mountPath
+            && mounted[0]["dev-entry"] as? String == volumeDevice
+    }
+
+    static func bootSector(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count == 512 else { return false }
+        func word(_ at: Int) -> Int { Int(bytes[at]) | Int(bytes[at + 1]) << 8 }
+        func doubleWord(_ at: Int) -> Int { word(at) | word(at + 2) << 16 }
+        let sectorsPerCluster = Int(bytes[13]), reserved = word(14), fatCount = Int(bytes[16])
+        let fatSectors = doubleWord(36)
+        let dataSectors = 262_144 - reserved - fatCount * fatSectors
+        let clusters = sectorsPerCluster == 0 ? 0 : dataSectors / sectorsPerCluster
+        return bytes[510] == 0x55 && bytes[511] == 0xAA
+            && Array(bytes[82..<90]) == Array("FAT32   ".utf8)
+            && word(11) == 512 && sectorsPerCluster > 0 && sectorsPerCluster <= 128
+            && sectorsPerCluster & (sectorsPerCluster - 1) == 0
+            && reserved > 0 && (fatCount == 1 || fatCount == 2) && fatSectors > 0
+            && word(17) == 0 && word(19) == 0 && word(22) == 0
+            && doubleWord(32) == 262_144 && doubleWord(44) >= 2
+            && (65_525...0x0FFFFFF5).contains(clusters)
+    }
+
+    static func currentImageInfo() throws -> Data {
+        let child = Process(), output = Pipe()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        child.arguments = ["info", "-plist"]
+        child.standardInput = FileHandle.nullDevice
+        child.standardOutput = output
+        child.standardError = FileHandle.nullDevice
+        try child.run()
+        try? output.fileHandleForWriting.close()
+        defer {
+            if child.isRunning { child.terminate() }
+            try? output.fileHandleForReading.close()
+        }
+        var data = Data(), eof = false
+        let deadline = ProcessInfo.processInfo.systemUptime + 10
+        while !eof {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw FileOperationFailure.unavailable }
+            var descriptor = pollfd(fd: output.fileHandleForReading.fileDescriptor,
+                                    events: Int16(POLLIN), revents: 0)
+            let ready = Darwin.poll(&descriptor, 1, 100)
+            if ready < 0 { if errno == EINTR { continue }; throw posixFailure() }
+            if ready == 0 { continue }
+            guard descriptor.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 else { continue }
+            var buffer = [UInt8](repeating: 0, count: 16_384)
+            let count = Darwin.read(descriptor.fd, &buffer, buffer.count)
+            if count < 0 { if errno == EINTR || errno == EAGAIN { continue }; throw posixFailure() }
+            if count == 0 { eof = true }
+            else {
+                guard data.count + count <= 2 * 1024 * 1024 else { throw FileOperationFailure.unavailable }
+                data.append(contentsOf: buffer.prefix(count))
+            }
+        }
+        while child.isRunning {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw FileOperationFailure.unavailable }
+            usleep(10_000)
+        }
+        child.waitUntilExit()
+        guard child.terminationReason == .exit, child.terminationStatus == 0 else {
+            throw FileOperationFailure.unavailable
+        }
+        return data
+    }
+}
+
 /// This opt-in fixture admits only a fresh image whose exact host-side identity
-/// was recorded by the separately reviewed image controller. That controller
-/// proves the mounted device belongs to the image. The package test never mounts
-/// or detaches a volume.
+/// was recorded by the separately reviewed image controller. The test also
+/// independently checks the live hdiutil graph and FAT32 boot sector. It never
+/// mounts or detaches a volume.
 private struct Fat32CopyFixture {
     private struct Marker: Decodable {
         let version: Int
@@ -58,6 +141,9 @@ private struct Fat32CopyFixture {
         let rootIno: UInt64
         let mountDev: Int64
         let mountIno: UInt64
+        let mountPath: String
+        let imageDevice: String
+        let volumeDevice: String
         let filesystem: String
         let format: String
     }
@@ -65,7 +151,7 @@ private struct Fat32CopyFixture {
     private let mount: DirectoryAnchor
     private let marker: Marker
     private let markerData: Data
-    private static let markerName = ".fat32-copy-owner-v1.json"
+    private static let markerName = ".fat32-copy-owner-v2.json"
     private static let imageBytes: Int64 = 128 * 1024 * 1024
 
     init() throws {
@@ -92,16 +178,22 @@ private struct Fat32CopyFixture {
         let data = try OperationJournal.read(name: Self.markerName, anchor: anchoredRoot)
         guard let shape = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(shape.keys) == Set(["version", "jobID", "imageBytes", "imageDev", "imageIno",
-                                      "rootDev", "rootIno", "mountDev", "mountIno", "filesystem", "format"]) else {
+                                      "rootDev", "rootIno", "mountDev", "mountIno", "mountPath",
+                                      "imageDevice", "volumeDevice", "filesystem", "format"]) else {
             throw FileOperationFailure.invalidRequest
         }
         let decoded = try JSONDecoder().decode(Marker.self, from: data)
-        guard decoded.version == 1, decoded.jobID == id.uuidString, decoded.imageBytes == Self.imageBytes,
+        let mountURL = URL(fileURLWithPath: decoded.mountPath, isDirectory: true)
+        guard decoded.version == 2, decoded.jobID == id.uuidString, decoded.imageBytes == Self.imageBytes,
               decoded.rootDev == Int64(anchoredRoot.identity.device), decoded.rootIno == anchoredRoot.identity.inode,
-              decoded.filesystem == "msdos", decoded.format == "FAT32" else {
+              decoded.filesystem == "msdos", decoded.format == "FAT32",
+              decoded.mountPath == mountURL.path,
+              mountURL.deletingLastPathComponent().path == "/Volumes",
+              Fat32MountProof.device(decoded.imageDevice, whole: true),
+              Fat32MountProof.device(decoded.volumeDevice, whole: false) else {
             throw FileOperationFailure.invalidRequest
         }
-        let anchoredMount = try DirectoryAnchor(anchoredRoot.url.appendingPathComponent("mount", isDirectory: true), resolve: false)
+        let anchoredMount = try DirectoryAnchor(mountURL, resolve: false)
         root = anchoredRoot; mount = anchoredMount; marker = decoded; markerData = data
         try validate()
     }
@@ -111,17 +203,38 @@ private struct Fat32CopyFixture {
         guard try OperationJournal.read(name: Self.markerName, anchor: root) == markerData,
               Int64(mount.identity.device) == marker.mountDev, mount.identity.inode == marker.mountIno,
               mount.identity.device != root.identity.device else { throw FileOperationFailure.destinationChanged }
-        var image = stat(), filesystem = statfs()
+        var image = stat(), openedImage = stat(), filesystem = statfs()
         guard fstatat(root.fd, "fixture.dmg", &image, AT_SYMLINK_NOFOLLOW) == 0,
               image.st_mode & S_IFMT == S_IFREG, image.st_uid == geteuid(), image.st_nlink == 1,
               image.st_size == Self.imageBytes, Int64(image.st_dev) == marker.imageDev,
               image.st_ino == marker.imageIno, fstatfs(mount.fd, &filesystem) == 0 else {
             throw FileOperationFailure.destinationChanged
         }
+        let imageFD = openat(root.fd, "fixture.dmg", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard imageFD >= 0 else { throw FileOperationFailure.destinationChanged }
+        defer { close(imageFD) }
+        var boot = [UInt8](repeating: 0, count: 512)
+        guard fstat(imageFD, &openedImage) == 0,
+              openedImage.st_dev == image.st_dev, openedImage.st_ino == image.st_ino,
+              pread(imageFD, &boot, boot.count, 0) == boot.count,
+              Fat32MountProof.bootSector(boot) else { throw FileOperationFailure.destinationChanged }
         let kind = withUnsafePointer(to: &filesystem.f_fstypename) {
             $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSNAMELEN)) { String(cString: $0) }
         }
-        guard kind == "msdos", filesystem.f_flags & UInt32(MNT_LOCAL) != 0 else {
+        let mountedFrom = withUnsafePointer(to: &filesystem.f_mntfromname) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
+        let mountedAt = withUnsafePointer(to: &filesystem.f_mntonname) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
+        guard kind == "msdos", filesystem.f_flags & UInt32(MNT_LOCAL) != 0,
+              filesystem.f_flags & UInt32(MNT_RDONLY) == 0,
+              mountedAt == marker.mountPath, mountedFrom == marker.volumeDevice,
+              Fat32MountProof.imageGraph(try Fat32MountProof.currentImageInfo(),
+                                         imagePath: root.url.appendingPathComponent("fixture.dmg").path,
+                                         mountPath: marker.mountPath,
+                                         imageDevice: marker.imageDevice,
+                                         volumeDevice: marker.volumeDevice, owner: geteuid()) else {
             throw FileOperationFailure.destinationChanged
         }
     }
@@ -152,6 +265,76 @@ private struct Fat32CopyFixture {
         }
         try validate()
         return (source, destinationDirectory, root.url.appendingPathComponent("journal-" + name))
+    }
+
+    /// At most one generated directory and three one-byte regular file names.
+    /// A successful fsync is an observed syscall result, not a durability claim.
+    func probeRegularFilePrimitives() throws {
+        try validate()
+        let name = "primitive-" + UUID().uuidString
+        guard mkdirat(mount.fd, name, 0o700) == 0 else { throw posixFailure() }
+        let probe = try DirectoryAnchor(mount.url.appendingPathComponent(name, isDirectory: true), resolve: false)
+        func syncStatus(_ result: Int32) throws -> String {
+            if result == 0 { return "ok" }
+            let failure = errno
+            if failure == EINVAL || failure == ENOTSUP || failure == EOPNOTSUPP { return "unsupported" }
+            throw posixFailure(failure)
+        }
+        func create(_ name: String, byte: UInt8) throws -> (stat, String) {
+            let fd = openat(probe.fd, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { throw posixFailure() }
+            defer { close(fd) }
+            var value = byte, facts = stat()
+            guard write(fd, &value, 1) == 1, fstat(fd, &facts) == 0,
+                  facts.st_mode & S_IFMT == S_IFREG, facts.st_size == 1 else { throw FileOperationFailure.ioFailure }
+            return (facts, try syncStatus(fsync(fd)))
+        }
+        func prove(_ name: String, _ original: stat, _ byte: UInt8) throws {
+            let fd = openat(probe.fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+            guard fd >= 0 else { throw FileOperationFailure.destinationChanged }
+            defer { close(fd) }
+            var facts = stat(), actual: UInt8 = 0
+            guard fstat(fd, &facts) == 0, facts.st_dev == original.st_dev, facts.st_ino == original.st_ino,
+                  facts.st_mode & S_IFMT == S_IFREG, facts.st_size == 1,
+                  pread(fd, &actual, 1, 0) == 1, actual == byte else { throw FileOperationFailure.destinationChanged }
+        }
+        let (source, fileSync) = try create("a", byte: 0x41)
+        let (target, _) = try create("b", byte: 0x42)
+        let duplicate = openat(probe.fd, "a", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        if duplicate >= 0 { close(duplicate); throw FileOperationFailure.destinationChanged }
+        guard errno == EEXIST else { throw FileOperationFailure.destinationChanged }
+        try prove("a", source, 0x41)
+        let collision = renameatx_np(probe.fd, "a", probe.fd, "b", UInt32(RENAME_EXCL))
+        guard collision != 0 else { throw FileOperationFailure.destinationChanged }
+        let collisionError = errno
+        try prove("a", source, 0x41)
+        try prove("b", target, 0x42)
+        guard collisionError == EEXIST || collisionError == EINVAL || collisionError == ENOTSUP
+                || collisionError == EOPNOTSUPP else { throw posixFailure(collisionError) }
+        var vacantStatus = "skipped"
+        if collisionError == EEXIST {
+            if renameatx_np(probe.fd, "a", probe.fd, "c", UInt32(RENAME_EXCL)) == 0 {
+                try prove("c", source, 0x41)
+                var missing = stat()
+                guard fstatat(probe.fd, "a", &missing, AT_SYMLINK_NOFOLLOW) == -1,
+                      errno == ENOENT else { throw FileOperationFailure.destinationChanged }
+                vacantStatus = "ok"
+            } else {
+                let failure = errno
+                try prove("a", source, 0x41)
+                var absent = stat()
+                guard fstatat(probe.fd, "c", &absent, AT_SYMLINK_NOFOLLOW) == -1,
+                      errno == ENOENT else { throw FileOperationFailure.destinationChanged }
+                guard failure == EINVAL || failure == ENOTSUP || failure == EOPNOTSUPP else {
+                    throw posixFailure(failure)
+                }
+                vacantStatus = "unsupported"
+            }
+        }
+        try prove("b", target, 0x42)
+        let directorySync = try syncStatus(fsync(probe.fd))
+        try validate()
+        print("FAT32_PRIMITIVE openExclusive=collision renameCollision=\(collisionError == EEXIST ? "protected" : "unsupported") renameVacant=\(vacantStatus) fileFsync=\(fileSync) directoryFsync=\(directorySync)")
     }
 }
 
@@ -206,6 +389,35 @@ private final class MetadataPublicationMark: @unchecked Sendable {
 }
 
 @Suite(.serialized) struct CopyMetadataTests {
+    @Test func fat32OfflineGraphAndBootProofRejectMismatches() throws {
+        var boot = [UInt8](repeating: 0, count: 512)
+        boot[11] = 0; boot[12] = 2             // 512-byte sectors
+        boot[13] = 1                           // one sector per cluster
+        boot[14] = 32; boot[16] = 2             // reserved sectors and FAT count
+        boot[32] = 0; boot[33] = 0; boot[34] = 4 // 262144 total sectors
+        boot[36] = 0; boot[37] = 8              // 2048 sectors per FAT
+        boot[44] = 2                           // root cluster
+        boot.replaceSubrange(82..<90, with: "FAT32   ".utf8)
+        boot[510] = 0x55; boot[511] = 0xAA
+        #expect(Fat32MountProof.bootSector(boot))
+        boot[33] = 1
+        #expect(!Fat32MountProof.bootSector(boot))
+        let image = "/generated/fixture.dmg", mount = "/Volumes/TRVFAT32"
+        let graph: [String: Any] = ["images": [["image-path": image, "owner-uid": Int(geteuid()),
+            "system-entities": [["dev-entry": "/dev/disk42"],
+                                ["dev-entry": "/dev/disk42s1", "mount-point": mount]]]]]
+        let data = try PropertyListSerialization.data(fromPropertyList: graph, format: .xml, options: 0)
+        func accepted(_ mountPath: String, _ device: String) -> Bool {
+            Fat32MountProof.imageGraph(data, imagePath: image, mountPath: mountPath,
+                                       imageDevice: "/dev/disk42", volumeDevice: device, owner: geteuid())
+        }
+        #expect(accepted(mount, "/dev/disk42s1"))
+        #expect(!accepted("/Volumes/Another", "/dev/disk42s1"))
+        #expect(!accepted(mount, "/dev/disk43s1"))
+        #expect(!Fat32MountProof.imageGraph(data, imagePath: "/generated/other.dmg", mountPath: mount,
+                                            imageDevice: "/dev/disk42", volumeDevice: "/dev/disk42s1", owner: geteuid()))
+    }
+
     @Test func generatedCopyDifferenceReportsOnlyFixedMetadataFamilies() async throws {
         let f = try MetadataFixture(); defer { f.remove() }
         let result = await f.service().perform(.copy(sources: [f.source], destinationDirectory: f.destination))
@@ -256,7 +468,9 @@ private final class MetadataPublicationMark: @unchecked Sendable {
             let recordID = try #require(result.recordID)
             let record = try #require(try OperationJournal(item.journal).inspectRecord(recordID))
             let publicCopy = item.destination.appendingPathComponent(item.source.lastPathComponent)
-            #expect(before.matches(try verifiedTree(item.source, cancellation: .init())))
+            guard before.matches(try verifiedTree(item.source, cancellation: .init())) else {
+                throw FileOperationFailure.sourceChanged
+            }
 
             var families: [CopyOrdinaryMetadataFamily] = []
             var contentEqual = false, staged = false, sidecar = false
@@ -270,14 +484,16 @@ private final class MetadataPublicationMark: @unchecked Sendable {
             if let anchor = try? DirectoryAnchor(area.url, resolve: false) {
                 var sibling = stat()
                 if fstatat(anchor.fd, "._payload", &sibling, AT_SYMLINK_NOFOLLOW) == 0 { sidecar = true }
-                else { #expect(errno == ENOENT) }
+                else if errno != ENOENT { throw posixFailure() }
                 let destinationComparison = CopyComparison(diagnoseMetadataFamilies: true)
                 if let stagedTree = try? verifiedTree(parent: anchor.fd, name: "payload", cancellation: .init(),
                                                         copyComparison: destinationComparison) {
                     staged = true
                     contentEqual = sourceComparison.contentDigest == destinationComparison.contentDigest
                     families = try sourceComparison.differingMetadataFamilies(from: destinationComparison)
-                    #expect(stagedTree.identity.device == anchor.identity.device)
+                    guard stagedTree.identity.device == anchor.identity.device else {
+                        throw FileOperationFailure.destinationChanged
+                    }
                 }
             }
             let statusName: String
@@ -291,18 +507,22 @@ private final class MetadataPublicationMark: @unchecked Sendable {
             print("FAT32_COPY_FAMILY variant=\(label) status=\(statusName) staged=\(staged) contentEqual=\(contentEqual) families=\(families.map(\.rawValue).joined(separator: ",")) appleDouble=\(sidecar)")
 
             if label == "plain" {
-                #expect(status == .failed(.copyMetadataMismatch))
-                #expect(record.state == "needsReview" && staged && contentEqual)
-                #expect(families.contains(.modificationTime))
-                #expect(!FileManager().fileExists(atPath: publicCopy.path))
+                guard status == .failed(.copyMetadataMismatch), record.state == "needsReview",
+                      staged, contentEqual, families.contains(.modificationTime),
+                      !FileManager().fileExists(atPath: publicCopy.path) else {
+                    throw FileOperationFailure.destinationChanged
+                }
             } else if case .failed = status {
-                #expect(record.state == "needsReview")
-                #expect(!FileManager().fileExists(atPath: publicCopy.path))
+                guard record.state == "needsReview", !FileManager().fileExists(atPath: publicCopy.path) else {
+                    throw FileOperationFailure.destinationChanged
+                }
             } else {
-                #expect(status == .succeeded)
-                #expect(FileManager().fileExists(atPath: publicCopy.path))
+                guard status == .succeeded, FileManager().fileExists(atPath: publicCopy.path) else {
+                    throw FileOperationFailure.destinationChanged
+                }
             }
         }
+        try fixture.probeRegularFilePrimitives()
     }
 
     @Test func realNativeQuarantineCopiesWithActualFingerprintAndUndo() async throws {
