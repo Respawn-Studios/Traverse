@@ -67,6 +67,7 @@ import Foundation
             benchmarkBrowser?.window?.close(); benchmarkBrowser = nil
         }
         func capture(_ label: String, _ window: NSWindow, field: (() -> NSTextField?)? = nil, over background: NSWindow? = nil,
+                     includingChildWindows: Bool = true,
                      action: @MainActor () -> Void) async throws {
             window.title = label + " · generated review"
             if let background { ToolWindowChrome.position(window, relativeTo: background) } else { window.center() }
@@ -74,7 +75,7 @@ import Foundation
             NSApplication.shared.activate(ignoringOtherApps: true)
             try await Task.sleep(for: .milliseconds(250))
             let movie = try await NativeMotionRecorder.record(window: window, over: background, root: root, label: label,
-                sampling: .diagnostic(for: window), action: action)
+                sampling: .diagnostic(for: window), includingChildWindows: includingChildWindows, action: action)
             try JSONEncoder().encode(movie).write(to: root.appendingPathComponent("evidence/\(label).json"), options: .withoutOverwriting)
             var measured = DevelopmentMotionVerification.clip(label, report: movie, field: field?(), window: window)
             let expected: NSAppearance.Name = settings.appearance == .system
@@ -109,7 +110,8 @@ import Foundation
             indicator.frame = .init(x: 22, y: 24, width: 33, height: 24); content.addSubview(indicator)
             indicator.configure(.connected, detail: "SFTP · Connected\nGenerated server\nFolder: Generated server · /fixture/Projects/Client project/Build assets\nSecurity: SSH encrypted\nAccess: Read and write\nItems: 64\nLatest directory read: 12 ms\nIncludes server response and local processing; not a network ping.\nConnected: Today, 10:30 AM", motion: settings.motion)
             var gesture: Task<Void, Error>?
-            try await capture("tool-connection-status", window) {
+            let indicatorParentFrame = window.frame
+            try await capture("tool-connection-status", window, includingChildWindows: false) {
                 gesture = Task { @MainActor in
                     for index in 0..<12 {
                         let local = NSPoint(x: CGFloat(index) * 2.5 + 2, y: 13)
@@ -130,7 +132,7 @@ import Foundation
                 }
             }
             try await gesture?.value
-            guard reconnects == 0, hoverShown else { throw Failure.presentation }
+            guard reconnects == 0, hoverShown, window.frame == indicatorParentFrame else { throw Failure.presentation }
             indicator.configure(.disconnected, detail: "SFTP · Disconnected\nClick to reconnect.", motion: settings.motion)
             indicator.performClick(nil)
             guard reconnects == 1 else { throw Failure.presentation }

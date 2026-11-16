@@ -69,7 +69,8 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
     private var sampling = Sampling.standard
 
     @MainActor static func record(window: NSWindow, over background: NSWindow? = nil, root: URL, label: String,
-                                  sampling: Sampling = .standard, action: @MainActor () throws -> Void) async throws -> Report {
+                                  sampling: Sampling = .standard, includingChildWindows: Bool = true,
+                                  action: @MainActor () throws -> Void) async throws -> Report {
         try validateScope(window: window, root: root, label: label)
         if let background {
             try validateScope(window: background, root: root, label: label)
@@ -81,7 +82,7 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
         let owner = NativeMotionRecorder(); owner.sampling = sampling
         let url = root.appendingPathComponent("evidence/\(label).mov")
         try await owner.start(window: CGWindowID(window.windowNumber), background: background.map { CGWindowID($0.windowNumber) }, expectedWidth: window.frame.width,
-                              expectedHeight: window.frame.height, output: url)
+                              expectedHeight: window.frame.height, includingChildWindows: includingChildWindows, output: url)
         do {
             try await owner.waitForFirstFrame()
             try await Task.sleep(for: .milliseconds(sampling.preRollMilliseconds))
@@ -366,11 +367,12 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
               window.frame.width <= (downloadBatchCase ? 1280 : folderDownloadCase || routedFolderCase || captureTitleCase || tarCase || smbFolderCase ? 1280 : browserTaskCase || developmentCase || dataClassificationCase || purposeJourneyCase || exclusiveUploadCase || folderUploadCase || remotePropertiesCase || inlineArchiveCase || tarPreviewCase || selectionGroupCase || settingsSidebarCase || helpMotionCase || editorComparisonCase ? 1152 : downloadCase ? 1024 : 960), window.frame.height <= (downloadBatchCase ? 800 : folderDefaultCase ? 692 : browserTaskCase || developmentCase || folderDownloadCase || dataClassificationCase || purposeJourneyCase || exclusiveUploadCase || folderUploadCase || remotePropertiesCase || smbFolderCase || driveStatusCase || inlineArchiveCase || tarPreviewCase || selectionGroupCase || settingsSidebarCase || helpMotionCase || recordedAnalysisCase || tarCase || editorComparisonCase ? 800 : patchCase || accessCase || helpCase ? 700 : 640) else { throw Failure.scope }
     }
 
-    private func start(window id: CGWindowID, background: CGWindowID?, expectedWidth: Double, expectedHeight: Double, output: URL) async throws {
+    private func start(window id: CGWindowID, background: CGWindowID?, expectedWidth: Double, expectedHeight: Double,
+                       includingChildWindows: Bool, output: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
                 observeStart(window: id, background: background, expectedWidth: expectedWidth, expectedHeight: expectedHeight,
-                    output: output, attempt: 1, continuation: continuation)
+                    includingChildWindows: includingChildWindows, output: output, attempt: 1, continuation: continuation)
             }
         }
     }
@@ -378,7 +380,7 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
     // Retry only that exact ID/geometry, on this queue, at most fifty times;
     // errors remain terminal. Never enumerate another app or capture a whole display.
     private func observeStart(window id: CGWindowID, background: CGWindowID?, expectedWidth: Double, expectedHeight: Double,
-                              output: URL, attempt: Int, continuation: CheckedContinuation<Void, Error>) {
+                              includingChildWindows: Bool, output: URL, attempt: Int, continuation: CheckedContinuation<Void, Error>) {
         SCShareableContent.getCurrentProcessShareableContent { [self] content, error in
             let observation = ContentObservation(content: content)
             queue.async { [self] in
@@ -387,12 +389,13 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                 let geometryReady = ownWindow.map { window in
                     window.frame.width > 0 && window.frame.height > 0 &&
                     (!sampling.diagnostic || (abs(window.frame.width - expectedWidth) <= 2 && abs(window.frame.height - expectedHeight) <= 2 &&
-                        abs((ownFilter?.contentRect.width ?? 0) - expectedWidth) <= 2 && abs((ownFilter?.contentRect.height ?? 0) - expectedHeight) <= 2))
+                        (!includingChildWindows || (abs((ownFilter?.contentRect.width ?? 0) - expectedWidth) <= 2
+                            && abs((ownFilter?.contentRect.height ?? 0) - expectedHeight) <= 2))))
                 } ?? false
                 if error == nil, (!geometryReady || ownWindow == nil), attempt < 51 {
                     queue.asyncAfter(deadline: .now() + .milliseconds(20)) { [self] in
                         observeStart(window: id, background: background, expectedWidth: expectedWidth, expectedHeight: expectedHeight,
-                            output: output, attempt: attempt + 1, continuation: continuation)
+                            includingChildWindows: includingChildWindows, output: output, attempt: attempt + 1, continuation: continuation)
                     }
                     return
                 }
@@ -418,13 +421,25 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                     filter.includeMenuBar = false
                     crop = window.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
                     sourceDescription = "ScreenCaptureKit.currentProcess/two-window-closing-crop"
+                } else if !includingChildWindows {
+                    guard let display = observation.content?.displays.first(where: { $0.frame.contains(window.frame) }) else {
+                        throw Failure.scope
+                    }
+                    // Desktop-independent capture grows to include a popover,
+                    // rescaling the parent's pixels mid-clip. An exact ID list
+                    // and parent-frame crop keep the same region throughout.
+                    filter = SCContentFilter(display: display, including: [window])
+                    filter.includeMenuBar = false
+                    crop = window.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+                    sourceDescription = "ScreenCaptureKit.currentProcess/single-window-fixed-crop"
                 } else { filter = SCContentFilter(desktopIndependentWindow: window); crop = nil }
                 captureGeometry = ["appKitWidth": expectedWidth, "appKitHeight": expectedHeight,
                     "shareableWidth": window.frame.width, "shareableHeight": window.frame.height,
                     "filterWidth": filter.contentRect.width, "filterHeight": filter.contentRect.height,
                     "pointPixelScale": Double(filter.pointPixelScale)]
                 if let crop {
-                    captureGeometry["includedWindowCount"] = 2
+                    captureGeometry["includedWindowCount"] = background == nil ? 1 : 2
+                    captureGeometry["includingChildWindows"] = includingChildWindows ? 1 : 0
                     captureGeometry["cropX"] = crop.minX; captureGeometry["cropY"] = crop.minY
                     captureGeometry["cropWidth"] = crop.width; captureGeometry["cropHeight"] = crop.height
                 }
@@ -449,6 +464,7 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                 configuration.capturesAudio = false; configuration.captureMicrophone = false
                 configuration.scalesToFit = false; configuration.preservesAspectRatio = true
                 configuration.captureResolution = .nominal; configuration.ignoreShadowsSingleWindow = true
+                if !includingChildWindows { configuration.includeChildWindows = false }
                 if let crop { configuration.sourceRect = crop; configuration.ignoreShadowsDisplay = true }
                 configuration.backgroundColor = recordingBackground
                 let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
