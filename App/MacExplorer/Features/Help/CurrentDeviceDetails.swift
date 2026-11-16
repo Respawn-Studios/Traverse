@@ -1,14 +1,14 @@
 import Darwin
 import Foundation
 
-/// One explicit snapshot on the report worker queue. No monitoring, environment,
+/// One snapshot when composing a report, on its worker queue. No monitoring, environment,
 /// device identifiers, host names, user paths or memory contents are collected.
 enum CurrentDeviceDetails {
     static let heading = "## Current device info (not crash-time)"
 
     static func text() -> String {
         let process = ProcessInfo.processInfo
-        var lines = [heading, "", "Snapshot taken on request; these values are current, not crash-time measurements.",
+        var lines = [heading, "", "Snapshot taken when preparing this report; these are current values, not crash-time measurements.",
                      "CPU: \(cpuFamily())", "Logical processor count: \(process.processorCount)",
                      "Installed RAM: \(memory(process.physicalMemory))"]
         if let resident = residentMemory() { lines.append("Current app resident memory: \(memory(resident))") }

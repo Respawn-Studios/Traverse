@@ -45,9 +45,12 @@ and can identify software versions. Add comments only if you intend to share
 them. Hide Private Details is a convenience for common paths, URLs and contact
 information, not a guarantee of anonymity. Inspect the final text yourself.
 
-Add Current Device Info is optional. It adds a current, editable snapshot of
-the CPU family, logical processor count, installed RAM and Traverse's resident
-memory. These are not crash-time measurements. It does not collect device
+Reports include device details by default. Where the native capture provides
+them, the hardware model and physical/logical core counts describe the Mac at
+capture. A separate editable snapshot adds the current CPU family, logical
+processor count, installed RAM and Traverse's resident memory when you prepare
+the report. Current measurements are clearly labelled and do not describe the
+moment of a past crash. Traverse does not collect serial numbers, device
 identifiers, hostnames, memory contents or a background performance history.
 
 Open GitHub Draft puts the reviewed text in a browser URL. Opening it sends that

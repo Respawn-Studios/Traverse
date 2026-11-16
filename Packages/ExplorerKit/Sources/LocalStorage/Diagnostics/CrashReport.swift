@@ -36,6 +36,22 @@ public struct CrashReport: Codable, Equatable, Sendable, Identifiable {
             self.number = number; self.crashed = crashed; self.frames = frames
         }
     }
+    public struct Machine: Codable, Equatable, Sendable {
+        public let model: String?
+        public let physicalCores: Int?
+        public let logicalCores: Int?
+        public init(model: String?, physicalCores: Int?, logicalCores: Int?) {
+            self.model = model; self.physicalCores = physicalCores; self.logicalCores = logicalCores
+        }
+        fileprivate var isValid: Bool {
+            (model.map {
+                $0.utf8.count <= 64 && $0.range(of: #"\A[A-Za-z][A-Za-z0-9]*[0-9],[0-9]+\z"#,
+                    options: .regularExpression) != nil
+            } ?? true)
+                && (physicalCores.map { (1...4096).contains($0) } ?? true)
+                && (logicalCores.map { (1...4096).contains($0) } ?? true)
+        }
+    }
     public let id: UUID
     public let capturedAt: Date?
     public let version: String?
@@ -43,6 +59,9 @@ public struct CrashReport: Codable, Equatable, Sendable, Identifiable {
     public let systemVersion: String?
     public let systemBuild: String?
     public let architecture: Architecture
+    /// Optional for previously retained reports. This is the hardware recorded
+    /// by the capture, never a serial number or a user-assigned computer name.
+    public let machine: Machine?
     public let signal: Signal
     public let images: [Image]
     public let threads: [Thread]
@@ -50,10 +69,12 @@ public struct CrashReport: Codable, Equatable, Sendable, Identifiable {
 
     public init(id: UUID = UUID(), capturedAt: Date?, version: String?, build: String?,
                 systemVersion: String?, systemBuild: String?, architecture: Architecture,
-                signal: Signal, images: [Image], threads: [Thread], truncated: Bool = false) throws {
+                signal: Signal, images: [Image], threads: [Thread], truncated: Bool = false,
+                machine: Machine? = nil) throws {
         self.id = id; self.capturedAt = capturedAt; self.version = version; self.build = build
         self.systemVersion = systemVersion; self.systemBuild = systemBuild
         self.architecture = architecture; self.signal = signal; self.images = images
+        self.machine = machine
         self.threads = threads; self.truncated = truncated
         try validate()
     }
@@ -62,7 +83,7 @@ public struct CrashReport: Codable, Equatable, Sendable, Identifiable {
         guard Self.numeric(version), Self.numeric(build), Self.numeric(systemVersion),
               systemBuild.map({ !$0.isEmpty && $0.utf8.count <= 32 && $0.utf8.allSatisfy(Self.alphaNumeric) }) ?? true,
               capturedAt.map({ $0.timeIntervalSince1970.isFinite && (0...4_102_444_800).contains($0.timeIntervalSince1970) }) ?? true,
-              images.count <= 512, threads.count <= 128,
+              machine?.isValid ?? true, images.count <= 512, threads.count <= 128,
               threads.allSatisfy({ $0.frames.count <= 512 }),
               threads.reduce(0, { $0 + $1.frames.count }) <= 8192,
               Set(threads.map(\.number)).count == threads.count,
@@ -87,6 +108,9 @@ public struct CrashReport: Codable, Equatable, Sendable, Identifiable {
                      "App: \(version ?? "Unavailable") (\(build ?? "Unavailable"))",
                      "macOS at capture: \(systemVersion ?? "Unavailable") (\(systemBuild ?? "Unavailable"))",
                      "Architecture: \(architecture.rawValue)", "Signal: \(signal.rawValue)"]
+        lines += ["Hardware at capture: \(machine?.model ?? "Unavailable")",
+                  "Physical cores at capture: \(machine?.physicalCores.map(String.init) ?? "Unavailable")",
+                  "Logical cores at capture: \(machine?.logicalCores.map(String.init) ?? "Unavailable")"]
         if let capturedAt { lines.append("Captured: \(ISO8601DateFormatter().string(from: capturedAt))") }
         lines += ["", "## What happened", "", "## Steps to reproduce", "", "## Expected behavior", "", "## Crash trace"]
         let selectedThreads = threads.filter { $0.crashed || includeOtherThreads }

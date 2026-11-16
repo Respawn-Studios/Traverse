@@ -154,13 +154,19 @@ private final class CrashReportWorker: @unchecked Sendable {
     }
     @Published private(set) var notice = "Starting local crash reporting…"
     @Published private(set) var working = false
+    @Published private(set) var preparingReport = false
     @Published private(set) var canDiscardPending = false
     @Published var includeOtherThreads = false
     @Published private(set) var hasCurrentDeviceInfo = false
     private let worker = CrashReportWorker()
     private var controller: NSWindowController?
     private var started = false
-    private var drafts: [UUID: String] = [:]
+    private struct ReviewDraft {
+        let text: String
+        let devicePrepared: Bool
+    }
+    private var drafts: [UUID: ReviewDraft] = [:]
+    private var devicePrepared = false
     private var settings: BrowserSettings?
     private var exportPanel: NSSavePanel?
     private var presentation: IdleBrowserPresentation?
@@ -171,6 +177,7 @@ private final class CrashReportWorker: @unchecked Sendable {
     private let openURL: (URL) -> Bool
     private let deviceDetails: @Sendable () -> String
     private var reviewRevision: UInt64 = 0
+    private var reportPreparation = UUID()
     var window: NSWindow? { controller?.window }
     var allowsOptionalStartupMessage: Bool { startupCheckFinished && !recoveredAtLaunch }
     private var current: CrashReport? { reports.first { $0.id == selected } }
@@ -243,6 +250,7 @@ private final class CrashReportWorker: @unchecked Sendable {
             return
         }
         if newBug || (selected == nil && document.isEmpty) { prepareBugReport(settings: settings) }
+        else if !document.isEmpty, !devicePrepared, !preparingReport { prepareDocument(document) }
         if let window = controller?.window {
             ToolWindowChrome.install(in: window, settings: settings)
             if !offscreen { window.makeKeyAndOrderFront(nil) }; return
@@ -267,29 +275,51 @@ private final class CrashReportWorker: @unchecked Sendable {
     }
 
     func select(_ id: UUID?) {
-        if let selected { drafts[selected] = document }
+        if let selected { drafts[selected] = .init(text: document, devicePrepared: devicePrepared) }
         selected = id; includeOtherThreads = false
-        if let report = current { document = drafts[report.id] ?? ((try? report.text()) ?? "") }
-        hasCurrentDeviceInfo = document.contains(CurrentDeviceDetails.heading)
+        reportPreparation = UUID(); preparingReport = false
+        if let report = current {
+            if let draft = drafts[report.id], draft.devicePrepared {
+                document = draft.text; devicePrepared = true
+            } else if let draft = drafts[report.id] { prepareDocument(draft.text) }
+            else { prepareDocument((try? report.text()) ?? "") }
+        }
     }
 
     func prepareBugReport(settings: BrowserSettings) {
-        if let selected { drafts[selected] = document }
+        if let selected { drafts[selected] = .init(text: document, devicePrepared: devicePrepared) }
         selected = nil; includeOtherThreads = false
-        hasCurrentDeviceInfo = false
-        document = "## What happened\n\n## Steps to reproduce\n\n## Expected behavior\n\n## App details\n\n"
-            + SupportDetailsSnapshot.current(settings: settings).text
+        prepareDocument("## What happened\n\n## Steps to reproduce\n\n## Expected behavior\n\n## App details\n\n"
+            + SupportDetailsSnapshot.current(settings: settings).text)
+    }
+
+    /// Device facts belong in the first editable draft, before any sharing
+    /// action. Never append hidden fields when copying, exporting or opening a
+    /// GitHub draft: those actions still use exactly the text the user reviewed.
+    private func prepareDocument(_ body: String) {
+        let ticket = UUID(); reportPreparation = ticket
+        document = body; devicePrepared = false; preparingReport = true
+        Task {
+            let details = await worker.deviceDetails(deviceDetails)
+            guard reportPreparation == ticket else { return }
+            preparingReport = false
+            guard document.utf8.count + details.utf8.count + 2 <= CrashReportRedaction.maximumBytes else {
+                notice = "Device details could not fit in this report. Review the text before sharing."; return
+            }
+            document += "\n\n" + details
+            devicePrepared = true
+        }
     }
 
     func addOtherThreads() {
-        guard let report = current, !includeOtherThreads else { return }
+        guard let report = current, !includeOtherThreads, !preparingReport else { return }
         guard let trace = try? report.text(includeOtherThreads: true) else { return }
         document += "\n\n## Extended crash trace\n\n" + trace
         includeOtherThreads = true
     }
 
     func redact() {
-        guard !working else { return }
+        guard !working, !preparingReport else { return }
         let original = document, selection = selected
         let prefixes = [FileManager.default.homeDirectoryForCurrentUser.path]
         working = true
@@ -308,7 +338,7 @@ private final class CrashReportWorker: @unchecked Sendable {
     }
 
     func copyReport() {
-        guard !working, !document.isEmpty, document.utf8.count <= CrashReportRedaction.maximumBytes else {
+        guard !working, !preparingReport, !document.isEmpty, document.utf8.count <= CrashReportRedaction.maximumBytes else {
             notice = "Keep the reviewed report below 512 KiB before sharing."; return
         }
         guard clipboard(document) else {
@@ -318,7 +348,7 @@ private final class CrashReportWorker: @unchecked Sendable {
     }
 
     func openGitHubDraft() {
-        guard !working, !document.isEmpty, document.utf8.count <= CrashReportRedaction.maximumBytes else {
+        guard !working, !preparingReport, !document.isEmpty, document.utf8.count <= CrashReportRedaction.maximumBytes else {
             notice = "Keep the reviewed report below 512 KiB before opening a draft."; return
         }
         let reviewed = document, selection = selected, revision = reviewRevision
@@ -340,28 +370,8 @@ private final class CrashReportWorker: @unchecked Sendable {
         }
     }
 
-    func addCurrentDeviceInfo() {
-        guard !working, !hasCurrentDeviceInfo else { return }
-        let selection = selected, revision = reviewRevision, sourceWindow = controller?.window
-        working = true
-        Task {
-            let details = await worker.deviceDetails(deviceDetails)
-            working = false
-            guard revision == reviewRevision, selected == selection, controller?.window === sourceWindow else {
-                notice = "The report changed while the device snapshot was prepared. Add it again after reviewing your edits."
-                return
-            }
-            guard document.utf8.count + details.utf8.count + 2 <= CrashReportRedaction.maximumBytes else {
-                notice = "There is no room for device details in this report. Shorten it first."; return
-            }
-            document += "\n\n" + details
-            hasCurrentDeviceInfo = true
-            notice = "Added a current device snapshot to the editable text. The retained crash capture is unchanged. Review before sharing."
-        }
-    }
-
     func saveReport() {
-        guard !working, document.utf8.count <= CrashReportRedaction.maximumBytes,
+        guard !working, !preparingReport, document.utf8.count <= CrashReportRedaction.maximumBytes,
               let window = controller?.window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]; panel.canCreateDirectories = false
@@ -426,8 +436,9 @@ private final class CrashReportWorker: @unchecked Sendable {
 
     func windowWillClose(_ notification: Notification) {
         reviewRevision &+= 1
+        reportPreparation = UUID(); preparingReport = false
         exportPanel?.cancel(nil); exportPanel = nil
-        if let selected { drafts[selected] = document }
+        if let selected { drafts[selected] = .init(text: document, devicePrepared: devicePrepared) }
         controller = nil; settings = nil
     }
 }

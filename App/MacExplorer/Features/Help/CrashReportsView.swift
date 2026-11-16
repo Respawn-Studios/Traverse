@@ -17,16 +17,18 @@ struct CrashReportsView: View {
                     }
                 }
             }
-            Text("Native captures stay local. Review and edit the shareable text below; add what you were doing and steps to reproduce the problem.")
+            Text("Reports include device details and stay local. Review and edit the text below, then add what happened and steps to reproduce it.")
                 .foregroundStyle(.secondary)
             TextEditor(text: $owner.document)
                 .interfaceFont(.system(.body, design: .monospaced))
                 .accessibilityLabel("Editable report to review before sharing")
                 .border(.separator.opacity(0.4))
+                .disabled(owner.preparingReport)
             ViewThatFits(in: .horizontal) {
                 HStack { privacyControls; Spacer(minLength: 0) }
                 VStack(alignment: .leading, spacing: 8) { privacyControls }
-            }.disabled(owner.working)
+            }.disabled(owner.working || owner.preparingReport)
+            if owner.preparingReport { ProgressView("Preparing device details…").controlSize(.small) }
             Text(owner.notice).interfaceFont(.callout).foregroundStyle(.secondary)
                 .accessibilityLabel("Report status: " + owner.notice)
             Divider()
@@ -43,7 +45,7 @@ struct CrashReportsView: View {
                     githubControl
                     HStack { secondaryShareControls }
                 }
-            }.disabled(owner.working || owner.document.isEmpty)
+            }.disabled(owner.working || owner.preparingReport || owner.document.isEmpty)
         }
         .padding(20)
         .frame(minWidth: 600, minHeight: 460)
@@ -51,7 +53,6 @@ struct CrashReportsView: View {
 
     @ViewBuilder private var privacyControls: some View {
         Button("Hide Private Details", action: owner.redact)
-        Button("Add Current Device Info", action: owner.addCurrentDeviceInfo).disabled(owner.hasCurrentDeviceInfo)
         if owner.canDiscardPending {
             Button("Discard Unreadable Capture…", action: owner.discardUnreadableCapture)
         }

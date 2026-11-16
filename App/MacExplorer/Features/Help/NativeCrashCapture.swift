@@ -133,11 +133,22 @@ final class NativeCrashCapture {
                   text.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) }) else { return nil }
             return text
         }
+        let machine = native.machineInfo.map { info in
+            let model = info.modelName.flatMap { name -> String? in
+                guard name.utf8.count <= 64,
+                      name.range(of: #"\A[A-Za-z][A-Za-z0-9]*[0-9],[0-9]+\z"#,
+                          options: .regularExpression) != nil else { return nil }
+                return name
+            }
+            func cores(_ count: UInt) -> Int? { (1...4096).contains(count) ? Int(count) : nil }
+            return CrashReport.Machine(model: model, physicalCores: cores(info.processorCount),
+                logicalCores: cores(info.logicalProcessorCount))
+        }
         return try CrashReport(capturedAt: native.systemInfo.timestamp,
             version: version(native.applicationInfo.applicationMarketingVersion),
             build: version(native.applicationInfo.applicationVersion), systemVersion: version(native.systemInfo.operatingSystemVersion),
             systemBuild: systemBuild, architecture: architecture,
             signal: CrashReport.Signal(rawValue: native.signalInfo.name ?? "") ?? .unknown,
-            images: images, threads: threads, truncated: truncated)
+            images: images, threads: threads, truncated: truncated, machine: machine)
     }
 }

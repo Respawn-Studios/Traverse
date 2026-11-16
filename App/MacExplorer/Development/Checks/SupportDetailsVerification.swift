@@ -284,7 +284,8 @@
             var copied: [String] = [], opened: [URL] = []
             let owner = ApplicationCrashReports(clipboard: { copied.append($0); return true },
                 openURL: { opened.append($0); return true }, deviceDetails: {
-                    "## Current device info (not crash-time)\n\nCPU: Apple M2 Pro\nLogical processor count: 12\nInstalled RAM: 32 GB\nCurrent app resident memory: 128 MB"
+                    Thread.sleep(forTimeInterval: 0.08)
+                    return "## Current device info (not crash-time)\n\nCPU: Apple M2 Pro\nLogical processor count: 12\nInstalled RAM: 32 GB\nCurrent app resident memory: 128 MB"
                 })
             owner.startForVerification(directory: root, identifier: identifier)
             owner.show(settings: settings, offscreen: !capture)
@@ -297,21 +298,27 @@
                 "Crash review did not retain the earlier report beside an unreadable pending capture")
             try check(copied.isEmpty && opened.isEmpty, "Opening crash review shared data")
             owner.select(owner.reports.first?.id)
-            try check(!owner.hasCurrentDeviceInfo && !owner.document.contains("Current device info"),
-                "Device details were added without an explicit request")
             let retainedText = try owner.reports[0].text()
-            owner.addCurrentDeviceInfo()
             for _ in 0..<100 {
-                if !owner.working { break }
+                if !owner.preparingReport { break }
                 try await Task.sleep(for: .milliseconds(25))
             }
             let retainedAfterDevice = try owner.reports[0].text()
-            try check(owner.hasCurrentDeviceInfo && owner.document.contains("CPU: Apple M2 Pro")
+            try check(!owner.preparingReport && owner.hasCurrentDeviceInfo && owner.document.contains("CPU: Apple M2 Pro")
                 && owner.document.contains("not crash-time") && retainedAfterDevice == retainedText
-                && copied.isEmpty && opened.isEmpty, "Explicit device info changed capture data or shared text")
+                && copied.isEmpty && opened.isEmpty, "Default device info changed capture data or shared text")
             let withDevice = owner.document
-            owner.addCurrentDeviceInfo()
+            owner.select(owner.reports.first?.id)
             try check(owner.document == withDevice, "Device details were appended repeatedly")
+            owner.prepareBugReport(settings: settings)
+            for _ in 0..<100 {
+                if !owner.preparingReport { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            try check(!owner.preparingReport && owner.document.contains("CPU: Apple M2 Pro")
+                && owner.document.contains("Installed RAM: 32 GB") && copied.isEmpty && opened.isEmpty,
+                "A new bug report omitted default device details or shared automatically")
+            owner.select(owner.reports.first?.id)
             owner.document += "\nGenerated comment: /Users/Generated/Taxes_2026.pdf person@example.invalid\n"
             owner.redact()
             for _ in 0..<100 {
@@ -384,6 +391,19 @@
             }
             try check(!owner.working && !owner.canDiscardPending && owner.reports.count == 1
                 && owner.notice.hasPrefix("Discarded"), "Confirmed pending discard lost the retained report or failed")
+            owner.prepareBugReport(settings: settings)
+            owner.document += "\nGenerated note kept across a quick close."
+            owner.window?.close()
+            try check(owner.window == nil, "Report preparation prevented ordinary close")
+            owner.show(settings: settings, offscreen: !capture)
+            for _ in 0..<100 {
+                if !owner.preparingReport { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            try check(!owner.preparingReport && owner.document.contains("Generated note kept across a quick close.")
+                && owner.document.components(separatedBy: CurrentDeviceDetails.heading).count == 2
+                && owner.document.contains("CPU: Apple M2 Pro") && opened.count == 2 && copied == [reviewed],
+                "Closing during device preparation lost a draft, omitted/duplicated device facts or shared automatically")
         }
         private static func check(_ value: @autoclosure () -> Bool, _ message: String) throws {
             if !value() { throw UIVerification.Failure(message: message) }

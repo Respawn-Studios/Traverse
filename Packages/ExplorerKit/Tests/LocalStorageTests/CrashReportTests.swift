@@ -48,6 +48,28 @@ final class CrashReportTests: XCTestCase {
         XCTAssertThrowsError(try oversized.validate())
     }
 
+    func testCaptureMachineFactsAndOlderReportsRemainSafeToShare() throws {
+        let source = try report()
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(source)) as? [String: Any])
+        XCTAssertNil(value["machine"])
+        XCTAssertTrue(try source.text().contains("Hardware at capture: Unavailable"))
+        value["machine"] = ["model": "Mac14,12", "physicalCores": 12, "logicalCores": 12]
+        let captured = try JSONDecoder().decode(CrashReport.self, from: JSONSerialization.data(withJSONObject: value))
+        XCTAssertTrue(try captured.text().contains("Hardware at capture: Mac14,12"))
+        XCTAssertTrue(try captured.text().contains("Physical cores at capture: 12"))
+        XCTAssertEqual(captured, try JSONDecoder().decode(CrashReport.self, from: JSONEncoder().encode(captured)))
+        for model in ["John's Mac", "/Users/Generated", "Mac14,12\nPrivate detail", String(repeating: "M", count: 65)] {
+            value["machine"] = ["model": model, "physicalCores": 12, "logicalCores": 12]
+            let malformed = try JSONDecoder().decode(CrashReport.self, from: JSONSerialization.data(withJSONObject: value))
+            XCTAssertThrowsError(try malformed.text())
+        }
+        for count in [-1, 0, 4097] {
+            value["machine"] = ["model": "VirtualMac2,1", "physicalCores": count, "logicalCores": 12]
+            let malformed = try JSONDecoder().decode(CrashReport.self, from: JSONSerialization.data(withJSONObject: value))
+            XCTAssertThrowsError(try malformed.validate())
+        }
+    }
+
     func testDefaultDraftKeepsReferencedImageIndicesWithoutTheUnusedImageInventory() throws {
         let images = (0..<512).map { index in
             CrashReport.Image(kind: index == 0 ? .application : .system,
