@@ -195,21 +195,42 @@ import SwiftUI
                     && DriveBenchmarkSuiteComparison(selected: second,
                         reference: .init(sequential: first.sequential, random4K: secondRandom)) == nil,
                     "Quick Mix suite comparison crossed workloads, paired a foreign stage or lost measured rates")
-                let scrollBefore = model.window.flatMap { benchmarkScrollOffset($0) }
-                model.comparisonSuiteID = first.sequential.suiteID
-                try require(model.suiteComparison != nil && model.comparisonRunID == nil,
-                    "Quick Mix suite selection did not project the completed pair")
-                if let window = model.window, CGPreflightScreenCaptureAccess() {
-                    guard let scrollBefore else {
-                        throw UIVerification.Failure(message: "Quick Mix comparison scroll view is unavailable")
+                let record = ProcessInfo.processInfo.arguments.contains("--record-drive-benchmark") && CGPreflightScreenCaptureAccess()
+                let priorMotion = settings.motion.mode, priorHistory = model.history.map(\.id)
+                let modes: [BrowserMotionMode] = record ? [.full, .reduced, .off] : [priorMotion]
+                for mode in modes {
+                    settings.motion.mode = mode; model.comparisonSuiteID = nil
+                    try await Task.sleep(for: .milliseconds(300))
+                    try await wait(seconds: 3) { model.window.flatMap { benchmarkScrollView($0) } != nil }
+                    guard let window = model.window, let scroll = benchmarkScrollView(window) else {
+                        throw UIVerification.Failure(message: "Quick Mix comparison viewport unavailable")
                     }
-                    try await wait(seconds: 3) {
-                        benchmarkScrollOffset(window).map { $0 > scrollBefore + 100 } == true
+                    scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
+                    let scrollBefore = scroll.contentView.bounds.minY
+                    let label = "drive-benchmark-suite-comparison" + (mode == .full ? "" : "-" + mode.rawValue)
+                    if record {
+                        let clip = try await NativeMotionRecorder.record(window: window, root: root,
+                            label: label, sampling: .diagnostic(for: window)) {
+                            model.comparisonSuiteID = first.sequential.suiteID
+                        }
+                        motionFrames += clip.frames.count; clips.append(["label": label])
+                    } else { model.comparisonSuiteID = first.sequential.suiteID }
+                    try require(model.suiteComparison != nil && model.comparisonRunID == nil,
+                        "Quick Mix suite selection did not project the completed pair")
+                    if CGPreflightScreenCaptureAccess() {
+                        try await wait(seconds: 3) { benchmarkScrollOffset(window).map { $0 > scrollBefore + 100 } == true }
+                        try await Task.sleep(for: .milliseconds(300))
+                        try await GlassVerification.captureOwnedWindow(window,
+                            to: root.appendingPathComponent("evidence/" + label + ".png"))
                     }
-                    try await Task.sleep(for: .milliseconds(200))
-                    try await GlassVerification.captureOwnedWindow(window,
-                        to: root.appendingPathComponent("evidence/drive-benchmark-suite-comparison.png"))
+                    model.comparisonSuiteID = first.sequential.suiteID
+                    try await Task.sleep(for: .milliseconds(30))
+                    try require(model.history.map(\.id) == priorHistory && !model.hasPendingWork
+                        && (window.contentViewController as? ToolWindowChrome)?.contentHost.layer?
+                            .animation(forKey: "tool-page-crossfade") == nil,
+                        "Same comparison replayed motion or started a workload")
                 }
+                settings.motion.mode = priorMotion
                 checks.append("Two complete Quick Mix pairs compare four named phases; a foreign stage is refused and no new workload starts")
             }
             try require(selected.result.outcome == .completed && model.comparisonCandidates.contains(where: { $0.id == reference.id }),
@@ -451,18 +472,26 @@ import SwiftUI
         try await Task.sleep(for: .milliseconds(350))
         try await GlassVerification.captureOwnedWindow(window, to: destination)
     }
-    private static func benchmarkScrollOffset(_ window: NSWindow) -> CGFloat? {
+    private static func benchmarkScrollView(_ window: NSWindow) -> NSScrollView? {
         window.contentView?.layoutSubtreeIfNeeded()
         var pending = [window.contentView].compactMap { $0 }, inspected = 0
+        var primary: NSScrollView?, largestArea: CGFloat = 0
         while let view = pending.popLast(), inspected < 512 {
             inspected += 1
             if let scroll = view as? NSScrollView, let document = scroll.documentView,
-               document.bounds.height > scroll.contentView.bounds.height + 300 {
-                return scroll.contentView.bounds.minY
+               scroll.window === window, !scroll.isHiddenOrHasHiddenAncestor,
+               document.bounds.height > 0, document.bounds.width > 0 {
+                // The initial page can fit. Select its actual primary viewport,
+                // not an arbitrary overflow threshold or a nested chart scroller.
+                let area = scroll.contentView.bounds.width * scroll.contentView.bounds.height
+                if area > largestArea { primary = scroll; largestArea = area }
             }
             pending += view.subviews
         }
-        return nil
+        return primary
+    }
+    private static func benchmarkScrollOffset(_ window: NSWindow) -> CGFloat? {
+        benchmarkScrollView(window)?.contentView.bounds.minY
     }
     private static func wait(seconds: Double = 5, _ condition: () -> Bool) async throws {
         let deadline = ProcessInfo.processInfo.systemUptime + seconds

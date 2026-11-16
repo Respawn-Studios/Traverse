@@ -261,7 +261,8 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
             || ProcessInfo.processInfo.arguments.contains("--check-sftp-routed-upload") && ProcessInfo.processInfo.arguments.contains("--folder-upload") && folderAction == "routed-folder-upload-native"
             || ProcessInfo.processInfo.arguments.contains("--check-connection-fields") && folderAction == "native-connection-fields"
             || ProcessInfo.processInfo.arguments.contains("--check-drive-benchmark-native") && folderAction == "native-drive-benchmark"
-                && ["drive-benchmark-run", "drive-benchmark-comparison", "drive-benchmark-comparison-size"].contains(label)
+                && ["drive-benchmark-run", "drive-benchmark-suite-comparison", "drive-benchmark-suite-comparison-reduced",
+                    "drive-benchmark-suite-comparison-off", "drive-benchmark-comparison", "drive-benchmark-comparison-size"].contains(label)
             || tarCase || zipRenameCase || smbGroupCase || sftpActionCase || smbDestinationCase)
             && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
             && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent

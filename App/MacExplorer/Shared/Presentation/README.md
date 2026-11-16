@@ -60,6 +60,9 @@ Its first measured width is adopted without animation; only later genuine
 reflows follow the shared Full/Reduced/Off policy. This avoids new panels
 animating from an unmeasured narrow arrangement. Tool-page replacement can use
 the existing native compositor crossfade without animating text geometry.
+Use one main effect for each change. A comparison that scrolls into place should
+use that scroll as its transition; keep page fades for changes in place so
+moving labels stay readable.
 
 FileKindText.swift and FileOpeningSymbol.swift share filename-kind labels and
 finite native-opening image variants across local/server rows. Cues follow the
