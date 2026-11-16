@@ -258,7 +258,9 @@ struct TARClipboardSource {
     }
     static func isCompressed(_ source: URL) -> Bool {
         let kind = ArchiveFilename(source.lastPathComponent)?.kind
-        return kind == .tarGzip || TARBzip2Feature.available && kind == .tarBzip2
+        // Recognizing a readable wrapper must not require permission to edit it.
+        // Preparation still passes the separate browsing and source checks.
+        return kind == .tarGzip || kind == .tarBzip2
     }
     static func allowsCompressedEditing(_ source: URL) -> Bool {
         let kind = ArchiveFilename(source.lastPathComponent)?.kind

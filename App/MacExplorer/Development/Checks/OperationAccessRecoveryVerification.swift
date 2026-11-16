@@ -2690,6 +2690,17 @@ import LocalStorage
         }.value
         let inputs = try await promiseInputs(selection)
         try require(inputs.values.allSatisfy(\.publiclyMarked), "promise-source-public-property")
+        // Check every format before requesting the first real gesture. A later
+        // read-only codec refusal must not waste the owner's earlier drags.
+        for format in ["tar", "tar.gz", "tar.bz2"] {
+            stage = format + "/readiness-preflight"
+            let source = selection.fixtureRoot.appendingPathComponent("Promise." + format)
+            let context = try await TARMemberActionDriver.open(source, browser: browser, folder: ["Archive"])
+            try require(context.model.current && !TARArchiveEditingFeature.available
+                && !ArchiveCreationActivation.available && !ZIPMemberRenameFeature.available,
+                "promise-readiness-without-write-admission")
+            try require(try await promiseInputs(selection) == inputs, "promise-preflight-sources-unchanged")
+        }
         var steps: [PromiseStep] = []
         for route in promiseRoutes {
             stage = route.id + "/open"
