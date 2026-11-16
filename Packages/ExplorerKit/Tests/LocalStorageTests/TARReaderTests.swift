@@ -5,27 +5,7 @@ import Testing
 @testable import LocalStorage
 
 struct TARReaderTests {
-    private final class Trace: @unchecked Sendable {
-        private let lock = NSLock()
-        private var reads = [(UInt64, Int)](), mainThread = false, held = false
-        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
-        init(holdFirstRead: Bool = false) { held = holdFirstRead }
-        func probe(_ stage: TARArchiveReader.Stage, _ offset: UInt64, _ count: Int) throws {
-            let pause = lock.withLock {
-                mainThread = mainThread || Thread.isMainThread
-                guard case .metadata = stage else { return false }
-                reads.append((offset, count))
-                if held { held = false; return true }
-                return false
-            }
-            if pause {
-                entered.signal()
-                guard release.wait(timeout: .now() + 5) == .success else { throw TARArchiveFailure.unavailable }
-            }
-        }
-        var observations: (reads: [(UInt64, Int)], mainThread: Bool) { lock.withLock { (reads, mainThread) } }
-        func waitForEntry() -> Bool { entered.wait(timeout: .now() + 5) == .success }
-    }
+    private typealias Trace = TARReadTestProbe
     private actor QueryGate {
         private var waiting = false
         private var start: CheckedContinuation<Void, Never>?, release: CheckedContinuation<Void, Never>?

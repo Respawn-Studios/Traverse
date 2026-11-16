@@ -21,9 +21,10 @@ struct TARMetadataTests {
         #expect(catalog.nodes.count <= 20_000)
         let (end, physical): (UInt64, Int) = switch variant {
         case .ustar: (70_144, 6)
-        case .pax, .gnu: (2048, 2)
+        case .pax, .gnu, .paxSize: (2048, 2)
         case .rootAndLinks: (3072, 5)
         case .empty: (0, 0)
+        case .preview: (539_648, 18)
         }
         #expect(parsed.endOffset == end && parsed.physicalRecords == physical)
         // PAX/GNU extension bodies are metadata. Only ordinary file bodies are forbidden here.

@@ -17,6 +17,7 @@ Run package checks through the normal build owner. For example:
 
 ```sh
 python3 -B tools/dev.py test --filter 'ZIPRootExportTests|ZIPExportBatchStateTests' --serial
+python3 -B tools/dev.py test --filter 'TARMetadataTests|TARReaderTests|TARPreviewTests' --serial
 ```
 
 Use an existing native flow to check application integration:
