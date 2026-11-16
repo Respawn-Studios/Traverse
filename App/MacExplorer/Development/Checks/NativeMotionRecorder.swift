@@ -388,13 +388,16 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
             queue.async { [self] in
                 let ownWindow = observation.content?.windows.first(where: { $0.windowID == id })
                 let ownFilter = ownWindow.map { SCContentFilter(desktopIndependentWindow: $0) }
+                let ownBackground = background.flatMap { id in observation.content?.windows.first(where: { $0.windowID == id }) }
+                let backgroundReady = background == nil || (ownBackground?.owningApplication?.processID == getpid()
+                    && ownWindow.map { ownBackground?.frame.contains($0.frame) == true } == true)
                 let geometryReady = ownWindow.map { window in
                     window.frame.width > 0 && window.frame.height > 0 &&
                     (!sampling.diagnostic || (abs(window.frame.width - expectedWidth) <= 2 && abs(window.frame.height - expectedHeight) <= 2 &&
                         (!includingChildWindows || (abs((ownFilter?.contentRect.width ?? 0) - expectedWidth) <= 2
                             && abs((ownFilter?.contentRect.height ?? 0) - expectedHeight) <= 2))))
                 } ?? false
-                if error == nil, (!geometryReady || ownWindow == nil), attempt < 51 {
+                if error == nil, (!geometryReady || ownWindow == nil || !backgroundReady), attempt < 51 {
                     queue.asyncAfter(deadline: .now() + .milliseconds(20)) { [self] in
                         observeStart(window: id, background: background, expectedWidth: expectedWidth, expectedHeight: expectedHeight,
                             includingChildWindows: includingChildWindows, output: output, attempt: attempt + 1, continuation: continuation)
@@ -403,6 +406,7 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                 }
                 let readiness: [String:Any] = ["lookups": attempt,"exactWindowPresent": ownWindow != nil,"geometryMatches": geometryReady,
                     "ownerMatches": ownWindow?.owningApplication?.processID == getpid(),
+                    "backgroundRequested": background != nil, "backgroundReady": backgroundReady,
                     "nativeErrorCode": error.map { ($0 as NSError).code as Any } ?? NSNull()]
                 do { try JSONSerialization.data(withJSONObject: readiness,options: [.prettyPrinted,.sortedKeys])
                     .write(to: output.deletingPathExtension().appendingPathExtension("window-ready.json"),options: .withoutOverwriting) }

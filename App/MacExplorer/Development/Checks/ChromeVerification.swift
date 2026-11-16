@@ -1015,7 +1015,9 @@ extension UIVerification {
             control.presentAncestorMenuForVerification = { captured = $0 }
             defer { control.presentAncestorMenuForVerification = nil }
             chromeClick(control, window: window, at: try point(control, index), count: 1)
-            guard let captured else { throw Failure(message: "Native ellipsis activation did not produce its menu") }
+            guard let captured else {
+                throw Failure(message: "Native ellipsis activation did not produce its menu: visible=\(window.isVisible), key=\(window.isKeyWindow), active=\(NSApp.isActive), controlWindow=\(control.window === window), firstResponder=\(String(describing: window.firstResponder.map { type(of: $0) }))")
+            }
             try require(browser.location == expectedLocation, "Opening an ancestor menu navigated or edited the path")
             return captured
         }

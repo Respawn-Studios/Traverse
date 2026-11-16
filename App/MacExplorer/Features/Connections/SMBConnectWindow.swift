@@ -1006,40 +1006,17 @@ private extension SFTPConnectionStage {
 /// Advance real layout in display-aligned steps. Implicit whole-window scaling
 /// can briefly stretch/clip native controls while the backing surface changes.
 @MainActor private final class SMBConnectResizeMotion {
-    @MainActor private final class Tick: NSObject {
-        weak var owner: SMBConnectResizeMotion?
-        @objc func update(_ link: CADisplayLink) {
-            guard let owner else { link.invalidate(); return }
-            owner.update(link)
-        }
-    }
-    private let tick = Tick()
-    private weak var window: NSWindow?
-    private var link: CADisplayLink?
-    private var start = NSRect.zero, finish = NSRect.zero
-    private var began = 0.0
-    private var duration = 0.36
-    var isAnimating: Bool { link != nil }
-    init() { tick.owner = self }
-    isolated deinit { link?.invalidate() }
+    private let transition = DisplayLinkedTransition()
+    var isAnimating: Bool { transition.isAnimating }
     func animate(_ window: NSWindow, to frame: NSRect, mode: BrowserMotionMode) {
-        cancel(); self.window = window; start = window.frame; finish = frame; began = CACurrentMediaTime()
-        duration = 0.36 * mode.durationScale
-        let link = window.displayLink(target: tick, selector: #selector(Tick.update(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
-        self.link = link; link.add(to: .main, forMode: .common)
+        let start = window.frame
+        transition.animate(in: window, duration: 0.36 * mode.durationScale, update: { [weak window] progress in
+            guard let window else { return }
+            let intermediate = NSRect(x: start.minX + (frame.minX - start.minX) * progress, y: start.minY,
+                width: start.width + (frame.width - start.width) * progress, height: start.height)
+            window.setFrame(intermediate, display: true, animate: false)
+            window.contentView?.layoutSubtreeIfNeeded()
+        })
     }
-    func cancel() { link?.invalidate(); link = nil; window = nil }
-    private func update(_ link: CADisplayLink) {
-        guard let window, window.isVisible else { cancel(); return }
-        let progress = min(1, max(0, (link.targetTimestamp - began) / max(0.001, duration)))
-        let eased = progress * progress * (3 - 2 * progress)
-        let frame = NSRect(x: start.minX + (finish.minX - start.minX) * eased, y: start.minY,
-            width: start.width + (finish.width - start.width) * eased, height: start.height)
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        window.setFrame(frame, display: true, animate: false)
-        window.contentView?.layoutSubtreeIfNeeded()
-        CATransaction.commit()
-        if progress >= 1 { cancel() }
-    }
+    func cancel() { transition.cancel() }
 }

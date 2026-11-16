@@ -33,7 +33,7 @@ enum BrowserMotionEffect: String, CaseIterable, Codable, Identifiable, Sendable 
     case tabStrip = "Tab creation and closing"
     case tabContent = "Switching tab contents"
     case folders = "Folder navigation"
-    case panes = "Pane creation and closing"
+    case panes = "Panes and sidebar"
     case windows = "Opening windows"
     case windowClosing = "Closing windows"
     case connectionStatus = "Connection indicators"

@@ -32,14 +32,11 @@ final class WorkspacePaneTransition: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func isAccessibilityElement() -> Bool { false }
 
-    func capture(_ hosts: [UUID: PaneHostView], in parent: NSView) {
+    func capture(_ hosts: [UUID: PaneHostView], in parent: NSView, foreground: (UUID) -> [NSView]) {
         guard mode != .off, parent.window?.isVisible == true, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
               parent.bounds.width * parent.bounds.height * pow(parent.window?.backingScaleFactor ?? 1, 2) <= 8_000_000 else { return }
         for (id, host) in hosts {
-            guard host.bounds.width > 1, host.bounds.height > 1,
-                  let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
-            host.cacheDisplay(in: host.bounds, to: rep)
-            let image = NSImage(size: host.bounds.size); image.addRepresentation(rep)
+            guard let image = NativeForegroundSnapshot.capture(in: host, views: foreground(id)) else { continue }
             frames[id] = Frame(rect: host.convert(host.bounds, to: parent), image: image)
         }
     }

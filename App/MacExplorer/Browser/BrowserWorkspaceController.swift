@@ -68,6 +68,8 @@ final class BrowserWorkspaceController: NSViewController {
     let sidebarRestoreButton = NSButton()
     private var sidebarControllers: [UUID: NSViewController] = [:]
     private(set) var paneHosts: [UUID: PaneHostView] = [:]
+    private var paneSplits: [UUID: WorkspaceSplitView] = [:]
+    private var reconcilingPaneTree = false
     private var sidebarSplit: WorkspaceSidebarSplitView?
     var isSidebarCollapsed: Bool { sidebarSplit?.isSidebarCollapsed == true }
     var sidebarSnapshot: PaneWorkspaceSnapshot.Sidebar { sidebarSplit?.snapshot ?? .init() }
@@ -138,6 +140,7 @@ final class BrowserWorkspaceController: NSViewController {
         content.canCollapse = { [weak self] in self?.canToggleSidebar == true }
         content.onToggleRequested = { [weak self] in self?.toggleSidebar() }
         content.onCollapsedChanged = { [weak self] in self?.sidebarPresentationChanged() }
+        content.onPresentationChanged = { [weak self] in self?.updateSidebarRestorePresentation() }
         content.onWidthChanged = { [weak self] in
             self?.enforceWindowMinimum(grow: false)
             self?.recordSession()
@@ -479,9 +482,17 @@ final class BrowserWorkspaceController: NSViewController {
             || (!isSidebarCollapsed && responder === sidebarRestoreButton) {
             activeBrowser.focusBrowserContent()
         }
-        sidebarRestoreButton.isHidden = !isSidebarCollapsed
         enforceWindowMinimum(grow: !isSidebarCollapsed)
         recordSession()
+    }
+
+    private func updateSidebarRestorePresentation() {
+        let moving = sidebarSplit?.isAnimating == true
+        let visible = isSidebarCollapsed || moving
+        if sidebarRestoreButton.isHidden == visible { sidebarRestoreButton.isHidden = !visible }
+        sidebarRestoreButton.alphaValue = moving ? (sidebarSplit?.collapsedFraction ?? 0) : (isSidebarCollapsed ? 1 : 0)
+        sidebarRestoreButton.isEnabled = isSidebarCollapsed
+        sidebarRestoreButton.setAccessibilityHidden(!isSidebarCollapsed)
     }
 
     func canSplitActive(at edge: PaneDropEdge) -> Bool {
@@ -713,14 +724,16 @@ final class BrowserWorkspaceController: NSViewController {
         rebuildPaneTree(animated: false)
         installSharedViews()
         sidebarSplit?.restore(snapshot.sidebar)
-        sidebarRestoreButton.isHidden = !isSidebarCollapsed
+        updateSidebarRestorePresentation()
         enforceWindowMinimum(grow: true)
         onActiveBrowserChanged?(activeBrowser)
     }
 
     func rebuildPaneTree(animated: Bool = true) {
-        guard isViewLoaded else { return }
-        paneTreeHost.subviews.forEach { $0.removeFromSuperview() }
+        guard isViewLoaded, !reconcilingPaneTree else { return }
+        reconcilingPaneTree = true
+        defer { reconcilingPaneTree = false }
+        var retainedSplits = Set<UUID>()
         func build(_ id: UUID, size: NSSize) -> NSView {
             guard let node = layout.node(id) else { return NSView() }
             switch node.content {
@@ -729,7 +742,14 @@ final class BrowserWorkspaceController: NSViewController {
                 host.frame = NSRect(origin: .zero, size: size)
                 return host
             case .split(let axis, let fraction, let first, let second):
-                let split = WorkspaceSplitView(axis: axis, fraction: fraction, firstMinimum: minimumSize(for: first), secondMinimum: minimumSize(for: second))
+                // Keep unchanged branches attached. Reparenting every native
+                // glass host needlessly resets its backdrop during a split.
+                let split = paneSplits[id] ?? WorkspaceSplitView(axis: axis, fraction: fraction,
+                    firstMinimum: minimumSize(for: first), secondMinimum: minimumSize(for: second))
+                paneSplits[id] = split; retainedSplits.insert(id)
+                split.isVertical = axis == .columns
+                split.fraction = fraction
+                split.firstMinimum = minimumSize(for: first); split.secondMinimum = minimumSize(for: second)
                 split.frame = NSRect(origin: .zero, size: size)
                 let a = minimumSize(for: first), b = minimumSize(for: second)
                 let available = max(0, (axis == .columns ? size.width : size.height) - split.dividerThickness)
@@ -738,17 +758,23 @@ final class BrowserWorkspaceController: NSViewController {
                 let sizes = axis == .columns
                     ? [NSSize(width: firstLength, height: size.height), NSSize(width: available - firstLength, height: size.height)]
                     : [NSSize(width: size.width, height: firstLength), NSSize(width: size.width, height: available - firstLength)]
-                for (index, childID) in [first, second].enumerated() {
-                    let child = build(childID, size: sizes[index])
+                let children = [first, second].enumerated().map { index, child in build(child, size: sizes[index]) }
+                for retired in split.arrangedSubviews where !children.contains(where: { $0 === retired }) {
+                    split.removeArrangedSubview(retired); retired.removeFromSuperview()
+                }
+                for (index, child) in children.enumerated() {
+                    if split.arrangedSubviews.indices.contains(index), split.arrangedSubviews[index] === child { continue }
                     // Set frame ownership before insertion: attaching a zero
                     // subtree to a live window otherwise solves its controls at zero.
                     child.translatesAutoresizingMaskIntoConstraints = true
                     child.autoresizingMask = []
-                    split.addArrangedSubview(child)
+                    if child.superview === split { split.removeArrangedSubview(child); child.removeFromSuperview() }
+                    split.insertArrangedSubview(child, at: min(index, split.arrangedSubviews.count))
                 }
-                split.adjustSubviews()
+                split.fraction = fraction
+                split.resizeSubviews(withOldSize: split.bounds.size)
                 split.onFractionChanged = { [weak self] value in
-                    guard let self else { return }
+                    guard let self, !self.reconcilingPaneTree else { return }
                     try? self.layout.setFraction(value, for: id)
                     self.recordSession()
                 }
@@ -758,7 +784,12 @@ final class BrowserWorkspaceController: NSViewController {
         let minimum = minimumSize(for: layout.rootID)
         let tree = build(layout.rootID, size: NSSize(width: max(minimum.width, paneTreeHost.bounds.width),
             height: max(minimum.height, paneTreeHost.bounds.height)))
-        pin(tree, inside: paneTreeHost)
+        if tree.superview !== paneTreeHost {
+            paneTreeHost.subviews.forEach { $0.removeFromSuperview() }
+            pin(tree, inside: paneTreeHost)
+        }
+        for (id, retired) in paneSplits where !retainedSplits.contains(id) { retired.removeFromSuperview() }
+        paneSplits = paneSplits.filter { retainedSplits.contains($0.key) }
         for (index, id) in layout.paneIDs.enumerated() {
             paneHosts[id]?.isSplit = layout.paneIDs.count > 1
             paneHosts[id]?.isActive = id == activePaneID
@@ -785,7 +816,7 @@ final class BrowserWorkspaceController: NSViewController {
         guard primaryBrowser.settings.motion.allows(.panes) else { return }
         let transition = WorkspacePaneTransition()
         transition.mode = primaryBrowser.settings.motion.mode
-        transition.capture(paneHosts, in: paneTreeHost)
+        transition.capture(paneHosts, in: paneTreeHost) { browsers[$0]?.paneTransitionForeground ?? [] }
         guard !transition.frames.isEmpty else { return }
         if let source, let tabID, let edge,
            let tab = source.tabStrip.paneTransitionFrame(for: tabID, in: paneTreeHost) {
@@ -826,7 +857,7 @@ final class BrowserWorkspaceController: NSViewController {
         if let sidebar = sidebarControllers[activePaneID]?.view { pin(sidebar, inside: sidebarHost) }
         if let footer = activeBrowser.statusSurface { pin(footer, inside: activeFooterHost) }
         activeBrowser.statusRow?.insertArrangedSubview(sidebarRestoreButton, at: 0)
-        sidebarRestoreButton.isHidden = !isSidebarCollapsed
+        updateSidebarRestorePresentation()
         if let row = activeBrowser.statusRow,
            let index = row.arrangedSubviews.firstIndex(of: activeBrowser.viewModeControl) {
             row.insertArrangedSubview(operationButton, at: index)
@@ -906,8 +937,8 @@ final class BrowserWorkspaceController: NSViewController {
 
 @MainActor
 private final class WorkspaceSplitView: NSSplitView, NSSplitViewDelegate {
-    let firstMinimum: NSSize
-    let secondMinimum: NSSize
+    var firstMinimum: NSSize
+    var secondMinimum: NSSize
     var fraction: Double
     var onFractionChanged: ((Double) -> Void)?
     private var positioning = false

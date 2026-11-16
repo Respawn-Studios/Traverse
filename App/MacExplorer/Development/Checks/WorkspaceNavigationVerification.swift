@@ -137,7 +137,7 @@ enum WorkspaceNavigationVerification {
             && !ProcessInfo.processInfo.arguments.contains("--offscreen")
         if visibleFilterQualification { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
         var clips: [[String: Any]] = []
-        func record(_ label: String, action: @MainActor () throws -> Void) async throws {
+        func record(_ label: String, field: NSView? = nil, action: @MainActor () throws -> Void) async throws {
             guard recordsMotion else { try action(); return }
             // Keep the wide functional control intact. Only the recorded
             // action uses this compact, admitted WindowServer canvas.
@@ -145,12 +145,23 @@ enum WorkspaceNavigationVerification {
             defer { window.setFrame(originalFrame, display: true); window.contentView?.layoutSubtreeIfNeeded() }
             window.setContentSize(NSSize(width: 1120, height: 740))
             window.contentView?.layoutSubtreeIfNeeded()
+            let fieldPresent = field.map { $0.window === window && !$0.isHiddenOrHasHiddenAncestor } ?? false
             window.title = "Panes · generated review · motion audit"
-            let movie = try await NativeMotionRecorder.record(window: window, root: testRoot, label: label,
+            // Give behind-window glass a known, non-private backdrop. A filtered
+            // one-window stream can omit the surface that native material samples.
+            let backdrop = NSWindow(contentRect: window.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            backdrop.title = "Panes backdrop · generated review · motion audit"
+            backdrop.isReleasedWhenClosed = false; backdrop.isRestorable = false
+            backdrop.backgroundColor = .systemIndigo; backdrop.isOpaque = true; backdrop.ignoresMouseEvents = true
+            backdrop.order(.below, relativeTo: window.windowNumber)
+            defer { backdrop.close() }
+            let movie = try await NativeMotionRecorder.record(window: window, over: backdrop, root: testRoot, label: label,
                 sampling: .diagnostic(for: window), includingChildWindows: false, action: action)
             try JSONEncoder().encode(movie).write(to: testRoot.appendingPathComponent("evidence/\(label).json"),
                 options: .withoutOverwriting)
-            clips.append(DevelopmentMotionVerification.clip(label, report: movie, field: nil, window: window))
+            var clip = DevelopmentMotionVerification.clip(label, report: movie, field: field, window: window)
+            if field != nil { clip["fieldPresentBeforeAction"] = fieldPresent }
+            clips.append(clip)
         }
         workspace.startBrowser(primary)
         try await waitUntil("Initial generated pane listing") { primary.rowsByURL[firstFile] != nil && !primary.isLoading && primary.orderingTask == nil }
@@ -159,6 +170,51 @@ enum WorkspaceNavigationVerification {
         try require(workspace.browsers.count == 1 && !workspace.preview.isEnabled, "Workspace did not start with one pane and preview off")
         try require(workspace.paneHosts.values.allSatisfy { !$0.showsFocusOutline },
                     "A single-pane workspace must not draw an active-pane outline")
+        if recordsMotion && settings.motion.allows(.panes) && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            var collapseProbe: Task<[String: Double], Error>?
+            let expandedWidth = workspace.sidebarHost.frame.width
+            try await record("sidebar-collapse") {
+                workspace.setSidebarCollapsed(true)
+                let began = CACurrentMediaTime()
+                collapseProbe = Task { @MainActor in
+                    try await Task.sleep(for: .milliseconds(50))
+                    return ["elapsed": CACurrentMediaTime() - began,
+                        "width": Double(workspace.sidebarHost.frame.width),
+                        "alpha": Double(workspace.sidebarRestoreButton.alphaValue),
+                        "animating": workspace.hasSidebarAnimationForVerification ? 1 : 0]
+                }
+                try require(workspace.hasSidebarAnimationForVerification
+                    && !workspace.sidebarRestoreButton.isHidden && workspace.sidebarRestoreButton.alphaValue < 0.1,
+                    "Sidebar restore button appeared fully opaque before its collapse transition")
+            }
+            guard let collapseProbe else { throw UIVerification.Failure(message: "Sidebar progress probe did not start") }
+            let observed = try await collapseProbe.value
+            try JSONSerialization.data(withJSONObject: observed, options: [.prettyPrinted, .sortedKeys])
+                .write(to: testRoot.appendingPathComponent("evidence/sidebar-progress.json"), options: .withoutOverwriting)
+            try require(observed["animating"] == 1 && (observed["width"] ?? 0) > 1
+                && (observed["width"] ?? expandedWidth) < expandedWidth - 1,
+                "Sidebar geometry jumped to its final width instead of traversing intermediate frames")
+            try require(workspace.isSidebarCollapsed && !workspace.sidebarRestoreButton.isHidden
+                && workspace.sidebarRestoreButton.alphaValue == 1, "Collapsed sidebar did not settle its restore button")
+            try await record("sidebar-expand") {
+                workspace.setSidebarCollapsed(false)
+                try require(workspace.hasSidebarAnimationForVerification
+                    && !workspace.sidebarRestoreButton.isHidden && workspace.sidebarRestoreButton.alphaValue > 0.9,
+                    "Sidebar restore button vanished before expansion completed")
+            }
+            try require(!workspace.isSidebarCollapsed && workspace.sidebarRestoreButton.isHidden,
+                "Expanded sidebar retained its restore button")
+            workspace.setSidebarCollapsed(true)
+            try await Task.sleep(for: .milliseconds(45))
+            let interruptedWidth = workspace.sidebarHost.frame.width
+            workspace.setSidebarCollapsed(false)
+            try require(abs(workspace.sidebarHost.frame.width - interruptedWidth) < 1,
+                "Retargeting a moving sidebar jumped to the previous destination")
+            try await waitUntil("Sidebar retargeting") { !workspace.hasSidebarAnimationForVerification }
+            try require(abs(workspace.sidebarHost.frame.width - expandedWidth) < 1 && workspace.sidebarRestoreButton.isHidden,
+                "Sidebar retargeting did not restore its original width")
+            checks.append("Sidebar and footer restore use the same live transition; the restore button fades with the divider instead of appearing or vanishing at the first frame")
+        }
         guard let singleName = primary.table.tableColumn(withIdentifier: .init("name")),
               let singleDate = primary.table.tableColumn(withIdentifier: .init("modified")) else {
             throw UIVerification.Failure(message: "Single-pane column control is unavailable")
@@ -373,14 +429,27 @@ enum WorkspaceNavigationVerification {
         checks.append("Foreign source strings, stale drag sequences and center drops have no split authority; all four edge outlines stay inside the pane")
 
         var fourthVisitBeforeLoading: UUID?
-        try await record("pane-split-unaffected") {
+        try await record("pane-split-unaffected", field: peer.navigationSurface) {
             guard let stable = workspace.paneHosts[primary.paneID] else {
                 throw UIVerification.Failure(message: "Unchanged pane disappeared before fourth split")
             }
             let before = stable.convert(stable.bounds, to: workspace.paneTreeHost), visit = primary.sessionID
+            let stableParent = stable.superview
+            let peerParent = workspace.paneHosts[peer.paneID]?.superview
+            let fractions = Dictionary(uniqueKeysWithValues: workspace.layout.nodes.compactMap { node -> (UUID, Double)? in
+                if case .split(_, let fraction, _, _) = node.content { return (node.id, fraction) }
+                return nil
+            })
             try require(workspace.splitActive(at: .top), "Fourth pane stretch failed in a sufficiently sized workspace")
             workspace.activeBrowser.permitsBackgroundVerification = true
             fourthVisitBeforeLoading = workspace.activeBrowser.sessionID
+            try require(stable.superview === stableParent && workspace.paneHosts[peer.paneID]?.superview === peerParent,
+                "Splitting another branch detached an unchanged native pane")
+            for (id, expectedFraction) in fractions {
+                if case .split(_, let fraction, _, _)? = workspace.layout.node(id)?.content {
+                    try require(fraction == expectedFraction, "Native tree reconciliation persisted a transient divider fraction")
+                }
+            }
             if paneMotion {
                 try require(stable.convert(stable.bounds, to: workspace.paneTreeHost) == before
                     && primary.sessionID == visit

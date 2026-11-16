@@ -13,22 +13,20 @@ final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
     var onToggleRequested: (() -> Void)?
     var onWidthChanged: (() -> Void)?
     var onCollapsedChanged: (() -> Void)?
+    var onPresentationChanged: (() -> Void)?
     var motion = BrowserMotionPreferences()
     private var positioning = false
-    private var animationTicket: UUID?
-    var isAnimating: Bool { animationTicket != nil }
+    private let transition = DisplayLinkedTransition()
+    var isAnimating: Bool { transition.isAnimating }
     var snapshot: PaneWorkspaceSnapshot.Sidebar {
         .init(isCollapsed: isSidebarCollapsed, expandedWidth: Double(sidebarWidth))
     }
     var reservedWidth: CGFloat { isSidebarCollapsed ? 0 : sidebarWidth + dividerThickness }
+    var collapsedFraction: CGFloat { 1 - min(1, max(0, sidebarPosition / max(1, expandedPosition))) }
 
-    /// AppKit interpolates this scalar on the live split view. Retargeting an
-    /// in-flight animation begins at its current value, with no image overlays.
-    @objc dynamic var sidebarPosition: CGFloat = 200 {
+    /// Retarget from the current live divider, keeping native blur and text live.
+    private(set) var sidebarPosition: CGFloat = 200 {
         didSet { layoutSidebar() }
-    }
-    override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
-        key == "sidebarPosition" ? CABasicAnimation() : super.defaultAnimation(forKey: key)
     }
 
     init() {
@@ -58,42 +56,33 @@ final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
         // Expansion may grow the window before claiming space from the panes.
         onCollapsedChanged?()
         let target: CGFloat = collapsed ? 0 : expandedPosition
-        guard animated, motion.allows(.panes), window?.isVisible == true,
+        guard animated, motion.allows(.panes), let window, window.isVisible,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             finishAnimation(); return
         }
         subviews.first?.isHidden = false
-        let ticket = UUID(); animationTicket = ticket
-        sidebarPosition = start
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.24 * motion.mode.durationScale
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            animator().sidebarPosition = target
-        }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, self.animationTicket == ticket else { return }
-                self.finishAnimation()
-            }
+        transition.animate(in: window, duration: 0.24 * motion.mode.durationScale, update: { [weak self] progress in
+            self?.sidebarPosition = start + (target - start) * progress
+        }, completion: { [weak self] in
+            self?.finishAnimation()
         })
     }
 
     /// Resize, close, a native drag or a motion-policy change settles the current
     /// requested state and invalidates older animation completions.
     func finishAnimation() {
-        animationTicket = nil
+        transition.cancel()
         let target: CGFloat = isSidebarCollapsed ? 0 : expandedPosition
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            animator().sidebarPosition = target
-        }
-        // The custom-property animator can defer even a zero-duration setter.
-        // Cancel its old target above, then settle live geometry synchronously.
         sidebarPosition = target
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
-        if isAnimating { finishAnimation() }
-        else { sidebarPosition = isSidebarCollapsed ? 0 : expandedPosition }
+        // AppKit can request another layout at the same size during a frame.
+        // Only a real allocation change interrupts the requested transition.
+        if isAnimating {
+            if oldSize != bounds.size { finishAnimation() }
+            else { layoutSidebar() }
+        } else { sidebarPosition = isSidebarCollapsed ? 0 : expandedPosition }
     }
 
     private func layoutSidebar() {
@@ -106,6 +95,7 @@ final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
         subviews[0].frame = NSRect(x: 0, y: 0, width: width, height: bounds.height)
         subviews[1].frame = NSRect(x: width + divider, y: 0,
             width: max(0, bounds.width - width - divider), height: bounds.height)
+        onPresentationChanged?()
         needsDisplay = true
     }
 
