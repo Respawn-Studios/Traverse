@@ -235,10 +235,12 @@ import Foundation
         var stage = "startup", passed = false
         var observations: [[String: Any]] = []
         var alphaSamples: [CGFloat] = []
+        var alphaSampleTimes: [TimeInterval] = []
         defer {
             try? JSONSerialization.data(withJSONObject: ["passed": passed, "stage": stage, "windows": observations,
                 "nativeWindowAlpha": windows.map { $0.alphaValue },
                 "lastOpeningAlphaSamples": alphaSamples,
+                "lastOpeningSampleTimes": alphaSampleTimes,
                 "independentEffects": passed, "programmaticCloseImmediate": passed,
                 "systemReduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion], options: [.prettyPrinted, .sortedKeys])
                 .write(to: root.appendingPathComponent("evidence/tool-window-lifecycle.json"), options: .withoutOverwriting)
@@ -273,10 +275,13 @@ import Foundation
                             name + " identical style binding ended its opening transition")
                     }
                     alphaSamples = [window.alphaValue]
-                    let openingDeadline = CACurrentMediaTime() + 1
+                    let openingBegan = CACurrentMediaTime()
+                    alphaSampleTimes = [0]
+                    let openingDeadline = openingBegan + 1
                     while window.alphaValue < 1 && CACurrentMediaTime() < openingDeadline {
                         try await Task.sleep(for: .milliseconds(10))
                         alphaSamples.append(window.alphaValue)
+                        alphaSampleTimes.append(CACurrentMediaTime() - openingBegan)
                     }
                     let openingAlpha = alphaSamples.first(where: { $0 > 0 && $0 < 1 }) ?? window.alphaValue
                     stage = name + "/" + mode.rawValue + "/intermediate-opacity"
@@ -315,9 +320,24 @@ import Foundation
                         name + " retained a hidden or unresponsive presentation")
                     observations.append(["window": name, "mode": mode.rawValue,
                         "entrance": entrance, "openingIntermediateAlpha": openingAlpha,
+                        "openingAlphaSamples": alphaSamples, "openingSampleTimes": alphaSampleTimes,
                         "closingIntermediateAlpha": closingAlpha ?? 1, "userCloseFade": closing, "framePreserved": true])
                 }
             }
+            stage = "hidden-entrance-policy-change"
+            settings.motion = .init()
+            try await Task.sleep(for: .milliseconds(30))
+            preferences.makeKeyAndOrderFront(nil)
+            preferences.orderOut(nil)
+            settings.motion = .init(mode: .off)
+            _ = ToolWindowChrome.install(in: preferences, settings: settings)
+            preferences.makeKeyAndOrderFront(nil)
+            try UIVerification.require(preferences.alphaValue == 1,
+                "A hidden entrance survived reopening with motion disabled")
+            try await Task.sleep(for: .milliseconds(450))
+            try UIVerification.require(preferences.isVisible && preferences.alphaValue == 1,
+                "A retired entrance changed the reopened window")
+            preferences.close()
             // Opening and closing have separate switches. Programmatic teardown
             // must remain immediate even when both user-facing effects are on.
             for opening in [false, true] {

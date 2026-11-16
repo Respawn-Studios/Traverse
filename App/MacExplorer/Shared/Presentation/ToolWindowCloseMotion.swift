@@ -37,6 +37,7 @@ import QuartzCore
     }
     private static func start(_ window: NSWindow, exit: Exit) {
         let key = ObjectIdentifier(window)
+        ToolContentMotion.cancelWindowEntrance(in: window)
         exits[key] = exit
         exit.observation = BrowserNotificationObservation(name: NSWindow.willCloseNotification, object: window) { _ in
             MainActor.assumeIsolated { cancel(window) }

@@ -268,25 +268,54 @@ private struct ToolPageCrossfadeTrigger<ID: Equatable & Sendable>: NSViewReprese
 enum ToolContentMotion {
     // Weak bookkeeping only: this never keeps a view/private description alive.
     private static let views = NSHashTable<NSView>.weakObjects()
+    private static let entrances = NSMapTable<NSWindow, DisplayLinkedTransition>(keyOptions: .weakMemory,
+                                                                               valueOptions: .strongMemory)
     /// A retained window can be shown repeatedly. Bringing it forward, or
     /// cancelling an accepted close, must not replay its entrance.
-    static func prepareWindowEntrance(_ window: NSWindow, wasVisible: Bool) -> BrowserMotionPreferences? {
-        guard !wasVisible, !window.isMiniaturized, window.sheetParent == nil,
+    private static func windowEntranceMotion(_ window: NSWindow) -> BrowserMotionPreferences? {
+        guard !window.isMiniaturized, window.sheetParent == nil,
               let chrome = window.contentViewController as? ToolWindowChrome,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
               chrome.motion.allows(.windows) else { return nil }
-        window.alphaValue = 0
         return chrome.motion
     }
-    static func revealWindow(_ window: NSWindow, motion: BrowserMotionPreferences?) {
-        guard let motion else { return }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = motion.mode.toolWindowDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            window.animator().alphaValue = 1
+    static func prepareWindowEntrance(_ window: NSWindow, wasVisible: Bool) -> BrowserMotionPreferences? {
+        guard !wasVisible else { return nil }
+        cancelWindowEntrance(in: window)
+        guard let motion = windowEntranceMotion(window) else {
+            if !ToolWindowCloseMotion.isClosing(window) { window.alphaValue = 1 }
+            return nil
         }
+        window.alphaValue = 0
+        return motion
+    }
+    static func revealWindow(_ window: NSWindow, motion: BrowserMotionPreferences?) {
+        guard let motion else {
+            // Bringing an eligible live window forward keeps its entrance.
+            // Becoming a sheet or disabling motion instead settles it now.
+            if windowEntranceMotion(window) == nil {
+                cancelWindowEntrance(in: window)
+                if !ToolWindowCloseMotion.isClosing(window) { window.alphaValue = 1 }
+            }
+            return
+        }
+        cancelWindowEntrance(in: window)
+        let transition = DisplayLinkedTransition()
+        entrances.setObject(transition, forKey: window)
+        transition.animate(in: window, duration: motion.mode.toolWindowDuration, startsOnFirstFrame: true,
+            update: { [weak window] progress in window?.alphaValue = progress },
+            completion: { [weak window, weak transition] in
+                guard let window, entrances.object(forKey: window) === transition else { return }
+                entrances.removeObject(forKey: window)
+                window.alphaValue = 1
+            })
+    }
+    static func cancelWindowEntrance(in window: NSWindow) {
+        entrances.object(forKey: window)?.cancel()
+        entrances.removeObject(forKey: window)
     }
     static func finish(in window:NSWindow) {
+        cancelWindowEntrance(in: window)
         if !ToolWindowCloseMotion.isClosing(window), window.alphaValue < 1 {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0; window.animator().alphaValue = 1
