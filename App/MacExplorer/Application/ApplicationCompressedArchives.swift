@@ -84,12 +84,14 @@ enum CompressedTARFeature {
     }
 }
 
-/// A deliberate local Open can include bounded preparation in Development.
-/// Restored locations and distributed builds keep their separate Prepare step.
+/// A deliberate Open includes bounded preparation in the qualified workbench.
+/// Passive restore and a changed source still wait for an explicit request.
 @MainActor enum CompressedArchiveOpenFeature {
     static var available: Bool {
         if GeneratedArchiveDriveReview.requested { return GeneratedArchiveDriveReview.archiveAdmitted }
-        return AppFeatureAvailability.policy.edition == .development
-            && !GeneratedSandboxReview.admitted && CompressedTARFeature.available
+        let edition = AppFeatureAvailability.policy.edition
+        let qualified = edition == .development
+            || (edition == .directPublic && TARArchiveEditingFeature.available)
+        return qualified && !GeneratedSandboxReview.admitted && CompressedTARFeature.available
     }
 }

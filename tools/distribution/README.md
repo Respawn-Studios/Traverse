@@ -32,6 +32,15 @@ never launch the app. Each runtime phase needs a separate bounded permit;
 the passive drive phase cannot format a volume or attach an image. This role
 has no updater, network helper, Finder registration or Trash capability.
 
+`prepare --suite tar-members` selects the shared TAR workbench flow, including
+creation, member changes and Undo in a separate app process. The default suite
+keeps the authored ZIP/TAR checks. Neither selection grants a runtime permit.
+The phase-admission regressions run offline:
+
+```sh
+python3 -B tools/distribution/test_archive_drive_qa.py
+```
+
 After changing dependency provenance or license inputs, review and regenerate the
 bundled manifest and notices before building:
 

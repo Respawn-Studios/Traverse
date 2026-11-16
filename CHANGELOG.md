@@ -11,13 +11,14 @@ Earlier private-beta version numbers belong to a separate release history.
 - Plain and prepared gzip/bzip2 TAR member editing through the shared archive workbench and native
   editor: Rename, batch Rename, Remove, Duplicate, Move, Add, Create File/Folder, Group and
   Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo.
-  This remains a development feature pending distribution qualification.
+  These flows are qualified in the signed direct-build source, including Undo
+  after restart. They are not part of the published 0.2.0 package.
 - TAR.gz and TAR.bz2 creation through the shared archive publisher, with
   compression choices and guarded Undo. Gzip edits preserve bounded optional
   headers; bzip2 edits keep the current compression setting by default.
   Common `.tgz`, `.tbz2` and `.tbz` names keep their wrapper identity through
   opening, editing and creation.
-- A saved Quick Compress format in Operations settings. Development builds
+- A saved Quick Compress format in Operations settings. The next direct build will
   offer ZIP, TAR, TAR.gz and TAR.bz2; the one-click command uses the selected
   format and numbers occupied names without splitting compound extensions.
   Compress… keeps the full creation controls.
@@ -29,7 +30,7 @@ Earlier private-beta version numbers belong to a separate release history.
 - A bounded Quick Mix benchmark, matched suite comparisons and readable
   per-block latency distributions alongside the existing result metrics.
   Copied text and JSON results include the same completed-call distribution.
-- Deliberate compressed-TAR Open in Development includes bounded preparation.
+- Deliberate compressed-TAR Open in the qualified direct workbench includes bounded preparation.
   Passive restore and return to a changed archive still wait for Prepare.
 - Archive export completion keeps the same selection ready for another drag,
   while late work cannot replace a newer archive view's message.

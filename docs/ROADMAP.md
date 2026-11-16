@@ -51,9 +51,10 @@ More writable formats, deeper folder and member editing, and direct actions
 for the things people do most often. The aim is simple: working on a file in an
 archive should feel as ordinary as working on a file in a folder.
 
-Development builds now bring the shared workbench and editor to plain, gzip and
-bzip2 TARs. We're working through their delivery and recovery checks before
-they join a download. XZ and other formats are further down the list.
+The next direct build brings the shared workbench and editor to plain, gzip and
+bzip2 TARs. Their creation, member changes and Undo after restart have passed
+signed checks; the downloadable release still needs its final app checks.
+XZ and other formats are further down the list.
 
 ### A lightweight editor that earns its place
 

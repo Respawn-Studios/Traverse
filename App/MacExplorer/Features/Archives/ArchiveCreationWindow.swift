@@ -34,9 +34,7 @@ enum ArchiveCreationFormat: String, Codable, CaseIterable, Sendable {
         guard !GeneratedSandboxReview.nativeTARCreateAdmitted else { return false }
         switch self {
         case .zip: return true
-        case .tar: return (AppFeatureAvailability.policy.edition == .development
-            || GeneratedArchiveDriveReview.archiveForwardAdmitted)
-            && AppFeatureAvailability.allows(.tarCreation)
+        case .tar: return TARArchiveEditingFeature.available && AppFeatureAvailability.allows(.tarCreation)
         case .tarGzip: return AppFeatureAvailability.allows(.tarCreation) && TARGzipCreationFeature.available
         case .tarBzip2: return AppFeatureAvailability.allows(.tarCreation) && TARBzip2Feature.available
         }
@@ -44,8 +42,7 @@ enum ArchiveCreationFormat: String, Codable, CaseIterable, Sendable {
 }
 enum TARGzipCreationFeature {
     static var available: Bool {
-        (AppFeatureAvailability.policy.edition == .development || GeneratedArchiveDriveReview.archiveForwardAdmitted)
-            && AppFeatureAvailability.allows(.tarCreation)
+        TARArchiveEditingFeature.available && AppFeatureAvailability.allows(.tarCreation)
             && !GeneratedSandboxReview.admitted
     }
 }

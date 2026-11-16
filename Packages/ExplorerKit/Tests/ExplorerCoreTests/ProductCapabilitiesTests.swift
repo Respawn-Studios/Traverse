@@ -7,17 +7,20 @@ final class ProductCapabilitiesTests: XCTestCase {
         XCTAssertTrue(direct.edition.isDeveloperID)
         XCTAssertFalse(direct.edition.isScopedDirect)
         let allowed: [ProductCapabilities.Feature] = [.localTrashAndRestore, .authoredZIPChanges,
-            .tarCreation, .archiveSingleFileExtraction, .archiveZIPTreeExtraction,
+            .tarCreation, .archiveMemberChanges, .archiveSingleFileExtraction, .archiveZIPTreeExtraction,
             .archiveTARTreeExtraction, .archiveTARSingleFileExtraction,
             .serverSingleFileDownloads, .serverGroupDownloads, .serverDownloads,
             .archiveInternalTransfers, .serverActions, .driveHealth, .driveHealthLiveUpdates, .archiveExternalPromises]
         for feature in allowed {
             XCTAssertTrue(direct.allows(feature), feature.rawValue)
         }
-        let held: [ProductCapabilities.Feature] = [.apfsVolumeCreation, .archiveExtraction,
-            .archiveMemberChanges, .nativeTrash]
+        let held: [ProductCapabilities.Feature] = [.apfsVolumeCreation, .archiveExtraction, .nativeTrash]
         for feature in held {
             XCTAssertFalse(direct.allows(feature), feature.rawValue)
+        }
+        for edition in [ProductCapabilities.Edition.privateBeta, .publicRelease, .appStore] {
+            XCTAssertEqual(ProductCapabilities(edition: edition).availability(of: .archiveMemberChanges),
+                .held(.fileProtection))
         }
         XCTAssertEqual(direct.availability(of: .driveHealth), .available)
         XCTAssertEqual(direct.availability(of: .driveHealthLiveUpdates), .available)

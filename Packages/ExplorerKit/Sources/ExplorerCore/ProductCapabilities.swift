@@ -46,9 +46,13 @@ public struct ProductCapabilities: Sendable, Equatable {
                 // Signed service/device and archive publication owners retain
                 // authority. Developer ID Live also requires fresh opt-in.
                 return .available
+            case .archiveMemberChanges:
+                // The direct TAR workbench uses its separately qualified native
+                // owner. Product availability does not grant file authority.
+                return .available
             case .apfsVolumeCreation:
                 return .held(.hardwareQualification)
-            case .archiveExtraction, .archiveMemberChanges, .nativeTrash:
+            case .archiveExtraction, .nativeTrash:
                 return .held(.fileProtection)
             default:
                 return .available

@@ -17,8 +17,11 @@ enum ZIPTextEditorFeature {
 enum TARArchiveEditingFeature {
     static var available: Bool {
         if GeneratedArchiveDriveReview.requested { return GeneratedArchiveDriveReview.archiveForwardAdmitted }
-        return AppFeatureAvailability.policy.edition == .development && TARBrowseFeature.available
-            && !GeneratedSandboxReview.admitted
+        guard !GeneratedSandboxReview.admitted, TARBrowseFeature.available else { return false }
+        let edition = AppFeatureAvailability.policy.edition
+        if edition == .development { return true }
+        return edition == .directPublic && NativeLocalProtectionPolicy.nativeTARCreateAvailable
+            && AppFeatureAvailability.allows(.archiveMemberChanges)
     }
 }
 
