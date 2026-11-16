@@ -308,7 +308,8 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
             && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
             && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
             && window.title == "Grouping · generated review · motion audit"
-            && ["selection-group-draft", "selection-group-results"].contains(label)
+            && ["selection-group-draft", "selection-group-results", "selection-group-new-folder",
+                "selection-group-new-folder-return"].contains(label)
         let settingsSidebarCase = ProcessInfo.processInfo.arguments.contains("--check-settings-sidebar")
             && folderAction == "settings-sidebar-v1"
             && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")

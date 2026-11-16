@@ -853,6 +853,23 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             phase_value = json.loads(phase_receipt.read_text()) if phase_receipt.is_file() else {}
             if phase_value.get("passed") is not True or phase_value.get("coordinatorIdle") is not True:
                 raise RuntimeError(f"Native {feature} {phase} failed at {phase_value.get('failureStage', 'missing report')}; inspect {case / 'evidence'}")
+            expected_clips = (["selection-group-draft", "selection-group-results",
+                               "selection-group-new-folder", "selection-group-new-folder-return"]
+                              if phase == "suite" and mode == "full-dark" else [])
+            clips = phase_value.get("clips")
+            if not isinstance(clips, list) or [clip.get("label") if isinstance(clip, dict) else None for clip in clips] != expected_clips:
+                raise RuntimeError(f"Native {feature} {phase} has the wrong recorded action set; inspect {case / 'evidence'}")
+            for clip in clips:
+                label = clip["label"]
+                movie, recording = case / "evidence" / f"{label}.mov", case / "evidence" / f"{label}.json"
+                frames = clip.get("frames")
+                if clip.get("requestedFPS") != 120 or not isinstance(frames, int) or not 3 <= frames <= 180 \
+                        or not isinstance(clip.get("captureGeometry"), dict) \
+                        or not movie.is_file() or not recording.is_file() or not 0 < movie.stat().st_size <= 4 << 20:
+                    raise RuntimeError(f"Native {feature} {phase} has incomplete bounded movie evidence; inspect {case / 'evidence'}")
+                if label.startswith("selection-group-new-folder") and (clip.get("fieldOwnerVerified") is not True
+                        or clip.get("fieldPresentBeforeAction") is not True):
+                    raise RuntimeError(f"Native {feature} {phase} did not record the visible local filename viewport")
     receipt = case / report if feature in ("trash-command", "operation-access", "archive-pane") else case / "evidence" / report
     value = json.loads(receipt.read_text()) if receipt.is_file() else {}
     if result.returncode or value.get("passed") is not True:

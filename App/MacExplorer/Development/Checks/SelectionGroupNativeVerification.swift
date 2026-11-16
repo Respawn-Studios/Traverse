@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import Darwin
 import ExplorerCore
 import FileOperations
 import LocalStorage
@@ -161,7 +162,8 @@ import LocalStorage
             if phase == "recover" { try await coldRecovery(current) }
             else {
                 try await preparation(current); try await naming(current); try await revocation(current)
-                try await groupingAndResults(current); try await stopAndBusy(current); try await staleReview(current)
+                try await groupingAndResults(current); try await ordinaryNewFolderInlineRename(current)
+                try await stopAndBusy(current); try await staleReview(current)
                 let result = try await group(current, name: "RestartGroup", urls: [current.items.appendingPathComponent("Restart.txt")])
                 try JSONSerialization.data(withJSONObject: ["recordID": result.recordID!.uuidString, "mode": mode], options: [.sortedKeys]).write(to: area.appendingPathComponent("evidence/group-restart.json"), options: .withoutOverwriting)
                 current.checks.append("A real typed group remains for a separately reserved fresh-process review and Undo")
@@ -172,7 +174,8 @@ import LocalStorage
             test.holds.forEach { $0.release() }
             for browser in test.browsers {
                 browser.beforeSelectionGroupPerformForVerification = nil; browser.beforeSelectionGroupReviewActionForVerification = nil
-                browser.selectionGroupDraft.cancel(); browser.operationPreparationTask?.cancel(); browser.operationTask?.cancel()
+                browser.selectionGroupDraft.cancel(); browser.inlineRename.cancel()
+                browser.operationPreparationTask?.cancel(); browser.operationTask?.cancel()
                 await browser.operationPreparationTask?.value; await browser.operationTask?.value
                 browser.selectionGroupWindow?.close(); await browser.selectionGroupWindow?.drain()
                 browser.recoveryWindow?.close(); browser.retentionInspectionTask?.cancel(); browser.recoveryInspectionTask?.cancel()
@@ -398,6 +401,115 @@ import LocalStorage
         await closeReview(test)
         test.checks.append("Cancelled actual Command-Z drains and leaves existing Results refreshable; successful fresh Command-Z preserves current edits/children; foreign-child Undo reports membersRestored and explicit partial closure preserves the foreign entry")
     }
+    private static func ordinaryNewFolderInlineRename(_ test: Context) async throws {
+        try await local(test)
+        let browser = test.browser, created = test.items.appendingPathComponent("New Folder", isDirectory: true)
+        let renamed = test.items.appendingPathComponent("Canvas Renamed", isDirectory: true)
+        guard let window = test.owner.window else { throw Failure(stage: "new-folder-browser-window") }
+        func absent(_ url: URL) -> Bool {
+            var facts = stat()
+            return lstat(url.path, &facts) == -1 && errno == ENOENT
+        }
+        func identity(_ url: URL) throws -> (dev_t, ino_t) {
+            var facts = stat()
+            try require(lstat(url.path, &facts) == 0 && facts.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                "new-folder-exact-directory-identity")
+            return (facts.st_dev, facts.st_ino)
+        }
+        try require(absent(created) && absent(renamed), "new-folder-fresh-generated-names")
+        let previousCount = try await history(test).records.count
+        browser.setFileSelection([]); browser.fileSelectionDidChange(); browser.focusBrowserContent()
+        let viewport = browser.activeFileScrollView.contentView
+        let selector = #selector(BrowserViewController.createFolder(_:))
+        func create() throws {
+            try require(browser.commandEnabled(selector) && NSApp.sendAction(selector, to: browser, from: nil),
+                "new-folder-ordinary-browser-command")
+        }
+        if test.mode == "full-dark" {
+            window.title = title
+            let visible = isVisible(viewport, in: window)
+            try require(visible, "new-folder-visible-browser-viewport")
+            let report = try await NativeMotionRecorder.record(window: window, root: test.root,
+                label: "selection-group-new-folder", sampling: .diagnostic(for: window)) { try create() }
+            try recordClip(test, report, label: "selection-group-new-folder", window: window,
+                field: viewport, fieldPresentBeforeAction: visible)
+        } else { try create() }
+        try await wait("new-folder-created-inline-editor") {
+            browser.inlineRename.field?.currentEditor() is NSTextView && browser.operationTask == nil
+                && browser.operationPreparationTask != nil && !browser.isLoading && browser.orderingTask == nil
+        }
+        guard let field = browser.inlineRename.field, let editor = field.currentEditor() as? NSTextView,
+              let createID = browser.lastRecoveryRecordID, let result = browser.lastOperationResult else {
+            throw Failure(stage: "new-folder-create-editor-and-record")
+        }
+        try require(result.disposition == .succeeded && result.items.count == 1
+            && result.items[0].status == .succeeded && result.items[0].destination?.path == created.path
+            && editor.string == "New Folder" && editor.selectedRange() == NSRange(location: 0, length: editor.string.utf16.count)
+            && browser.selectedURLs.count == 1 && browser.selectedURLs.first?.path == created.path
+            && window.attachedSheet == nil, "new-folder-actual-creation-and-full-name-editor")
+        let originalIdentity = try identity(created)
+        let afterCreate = try await history(test).records
+        try require(afterCreate.count == previousCount + 1 && afterCreate.first?.id == createID
+            && afterCreate.first?.kind == .ordinary && afterCreate.first?.canUndo == true,
+            "new-folder-one-ordinary-create-record")
+        func commitName() throws {
+            type("Canvas Renamed", in: editor)
+            try require(window.firstResponder === editor, "new-folder-native-Return-editor-focus")
+            editor.keyDown(with: try key(window, code: 36, text: "\r"))
+        }
+        if test.mode == "full-dark" {
+            window.title = title
+            let visible = isVisible(viewport, in: window) && isVisible(field, in: window)
+            try require(visible, "new-folder-visible-inline-editor")
+            let report = try await NativeMotionRecorder.record(window: window, root: test.root,
+                label: "selection-group-new-folder-return", sampling: .diagnostic(for: window)) { try commitName() }
+            try recordClip(test, report, label: "selection-group-new-folder-return", window: window,
+                field: viewport, fieldPresentBeforeAction: visible)
+        } else { try commitName() }
+        try await wait("new-folder-return-rename-visible") {
+            browser.inlineRename.field == nil && browser.operationTask == nil && browser.operationPreparationTask == nil
+                && !browser.isLoading && browser.orderingTask == nil
+                && browser.rowsByURL.keys.contains(where: { $0.path == renamed.path })
+        }
+        guard let renameID = browser.lastRecoveryRecordID, let renameResult = browser.lastOperationResult else {
+            throw Failure(stage: "new-folder-rename-record")
+        }
+        try require(renameID != createID && renameResult.disposition == .succeeded
+            && renameResult.items.count == 1 && renameResult.items[0].status == .succeeded
+            && renameResult.items[0].source?.path == created.path
+            && renameResult.items[0].destination?.path == renamed.path
+            && absent(created) && (try identity(renamed)) == originalIdentity,
+            "new-folder-return-renamed-same-object")
+        let afterRename = try await history(test).records
+        try require(afterRename.count == previousCount + 2 && afterRename.first?.id == renameID
+            && afterRename.first?.canUndo == true && afterRename.contains { $0.id == createID && $0.canUndo },
+            "new-folder-separate-rename-record")
+        func undo(_ id: UUID) async throws {
+            window.makeKeyAndOrderFront(nil); browser.focusBrowserContent(); browser.inspectOperationRecovery()
+            try await wait("new-folder-native-Undo-candidate") {
+                browser.canUndoFileOperation && browser.recoveryRecords.first(where: \.canUndo)?.id == id
+            }
+            try require(browser.commandEnabled(#selector(BrowserViewController.undoFileOperation(_:)))
+                && browser.routeBrowserShortcut(try key(window, code: 6, text: "z", flags: [.command])),
+                "new-folder-native-Command-Z-routed")
+            try await wait("new-folder-native-Undo-drained") {
+                browser.operationTask == nil && browser.operationPreparationTask == nil
+                    && !browser.isLoading && browser.orderingTask == nil
+                    && browser.recoveryRecords.first(where: { $0.id == id })?.state == "undone"
+            }
+        }
+        try await undo(renameID)
+        try require(absent(renamed) && (try identity(created)) == originalIdentity
+            && browser.rowsByURL.keys.contains(where: { $0.path == created.path }),
+            "new-folder-rename-Undo-restored-exact-object")
+        try await undo(createID)
+        let final = try await history(test).records
+        try require(absent(created) && absent(renamed) && final.count == previousCount + 2
+            && [renameID, createID].allSatisfy { id in final.contains { $0.id == id && $0.state == "undone" && !$0.canUndo } }
+            && test.sources.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
+            "new-folder-create-Undo-removed-only-generated-folder")
+        test.checks.append("The ordinary New Folder command creates one selected directory and native inline full-name editor; Return renames the same device/inode, then two actual browser Command-Z operations restore and remove it")
+    }
     private static func stopThroughProgress(_ test: Context) throws {
         test.browser.showFileOperationDetails(nil)
         guard let stop = descendants(test.browser.operationDetails).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Stop" && $0.isEnabled }) else { throw Failure(stage: "actual-progress-Stop-button") }
@@ -538,7 +650,8 @@ import LocalStorage
             let rect = field.convert(field.bounds, to: nil), region = NSRect(x: rect.minX, y: CGFloat(report.height)-rect.maxY, width: rect.width, height: rect.height)
             if NSRect(x: 0, y: 0, width: report.width, height: report.height).contains(region) {
                 clip["fieldRegion"] = ["x": region.minX, "y": region.minY, "width": region.width, "height": region.height]
-                clip["fieldVisibility"] = label == "selection-group-draft" ? "Actual proposed name field" : "Actual typed member evidence table"
+                clip["fieldVisibility"] = label == "selection-group-draft" ? "Actual proposed name field"
+                    : label == "selection-group-results" ? "Actual typed member evidence table" : "Actual local filename viewport"
                 clip["fieldOwnerVerified"] = true
                 clip["fieldPresentBeforeAction"] = fieldPresentBeforeAction
             }
