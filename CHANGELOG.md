@@ -8,6 +8,16 @@ Earlier private-beta version numbers belong to a separate release history.
 
 ### In development
 
+- Open Terminal at the current local folder, with a default-on navigation
+  button and a selected-folder context action. General and setup let you hide it.
+- Compare two selected local files in Kaleidoscope, Beyond Compare, Visual
+  Studio Code or FileMerge, with automatic discovery and an app preference.
+- F6/Shift-F6 focus navigation, Control-Tab/Control-Shift-Tab and Shift-F10
+  selection menus in both keyboard presets. Existing explicit bindings keep
+  priority, and address/search fields leave marked text composition alone.
+- Reviewed crash reports include capture-device details and current CPU/memory
+  information by default. Current information is labelled separately from the
+  crash-time capture; the editable report remains the source of what is shared.
 - Plain and prepared gzip/bzip2 TAR member editing through the shared archive workbench and native
   editor: Rename, batch Rename, Remove, Duplicate, Move, Add, Create File/Folder, Group and
   Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo.
@@ -44,6 +54,13 @@ Earlier private-beta version numbers belong to a separate release history.
 
 ### Fixed
 
+- Sidebar collapse and its restore button now follow the same live layout
+  transition, including a reversal before the previous movement finishes.
+- Pane transitions reuse foreground snapshots instead of capturing native Glass
+  containers. Unchanged split branches stay attached, and divider reconciliation
+  cannot save a temporary fraction during layout.
+- This Mac, sidebar rows, file icons and drive tiles follow the same native
+  active/inactive selection emphasis when keyboard focus changes.
 - Read-only bzip2 TAR browsing no longer depends on editing being enabled.
 - Moving TAR members within the same archive no longer depends on extraction
   being available. Internal moves keep their own checked drag path.
