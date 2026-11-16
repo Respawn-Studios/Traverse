@@ -54,6 +54,8 @@ Earlier private-beta version numbers belong to a separate release history.
   transitions. Discarding an unsaved Properties draft follows the same close flow.
 - Separate ZIP and TAR browser windows follow the same motion preferences,
   including an interrupted Close and reopening the existing window.
+- Rebinding an embedded tool's appearance keeps its opening transition running,
+  including the shorter Reduced motion in Drives.
 
 ## [0.2.0] - 2026-11-15
 

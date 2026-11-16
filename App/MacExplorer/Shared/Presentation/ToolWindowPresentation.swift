@@ -12,6 +12,7 @@ final class ToolWindowChrome: NSViewController {
     private var preferenceObservation: AnyCancellable?
     private var style = NavigationStyle.glass
     private(set) var motion = BrowserMotionPreferences()
+    private var appliedMotion: BrowserMotionPreferences?
 
     private init(content: NSViewController) {
         let host = NSView(); contentHost = host
@@ -158,7 +159,13 @@ final class ToolWindowChrome: NSViewController {
 
     private func apply(appearance: BrowserAppearance? = nil) {
         let workspace = NSWorkspace.shared
-        if let toolWindow {ToolContentMotion.finish(in:toolWindow)}
+        // Embedded tools can bind the same chrome again while their first
+        // observations arrive. Styling alone must not cut an entrance short.
+        if let toolWindow, workspace.accessibilityDisplayShouldReduceMotion
+            || appliedMotion.map({ $0 != motion }) == true {
+            ToolContentMotion.finish(in: toolWindow)
+        }
+        appliedMotion = motion
         contentHost.layer?.removeAnimation(forKey: "tool-page-crossfade")
         let glass = BrowserMaterialPolicy.glassEnabled(style: style, enabled: true,
             reduceTransparency: workspace.accessibilityDisplayShouldReduceTransparency,

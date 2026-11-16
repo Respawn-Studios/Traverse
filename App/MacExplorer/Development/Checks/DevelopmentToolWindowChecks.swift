@@ -17,14 +17,18 @@ import Foundation
                 model: "Generated SSD", transport: "PCI-Express", mediaBytes: 512 << 30, writable: true))
         }
     }
-    static func run(root: URL, settings: BrowserSettings) async throws -> (checks: [String: Any], clips: [[String: Any]]) {
-        var clips: [[String: Any]] = [], decisions = 0, copies = 0, details = 0, trustDrains = 0
+    private static func presentationHealth() -> ApplicationDriveDetails {
         let health = ApplicationDriveDetails(reader: Inspection(), utilityHandoff: { false })
         health.healthCheckForVerification = { _ in
             .init(outcome: .warning(kind: .nvme, rawByte: 0, capturedAt: Date()), childReaped: true, nativeCleanupConfirmed: true,
                 nvmeMeasurements: .init(temperatureKelvin: 310, availableSpare: 97, spareThreshold: 10,
                     percentageUsed: 12, counters: [1_000_000, 2_000_000, 500, 600, 70, 121, 2_000, 3, 0, 4]))
         }
+        return health
+    }
+    static func run(root: URL, settings: BrowserSettings) async throws -> (checks: [String: Any], clips: [[String: Any]]) {
+        var clips: [[String: Any]] = [], decisions = 0, copies = 0, details = 0, trustDrains = 0
+        let health = presentationHealth()
         let drives = ApplicationDriveManagement(reader: Topology(snapshot: try DriveManagementVerification.fixture()),
             health: health, details: { _, _ in details += 1 })
         let trustModel = SFTPTrustModel(review: .init(host: "generated.invalid", port: 22,
@@ -214,11 +218,16 @@ import Foundation
     /// animation helper. This makes the normal opening/closing path observable.
     static func verifyWindowLifecycle(root: URL, settings: BrowserSettings) async throws {
         let original = settings.motion
+        let originalLive = settings.driveHealthLiveUpdates
+        settings.driveHealthLiveUpdates = false
         let preferences = BrowserSettingsWindow.make(BrowserSettingsView(settings: settings))
         let analysis = StorageAnalysisWindowController(onChooseFolder: {}, onRefresh: {}, onStop: {}, onAppStorage: {})
         let properties = FilePropertiesWindowController(settings: settings, copyPaths: { _ in })
         let zip = ArchiveBrowserWindowController(model: .init(settings: settings, reader: .init()))
         let tar = TARBrowserWindowController(model: .init(settings: settings, reader: .init()))
+        let health = presentationHealth()
+        let drives = ApplicationDriveManagement(reader: Topology(snapshot: try DriveManagementVerification.fixture()),
+            health: health, details: { _, _ in })
         let help = TraverseHelpController.shared
         var windows: [NSWindow] = [preferences]
         var stage = "startup", passed = false
@@ -233,6 +242,7 @@ import Foundation
                 .write(to: root.appendingPathComponent("evidence/tool-window-lifecycle.json"), options: .withoutOverwriting)
             for window in windows { ToolWindowCloseMotion.cancel(window); window.close() }
             properties.cancel(); help.history.cancel(); settings.motion = original
+            settings.driveHealthLiveUpdates = originalLive
         }
         let shows: [(String, () -> NSWindow?)] = [
             ("Settings", { preferences.makeKeyAndOrderFront(nil); return preferences }),
@@ -240,91 +250,103 @@ import Foundation
             ("Properties", { properties.show(urls: [root.appendingPathComponent("source/Upload.txt")]); return properties.window }),
             ("Analyzer", { analysis.applyToolStyle(settings); analysis.showWindow(nil); return analysis.window }),
             ("ZIP Browser", { zip.showWindow(nil); zip.window?.makeKeyAndOrderFront(nil); return zip.window }),
-            ("TAR Browser", { tar.showWindow(nil); tar.window?.makeKeyAndOrderFront(nil); return tar.window })
+            ("TAR Browser", { tar.showWindow(nil); tar.window?.makeKeyAndOrderFront(nil); return tar.window }),
+            ("Drives", { drives.show(settings: settings); return drives.window })
         ]
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        for mode in BrowserMotionMode.allCases {
-            settings.motion = .init(mode: mode)
-            try await Task.sleep(for: .milliseconds(30))
-            for (name, show) in shows {
-                stage = name + "/" + mode.rawValue + "/opening"
-                guard let window = show(), let chrome = window.contentViewController as? ToolWindowChrome else { throw Failure.presentation }
-                if !windows.contains(where: { $0 === window }) { windows.append(window) }
-                let expected = mode != .off && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-                let entrance = window.alphaValue < 1
-                try UIVerification.require(entrance == expected, name + " normal opening missed its motion policy")
-                alphaSamples = [window.alphaValue]
-                let openingDeadline = CACurrentMediaTime() + 1
-                while window.alphaValue < 1 && CACurrentMediaTime() < openingDeadline {
-                    try await Task.sleep(for: .milliseconds(10))
-                    alphaSamples.append(window.alphaValue)
-                }
-                let openingAlpha = alphaSamples.first(where: { $0 > 0 && $0 < 1 }) ?? window.alphaValue
-                stage = name + "/" + mode.rawValue + "/intermediate-opacity"
-                try UIVerification.require(!expected || openingAlpha > 0 && openingAlpha < 1,
-                    name + " opening did not expose an intermediate native window opacity")
-                try await wait { window.isVisible && window.isOnActiveSpace && window.occlusionState.contains(.visible) }
-                let frame = window.frame, child = chrome.children.first
-                stage = name + "/" + mode.rawValue + "/settling"
-                try await wait { window.alphaValue == 1 }
-                _ = show()
-                try UIVerification.require(window.frame == frame && chrome.children.first === child
-                    && window.alphaValue == 1,
-                    name + " bring-to-front replayed motion or rebuilt its allocation")
-                window.performClose(nil)
-                stage = name + "/" + mode.rawValue + "/closing"
-                let closing = ToolWindowCloseMotion.isClosing(window)
-                try UIVerification.require(closing == expected, name + " native user close missed its motion policy")
-                if expected {
-                    try UIVerification.require(window.isVisible && window.ignoresMouseEvents, name + " retired before its accepted fade")
-                    window.makeKeyAndOrderFront(nil)
-                    try UIVerification.require(window.isVisible && !ToolWindowCloseMotion.isClosing(window)
-                        && !window.ignoresMouseEvents && window.alphaValue == 1,
-                        name + " Show did not cancel the pending close")
+        do {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            for mode in BrowserMotionMode.allCases {
+                settings.motion = .init(mode: mode)
+                try await Task.sleep(for: .milliseconds(30))
+                for (name, show) in shows {
+                    stage = name + "/" + mode.rawValue + "/opening"
+                    guard let window = show(), let chrome = window.contentViewController as? ToolWindowChrome else { throw Failure.presentation }
+                    if !windows.contains(where: { $0 === window }) { windows.append(window) }
+                    let expected = mode != .off && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    let entrance = window.alphaValue < 1
+                    try UIVerification.require(entrance == expected, name + " normal opening missed its motion policy")
+                    if expected {
+                        _ = ToolWindowChrome.install(in: window, settings: settings)
+                        try UIVerification.require(window.alphaValue < 1,
+                            name + " identical style binding ended its opening transition")
+                    }
+                    alphaSamples = [window.alphaValue]
+                    let openingDeadline = CACurrentMediaTime() + 1
+                    while window.alphaValue < 1 && CACurrentMediaTime() < openingDeadline {
+                        try await Task.sleep(for: .milliseconds(10))
+                        alphaSamples.append(window.alphaValue)
+                    }
+                    let openingAlpha = alphaSamples.first(where: { $0 > 0 && $0 < 1 }) ?? window.alphaValue
+                    stage = name + "/" + mode.rawValue + "/intermediate-opacity"
+                    try UIVerification.require(!expected || openingAlpha > 0 && openingAlpha < 1,
+                        name + " opening did not expose an intermediate native window opacity")
+                    try await wait { window.isVisible && window.isOnActiveSpace && window.occlusionState.contains(.visible) }
+                    let frame = window.frame, child = chrome.children.first
+                    stage = name + "/" + mode.rawValue + "/settling"
+                    try await wait { window.alphaValue == 1 }
+                    _ = show()
+                    try UIVerification.require(window.frame == frame && chrome.children.first === child
+                        && window.alphaValue == 1,
+                        name + " bring-to-front replayed motion or rebuilt its allocation")
                     window.performClose(nil)
+                    stage = name + "/" + mode.rawValue + "/closing"
+                    let closing = ToolWindowCloseMotion.isClosing(window)
+                    try UIVerification.require(closing == expected, name + " native user close missed its motion policy")
+                    if expected {
+                        try UIVerification.require(window.isVisible && window.ignoresMouseEvents, name + " retired before its accepted fade")
+                        window.makeKeyAndOrderFront(nil)
+                        try UIVerification.require(window.isVisible && !ToolWindowCloseMotion.isClosing(window)
+                            && !window.ignoresMouseEvents && window.alphaValue == 1,
+                            name + " Show did not cancel the pending close")
+                        window.performClose(nil)
+                    }
+                    var closingAlpha: CGFloat?
+                    let closingDeadline = CACurrentMediaTime() + 1
+                    while window.isVisible && CACurrentMediaTime() < closingDeadline {
+                        if window.alphaValue > 0 && window.alphaValue < 1 { closingAlpha = window.alphaValue }
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    try UIVerification.require(!expected || closingAlpha != nil,
+                        name + " closing did not expose an intermediate native window opacity")
+                    try await wait { !window.isVisible && !ToolWindowCloseMotion.isClosing(window) }
+                    try UIVerification.require(window.alphaValue == 1 && !window.ignoresMouseEvents,
+                        name + " retained a hidden or unresponsive presentation")
+                    observations.append(["window": name, "mode": mode.rawValue,
+                        "entrance": entrance, "openingIntermediateAlpha": openingAlpha,
+                        "closingIntermediateAlpha": closingAlpha ?? 1, "userCloseFade": closing, "framePreserved": true])
                 }
-                var closingAlpha: CGFloat?
-                let closingDeadline = CACurrentMediaTime() + 1
-                while window.isVisible && CACurrentMediaTime() < closingDeadline {
-                    if window.alphaValue > 0 && window.alphaValue < 1 { closingAlpha = window.alphaValue }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                try UIVerification.require(!expected || closingAlpha != nil,
-                    name + " closing did not expose an intermediate native window opacity")
-                try await wait { !window.isVisible && !ToolWindowCloseMotion.isClosing(window) }
-                try UIVerification.require(window.alphaValue == 1 && !window.ignoresMouseEvents,
-                    name + " retained a hidden or unresponsive presentation")
-                observations.append(["window": name, "mode": mode.rawValue,
-                    "entrance": entrance, "openingIntermediateAlpha": openingAlpha,
-                    "closingIntermediateAlpha": closingAlpha ?? 1, "userCloseFade": closing, "framePreserved": true])
             }
-        }
-        // Opening and closing have separate switches. Programmatic teardown
-        // must remain immediate even when both user-facing effects are on.
-        for opening in [false, true] {
-            stage = "independent-effects/" + String(opening)
-            settings.motion = .init(windows: opening, windowClosing: !opening)
+            // Opening and closing have separate switches. Programmatic teardown
+            // must remain immediate even when both user-facing effects are on.
+            for opening in [false, true] {
+                stage = "independent-effects/" + String(opening)
+                settings.motion = .init(windows: opening, windowClosing: !opening)
+                try await Task.sleep(for: .milliseconds(30))
+                preferences.makeKeyAndOrderFront(nil)
+                let systemReduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                try UIVerification.require((preferences.alphaValue < 1) == (opening && !systemReduced),
+                    "Independent opening preference was ignored")
+                try await wait { preferences.occlusionState.contains(.visible) }
+                preferences.performClose(nil)
+                try UIVerification.require(ToolWindowCloseMotion.isClosing(preferences) == (!opening && !systemReduced),
+                    "Independent closing preference was ignored")
+                try await wait { !preferences.isVisible }
+            }
+            settings.motion = .init()
+            stage = "programmatic-close"
             try await Task.sleep(for: .milliseconds(30))
-            preferences.makeKeyAndOrderFront(nil)
-            let systemReduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            try UIVerification.require((preferences.alphaValue < 1) == (opening && !systemReduced),
-                "Independent opening preference was ignored")
-            try await wait { preferences.occlusionState.contains(.visible) }
-            preferences.performClose(nil)
-            try UIVerification.require(ToolWindowCloseMotion.isClosing(preferences) == (!opening && !systemReduced),
-                "Independent closing preference was ignored")
-            try await wait { !preferences.isVisible }
+            preferences.makeKeyAndOrderFront(nil); preferences.close()
+            try UIVerification.require(!preferences.isVisible && !ToolWindowCloseMotion.isClosing(preferences),
+                "Programmatic teardown acquired a user-close fade")
+            try UIVerification.require(preferences.alphaValue == 1, "Programmatic teardown retained its opening fade")
+            stage = "properties-discard-close"
+            try await verifyPropertiesDiscardClose(root: root, settings: settings) { stage = "properties-discard/" + $0 }
+            await drives.closeAndDrain(); await health.closeAndDrain()
+            stage = "completed"; passed = true
+        } catch {
+            await drives.closeAndDrain(); await health.closeAndDrain()
+            throw error
         }
-        settings.motion = .init()
-        stage = "programmatic-close"
-        try await Task.sleep(for: .milliseconds(30))
-        preferences.makeKeyAndOrderFront(nil); preferences.close()
-        try UIVerification.require(!preferences.isVisible && !ToolWindowCloseMotion.isClosing(preferences),
-            "Programmatic teardown acquired a user-close fade")
-        try UIVerification.require(preferences.alphaValue == 1, "Programmatic teardown retained its opening fade")
-        stage = "properties-discard-close"
-        try await verifyPropertiesDiscardClose(root: root, settings: settings) { stage = "properties-discard/" + $0 }
-        stage = "completed"; passed = true
     }
     private static func verifyPropertiesDiscardClose(root: URL, settings: BrowserSettings,
                                                     onStage: (String) -> Void) async throws {
