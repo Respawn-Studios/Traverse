@@ -16,6 +16,13 @@ import StorageAnalysis
             }
             return args[index + 1]
         }
+            if args.contains("--check-external-tools") {
+                let root = URL(fileURLWithPath: try argument("--analysis-source"))
+                let report = try await verifyNativeExternalTools(browser, root: root)
+                try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: root.appendingPathComponent("evidence/native.json"), options: .withoutOverwriting)
+                NSApplication.shared.terminate(nil); return true
+            }
             if args.contains("--check-pane-transfers") {
                 let root = URL(fileURLWithPath: try argument("--analysis-source"))
                 let report = try await PaneTransferVerification.run(root: root, workspace: windowController.workspace,

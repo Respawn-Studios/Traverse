@@ -90,6 +90,9 @@ extension BrowserCommand {
     }
     var selector: Selector {
         switch self {
+        case .selectionMenu: #selector(BrowserViewController.showKeyboardContextMenu(_:))
+        case .openTerminal: #selector(BrowserViewController.openTerminalHere(_:))
+        case .compareFiles: #selector(BrowserViewController.compareSelectedFiles(_:))
         case .findCommand: #selector(BrowserViewController.findCommand(_:))
         case .launchProfiles: #selector(BrowserViewController.showLaunchProfiles(_:))
         case .switchLaunchProfile: #selector(BrowserViewController.switchLaunchProfile(_:))
@@ -218,11 +221,21 @@ extension BrowserViewController {
         let editing = view.window?.firstResponder is NSTextView
         if editing {
             if (view.window?.firstResponder as? NSTextView)?.hasMarkedText() == true { return false }
-            // Dedicated preset focus keys remain the existing way out of fields;
-            // arbitrary custom bindings never replace text/IME commands.
+            // Only dedicated navigation keys leave our own address/search
+            // fields. Other text editors and marked IME input keep their keys.
+            let ownField = browserFieldOwnsEditor(view.window?.firstResponder)
+            let navigationKey = shortcut.key == .special(.f6)
+                || (shortcut.key == .special(.tab) && [.control, [.control, .shift], [.command, .option]].contains(shortcut.modifiers))
+            if ownField, navigationKey,
+               let action = settings.shortcutMap.resolve(shortcut, fileSurface: false),
+               [.nextFocus, .previousFocus, .nextTab, .previousTab, .nextPane].contains(action),
+               !SystemShortcutSnapshot.shared.conflicts(event),
+               !BrowserShortcutMenus.hasUserOverride(action, in: NSApplication.shared.mainMenu) {
+                if commandEnabled(action.selector) { NSApp.sendAction(action.selector, to: self, from: nil) }
+                return true
+            }
             if settings.behavior.explorerFunctionKeysEnabled, shortcut.modifiers.intersection([.command, .control, .option]).isEmpty {
                 if shortcut.key == .special(.f4) { focusLocation(nil); return true }
-                if shortcut.key == .special(.f6) { cycleBrowserFocus(backward: shortcut.modifiers.contains(.shift)); return true }
             }
             return false
         }
@@ -259,8 +272,12 @@ extension BrowserViewController {
         if isRemoteLocation { selectAllLoadedRemoteItems(sender) }
         else if showsComputerVolumes { volumeBrowser.selectAll() } else { selectAllFiles() }
     }
-    @objc func nextBrowserTab(_ sender: Any?) { cycleTab(backward: false) }
-    @objc func previousBrowserTab(_ sender: Any?) { cycleTab(backward: true) }
+    private func browserFieldOwnsEditor(_ responder: NSResponder?) -> Bool {
+        guard let responder else { return false }
+        return pathField.currentEditor() === responder || folderFilter.displayedField.currentEditor() === responder
+    }
+    @objc func nextBrowserTab(_ sender: Any?) { if canManageBrowserTabs { cycleTab(backward: false) } }
+    @objc func previousBrowserTab(_ sender: Any?) { if canManageBrowserTabs { cycleTab(backward: true) } }
     @objc func selectNumberedBrowserTab(_ sender: NSMenuItem) {
         let index = sender.tag == 8 ? tabs.count - 1 : sender.tag
         if tabs.indices.contains(index) { selectTab(tabs[index].id) }

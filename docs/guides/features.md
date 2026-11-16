@@ -30,14 +30,37 @@ reuse a selection in another application.
 ### Keyboard and appearance
 
 Choose **Explorer**, **Mac** or **Custom** in Settings. Explorer behavior includes
-F2 Rename, F4 Address, F5 Refresh, F6 Focus and Delete to Trash. Mac behavior keeps
+F2 Rename, F4 Address, F5 Refresh and Delete to Trash. Mac behavior keeps
 familiar native choices; Custom lets you adjust the supported actions.
 Control aliases cover browser tabs, navigation, file commands and file-list
 selection. Command equivalents stay available, and text fields/editors keep
 their own editing behavior. Space opens Quick Look in each preset.
 
+Both presets use **F6 / Shift-F6** to move between the sidebar, address, search
+and file list, and **Control-Tab / Control-Shift-Tab** to change tabs. Use
+**Shift-F10** for the focused selection's context menu. These actions also live
+in Go → Keyboard Navigation and Window. On keyboards that use function keys
+for hardware controls, hold Fn too. macOS shortcuts and active text composition
+keep priority; Custom can change or disable Traverse's bindings.
+
 Find a Command searches the current browser or editor's actual commands. You
 can use the menu, context action or shortcut that suits the task.
+
+### Terminal and file comparison
+
+**Open Terminal Here** opens the current local folder in Apple's Terminal,
+including folders on mounted drives. A selected folder has the same action in
+its context menu. The navigation button is on by default and can be hidden in
+Settings → General or during setup. This opens a local shell; it does not start
+an SSH session or extract an archive.
+
+Select **two local files** and choose **Compare Files** to open an external diff.
+Automatic chooses an installed supported app; General lets you prefer
+Kaleidoscope, Beyond Compare, Visual Studio Code or FileMerge from the active
+Xcode installation. Display order decides the left and right files. Traverse
+passes each path separately without a shell command or an automatic merge.
+The comparison app controls any editing you do there. Remote and archive members
+need an explicit local copy first.
 
 Appearance, native Glass controls and interface sizing are shared across the
 browser and tools. Full, Reduced and Off motion let you choose how transitions
@@ -258,8 +281,10 @@ Utility. Broader device support remains in the
 ## Feedback and crash reports
 
 Help → Crash Reports & Feedback keeps the report editable. Add what happened,
-steps to reproduce it and, optionally, a current CPU/RAM snapshot. The privacy
-helper hides common private details; review the text yourself before sharing.
+steps to reproduce it and any context that helps. Device information is included
+by default: available capture-time model/core facts and a separately labelled
+current CPU/RAM snapshot. You can edit the report before sharing. The privacy
+helper hides common private details; review the text yourself too.
 
 Open GitHub Draft prefills the reviewed report when it fits the browser URL
 limit. Longer reports produce a clearly abbreviated draft; Copy Report and

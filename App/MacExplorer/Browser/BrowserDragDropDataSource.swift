@@ -123,12 +123,16 @@ final class BrowserSidebarOutlineView: NSOutlineView {
         if window == nil { clearPointerHighlights() }
         else if let window {
             windowObservations = [
+                BrowserNotificationObservation(name: NSWindow.didBecomeKeyNotification, object: window) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.refreshSelectionFocus() }
+                },
                 BrowserNotificationObservation(name: NSWindow.didResignKeyNotification, object: window) { [weak self] _ in
                     MainActor.assumeIsolated {
                         guard let self else { return }
                         self.hoveredItem = nil
                         if !self.isTrackingContextMenu { self.clearContextHighlight() }
                         self.refreshPointerRows()
+                        self.refreshSelectionFocus()
                     }
                 },
                 BrowserNotificationObservation(name: NSWindow.willCloseNotification, object: window) { [weak self] _ in
@@ -136,6 +140,21 @@ final class BrowserSidebarOutlineView: NSOutlineView {
                 }
             ]
         }
+        refreshSelectionFocus()
+    }
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { DispatchQueue.main.async { [weak self] in self?.refreshSelectionFocus() } }
+        return accepted
+    }
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { DispatchQueue.main.async { [weak self] in self?.refreshSelectionFocus() } }
+        return accepted
+    }
+    private func refreshSelectionFocus() {
+        let emphasized = BrowserSelectionFocus.isEmphasized(in: self)
+        enumerateAvailableRowViews { row, _ in row.isEmphasized = emphasized; row.needsDisplay = true }
     }
     override func reloadData() { clearPointerHighlights(); super.reloadData() }
     override func reloadItem(_ item: Any?, reloadChildren: Bool) {
@@ -144,6 +163,7 @@ final class BrowserSidebarOutlineView: NSOutlineView {
     override func reloadItem(_ item: Any?) { clearPointerHighlights(); super.reloadItem(item) }
 
     func configurePointerRow(_ row: BrowserSidebarRowView, item: SidebarNode) {
+        row.isEmphasized = BrowserSelectionFocus.isEmphasized(in: self)
         row.showsHoverOutline = !isFileDragActive && item === hoveredItem
         row.showsContextHighlight = !isFileDragActive && item === contextItem
     }
@@ -181,6 +201,14 @@ final class BrowserSidebarOutlineView: NSOutlineView {
         clearPointerHighlights()
         let row = row(at: convert(event.locationInWindow, from: nil))
         guard row >= 0, let node = item(atRow: row) as? SidebarNode else { return nil }
+        return contextMenu(for: node)
+    }
+    func selectedContextMenu() -> NSMenu? {
+        guard selectedRow >= 0, let node = item(atRow: selectedRow) as? SidebarNode else { return nil }
+        clearPointerHighlights()
+        return contextMenu(for: node)
+    }
+    private func contextMenu(for node: SidebarNode) -> NSMenu? {
         let candidate: NSMenu?
         if let id = node.connectionTarget { candidate = onConnectionMenu?(id) }
         else if let saved = node.serverBookmark { candidate = onSavedServerMenu?(saved) }

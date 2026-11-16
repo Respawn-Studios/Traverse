@@ -127,6 +127,70 @@ private final class OpenShareParentMenuProbe: NSObject, NSMenuDelegate {
 
 @MainActor
 extension UIVerification {
+    /// Explicit opt-in native handoff. Ordinary UI checks keep injected sinks.
+    /// The caller closes only the generated FileMerge/Terminal windows afterward.
+    static func verifyNativeExternalTools(_ browser: BrowserViewController, root: URL) async throws -> [String: Any] {
+        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        try require(ProcessInfo.processInfo.arguments.contains("--interactive-external-tools")
+            && !ProcessInfo.processInfo.arguments.contains("--offscreen")
+            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
+            && root.resolvingSymlinksInPath() == root && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent,
+            "External tools require the explicit owned foreground case")
+        let marker = try await Task.detached {
+            try BrowserSnapshotFile(directory: root, name: "reservation.json", maximumBytes: 4096).read()
+        }.value
+        try require(marker.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["action"] as? String == "external-tools",
+            "External tool reservation differs")
+        try require(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.FileMerge").isEmpty,
+            "Close existing FileMerge work before the generated check")
+        let folder = root.appendingPathComponent("source/Native Tools " + String(root.lastPathComponent.prefix(8)), isDirectory: true)
+        let files = [folder.appendingPathComponent("Left.txt"), folder.appendingPathComponent("Right.txt")]
+        let bodies = [Data("Generated comparison\nLeft value\n".utf8), Data("Generated comparison\nRight value\n".utf8)]
+        try await Task.detached {
+            try FileManager().createDirectory(at: folder, withIntermediateDirectories: false)
+            for (url, body) in zip(files, bodies) { try body.write(to: url, options: .withoutOverwriting) }
+        }.value
+        let owner = browser.openAndShare, originalTool = browser.settings.externalComparisonTool
+        let originalPermission = owner.permitsVerification
+        try require(owner.hooks.comparisonLaunch == nil && owner.hooks.launch == nil, "Native tools cannot use injected handoffs")
+        owner.permitsVerification = true; owner.permitsNativeToolsForVerification = true
+        defer {
+            owner.permitsVerification = originalPermission; owner.permitsNativeToolsForVerification = false
+            browser.settings.externalComparisonTool = originalTool
+        }
+        func focus() async throws {
+            browser.view.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            try await waitUntil("Generated tool window focus") { browser.view.window?.isKeyWindow == true && NSApp.isActive }
+            browser.focusBrowserContent()
+        }
+        browser.navigate(to: .directory(folder)); try await settled(browser)
+        try await focus()
+        browser.setFileSelection(Set(files)); browser.settings.externalComparisonTool = .fileMerge
+        try require(owner.canCompare, "Generated files cannot reach the native comparison")
+        owner.compareSelection()
+        try await waitUntil("Native FileMerge handoff") {
+            !owner.verificationState.preparing && !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.FileMerge").isEmpty
+        }
+        let comparisonPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.FileMerge").first?.processIdentifier
+        try await focus(); browser.setFileSelection([])
+        try require(owner.canOpenTerminal, "Generated directory cannot reach Terminal")
+        owner.openTerminal()
+        try await waitUntil("Native Terminal handoff") {
+            !owner.verificationState.preparing && owner.verificationState.launches == 0
+                && browser.status.stringValue == "Opening request accepted by the selected application."
+        }
+        try await Task.detached {
+            for (url, body) in zip(files, bodies) {
+                guard try Data(contentsOf: url) == body else { throw CocoaError(.fileReadCorruptFile) }
+            }
+        }.value
+        return ["passed": true, "nativeFileMergeHandoff": true, "nativeTerminalHandoff": true,
+            "comparisonPID": comparisonPID as Any, "fixture": folder.lastPathComponent, "inputsUnchanged": true,
+            "notExercised": ["Terminal working-directory UI", "FileMerge visible difference UI", "Other comparison apps", "Physical key delivery"],
+            "cleanup": "Close only generated Left.txt/Right.txt comparison and Native Tools terminal window; no app-wide Quit"]
+    }
+
     /// All candidate apps, launches, chooser responses and service completion
     /// are injected. No external app, sharing picker or recipient is invoked.
     static func verifyOpenAndShareWorkflows(_ browser: BrowserViewController, fixture: URL,
@@ -474,6 +538,7 @@ extension UIVerification {
         shareCompletion?(CocoaError(.userCancelled)); shareCompletion = nil
         try await waitUntil("Injected sharing cancellation") { !coordinator.verificationState.sharing }
         try require(browser.status.stringValue == "Sharing cancelled.", "Sharing cancellation was reported as a successful send")
+        try await verifyExternalToolRequests(browser, root: root, files: [first, second], application: appB)
         browser.navigate(to: .directory(fixture))
         try await settled(browser)
         let checks = [
@@ -482,7 +547,8 @@ extension UIVerification {
             "Injected explicit share captures only selected generated URLs and retains access through terminal completion",
             "Chosen share survives selection/window cleanup; cancellation is honest; no native picker, recipient or actual send",
             "Share anchor uses the visible selected name cell in table coordinates; empty/stale selection has no anchor",
-            "Explicit Share supersedes held Open With discovery; late choices cannot replace the captured share and duplicate requests stay bounded"
+            "Explicit Share supersedes held Open With discovery; late choices cannot replace the captured share and duplicate requests stay bounded",
+            "Terminal and comparison reuse access/identity/stale-request fencing; exact separate arguments, one handoff and missing-app refusal use injected sinks"
         ] + [focusReturnExercised
             ? "Owned native window focus loss clears stale discovery/Share preparation; the unchanged selection works after focus returns"
             : "Native focus-loss/return regression not exercised: foreground active-app qualification is required"]
@@ -499,6 +565,80 @@ extension UIVerification {
             "nativeSharePickerExercised": false, "actualSharingExercised": false, "airDropExercised": false],
             options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("open-share-verification.json"), options: .atomic)
         return checks
+    }
+
+    private static func verifyExternalToolRequests(_ browser: BrowserViewController, root: URL,
+        files: [URL], application: URL) async throws {
+        let owner = browser.openAndShare
+        let original = owner.hooks, tool = browser.settings.externalComparisonTool
+        let showsTerminal = browser.settings.showsTerminalButton
+        defer {
+            owner.contextWillChange(); owner.hooks = original
+            browser.settings.externalComparisonTool = tool; browser.settings.showsTerminalButton = showsTerminal
+        }
+        func select(_ urls: [URL]) {
+            browser.table.selectRowIndexes(IndexSet(urls.compactMap { browser.rowsByURL[$0] }), byExtendingSelection: false)
+        }
+        let awkward = [root.appendingPathComponent("one ; $(generated).txt"), root.appendingPathComponent("two ' \".txt")]
+        for candidate in ExternalComparisonTool.allCases where candidate != .automatic {
+            let command = candidate.command(application: application,
+                executable: application.appendingPathComponent("Contents/MacOS/Generated"), files: awkward)
+            try require(command?.arguments.suffix(2).elementsEqual(awkward.map(\.path)) == true,
+                "An external comparison escaped, expanded or combined path arguments")
+        }
+        try require([0, 1, 2, 11, 12, 13, 14].allSatisfy { ExternalComparisonTool.beyondCompare.acceptsExitStatus($0) }
+            && !ExternalComparisonTool.beyondCompare.acceptsExitStatus(100)
+            && !ExternalComparisonTool.beyondCompare.acceptsExitStatus(104)
+            && !ExternalComparisonTool.visualStudioCode.acceptsExitStatus(1),
+            "Comparison results were reported as a launch failure or an app failure was accepted")
+        var compared: [ExternalComparisonCommand] = [], terminals: [([URL], URL)] = []
+        owner.hooks.comparisonCommand = { _, urls in
+            guard let command = ExternalComparisonTool.fileMerge.command(application: application, executable: nil, files: urls) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            return command
+        }
+        owner.hooks.comparisonLaunch = { command, finish in compared.append(command); finish(0) }
+        owner.hooks.launch = { urls, app, finish in terminals.append((urls, app)); finish(nil) }
+        select([files[0]])
+        try require(!owner.canCompare, "A comparison accepted fewer than two files")
+        select(files)
+        try require(owner.canCompare, "Two generated local files cannot reach comparison")
+        owner.compareSelection()
+        try await waitUntil("Injected comparison request") { !owner.verificationState.preparing && compared.count == 1 }
+        try require(compared[0].arguments == files.map(\.path), "Comparison changed the displayed left/right order")
+        owner.hooks.comparisonCommand = { _, _ in throw CocoaError(.fileNoSuchFile) }
+        owner.compareSelection()
+        try await waitUntil("Unavailable comparison app") { !owner.verificationState.preparing }
+        try require(compared.count == 1, "An unavailable comparison helper still launched")
+        select([])
+        try require(owner.canOpenTerminal, "Current generated directory is unavailable to Terminal")
+        owner.openTerminal()
+        try await waitUntil("Injected Terminal directory handoff") { !owner.verificationState.preparing && terminals.count == 1 }
+        try require(terminals[0].0 == [root]
+            && terminals[0].1.lastPathComponent == "Terminal.app", "Terminal handoff changed the current directory or target app")
+        select([application])
+        try require(!owner.canCompare, "A package acquired the regular-file comparison command")
+        select(files)
+        let gate = OpenShareDiscoveryGate()
+        owner.hooks.comparisonCommand = { _, urls in
+            _ = await gate.hold()
+            guard let command = ExternalComparisonTool.fileMerge.command(application: application, executable: nil, files: urls) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            return command
+        }
+        owner.compareSelection()
+        try await waitUntil("Held comparison preparation") { gate.isHeld }
+        select([]); gate.resume([])
+        try await waitUntil("Stale comparison drains") { !owner.verificationState.preparing }
+        try require(compared.count == 1 && terminals.count == 1, "A stale comparison launched after selection changed")
+        browser.settings.showsTerminalButton = false
+        browser.settings.externalComparisonTool = .fileMerge
+        let restored = BrowserSettings(persist: false, restoredData: try browser.settings.encodedSnapshot())
+        try require(!restored.showsTerminalButton && restored.externalComparisonTool == .fileMerge,
+            "External-tool preferences were not retained")
+        browser.settings.showsTerminalButton = true
     }
 
     /// Drive the actual enabled context-menu Share action while discovery is

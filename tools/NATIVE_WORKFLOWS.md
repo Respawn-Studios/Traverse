@@ -17,6 +17,7 @@ and choose the check that exercises the changed route. See the
 | Saved analyses | `native-check analysis-persistence`; `--incremental-analysis` adds the retained-source refresh pair |
 | Generated chart presentation | `native-check storage-chart` |
 | Support report review | `native-check support-details` |
+| Native Terminal and FileMerge handoff | `native-check external-tools --interactive` |
 | Shared tool windows | `native-check tool-windows` |
 | Settings, Help, Properties and Analyzer opening/closing | `native-check window-lifecycle` |
 | Pane motion, geometry and authenticated tab routing | `native-check pane-motion` |
@@ -48,6 +49,13 @@ other journeys. Callback checks do not establish a physical Finder drag. Add
 Finder destination and matching Undo. Build first, then use `--skip-build` while
 that product is current. Neither flow grants access to personal files or
 qualifies a sandboxed distribution.
+
+The explicit external-tools check opens Apple's Terminal on one generated folder
+and FileMerge on two tiny generated text files. It refuses to start while
+FileMerge already has a running session. Ordinary Open With/Share regression
+checks keep their injected launch sinks. Confirm the resulting folder and diff,
+then close only those generated windows; leave existing Terminal work alone.
+The handoff receipt distinguishes API acceptance from visible app verification.
 
 The local-editor Save/focus journey retains native key-window guards and has no
 offscreen mode. Before automated input, verify the exact generated process,

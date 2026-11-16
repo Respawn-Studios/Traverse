@@ -25,8 +25,10 @@ enum BrowserShortcutVerification {
         browser.navigate(to: .directory(fixture)); try await UIVerification.settled(browser)
         settings.keyboardProfile = .explorer; settings.shortcutPreferences = .init()
         browser.focusBrowserContent()
+
         NSApplication.shared.mainMenu = BrowserMenus.applicationMenu(target: browser)
         SystemShortcutSnapshot.shared.refresh()
+        if interactive { try await verifyControlNavigation(browser, fixture: fixture) }
         let candidates: [(ShortcutSpecialKey, UInt16)] = [(.f7, 98), (.f8, 100), (.f9, 101), (.f10, 109), (.f11, 103), (.f12, 111)]
         guard let chosen = candidates.first(where: { !SystemShortcutSnapshot.shared.conflicts(event($0.0, code: $0.1, window: window)) }) else {
             throw UIVerification.Failure(message: "No generated test chord is free of enabled system reservations")
@@ -141,6 +143,84 @@ enum BrowserShortcutVerification {
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
             characters: shortcut.menuEquivalent, charactersIgnoringModifiers: shortcut.menuEquivalent,
             isARepeat: repeated, keyCode: code)!
+    }
+    private static func verifyControlNavigation(_ browser: BrowserViewController, fixture: URL) async throws {
+        guard let window = browser.view.window, window.isKeyWindow else {
+            throw UIVerification.Failure(message: "Keyboard navigation check requires its actual key window")
+        }
+        let preset = browser.settings.keyboardProfile, keys = browser.settings.shortcutPreferences
+        let viewMode = browser.paneViewMode
+        defer {
+            browser.settings.keyboardProfile = preset; browser.settings.shortcutPreferences = keys
+            browser.paneViewMode = viewMode; browser.applyDisplayPreferences()
+        }
+        func key(_ backwards: Bool = false) -> NSEvent {
+            UIVerification.key(String(UnicodeScalar(NSF6FunctionKey)!), code: 97,
+                flags: backwards ? .shift : [], window: window)
+        }
+        for mode in [KeyboardProfile.mac, .explorer] {
+            browser.settings.keyboardProfile = mode; browser.settings.shortcutPreferences = .init()
+            browser.focusLocation(nil)
+            try require(browser.pathField.currentEditor() != nil, "Address command did not enter its native editor")
+            try require(browser.routeBrowserShortcut(key()) && browser.pathField.currentEditor() == nil
+                && browser.location == .directory(fixture), "F6 trapped the address editor or navigated without Return")
+            browser.focusBrowserContent()
+            try require(browser.routeBrowserShortcut(key(true)), "Shift-F6 was absent from the selected keyboard preset")
+            try require(browser.routeBrowserShortcut(key()) && window.firstResponder === browser.activeFileView,
+                "F6 did not return from the query control to the actual file surface")
+            let originalTab = browser.activeID
+            browser.newTab(nil)
+            let extraTab = browser.activeID
+            try require(extraTab != originalTab, "Keyboard tab fixture did not create its second tab")
+            browser.navigate(to: .directory(fixture)); try await UIVerification.settled(browser)
+            browser.focusLocation(nil)
+            let nextID = browser.tabs[(browser.activeIndex + 1) % browser.tabs.count].id
+            let next = UIVerification.key("\t", code: 48, flags: .control, window: window)
+            let previous = UIVerification.key("\t", code: 48, flags: [.control, .shift], window: window)
+            try require(browser.routeBrowserShortcut(next) && browser.activeID == nextID
+                && browser.pathField.currentEditor() == nil, "Control-Tab was trapped by the address field")
+            try await UIVerification.settled(browser)
+            browser.focusFilter(nil)
+            try require(browser.folderFilter.displayedField.currentEditor() != nil
+                && browser.routeBrowserShortcut(previous) && browser.activeID == extraTab,
+                "Control-Shift-Tab was trapped by the query field")
+            try await UIVerification.settled(browser)
+            browser.focusLocation(nil)
+            if let editor = window.firstResponder as? NSTextView {
+                editor.setMarkedText("入力", selectedRange: NSRange(location: 2, length: 0),
+                    replacementRange: NSRange(location: NSNotFound, length: 0))
+                try require(!browser.routeBrowserShortcut(next) && browser.activeID == extraTab,
+                    "Tab navigation intercepted marked IME input")
+                editor.unmarkText(); browser.cancelLocationEditing()
+            }
+            browser.closeTab(id: extraTab); browser.selectTab(originalTab)
+            try await UIVerification.settled(browser)
+        }
+        let selected = Array(browser.displayedEntries.filter { $0.kind == .file }.prefix(2).map(\.url))
+        try require(selected.count == 2, "Keyboard context-menu fixture lacks two local files")
+        for mode in [BrowserViewMode.details, .icons] {
+            browser.paneViewMode = mode; browser.applyDisplayPreferences()
+            browser.setFileSelection(Set(selected)); browser.focusBrowserContent()
+            let before = browser.selectedURLs
+            let request = browser.keyboardContextMenuRequest()
+            try require(request?.menu.items.contains(where: { $0.action == #selector(BrowserViewController.copyFileURLs(_:)) }) == true
+                && browser.selectedURLs == before && before == Set(selected),
+                "Keyboard context-menu preparation changed selection or lost its shared file commands")
+        }
+        browser.navigate(to: .computer); try await UIVerification.settled(browser)
+        let outline = browser.outline
+        try require(outline.selectedRow >= 0 && window.makeFirstResponder(outline), "This Mac sidebar selection did not accept focus")
+        try await Task.sleep(for: .milliseconds(25))
+        let selectedRow = outline.selectedRow
+        let row = outline.rowView(atRow: selectedRow, makeIfNecessary: true)
+        try require(row?.isEmphasized == true && BrowserSelectionFocus.isEmphasized(in: outline),
+            "Focused sidebar selection did not use active native emphasis")
+        browser.focusBrowserContent()
+        try await Task.sleep(for: .milliseconds(25))
+        try require(outline.selectedRow == selectedRow && row?.isEmphasized == false,
+            "Moving focus into This Mac left active blue sidebar emphasis or erased its location selection")
+        browser.navigate(to: .directory(fixture)); try await UIVerification.settled(browser)
+        browser.focusBrowserContent()
     }
     private static func require(_ condition: Bool, _ message: String) throws {
         if !condition { throw UIVerification.Failure(message: message) }

@@ -574,7 +574,8 @@ final class BrowserViewController: NSViewController {
             ("Back", "arrow.left", #selector(goBack(_:))),
             ("Forward", "arrow.right", #selector(goForward(_:))),
             ("Up", "arrow.up", #selector(goUp(_:))),
-            ("Refresh", "arrow.clockwise", #selector(refresh(_:)))
+            ("Refresh", "arrow.clockwise", #selector(refresh(_:))),
+            ("Open Terminal Here", "terminal", #selector(openTerminalHere(_:)))
         ]
         let navigation = definitions.map { title, icon, action -> NSButton in
             let button = NSButton(image: symbol(icon, title) ?? NSImage(), target: self, action: action)
@@ -1140,7 +1141,12 @@ final class BrowserViewController: NSViewController {
         operationResultsButton.setAccessibilityLabel(needsAttention ? "Transfers need attention. Open transfer queue" : "Last operation results")
         operationResultsButton.isHidden = !needsAttention && lastOperationResult == nil
         operationResultsButton.isEnabled = canInspectLastOperationResult
-        for (button, action) in navigationButtons { button.isEnabled = commandEnabled(action) }
+        for (button, action) in navigationButtons {
+            button.isEnabled = commandEnabled(action)
+            if action == #selector(openTerminalHere(_:)) {
+                button.isHidden = !settings.showsTerminalButton || isRemoteLocation || isArchiveLocation || location.directoryURL == nil
+            }
+        }
         view.window?.toolbar?.validateVisibleItems()
     }
 

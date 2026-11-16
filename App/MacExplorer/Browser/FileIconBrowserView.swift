@@ -279,7 +279,7 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
         guard !updatingSelection else { return }
         refreshVisibleItems(); onSelectionChange?()
     }
-    private var selectionIsEmphasized: Bool { window?.isKeyWindow == true && window?.firstResponder === collectionView }
+    private var selectionIsEmphasized: Bool { BrowserSelectionFocus.isEmphasized(in: collectionView) }
     private func refreshVisibleItems() { for item in visibleItems { item.emphasized = selectionIsEmphasized } }
 
     private func selectContextItem(_ event: NSEvent) {

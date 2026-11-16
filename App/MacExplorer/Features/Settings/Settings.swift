@@ -77,7 +77,7 @@ enum BrowserNewTabDestination: String, CaseIterable, Codable, Identifiable {
 
 @MainActor
 final class BrowserSettings: ObservableObject {
-    nonisolated static let preferencesVersion = 21
+    nonisolated static let preferencesVersion = 22
     @Published private(set) var editorPreferences = EditorPreferences() { didSet { save() } }
     func updateEditorPreferences(_ value: EditorPreferences) {
         guard value.isValid else { return }
@@ -150,6 +150,8 @@ final class BrowserSettings: ObservableObject {
     @Published var addressVisitDays = 30 { didSet { updateDirectoryVisits(); save() } }
     @Published var showsCommandRow = true { didSet { save() } }
     @Published var showsPathBar = false { didSet { save() } }
+    @Published var showsTerminalButton = true { didSet { save() } }
+    @Published var externalComparisonTool = ExternalComparisonTool.automatic { didSet { save() } }
     @Published var showsHiddenFiles = false { didSet { save() } }
     @Published var keyboardProfile = KeyboardProfile.explorer { didSet { save() } }
     @Published var customBehavior = BrowserBehaviorPreferences.explorer { didSet { save() } }
@@ -300,6 +302,8 @@ final class BrowserSettings: ObservableObject {
         var pendingUpdateBuild: UInt64 = 0
         var showsCommandRow = true
         var showsPathBar = false
+        var showsTerminalButton = true
+        var externalComparisonTool = ExternalComparisonTool.automatic
         var showsHiddenFiles = false
         var keyboardProfile = KeyboardProfile.explorer
         var customBehavior = BrowserBehaviorPreferences.explorer
@@ -352,6 +356,7 @@ final class BrowserSettings: ObservableObject {
             case driveHealthLiveUpdates, driveHealthPrivateBetaLiveOptIn, driveHealthIntervalSeconds
             case addressPresentation, addressSuggestionLimit, ranksAddressVisits, addressVisitEntryLimit, addressVisitDays
             case version, showsCommandRow, showsPathBar, showsHiddenFiles, keyboardProfile, customBehavior, appearance, navigationStyle
+            case showsTerminalButton, externalComparisonTool
             case diagnosticHistoryEnabled, crashCaptureEnabled
             case automaticUpdateChecks, publicAutomaticUpdateChecks, updateInvitationSaved, pendingUpdateBuild
             case publicLastUpdateCheck
@@ -432,6 +437,8 @@ final class BrowserSettings: ObservableObject {
             pendingUpdateBuild = try values.decodeIfPresent(UInt64.self, forKey: .pendingUpdateBuild) ?? 0
             showsCommandRow = try values.decodeIfPresent(Bool.self, forKey: .showsCommandRow) ?? true
             showsPathBar = try values.decodeIfPresent(Bool.self, forKey: .showsPathBar) ?? false
+            showsTerminalButton = try values.decodeIfPresent(Bool.self, forKey: .showsTerminalButton) ?? true
+            externalComparisonTool = try values.decodeIfPresent(ExternalComparisonTool.self, forKey: .externalComparisonTool) ?? .automatic
             showsHiddenFiles = try values.decodeIfPresent(Bool.self, forKey: .showsHiddenFiles) ?? false
             keyboardProfile = try values.decodeIfPresent(KeyboardProfile.self, forKey: .keyboardProfile) ?? .explorer
             customBehavior = try values.decodeIfPresent(BrowserBehaviorPreferences.self, forKey: .customBehavior) ?? .explorer
@@ -531,6 +538,8 @@ final class BrowserSettings: ObservableObject {
             pendingUpdateBuild = settings.pendingUpdateBuild
             showsCommandRow = settings.showsCommandRow
             showsPathBar = settings.showsPathBar
+            showsTerminalButton = settings.showsTerminalButton
+            externalComparisonTool = settings.externalComparisonTool
             showsHiddenFiles = settings.showsHiddenFiles
             keyboardProfile = settings.keyboardProfile
             customBehavior = settings.customBehavior
@@ -629,6 +638,8 @@ final class BrowserSettings: ObservableObject {
             pendingUpdateBuild = value.pendingUpdateBuild
             showsCommandRow = value.showsCommandRow
             showsPathBar = value.showsPathBar
+            showsTerminalButton = value.showsTerminalButton
+            externalComparisonTool = value.externalComparisonTool
             showsHiddenFiles = value.showsHiddenFiles
             keyboardProfile = value.keyboardProfile
             customBehavior = value.customBehavior
@@ -998,6 +1009,13 @@ struct BrowserSettingsView: View {
                         .help("Click the selected name, pause briefly, then type. Double-click still opens the item; dragging and selection modifiers keep their usual behavior.")
                     Toggle("Show menus in the window title bar", isOn: $settings.showsCommandRow)
                     Toggle("Finder-style bottom address", isOn: $settings.showsPathBar)
+                    Toggle("Show Open Terminal in the navigation bar", isOn: $settings.showsTerminalButton)
+                        .help("Open Terminal at the current local folder. Server and archive locations keep their own commands.")
+                    Picker("Compare selected files with", selection: $settings.externalComparisonTool) {
+                        ForEach(ExternalComparisonTool.allCases) { Text($0.title).tag($0) }
+                    }
+                    Text("Select two local files, then choose Compare Files. Automatic uses an installed supported app; the displayed file order sets left and right. Traverse does not upload or merge them.")
+                        .interfaceFont(.caption).foregroundStyle(.secondary)
                     Toggle("Show Eject buttons beside external drives", isOn: $settings.showsSidebarEject)
                     Toggle("Show quick drive controls in the status bar", isOn: $settings.showsDriveStatus)
                     if settings.showsSidebarEject {

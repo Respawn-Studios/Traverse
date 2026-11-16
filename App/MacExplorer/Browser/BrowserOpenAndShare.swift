@@ -39,6 +39,7 @@ private enum OpenShareFailure: Error, Equatable {
 actor OpenWithApplicationReader {
     static let shared = OpenWithApplicationReader()
     static let maximumItems = 64
+    private var comparisonProcesses: [UUID: Process] = [:]
 
     fileprivate func acquire(_ preparation: FolderAccessPreparation) throws -> FileAccessLifetimes {
         let activity = try ApplicationFileActivity.gate.begin()
@@ -61,6 +62,7 @@ actor OpenWithApplicationReader {
             }
             var current = URL(fileURLWithPath: "/", isDirectory: true)
             var value = stat()
+            guard lstat("/", &value) == 0, value.st_mode & S_IFMT == S_IFDIR else { throw OpenShareFailure.unavailable }
             for component in url.pathComponents.dropFirst() {
                 current.appendPathComponent(component)
                 guard current.withUnsafeFileSystemRepresentation({ $0.map { lstat($0, &value) } ?? -1 }) == 0,
@@ -123,6 +125,52 @@ actor OpenWithApplicationReader {
             return OpenWithApplication(url: url, title: title)
         }
     }
+
+    func comparisonCommand(tool: ExternalComparisonTool, files: [URL]) throws -> ExternalComparisonCommand {
+        let choices: [ExternalComparisonTool] = tool == .automatic
+            ? [.kaleidoscope, .beyondCompare, .visualStudioCode, .fileMerge] : [tool]
+        for choice in choices {
+            try Task.checkCancellation()
+            let registered = choice.bundleIdentifiers.compactMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
+            let named = choice.applicationName.map { name in
+                [URL(fileURLWithPath: "/Applications", isDirectory: true).appendingPathComponent(name),
+                 FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/" + name)]
+            } ?? []
+            for candidate in registered + named {
+                guard let app = try? applicationForHandoff(candidate, excludingTraverse: true),
+                      let bundle = Bundle(url: app), let identifier = bundle.bundleIdentifier,
+                      choice.bundleIdentifiers.contains(identifier),
+                      let command = choice.command(application: app, executable: bundle.executableURL, files: files),
+                      FileManager.default.isExecutableFile(atPath: command.executable.path) else { continue }
+                return command
+            }
+        }
+        throw OpenShareFailure.applicationUnavailable
+    }
+
+    func launchComparison(_ command: ExternalComparisonCommand, finished: @escaping @Sendable (Int32) -> Void) throws {
+        try Task.checkCancellation()
+        guard comparisonProcesses.count < 8 else { throw OpenShareFailure.unavailable }
+        let process = Process()
+        process.executableURL = command.executable; process.arguments = command.arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        let id = UUID()
+        process.terminationHandler = { [weak self] process in
+            let status = process.terminationStatus
+            Task { await self?.comparisonFinished(id, status: status, finished: finished) }
+        }
+        comparisonProcesses[id] = process
+        do { try process.run() }
+        catch { comparisonProcesses.removeValue(forKey: id)?.terminationHandler = nil; throw error }
+        // This is another application's UI, not an owned transfer worker. It
+        // may remain open until the user closes it; never kill it on navigation
+        // or wait for it on the browser's main actor.
+    }
+    private func comparisonFinished(_ id: UUID, status: Int32, finished: @Sendable (Int32) -> Void) {
+        comparisonProcesses.removeValue(forKey: id)?.terminationHandler = nil
+        finished(status)
+    }
 }
 
 /// Optional seams are explicitly installed by generated-fixture verification.
@@ -138,6 +186,8 @@ struct BrowserOpenShareHooks {
     var airDropPerform: (@MainActor (NSSharingService, [URL]) -> Void)?
     var sharePreparation: (@Sendable (BrowserSharePreparationStage, [URL]) throws -> Void)?
     #if DEBUG
+    var comparisonCommand: (@Sendable (ExternalComparisonTool, [URL]) async throws -> ExternalComparisonCommand)?
+    var comparisonLaunch: (@MainActor (ExternalComparisonCommand, @escaping @MainActor @Sendable (Int32) -> Void) -> Void)?
     var preferredOpeningBeforeRevalidation: (@Sendable () async -> Void)?
     var airDropBeforeArming: (@MainActor (NSSharingService, [URL]) -> Void)?
     var pickerPresentation: (@MainActor (NSSharingServicePicker, [URL]) -> Void)?
@@ -196,15 +246,17 @@ enum NativeAirDropFeature {
 
 @MainActor
 private final class OpenShareRequest {
+    enum Scope { case selection, currentDirectory }
     let id = UUID()
     let visit: UUID
     let tab: UUID
     let presentation: UUID
     let urls: [URL]
+    let scope: Scope
     weak var window: NSWindow?
-    init(browser: BrowserViewController, urls: [URL]) {
+    init(browser: BrowserViewController, urls: [URL], scope: Scope = .selection) {
         visit = browser.sessionID; tab = browser.activeID; presentation = browser.filePresentationID
-        self.urls = urls; window = browser.view.window
+        self.urls = urls; self.scope = scope; window = browser.view.window
     }
 }
 
@@ -265,7 +317,15 @@ final class BrowserOpenAndShareController: NSObject, NSMenuDelegate {
     private let menus = NSHashTable<NSMenu>.weakObjects()
     #if DEBUG
     var permitsVerification = false
+    var permitsNativeToolsForVerification = false
     #endif
+    private var nativeToolsVerificationAllowed: Bool {
+        #if DEBUG
+        permitsNativeToolsForVerification
+        #else
+        false
+        #endif
+    }
 
     init(browser: BrowserViewController) {
         self.browser = browser; super.init(); ApplicationNativeSharing.register(self)
@@ -277,6 +337,20 @@ final class BrowserOpenAndShareController: NSObject, NSMenuDelegate {
             && shareSession == nil && BrowserNativeShareSession.canStart
     }
     var canSendViaAirDrop: Bool { NativeAirDropFeature.available && canShare }
+    var canCompare: Bool {
+        !TraverseAccessPolicy.requiresFolderSelection && canOpen && eligibleSelection?.count == 2
+            && browser.map { browser in browser.orderedSelectedURLs.allSatisfy {
+                guard let row = browser.rowsByURL[$0], browser.displayedEntries.indices.contains(row) else { return false }
+                return browser.displayedEntries[row].kind == .file
+            } } == true
+    }
+    var canOpenTerminal: Bool {
+        guard let browser else { return false }
+        return !ApplicationFileActivity.gate.isClosed && ApplicationNativeSharing.canPrepare
+            && browser.isActiveCommandPane && !browser.isBrowserSuspended && !browser.isRemoteLocation
+            && !browser.isArchiveLocation && browser.location.directoryURL != nil && browser.hasFileCommandFocus
+            && browser.view.window?.attachedSheet == nil && !(browser.view.window?.firstResponder is NSTextView)
+    }
     fileprivate var preparationCount: Int { retiringPreparations.count + (preparation == nil ? 0 : 1) }
     fileprivate var hasPendingPreparation: Bool { preparationCount > 0 }
     fileprivate var hasChosenHandoff: Bool { shareSession?.hasChosenService == true }
@@ -310,9 +384,13 @@ final class BrowserOpenAndShareController: NSObject, NSMenuDelegate {
     private func current(_ request: OpenShareRequest, requireFocus: Bool = true) -> Bool {
         guard let browser, browser.isActiveCommandPane, let window = request.window, browser.view.window === window,
               !browser.isBrowserSuspended, browser.sessionID == request.visit,
-              browser.activeID == request.tab, browser.filePresentationID == request.presentation,
-              browser.selectedItemCount == request.urls.count,
-              browser.orderedSelectedURLs == request.urls else { return false }
+              browser.activeID == request.tab, browser.filePresentationID == request.presentation else { return false }
+        switch request.scope {
+        case .selection:
+            guard browser.selectedItemCount == request.urls.count, browser.orderedSelectedURLs == request.urls else { return false }
+        case .currentDirectory:
+            guard browser.location.directoryURL.map({ [$0] }) == request.urls else { return false }
+        }
         #if DEBUG
         if browser.isVerificationSession && permitsVerification && browser.permitsBackgroundVerification { return true }
         #endif
@@ -505,6 +583,92 @@ final class BrowserOpenAndShareController: NSObject, NSMenuDelegate {
                        in: anchor?.view ?? browser.activeFileView)
     }
 
+    func openTerminal(selectedFolder: Bool = false) {
+        guard let browser, canOpenTerminal, preparation == nil || preparationPurpose == .discovery else { return }
+        if browser.isVerificationSession && hooks.launch == nil && !nativeToolsVerificationAllowed { return }
+        let urls: [URL]
+        if selectedFolder {
+            guard let selected = eligibleURLs, selected.count == 1,
+                  let row = browser.rowsByURL[selected[0]], browser.displayedEntries.indices.contains(row),
+                  browser.displayedEntries[row].kind == .directory else { return }
+            urls = selected
+        } else {
+            guard let directory = browser.location.directoryURL else { return }
+            urls = [directory]
+        }
+        let request = OpenShareRequest(browser: browser, urls: urls, scope: selectedFolder ? .selection : .currentDirectory)
+        let accessPreparation = browser.folderAccess.prepareAccess(to: urls)
+        preparation?.cancel(); discoveryMenu = nil; revision = UUID()
+        let token = revision
+        preparationPurpose = .opening
+        preparation = Task { [weak self, weak browser, reader] in
+            guard let self, let browser else { return }
+            defer { if revision == token { preparation = nil } }
+            do {
+                let access = try await reader.acquire(accessPreparation)
+                let items = try await reader.observe(urls)
+                guard items.allSatisfy({ $0.identity.mode & S_IFMT == S_IFDIR }) else { throw OpenShareFailure.unavailable }
+                let application = try await reader.applicationForHandoff(
+                    URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app", isDirectory: true), excludingTraverse: true)
+                try await reader.revalidate(items)
+                guard !Task.isCancelled, revision == token, current(request), browser.folderAccess.isCurrent(accessPreparation) else { return }
+                launchPreparedChoice(.init(request: request, items: items, access: access, application: application), application: application)
+            } catch {
+                if !Task.isCancelled, revision == token {
+                    report("This folder could not be opened in Terminal. Check that it is still available and you have access.", request: request)
+                }
+            }
+        }
+    }
+
+    func compareSelection() {
+        guard let browser, canCompare, preparation == nil || preparationPurpose == .discovery,
+              let urls = eligibleURLs else { return }
+        #if DEBUG
+        if browser.isVerificationSession && hooks.comparisonLaunch == nil && !nativeToolsVerificationAllowed { return }
+        #endif
+        let request = OpenShareRequest(browser: browser, urls: urls)
+        let accessPreparation = browser.folderAccess.prepareAccess(to: urls)
+        let tool = browser.settings.externalComparisonTool
+        preparation?.cancel(); discoveryMenu = nil; revision = UUID()
+        let token = revision
+        preparationPurpose = .opening
+        preparation = Task { [weak self, weak browser, reader] in
+            guard let self, let browser else { return }
+            defer { if revision == token { preparation = nil } }
+            do {
+                let access = try await reader.acquire(accessPreparation)
+                let items = try await reader.observe(urls)
+                guard items.allSatisfy({ $0.identity.mode & S_IFMT == S_IFREG }) else { throw OpenShareFailure.unavailable }
+                let command: ExternalComparisonCommand
+                #if DEBUG
+                if let resolve = hooks.comparisonCommand { command = try await resolve(tool, urls) }
+                else { command = try await reader.comparisonCommand(tool: tool, files: urls) }
+                #else
+                command = try await reader.comparisonCommand(tool: tool, files: urls)
+                #endif
+                try await reader.revalidate(items)
+                guard !Task.isCancelled, revision == token, current(request), browser.folderAccess.isCurrent(accessPreparation),
+                      browser.settings.externalComparisonTool == tool else { return }
+                browser.status.stringValue = "Opening comparison in \(command.tool.title)…"
+                let finish: @MainActor @Sendable (Int32) -> Void = { [weak self, access] status in
+                    withExtendedLifetime(access) {}
+                    if !command.tool.acceptsExitStatus(status) { self?.report("The comparison app did not accept this request. Check its installation or choose another app in Settings.", request: request) }
+                }
+                #if DEBUG
+                if let launch = hooks.comparisonLaunch { launch(command, finish); return }
+                #endif
+                try await reader.launchComparison(command) { status in Task { @MainActor in finish(status) } }
+            } catch {
+                guard !Task.isCancelled, revision == token else { return }
+                let message = (error as? OpenShareFailure) == .applicationUnavailable
+                    ? "No supported comparison app is available. Install Kaleidoscope, Beyond Compare, Visual Studio Code or Xcode, then choose your app in Settings → General."
+                    : "The selected files changed or could not be opened. Select two local files again before comparing."
+                report(message, request: request)
+            }
+        }
+    }
+
     /// A saved app URL is a preference, not authority. The existing access,
     /// observation, request fencing and launch owner remain authoritative.
     func openPreferredApplication(_ application: URL, for entry: FileEntry) {
@@ -602,7 +766,7 @@ final class BrowserOpenAndShareController: NSObject, NSMenuDelegate {
     private func launchPreparedChoice(_ choice: OpenWithChoice, application: URL) {
         guard let browser, current(choice.request) else { return }
         preparation = nil
-        if browser.isVerificationSession && hooks.launch == nil { return }
+        if browser.isVerificationSession && hooks.launch == nil && !nativeToolsVerificationAllowed { return }
         guard launchCount < 8 else {
             report("Wait for pending opening requests before opening more items.", request: choice.request); return
         }

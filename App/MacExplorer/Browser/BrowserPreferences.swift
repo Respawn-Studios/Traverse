@@ -4,6 +4,9 @@ import Combine
 @MainActor
 extension BrowserViewController {
     func connectDisplayPreferences() {
+        settings.$showsTerminalButton.removeDuplicates().dropFirst().sink { [weak self] _ in
+            Task { @MainActor [weak self] in self?.validateNavigationButtons() }
+        }.store(in: &subscriptions)
         settings.$interfaceSize.removeDuplicates().dropFirst().sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }

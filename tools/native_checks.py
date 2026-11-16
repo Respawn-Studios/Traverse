@@ -433,6 +433,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
     """Run existing feature checks in the ordinary app, with generated data only."""
     if feature == "storage-chart-integration" and offscreen:
         raise ValueError("Chart integration requires its visible native Properties and analysis windows")
+    if feature == "external-tools" and (not interactive or offscreen):
+        raise ValueError("External-tools requires --interactive: opens Terminal and FileMerge on generated fixtures")
     if archive_format not in ("zip", "tar", "tar.gz", "tar.bz2") or archive_format != "zip" and feature != "archive-export":
         raise ValueError("Choose an archive format only for archive-export")
     gzip_tar = feature == "create-targz"
@@ -514,6 +516,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         "trash-command": ("trash-app-route-generated", "--check-trash-app-route-generated", "result.json"),
         "remote-properties": ("remote-item-properties", "--check-remote-properties", "native-remote-properties.json"),
         "support-details": ("support-details", "--check-support-details", "native.json"),
+        "external-tools": ("external-tools", "--check-external-tools", "native.json"),
         "transfer-diagnostics": ("transfer-diagnostics", "--check-transfer-diagnostics", "native-transfer-diagnostics.json"),
         "clipboard-admission": ("clipboard-admission-diagnostics", "--check-clipboard-diagnostics", "native-clipboard-diagnostics.json"),
         "connection-fields": ("native-connection-fields", "--check-connection-fields", "native-connection-fields.json"),
@@ -901,6 +904,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command += ["--analysis-source", str(case)]
         if not offscreen:
             command.append("--capture-support-details")
+    if feature == "external-tools":
+        command += ["--analysis-source", str(case), "--interactive-external-tools"]
     if feature == "smb-connected-uploads":
         command += ["--live-phase", generated_flow, "--analysis-source", str(case), "--generated-port", str(generated_port)]
     if feature in ("zip-remove-copy", "zip-remove-folder-copy", "zip-update-remove", "zip-update-empty"):
@@ -941,7 +946,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command += ["--motion-mode", motion_mode]
         if large_interface:
             command += ["--motion-large", "--motion-light"]
-    if interactive:
+    if interactive and feature != "external-tools":
         command.append("--interactive-tar-member-drag" if tar_editor else
                        "--interactive-zip-move" if feature == "zip-update-move" else "--interactive-sidebar-review")
     if motion:

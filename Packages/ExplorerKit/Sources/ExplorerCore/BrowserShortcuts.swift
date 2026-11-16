@@ -19,7 +19,7 @@ public enum BrowserCommand: String, CaseIterable, Codable, Identifiable, Sendabl
     case connectServer, disconnectServer
     case switchLaunchProfile
     case copyToPane, moveToPane, moveOnServer, copyOnServer
-    case findCommand
+    case findCommand, selectionMenu, openTerminal, compareFiles
     public var id: Self { self }
     public var title: String {
         switch self {
@@ -65,6 +65,9 @@ public enum BrowserCommand: String, CaseIterable, Codable, Identifiable, Sendabl
         case .moveOnServer: "Move to Server Folder"
         case .copyOnServer: "Copy to Server Folder"
         case .findCommand: "Find a Command"
+        case .selectionMenu: "Show Context Menu"
+        case .openTerminal: "Open Terminal Here"
+        case .compareFiles: "Compare Files"
         }
     }
     public var allowsRepeat: Bool {
@@ -167,7 +170,7 @@ public struct BrowserShortcutMap: Sendable {
         for (action, keys) in preferences.overrides { values[action] = keys }
         // Adding a new preset must not invalidate an older user's explicit key.
         // Explicit new bindings still participate in normal conflicts.
-        for introduced in [BrowserCommand.connectServer, .switchLaunchProfile, .findCommand] {
+        for introduced in [BrowserCommand.connectServer, .switchLaunchProfile, .findCommand, .nextFocus, .previousFocus, .selectionMenu, .nextTab, .previousTab] {
             if preferences.overrides[introduced] == nil, let proposed = values[introduced],
                preferences.overrides.contains(where: { $0.key != introduced && !$0.value.filter(proposed.contains).isEmpty }) {
                 values[introduced] = []
@@ -217,13 +220,16 @@ public struct BrowserShortcutMap: Sendable {
         character(.pathBar, "p", [.command, .option])
         special(.open, .down, .command); special(.up, .up, .command)
         special(.nextPane, .tab, [.command, .option]); special(.trash, .backspace, .command)
+        special(.nextFocus, .f6); special(.previousFocus, .f6, .shift)
+        special(.selectionMenu, .f10, .shift)
+        special(.nextTab, .tab, .control); special(.previousTab, .tab, [.control, .shift])
         special(behavior.returnAction == .open ? .open : .rename, .returnKey)
         special(.quickLook, .space)
         if behavior.backspaceGoesBack { special(.back, .backspace) }
         special(.back, .left, .option); special(.forward, .right, .option); special(.up, .up, .option)
         if behavior.explorerFunctionKeysEnabled {
             special(.rename, .f2); special(.address, .f4); special(.refresh, .f5)
-            special(.nextFocus, .f6); special(.previousFocus, .f6, .shift); special(.trash, .forwardDelete)
+            special(.trash, .forwardDelete)
         }
         if behavior.controlAliasesEnabled {
             for (index, action) in [BrowserCommand.tab1, .tab2, .tab3, .tab4, .tab5, .tab6, .tab7, .tab8, .tab9].enumerated() {
@@ -232,7 +238,6 @@ public struct BrowserShortcutMap: Sendable {
             for (action, key): (BrowserCommand, String) in [(.newTab, "t"), (.closeTab, "w"), (.copy, "c"), (.cut, "x"),
                 (.paste, "v"), (.undo, "z"), (.selectAll, "a"), (.address, "l"), (.filter, "f")] { character(action, key, .control) }
             character(.address, "d", .option); character(.copyPath, "c", [.control, .shift]); character(.reopenTab, "t", [.control, .shift])
-            special(.nextTab, .tab, .control); special(.previousTab, .tab, [.control, .shift])
         }
         return result
     }

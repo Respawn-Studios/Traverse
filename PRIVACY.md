@@ -17,6 +17,10 @@ by that action. File-body indexing and cloud inference are not silently enabled
 by browsing. Local preferences, remembered locations, analyses and recovery data
 stay in the selected app data location.
 
+Open With and Compare Files hand the selected paths to another local app.
+Open Terminal Here hands off the current folder. Those apps use their own
+settings, permissions and privacy policies.
+
 SFTP and SMB communicate with the server you select. Those connections are not
 local-only operations. Saved sign-in information uses the macOS Keychain only
 when the relevant Remember option is chosen; connection profiles and refreshed

@@ -1,6 +1,20 @@
 # Shared presentation
 
-ToolWindowPresentation.swift owns window allocation/chrome/placement and tool motion. Appearance.swift owns semantic materials; InterfaceSizing.swift owns the app-wide sizing/settings binding. BrowserMotionPreferences.swift owns motion policy. Reuse these from feature controllers; no file-operation authority belongs here.
+ToolWindowPresentation.swift owns window allocation, chrome, placement and tool
+motion. Appearance.swift owns semantic materials; InterfaceSizing.swift owns the
+app-wide sizing/settings binding. BrowserMotionPreferences.swift owns motion
+policy. Reuse these from feature controllers; no file-operation authority belongs
+here.
+
+DisplayLinkedTransition.swift advances short changes to actual native geometry,
+shared by sidebar movement and connection-window resizing. Cancellation discards
+old callbacks; a feature still decides the settled state and motion preference.
+NativeForegroundSnapshot.swift captures bounded visible rows/cards for folder
+and pane transitions. Keep native Glass/material containers live instead of
+rendering them into snapshots. KeyboardContextMenu.swift anchors a shared native
+menu at the current selection without synthesizing a pointer click or changing
+the selected files. CollectionSelectionAppearance.swift shares responder-based
+active/inactive emphasis across browser surfaces.
 
 These are folders within the same App module, not additional packages. Consult App/README.md and docs/engineering/README.md from the repository root.
 

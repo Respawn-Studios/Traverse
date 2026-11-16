@@ -257,7 +257,7 @@ final class VolumeBrowserView: NSView, NSCollectionViewDataSource, NSCollectionV
     }
 
     private var selectionIsEmphasized: Bool {
-        window?.isKeyWindow == true && window?.firstResponder === collectionView
+        BrowserSelectionFocus.isEmphasized(in: collectionView)
     }
 
     private func updateSelectionAppearance() {
@@ -278,7 +278,14 @@ final class VolumeBrowserView: NSView, NSCollectionViewDataSource, NSCollectionV
             updateSelectionAppearance()
             onSelectionChange?()
         }
-        if let menu = onLocationMenu?(.directory(volumes[path.item].url)) { return menu }
+        return contextMenu(at: path)
+    }
+    func selectedContextMenu() -> NSMenu? {
+        guard let path = collectionView.selectionIndexPaths.sorted().first, volumes.indices.contains(path.item) else { return nil }
+        return contextMenu(at: path)
+    }
+    private func contextMenu(at path: IndexPath) -> NSMenu {
+        if selectedCount == 1, let menu = onLocationMenu?(.directory(volumes[path.item].url)) { return menu }
         let menu = NSMenu()
         menu.autoenablesItems = false
         let open = NSMenuItem(title: "Open", action: #selector(openContextSelection(_:)), keyEquivalent: "")

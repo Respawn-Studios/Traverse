@@ -410,13 +410,20 @@ extension BrowserViewController {
         let sidebar: NSView
         if let workspace, workspace.isSidebarCollapsed { sidebar = workspace.sidebarRestoreButton }
         else { sidebar = outline }
-        let controls: [NSView] = [sidebar, pathControl] + (folderFilter.displaysSearch || (!showsComputerVolumes && !metadataSearch.isShowingResults) ? [folderFilter.focusTarget] : []) + [content] + clipboard + progress
+        let address: NSView = pathField.isHidden ? pathControl : pathField
+        let controls = ([sidebar, address] + (folderFilter.displaysSearch || (!showsComputerVolumes && !metadataSearch.isShowingResults) ? [folderFilter.focusTarget] : []) + [content] + clipboard + progress)
+            .filter { !$0.isHiddenOrHasHiddenAncestor && $0.window === view.window }
+        guard !controls.isEmpty else { return }
         let responder: NSResponder? = startingAt ?? view.window?.firstResponder
         let current = controls.firstIndex { control in
             responder === control || (responder is NSTextView && (control as? NSControl)?.currentEditor() === responder)
         }
-        let next = current.map { ($0 + (backward ? controls.count - 1 : 1)) % controls.count } ?? 0
-        view.window?.makeFirstResponder(controls[next])
+        let step = backward ? controls.count - 1 : 1
+        let next = current.map { ($0 + step) % controls.count } ?? (backward ? controls.count - 1 : 0)
+        for offset in 0..<controls.count {
+            let index = (next + offset * step) % controls.count
+            if view.window?.makeFirstResponder(controls[index]) == true { return }
+        }
     }
 
     func cycleTab(backward: Bool) {
@@ -487,6 +494,14 @@ extension BrowserViewController: NSMenuItemValidation, NSToolbarItemValidation {
     }
 
     func commandEnabled(_ action: Selector?, synchronizingClipboard: Bool = true) -> Bool {
+        if action == #selector(openTerminalHere(_:)) { return openAndShare.canOpenTerminal }
+        if action == #selector(openSelectedFolderInTerminal(_:)) {
+            return openAndShare.canOpenTerminal && selectedFolderURL != nil && orderedSelectedURLs.count == 1
+        }
+        if action == #selector(compareSelectedFiles(_:)) { return openAndShare.canCompare }
+        if action == #selector(showKeyboardContextMenu(_:)) {
+            return !isBrowserSuspended && keyboardContextTarget != nil && view.window?.attachedSheet == nil
+        }
         if action == #selector(pasteFileURLs(_:)), hasScopedItemPasteboardType { return canPasteScopedItem }
         if [#selector(pasteWithOptions(_:)), #selector(moveCopiedFiles(_:)), #selector(pasteIntoSelection(_:))].contains(where: { $0 == action }),
            hasScopedItemPasteboardType { return false }
@@ -599,7 +614,8 @@ extension BrowserViewController: NSMenuItemValidation, NSToolbarItemValidation {
         case #selector(splitPaneRight(_:)): return workspace?.canSplitActive(at: .trailing) == true
         case #selector(splitPaneBelow(_:)): return workspace?.canSplitActive(at: .bottom) == true
         case #selector(closePane(_:)): return workspace.map { $0.canChangePaneLayout && $0.browsers.count > 1 } ?? false
-        case #selector(focusOtherPane(_:)): return workspace.map { $0.browsers.count > 1 } ?? false
+        case #selector(focusOtherPane(_:)): return hasFileCommandFocus && (workspace.map { $0.browsers.count > 1 } ?? false)
+        case #selector(nextBrowserControl(_:)), #selector(previousBrowserControl(_:)): return hasFileCommandFocus && !isBrowserSuspended
         case #selector(pinCurrentFolder(_:)): return canPinCurrentFolder
         case #selector(toggleSelectedFolderPin(_:)): return selectedFolderURL != nil && pinsController.canEdit
         case #selector(removeSelectedPin(_:)), #selector(renameSelectedPin(_:)): return canManageSelectedPin
@@ -614,6 +630,7 @@ extension BrowserViewController: NSMenuItemValidation, NSToolbarItemValidation {
         case #selector(goBack(_:)): return tabs[activeIndex].canGoBack
         case #selector(newTab(_:)): return canOpenBrowserTab
         case #selector(duplicateCurrentTab(_:)): return canManageBrowserTabs
+        case #selector(nextBrowserTab(_:)), #selector(previousBrowserTab(_:)): return canManageBrowserTabs && tabs.count > 1
         case #selector(reopenClosedTab(_:)): return canManageBrowserTabs && !closedTabs.isEmpty
         case #selector(moveCurrentTabLeft(_:)): return canManageBrowserTabs && activeIndex > 0
         case #selector(moveCurrentTabRight(_:)): return canManageBrowserTabs && activeIndex + 1 < tabs.count

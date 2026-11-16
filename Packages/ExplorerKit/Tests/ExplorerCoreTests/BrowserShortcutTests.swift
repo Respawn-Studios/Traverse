@@ -3,6 +3,25 @@ import Testing
 @testable import ExplorerCore
 
 struct BrowserShortcutTests {
+    @Test func keyboardNavigationIsAvailableInBothPresetsAndKeepsOlderOverrides() {
+        for behavior in [BrowserBehaviorPreferences.mac, .explorer] {
+            let preset = BrowserShortcutMap(behavior: behavior)
+            #expect(preset.resolve(.init(.special(.f6)), fileSurface: false) == .nextFocus)
+            #expect(preset.resolve(.init(.special(.f6), .shift), fileSurface: false) == .previousFocus)
+            #expect(preset.resolve(.init(.special(.f10), .shift), fileSurface: true) == .selectionMenu)
+            #expect(preset.resolve(.init(.special(.tab), .control), fileSurface: false) == .nextTab)
+            #expect(preset.resolve(.init(.special(.tab), [.control, .shift]), fileSurface: false) == .previousTab)
+            for (action, chord) in [(BrowserCommand.nextFocus, BrowserShortcut(.special(.f6))),
+                    (.selectionMenu, .init(.special(.f10), .shift)), (.nextTab, .init(.special(.tab), .control)),
+                    (.previousTab, .init(.special(.tab), [.control, .shift]))] {
+                let older = BrowserShortcutMap(behavior: behavior, preferences: .init(overrides: [.storageAnalysis: [chord]]))
+                #expect(older.issues.isEmpty && older.resolve(chord, fileSurface: true) == .storageAnalysis)
+                #expect(older.shortcuts(for: action).isEmpty)
+                let disabled = BrowserShortcutMap(behavior: behavior, preferences: .init(overrides: [action: []]))
+                #expect(disabled.resolve(chord, fileSurface: true) == nil)
+            }
+        }
+    }
     @Test func presetsAndFileSurfaceContextAreUnambiguous() {
         let explorer = BrowserShortcutMap(behavior: .explorer)
         let mac = BrowserShortcutMap(behavior: .mac)

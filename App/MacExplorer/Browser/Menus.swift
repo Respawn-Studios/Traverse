@@ -56,6 +56,7 @@ enum BrowserMenus {
             menu.addItem(item("Open Selection", #selector(BrowserViewController.openSelection(_:)), key: String(UnicodeScalar(0xF701)!), target: target))
             menu.addItem(item("Open in Default App", #selector(BrowserViewController.openSelectedFileInDefaultApp(_:)), target: target))
             menu.addItem(openWithItem(target: target))
+            menu.addItem(item("Compare Files", #selector(BrowserViewController.compareSelectedFiles(_:)), target: target))
             if LocalTextEditorFeature.ordinaryEnabled || RemoteTextEditorFeature.available {
                 menu.addItem(item("Edit in Traverse", #selector(BrowserViewController.editTextInTraverse(_:)), target: target))
             }
@@ -206,6 +207,12 @@ enum BrowserMenus {
             menu.addItem(item("This Mac", #selector(BrowserViewController.goComputer(_:)), key: "c", modifiers: [.command, .shift], target: target))
             menu.addItem(item("Home", #selector(BrowserViewController.goHome(_:)), key: "h", modifiers: [.command, .shift], target: target))
             menu.addItem(item("Edit Location", #selector(BrowserViewController.focusLocation(_:)), key: "l", target: target))
+            menu.addItem(item("Open Terminal Here", #selector(BrowserViewController.openTerminalHere(_:)), target: target))
+            addSection("Keyboard Navigation", to: menu) { section in
+                section.addItem(item("Next Browser Control", #selector(BrowserViewController.nextBrowserControl(_:)), target: target))
+                section.addItem(item("Previous Browser Control", #selector(BrowserViewController.previousBrowserControl(_:)), target: target))
+                section.addItem(item("Show Context Menu", #selector(BrowserViewController.showKeyboardContextMenu(_:)), target: target))
+            }
             menu.addItem(.separator())
             menu.addItem(item("Pin Current Folder", #selector(BrowserViewController.pinCurrentFolder(_:)), target: target))
             menu.addItem(item("Rename Pin Label…", #selector(BrowserViewController.renameSelectedPin(_:)), target: target))
@@ -300,12 +307,15 @@ enum BrowserMenus {
                 command(FilenamePrompt.newFileTitle + "…", #selector(BrowserViewController.createTextFile(_:)))])
             group([command("Paste", #selector(BrowserViewController.pasteFileURLs(_:))),
                 command("Paste with Options…", #selector(BrowserViewController.pasteWithOptions(_:)))], keepClipboard: true)
-            group([command("Refresh", #selector(BrowserViewController.refresh(_:)))])
+            group([command("Open Terminal Here", #selector(BrowserViewController.openTerminalHere(_:))),
+                command("Refresh", #selector(BrowserViewController.refresh(_:)))])
             return menu
         }
         group([command("Open", #selector(BrowserViewController.openSelection(_:))),
             command("Open in New Tab", #selector(BrowserViewController.openSelectionInNewTab(_:))),
-            command("Edit in Traverse", #selector(BrowserViewController.editTextInTraverse(_:)))])
+            command("Edit in Traverse", #selector(BrowserViewController.editTextInTraverse(_:))),
+            command("Compare Files", #selector(BrowserViewController.compareSelectedFiles(_:))),
+            command("Open in Terminal", #selector(BrowserViewController.openSelectedFolderInTerminal(_:)))])
         if target.orderedSelectedURLs.count == 1 && target.commandEnabled(#selector(BrowserViewController.openSelectedFileInDefaultApp(_:))) {
             menu.addItem(openWithItem(target: target))
         }
@@ -375,6 +385,10 @@ enum BrowserMenus {
         add(menu(.view, target: target), to: main)
         add(menu(.go, target: target), to: main)
         let window = NativeWindowMenu.make()
+        window.insertItem(item("Show Next Tab", #selector(BrowserViewController.nextBrowserTab(_:)),
+            key: "\t", modifiers: .control, target: target), at: 2)
+        window.insertItem(item("Show Previous Tab", #selector(BrowserViewController.previousBrowserTab(_:)),
+            key: "\t", modifiers: [.control, .shift], target: target), at: 3)
         add(window, to: main)
         NativeWindowMenu.bind(window)
         let help = menu(.help, target: target)

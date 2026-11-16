@@ -278,6 +278,7 @@ struct TraverseSetupView: View {
             Text("Explorer uses Return to open files and familiar Cut/Move actions. Mac follows Finder-style keys. Customize shortcuts later in Settings.")
                 .interfaceFont(.callout).foregroundStyle(.secondary)
             Toggle("Show the address bar at the bottom", isOn: $settings.showsPathBar)
+            Toggle("Show Open Terminal in the navigation bar", isOn: $settings.showsTerminalButton)
             Toggle("Show Eject buttons beside external drives", isOn: $settings.showsSidebarEject)
             Text("Keeps more room for your files by combining navigation and Search with your tabs.")
                 .interfaceFont(.callout).foregroundStyle(.secondary)
