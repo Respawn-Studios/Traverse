@@ -115,7 +115,7 @@ def post_format(fixture: Fixture, result: dict) -> dict:
     graph = fixture.two_member_owned(original_uuid=sibling_id, target_uuid=formatted_id)
     sibling = graph['members'][sibling_id]
     target = graph['members'][formatted_id]
-    if '/dev/' + graph['outer'] != result['outerDevice'] \
+    if graph['outer'] != result['outerDevice'] \
             or sibling['device'] != result['siblingDevice'] \
             or target['name'] != result['formattedName']:
         raise RuntimeError('Generated APFS image graph changed after signed process')

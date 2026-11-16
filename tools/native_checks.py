@@ -1,11 +1,13 @@
-"""Existing native feature checks; runtime code, not an app build input.
+"""Host-side native feature checks, separate from the ordinary app compiler.
 
 The ordinary dev CLI loads this module only for native-check. It reuses the
 same App checks, generated fixtures, product proof and operation owners.
+Signed qualification roles can also pin this controller in their input map.
 """
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 import bz2
 import gzip
 import hashlib
@@ -14,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -22,6 +25,7 @@ import time
 import uuid
 import zipfile
 import zlib
+from urllib.parse import unquote, urlsplit
 
 from dev import (
     APP, BUILD, ROOT, build, compiled_debug_inputs, environment, local_directory,
@@ -152,7 +156,110 @@ def _generated_path_absent(path: Path) -> bool:
     return False
 
 
-def _finder_payload_names(parent: Path) -> set[str]:
+@dataclass(frozen=True)
+class _FinderRecoveryArea:
+    record_id: str
+    device: int
+    inode: int
+    mode: int
+
+
+def _finder_recovery_areas(journal: Path, records: dict[str, tuple[int, Path]], parents: set[Path],
+                           *, state: str = "committed") -> dict[Path, _FinderRecoveryArea]:
+    """Recognize exact generated journal areas, never an arbitrary hidden prefix."""
+    if state not in ("committed", "undone") or not 1 <= len(records) <= 6 \
+            or any(str(uuid.UUID(key)).upper() != key or version not in (16, 17)
+                   or destination.parent not in parents for key, (version, destination) in records.items()) \
+            or journal.resolve() != journal or not journal.is_relative_to(BUILD) \
+            or any(parent.resolve() != parent or not parent.is_relative_to(BUILD) for parent in parents):
+        raise RuntimeError("Generated recovery selection differs")
+    original = read_artifact(journal, 16 << 20)
+    journal_facts, parent_facts = journal.lstat(), journal.parent.lstat()
+    if journal_facts.st_uid != os.getuid() or stat.S_IMODE(journal_facts.st_mode) != 0o600 \
+            or parent_facts.st_uid != os.getuid() or not stat.S_ISDIR(parent_facts.st_mode) \
+            or stat.S_IMODE(parent_facts.st_mode) != 0o700:
+        raise RuntimeError("Generated journal is not private and owned")
+    wal = journal.with_name(journal.name + "-wal")
+    if wal.is_symlink() or wal.exists() and wal.stat().st_size:
+        raise RuntimeError("Active journal prevents independent recovery read")
+    connection = sqlite3.connect(journal.as_uri() + "?mode=ro&immutable=1", uri=True)
+    try:
+        rows = connection.execute("SELECT id,state,head,checksum FROM jobs").fetchall()
+        areas = connection.execute("SELECT job,ordinal,payload,checksum FROM areas").fetchall()
+        steps = connection.execute("SELECT job,ordinal,payload,checksum FROM steps").fetchall()
+        if {row[0] for row in rows} != set(records) or len(rows) != len(records) \
+                or len(areas) != len(records) or {row[0] for row in areas} != set(records) \
+                or len(steps) != len(records) or {row[0] for row in steps} != set(records):
+            raise RuntimeError("Generated recovery record set differs")
+        for ident, actual_state, payload, checksum in rows:
+            if len(payload) > 1 << 20 or hashlib.sha256(payload).hexdigest() != checksum:
+                raise RuntimeError("Generated recovery head checksum differs")
+            head = json.loads(payload)
+            if actual_state != state or head.get("state") != state or head.get("id") != ident \
+                    or head.get("operation") != "Extract TAR" or head.get("version") != records[ident][0]:
+                raise RuntimeError("Generated recovery record contract differs")
+        result = {}
+        for ident, ordinal, payload, checksum in areas:
+            if ordinal != 0 or len(payload) > 1 << 20 or hashlib.sha256(payload).hexdigest() != checksum:
+                raise RuntimeError("Generated recovery area checksum differs")
+            area = json.loads(payload)
+            url = urlsplit(area["url"])
+            decoded = unquote(url.path, errors="strict")
+            path = Path(decoded)
+            if url.scheme != "file" or url.netloc or url.query or url.fragment \
+                    or decoded != str(path) + "/" or path.parent not in parents \
+                    or not re.fullmatch(r"\.mac-explorer-recovery-[0-9A-F-]{36}", path.name) \
+                    or str(uuid.UUID(path.name.removeprefix(".mac-explorer-recovery-"))).upper() \
+                        != path.name.removeprefix(".mac-explorer-recovery-") \
+                    or path.resolve() != path or path in result:
+                raise RuntimeError("Generated recovery area path differs")
+            facts = path.lstat()
+            witness = area["identity"]
+            if not stat.S_ISDIR(facts.st_mode) or facts.st_uid != os.getuid() \
+                    or stat.S_IMODE(facts.st_mode) != 0o700 \
+                    or facts.st_dev != path.parent.lstat().st_dev \
+                    or (facts.st_dev, facts.st_ino, facts.st_mode) != \
+                        (witness["device"], witness["inode"], witness["mode"]):
+                raise RuntimeError("Generated recovery area identity differs")
+            marker = path / ".mac-explorer-recovery-v1"
+            expected = ("MacExplorer recovery v1\n" + ident + "\nRetained until explicit cleanup.\n").encode()
+            if read_artifact(marker, 128) != expected or stat.S_IMODE(marker.lstat().st_mode) != 0o600 \
+                    or marker.lstat().st_uid != os.getuid():
+                raise RuntimeError("Generated recovery marker differs")
+            expected_names = {marker.name} if state == "committed" else {marker.name, "payload"}
+            if {item.name for item in path.iterdir()} != expected_names:
+                raise RuntimeError("Generated recovery area contents differ")
+            if state == "undone":
+                retained = (path / "payload").lstat()
+                if retained.st_uid != os.getuid() or not (
+                        stat.S_ISREG(retained.st_mode) and retained.st_nlink == 1 if records[ident][0] == 17
+                        else stat.S_ISDIR(retained.st_mode)):
+                    raise RuntimeError("Generated retained payload kind differs")
+            after = path.lstat()
+            if (after.st_dev, after.st_ino, after.st_mode) != (facts.st_dev, facts.st_ino, facts.st_mode):
+                raise RuntimeError("Generated recovery area changed during observation")
+            result[path] = _FinderRecoveryArea(ident, facts.st_dev, facts.st_ino, facts.st_mode)
+        for ident, ordinal, payload, checksum in steps:
+            if ordinal != 0 or len(payload) > 1 << 20 or hashlib.sha256(payload).hexdigest() != checksum:
+                raise RuntimeError("Generated recovery step checksum differs")
+            step = json.loads(payload)
+            area = next(path for path, witness in result.items() if witness.record_id == ident)
+            for field, expected in (("source", area / "payload"), ("destination", records[ident][1])):
+                url = urlsplit(step[field])
+                decoded = unquote(url.path, errors="strict")
+                if url.scheme != "file" or url.netloc or url.query or url.fragment \
+                        or decoded not in (str(expected), str(expected) + "/"):
+                    raise RuntimeError("Generated recovery step path differs")
+            if step.get("undone") is not (state == "undone"):
+                raise RuntimeError("Generated recovery step state differs")
+    finally:
+        connection.close()
+    if read_artifact(journal, 16 << 20) != original:
+        raise RuntimeError("Generated recovery journal changed during observation")
+    return result
+
+
+def _finder_payload_names(parent: Path, *, recovery_areas: dict[Path, _FinderRecoveryArea] | None = None) -> set[str]:
     """Finder may save its view state; no other extra output is ignored."""
     names = {item.name for item in parent.iterdir()}
     if '.DS_Store' in names:
@@ -160,20 +267,29 @@ def _finder_payload_names(parent: Path) -> set[str]:
         if not stat.S_ISREG(facts.st_mode) or facts.st_uid != os.getuid() \
                 or facts.st_nlink != 1 or facts.st_mode & 0o111 or facts.st_size > 64 << 10:
             raise RuntimeError('Generated Finder metadata differs')
-    return names - {'.DS_Store'}
+    retained = {path.name for path in (recovery_areas or {}) if path.parent == parent}
+    if not retained <= names:
+        raise RuntimeError("Expected generated recovery area is missing")
+    for path, witness in (recovery_areas or {}).items():
+        if path.parent == parent:
+            facts = path.lstat()
+            if (facts.st_dev, facts.st_ino, facts.st_mode) != (witness.device, witness.inode, witness.mode):
+                raise RuntimeError("Generated recovery area changed before namespace inspection")
+    return names - {'.DS_Store'} - retained
 
 
 def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str, str], output,
                                   *, archive: bool = False, destination: Path | None = None,
                                   archive_kinds: tuple[str, ...] = ("file", "folder"),
                                   archive_routes: tuple[tuple[str, str, Path], ...] | None = None,
+                                  archive_journal: Path | None = None,
                                   on_launch=None, audit=None, signal_on_uncertainty: bool = True) -> subprocess.CompletedProcess:
     """One ordinary owner, an independent receiver and bounded native controls."""
     destination = destination or case / "source/Destination"
     routes = archive_routes if archive_routes is not None else tuple(
         (kind, kind, destination) for kind in (archive_kinds if archive else ("file",)))
     if not 1 <= len(routes) <= 6 or len({route[0] for route in routes}) != len(routes) \
-            or archive_routes is not None and not archive:
+            or archive_routes is not None and (not archive or archive_journal is None):
         raise ValueError("Generated receiver routes differ")
     for route, kind, parent in routes:
         if not route or kind not in ("file", "folder") or parent.is_symlink() or not parent.is_dir() \
@@ -184,6 +300,7 @@ def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str,
     offset, pending, opened, phase, phase_kind = 0, b"", set(), None, None
     began, settled = time.monotonic(), None
     delivered, sent, failures, events = [], [], [], []
+    delivered_records = {}
     cancelling, controls = False, 0
     last_audit = began
     def send(message: bytes, *, close: bool) -> None:
@@ -243,6 +360,13 @@ def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str,
                             or archive_routes is not None and values.get("route") != phase:
                         raise RuntimeError("Generated external callback or parent choice differs")
                     delivered.append(phase)
+                    if archive_routes is not None:
+                        ident = values.get("recordID")
+                        if not isinstance(ident, str) or str(uuid.UUID(ident)).upper() != ident \
+                                or ident in delivered_records:
+                            raise RuntimeError("Generated delivery record differs")
+                        delivered_records[ident] = (17 if phase_kind == "file" else 16,
+                            destination / ("Generated Promise.txt" if phase_kind == "file" else "Generated Folder"))
                     settled = time.monotonic()
             if not cancelling and phase in delivered and phase not in sent and settled is not None and time.monotonic() - settled >= 0.75:
                 expected = {"Generated Promise.txt": b"Generated first root\n" if archive else b"Traverse generated promise control\n"}
@@ -258,7 +382,9 @@ def _run_generated_finder_promise(command: list[str], case: Path, env: dict[str,
                 if archive_routes is not None:
                     expected_leaves = {"Generated Promise.txt" if kind == "file" else "Generated Folder"
                         for route, kind, parent in routes if route in delivered and parent == destination}
-                    if _finder_payload_names(destination) != expected_leaves:
+                    areas = _finder_recovery_areas(archive_journal, delivered_records,
+                        {parent for _, _, parent in routes})
+                    if _finder_payload_names(destination, recovery_areas=areas) != expected_leaves:
                         raise RuntimeError("Generated Finder destination has an extra output")
                 sent.append(phase)
                 send(b"finish\n", close=len(sent) == len(routes))
