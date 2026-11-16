@@ -249,7 +249,7 @@ enum EditorSettingsAppChecks {
         let migrated = BrowserSettings(persist: false, restoredData: try JSONSerialization.data(withJSONObject: prior))
         try require(migrated.editorPreferences == .init() && migrated.preferencesPersistenceStatus.isEmpty,
                     "old-version-migrates-editor-defaults-without-losing-other-preferences")
-        prior["version"] = 21
+        prior["version"] = BrowserSettings.preferencesVersion + 1
         let newer = BrowserSettings(persist: false, restoredData: try JSONSerialization.data(withJSONObject: prior))
         try require(!newer.preferencesPersistenceStatus.isEmpty, "future-preferences-preserved-session-only")
         var invalid = preferences; invalid.basePointSize = 200
