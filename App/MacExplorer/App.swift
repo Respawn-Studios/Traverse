@@ -9,6 +9,15 @@ import ExplorerCore
 enum MacExplorerApplication {
     @MainActor
     static func main() {
+        // An exact generated Release image cannot enter an ordinary profile
+        // after a malformed relaunch, changed Info, or missing fixture root.
+        if GeneratedArchiveDriveReview.requested {
+            guard let selection = GeneratedArchiveDriveReview.selection,
+                  GeneratedArchiveDriveReview.consumePhasePermit(selection) else {
+                fputs("TRAVERSE_ARCHIVE_DRIVE_QUALIFICATION_LAUNCH_REFUSED\n", stderr)
+                Darwin.exit(71)
+            }
+        }
         #if DEBUG && TRAVERSE_GATEB_NATIVE_QUALIFICATION && !MAC_EXPLORER_DISTRIBUTION
         // Children use the same isolated, signed qualification image. Their
         // exact private case and parent witness are checked by each child.
@@ -194,6 +203,21 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if TRAVERSE_ARCHIVE_DRIVE_QA
+        guard let selection = GeneratedArchiveDriveReview.selection else {
+            fputs("TRAVERSE_ARCHIVE_DRIVE_QUALIFICATION_LAUNCH_REFUSED\n", stderr)
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        Task { @MainActor in
+            switch selection.phase {
+            case .archiveWarm, .archiveCold:
+                await OperationAccessRecoverySignedVerification.runAuthoredArchives(selection: selection)
+            case .driveReadOnly:
+                await OperationAccessRecoverySignedVerification.runPassiveDriveInspection(selection: selection)
+            }
+        }
+        #else
         #if TRAVERSE_SFTP_EDITOR_QA
         if GeneratedSandboxReview.ownedTrashRequested {
             guard let phase = GeneratedSandboxReview.ownedTrashPhase else {
@@ -737,6 +761,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
             defer { self.startupTask = nil }
             self.finishLaunching(settings: BrowserSettings(persist: !verification), verification: verification)
         }
+        #endif
     }
 
     private func finishLaunching(settings: BrowserSettings, verification: Bool) {

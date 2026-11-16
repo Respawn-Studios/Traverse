@@ -30,11 +30,25 @@ public enum TARTreePublicExtractionPolicy: Sendable, Equatable {
     case held, sourceQualification
 }
 
+/// The generated signed review has two distinct archive execution phases.
+/// A phase only restricts an engine that also has a fixture root.
+public enum ArchiveFixturePhase: Sendable, Equatable {
+    case warmForward, coldInverse
+}
+
+internal enum ArchiveFixtureAction: Equatable {
+    case read, forward, inverse
+}
+
 /// Opt-in, serial off-main operations with explicit retention and manual recovery.
 /// Recovery folders are never automatically deleted. Undo is a guarded reverse rename sequence.
 public final class RecoverableFileOperations: @unchecked Sendable {
     internal let directory: URL
     internal let protectedLocations: [URL]
+    /// Optional restriction for the one generated signed archive review. It
+    /// cannot enable any operation or relax an existing producer policy.
+    internal let archiveFixtureRoot: URL?
+    internal let archiveFixturePhase: ArchiveFixturePhase?
     internal let continuationSession = UUID()
     private let queue: OperationQueue
     private let activity: (@Sendable () throws -> any Sendable)?
@@ -143,9 +157,13 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                             zipTreePublicExtractionPolicy: ZIPTreePublicExtractionPolicy = .held,
                             tarTreePublicExtractionPolicy: TARTreePublicExtractionPolicy = .held,
                             nativeTrashPolicy: NativeTrashMutationPolicy = .existingVerifiedPaths,
-                            localTextRetirementPolicy: LocalTextRetirementPolicy = .legacyVerifiedPaths) {
+                            localTextRetirementPolicy: LocalTextRetirementPolicy = .legacyVerifiedPaths,
+                            archiveFixtureRoot: URL? = nil,
+                            archiveFixturePhase: ArchiveFixturePhase? = nil) {
         self.init(journalDirectory: journalDirectory, hooks: RecoveryHooks(), copyExecutionAuthorization: .closed,
-                  protecting: protecting, activity: activity, authoredZIPMetadataPolicy: authoredZIPMetadataPolicy,
+                  protecting: protecting, activity: activity, archiveFixtureRoot: archiveFixtureRoot,
+                  archiveFixturePhase: archiveFixturePhase,
+                  authoredZIPMetadataPolicy: authoredZIPMetadataPolicy,
                   strictPortableTARCreationPolicy: strictPortableTARCreationPolicy,
                   tarGzipCreationPolicy: tarGzipCreationPolicy,
                   tarBzip2CreationPolicy: tarBzip2CreationPolicy,
@@ -325,6 +343,8 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   qualifiedCopyPreview: QualifiedCopyPreviewScope? = nil,
                   protecting: [URL] = [],
                   activity: (@Sendable () throws -> any Sendable)? = nil,
+                  archiveFixtureRoot: URL? = nil,
+                  archiveFixturePhase: ArchiveFixturePhase? = nil,
                   authoredZIPMetadataPolicy: AuthoredZIPMetadataPolicy = .exactSource,
                   strictPortableTARCreationPolicy: StrictPortableTARCreationPolicy = .held,
                   tarGzipCreationPolicy: TARGzipCreationPolicy = .held,
@@ -347,6 +367,8 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                   localTextRetirementPolicy: LocalTextRetirementPolicy = .legacyVerifiedPaths) {
         directory = journalDirectory
         protectedLocations = protecting
+        self.archiveFixtureRoot = archiveFixtureRoot
+        self.archiveFixturePhase = archiveFixturePhase
         self.legacy = legacy
         self.activity = activity
         self.hooks = hooks
@@ -378,9 +400,57 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         queue.qualityOfService = .userInitiated
     }
 
+    /// Check before reading a selected source and again at each archive
+    /// mutation/reversal. Every parent component below the private fixture
+    /// root must still be an owned directory, not a symlink or alias outside
+    /// the generated case. The existing entry and parent identity checks then
+    /// guard changes between plan and commit.
+    internal func requireArchiveFixturePaths(_ paths: [URL]) throws {
+        guard let root = archiveFixtureRoot else { return }
+        guard root.isFileURL, root.path == root.standardizedFileURL.path else {
+            throw FileOperationFailure.invalidRequest
+        }
+        var ancestor = root
+        var privateDepth = 0
+        while ancestor.path != "/" {
+            var facts = stat()
+            guard lstat(ancestor.path, &facts) == 0,
+                  facts.st_mode & S_IFMT == S_IFDIR,
+                  privateDepth >= 3 || facts.st_uid == geteuid() && facts.st_mode & 0o077 == 0 else {
+                throw FileOperationFailure.invalidRequest
+            }
+            ancestor.deleteLastPathComponent()
+            privateDepth += 1
+        }
+        let rootPath = root.path
+        for path in paths {
+            guard path.isFileURL, path.path == path.standardizedFileURL.path,
+                  path.path.hasPrefix(rootPath + "/") else { throw FileOperationFailure.invalidRequest }
+            var parent = path.deletingLastPathComponent()
+            while parent.path != rootPath {
+                guard parent.path.hasPrefix(rootPath + "/") else { throw FileOperationFailure.invalidRequest }
+                var facts = stat()
+                guard lstat(parent.path, &facts) == 0,
+                      facts.st_mode & S_IFMT == S_IFDIR, facts.st_uid == geteuid() else {
+                    throw FileOperationFailure.invalidRequest
+                }
+                parent.deleteLastPathComponent()
+            }
+            var item = stat()
+            if lstat(path.path, &item) == 0 {
+                guard item.st_uid == geteuid(),
+                      item.st_mode & S_IFMT == S_IFDIR
+                        || item.st_mode & S_IFMT == S_IFREG && item.st_nlink == 1 else {
+                    throw FileOperationFailure.invalidRequest
+                }
+            } else if errno != ENOENT { throw FileOperationFailure.invalidRequest }
+        }
+    }
+
     public func observeSelection(_ urls: [URL]) async throws -> FileOperationSelection {
-        try await worker { cancellation in
+        try await worker(archiveAction: .read) { cancellation in
             guard !urls.isEmpty, urls.count <= OperationJournal.maximumInputs else { throw FileOperationFailure.invalidRequest }
+            try self.requireArchiveFixturePaths(urls)
             let observed = try urls.map { url in try cancellation.check(); return try observeObject(url) }
             return FileOperationSelection(urls: observed.map(\.url), identities: observed.map(\.snapshot))
         }
@@ -478,7 +548,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
 
     /// Passive inspection never creates, imports, upgrades or recovers storage.
     public func inspectExistingHistory(after: UUID? = nil, limit: Int = 64) async throws -> OperationRecoveryInspection {
-        try await worker { cancellation in
+        try await worker(archiveAction: .read) { cancellation in
             let adoptionUndoHint: Bool
             switch self.downloadAdoptionPolicy {
             case .held: adoptionUndoHint = false
@@ -501,7 +571,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
 
     /// Explicit writable history preparation. Passive callers use inspectExistingHistory.
     public func recoveryRecords(after: UUID? = nil, limit: Int = 64) async throws -> OperationRecoveryInspection {
-        try await worker { cancellation in
+        try await worker(archiveAction: .read) { cancellation in
             let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks, cancellation: cancellation)
             let page = try journal.inspectSummaries(after: after, limit: limit,
                 allowNativeOriginalUpdateUndoHint: self.authoredZIPOriginalUpdateNativePolicy == .qualifiedNativeStage,
@@ -527,12 +597,12 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     /// This passive read neither opens that destination nor changes history;
     /// Undo repeats all live checks.
     public func undoAccessRequirement(recordID: UUID) async throws -> OperationUndoAccessRequirement? {
-        try await worker { cancellation in
+        try await worker(archiveAction: .read) { cancellation in
             let catalog = try OperationHistoryInspector.record(self.directory, id: recordID,
                                                                cancellation: cancellation)
             let record: JournalRecord
             switch catalog {
-            case .treeV3(let value) where value.operation == "Create ZIP" || value.operation == "Create TAR" || value.operation == "Create TAR.gz":
+            case .treeV3(let value) where ["Create ZIP", "Create TAR", "Create TAR.gz", "Create TAR.bz2"].contains(value.operation):
                 // v3 also records other file work. The title alone is not a
                 // sufficient reason to ask the user for destination access.
                 let prefix = ".mac-explorer-recovery-"
@@ -588,6 +658,9 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 record = value
             default: return nil
             }
+            try self.requireArchiveFixturePaths(record.locations
+                + record.steps.flatMap { [$0.source, $0.destination] }
+                + record.areas.map(\.url))
             guard record.state == "committed", record.steps.count == 1,
                   let step = record.steps.first, step.after != nil, !step.undone else {
                 throw FileOperationFailure.recoveryUncertain
@@ -628,20 +701,32 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     private func reverseWorker(recordID: UUID, recovering: Bool,
         restoringInterruptedOriginalZIP: Bool, reporter: OperationProgressReporter) async -> RecoverableOperationResult {
         do {
-            return try await worker(progress: reporter) { cancellation in
+            return try await worker(progress: reporter, archiveAction: .inverse) { cancellation in
                 reporter.begin(.verifying)
                 let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks, cancellation: cancellation)
                 if case .textRevisionV3(let record)? = try journal.inspectCatalogRecord(recordID) {
+                    guard self.archiveFixtureRoot == nil else { throw FileOperationFailure.unsupported }
                     guard !recovering else { throw FileOperationFailure.unsupported }
                     return self.reverseLocalTextV2(record, journal: journal, cancellation: cancellation)
                 }
                 if case .groupedCopyV1? = try journal.inspectCatalogRecord(recordID) {
+                    guard self.archiveFixtureRoot == nil else { throw FileOperationFailure.unsupported }
                     // Restore Original State is the legacy inverse action, never
                     // authority to confirm or replay grouped Copy recovery.
                     guard !recovering, let edit = try journal.openGroupedEdit(recordID) else { throw FileOperationFailure.unsupported }
                     return self.reverseGroupedCopy(edit, journal: journal, cancellation: cancellation)
                 }
                 guard let record = try journal.openEdit(recordID) else { throw FileOperationFailure.recoveryUncertain }
+                if self.archiveFixtureRoot != nil {
+                    let title = record.snapshot.operation
+                    let authoredCreate = ["Create ZIP", "Create TAR", "Create TAR.gz", "Create TAR.bz2"].contains(title)
+                    let authoredUpdate = ArchiveUpdateProfile.isUpdate(record.snapshot.version)
+                        && title == ArchiveUpdateProfile.title(version: record.snapshot.version)
+                    guard authoredCreate || authoredUpdate else { throw FileOperationFailure.unsupported }
+                    try self.requireArchiveFixturePaths(record.locations
+                        + record.steps.flatMap { [$0.source, $0.destination] }
+                        + record.areas.map(\.url))
+                }
                 if record.snapshot.version == 14 {
                     guard !recovering,
                           self.receivedDownloadPublicQuarantinePolicy == .sourceQualification else {
@@ -1176,7 +1261,17 @@ public final class RecoverableFileOperations: @unchecked Sendable {
 
     internal func worker<T: Sendable>(progress: OperationProgressReporter? = nil,
                                       activation: UUID? = nil, ignoringCancellation: Bool = false,
+                                      archiveAction: ArchiveFixtureAction? = nil,
                                       _ action: @escaping @Sendable (OperationCancellation) throws -> T) async throws -> T {
+        if archiveFixtureRoot != nil || archiveFixturePhase != nil {
+            guard let archiveFixtureRoot, let archiveFixturePhase, let archiveAction,
+                  archiveFixtureRoot.isFileURL,
+                  archiveAction == .read
+                    || archiveAction == .forward && archiveFixturePhase == .warmForward
+                    || archiveAction == .inverse && archiveFixturePhase == .coldInverse else {
+                throw FileOperationFailure.unsupported
+            }
+        }
         let admitted = admissionLock.withLock { () -> Bool in
             guard activation == previewReservation else { return false }
             if activation != nil, submissions != 0 { return false }

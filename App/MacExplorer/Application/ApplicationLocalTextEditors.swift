@@ -6,7 +6,7 @@ import FileOperations
 /// The ordinary editor uses the same guarded Save/recovery owner in both
 /// configurations. Packaging/publication still follows release acceptance.
 enum LocalTextEditorFeature {
-    static let ordinaryEnabled = true
+    static var ordinaryEnabled: Bool { !GeneratedArchiveDriveReview.requested }
     static var allowsVersionRetirement: Bool { ordinaryEnabled }
 }
 
@@ -77,7 +77,8 @@ final class ApplicationLocalTextEditors {
             confirmReload: { window, dirty in await Self.confirmReload(in: window, dirty: dirty) },
             chooseArchiveCopyName: ArchiveEditorInteractions.chooseArchiveCopyName,
             chooseTextCopy: { [self] window, name in
-                await chooseDestination(in: window, source: nil, context: context, isTextCopy: true, suggestedName: name)
+                if GeneratedArchiveDriveReview.requested { return nil }
+                return await chooseDestination(in: window, source: nil, context: context, isTextCopy: true, suggestedName: name)
             },
             publishTextCopy: { [self] value, generation, destination, window in
                 try await publishTextCopy(value, generation: generation, destination: destination, window: window, engine: engine)

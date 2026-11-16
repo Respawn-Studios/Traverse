@@ -18,12 +18,19 @@ release work.
 | `release_notes.py`, `notices.py` | Deterministic bundled release notes and dependency notices |
 | `direct_dmg.py`, `DMGArtwork.swift` | Developer ID installer and artwork |
 | `sandbox.py`, `remote_editor_qa.py` | Isolated generated-data signed acceptance support |
+| `archive_drive_qa.py` | Existing-target signed archive checks and passive drive-history inspection |
 
 Source inventories reuse the normal app, worker, resource and build-control
 inputs. Vendored bytes and reviewed patches are verified at build/archive
 boundaries. Runtime acceptance is evidence for its exact app and scenario; it
 does not silently qualify a different rebuild. Public/direct shipping remains
 subject to the enforced release-admission policy.
+
+The archive review reuses the normal Release target and incremental caches,
+with its profile and fixtures inside the repository. Building and inspecting
+never launch the app. Each runtime phase needs a separate bounded permit;
+the passive drive phase cannot format a volume or attach an image. This role
+has no updater, network helper, Finder registration or Trash capability.
 
 After changing dependency provenance or license inputs, review and regenerate the
 bundled manifest and notices before building:

@@ -29,6 +29,158 @@ private struct RecoveryFixture {
     func remove() { try? FileManager().removeItem(at: root) }
 }
 
+private struct ArchiveFixtureGateFixture {
+    let caseRoot: URL
+    let sourceRoot: URL
+    let root: URL
+    let input: URL
+    let output: URL
+    let file: URL
+    let journal: URL
+
+    init() throws {
+        let base = try FileOperationTestFixtures.base()
+        caseRoot = base.appendingPathComponent("archive-fixture-" + UUID().uuidString, isDirectory: true)
+        sourceRoot = caseRoot.appendingPathComponent("source", isDirectory: true)
+        root = sourceRoot.appendingPathComponent("Operation Root", isDirectory: true)
+        input = root.appendingPathComponent("Input", isDirectory: true)
+        output = root.appendingPathComponent("Output", isDirectory: true)
+        let library = sourceRoot.appendingPathComponent("Library", isDirectory: true)
+        journal = library.appendingPathComponent("operation-recovery", isDirectory: true)
+        file = input.appendingPathComponent("generated.txt")
+        let manager = FileManager.default
+        for directory in [caseRoot, sourceRoot, root, input, output, library] {
+            try manager.createDirectory(at: directory, withIntermediateDirectories: false,
+                                        attributes: [.posixPermissions: 0o700])
+        }
+        try Data("generated archive source".utf8).write(to: file, options: .withoutOverwriting)
+    }
+
+    func engine(_ phase: ArchiveFixturePhase?) -> RecoverableFileOperations {
+        RecoverableFileOperations(journalDirectory: journal,
+                                  archiveFixtureRoot: root,
+                                  archiveFixturePhase: phase)
+    }
+
+    func remove() { try? FileManager.default.removeItem(at: caseRoot) }
+}
+
+private final class ArchiveFixtureNeverProduce: ArchiveFileProducer, @unchecked Sendable {
+    let preview = ArchiveProductionPreview(files: 1, folders: 0, logicalBytes: 24, longestPathBytes: 13)
+    private let lock = NSLock()
+    private var productions = 0
+    var productionCount: Int { lock.withLock { productions } }
+
+    func validate(check: @Sendable () throws -> Void) throws { try check() }
+    func produce(into descriptor: Int32, check: @Sendable () throws -> Void,
+                 progress: @Sendable (UInt64, Int) -> Void) throws -> ArchiveProducedNode {
+        lock.withLock { productions += 1 }
+        throw FileOperationFailure.ioFailure
+    }
+}
+
+@Suite(.serialized) struct ArchiveFixtureAdmissionTests {
+    @Test func phasesAdmitOnlyTheirArchiveActionsAndRetainOrdinaryBehavior() async throws {
+        let fixture = try ArchiveFixtureGateFixture(); defer { fixture.remove() }
+        let warm = fixture.engine(.warmForward)
+        let cold = fixture.engine(.coldInverse)
+        #expect(try await warm.observeSelection([fixture.file]).urls == [fixture.file])
+        #expect(try await cold.observeSelection([fixture.file]).urls == [fixture.file])
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await warm.observeDirectory(fixture.input)
+        }
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await cold.observeDirectory(fixture.input)
+        }
+        for engine in [warm, cold] {
+            let generic = await engine.perform(.createFolder(parent: fixture.output, name: "Denied"))
+            #expect(generic.result.items.first?.status == .failed(.unsupported))
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.output.appendingPathComponent("Denied").path))
+        #expect((await warm.undo(recordID: UUID())).result.items.first?.status == .failed(.unsupported))
+        let selection = try await cold.observeSelection([fixture.file])
+        await #expect(throws: FileOperationFailure.unsupported) {
+            _ = try await cold.prepareArchiveCreation(sources: [fixture.file], parent: fixture.output,
+                name: "Held.zip", observing: selection) { _ in ArchiveFixtureNeverProduce() }
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+
+        let ordinary = RecoverableFileOperations(journalDirectory: fixture.journal)
+        #expect(try await ordinary.observeDirectory(fixture.input).urls == [fixture.input])
+        #expect(try await ordinary.observeSelection([fixture.file]).urls == [fixture.file])
+    }
+
+    @Test func halfConfiguredEngineRefusesEveryWorker() async throws {
+        let fixture = try ArchiveFixtureGateFixture(); defer { fixture.remove() }
+        let rootOnly = fixture.engine(nil)
+        let phaseOnly = RecoverableFileOperations(journalDirectory: fixture.journal,
+                                                   archiveFixturePhase: .warmForward)
+        for engine in [rootOnly, phaseOnly] {
+            await #expect(throws: FileOperationFailure.unsupported) {
+                _ = try await engine.observeSelection([fixture.file])
+            }
+            await #expect(throws: FileOperationFailure.unsupported) {
+                _ = try await engine.observeDirectory(fixture.input)
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+    }
+
+    @Test func observationRejectsOutsideSymlinkedAndHardlinkedPaths() async throws {
+        let fixture = try ArchiveFixtureGateFixture(); defer { fixture.remove() }
+        let manager = FileManager.default
+        let outside = fixture.caseRoot.appendingPathComponent("outside.txt")
+        try Data("outside generated fixture".utf8).write(to: outside, options: .withoutOverwriting)
+        let linked = fixture.input.appendingPathComponent("linked.txt")
+        try manager.createSymbolicLink(at: linked, withDestinationURL: outside)
+        let hardlinked = fixture.input.appendingPathComponent("hardlinked.txt")
+        try manager.linkItem(at: outside, to: hardlinked)
+        let alias = fixture.root.appendingPathComponent("Alias", isDirectory: true)
+        try manager.createSymbolicLink(at: alias, withDestinationURL: fixture.input)
+        let engine = fixture.engine(.warmForward)
+        for path in [outside, linked, hardlinked, alias.appendingPathComponent("generated.txt")] {
+            await #expect(throws: FileOperationFailure.invalidRequest) {
+                _ = try await engine.observeSelection([path])
+            }
+        }
+        #expect(try await engine.observeSelection([fixture.file]).urls == [fixture.file])
+        #expect(try Data(contentsOf: outside) == Data("outside generated fixture".utf8))
+    }
+
+    @Test func ancestorSubstitutionAfterPrepareRefusesArchiveMutation() async throws {
+        let fixture = try ArchiveFixtureGateFixture(); defer { fixture.remove() }
+        let manager = FileManager.default
+        let engine = fixture.engine(.warmForward)
+        let selection = try await engine.observeSelection([fixture.file])
+        let producer = ArchiveFixtureNeverProduce()
+        let plan = try await engine.prepareArchiveCreation(sources: [fixture.file], parent: fixture.output,
+            name: "Produced.zip", observing: selection) { _ in producer }
+        let alternate = fixture.caseRoot.appendingPathComponent("alternate-source", isDirectory: true)
+        let alternateRoot = alternate.appendingPathComponent("Operation Root", isDirectory: true)
+        let alternateInput = alternateRoot.appendingPathComponent("Input", isDirectory: true)
+        let alternateOutput = alternateRoot.appendingPathComponent("Output", isDirectory: true)
+        for directory in [alternate, alternateRoot, alternateInput, alternateOutput] {
+            try manager.createDirectory(at: directory, withIntermediateDirectories: false,
+                                        attributes: [.posixPermissions: 0o700])
+        }
+        try Data("substituted generated source".utf8).write(
+            to: alternateInput.appendingPathComponent("generated.txt"), options: .withoutOverwriting)
+        let parked = fixture.caseRoot.appendingPathComponent("source-parked", isDirectory: true)
+        try manager.moveItem(at: fixture.sourceRoot, to: parked)
+        defer {
+            try? manager.removeItem(at: fixture.sourceRoot)
+            try? manager.moveItem(at: parked, to: fixture.sourceRoot)
+        }
+        try manager.createSymbolicLink(at: fixture.sourceRoot, withDestinationURL: alternate)
+        let refused = await engine.performArchiveCreation(plan)
+        #expect(refused.result.items.first?.status == .failed(.invalidRequest))
+        #expect(refused.recordID == nil)
+        #expect(producer.productionCount == 0)
+        #expect(!manager.fileExists(atPath: alternateOutput.appendingPathComponent("Produced.zip").path))
+        #expect(!manager.fileExists(atPath: parked.appendingPathComponent("Library/operation-recovery").path))
+    }
+}
+
 private func setGeneratedTrashAttribute(_ bytes: Data, name: String, at url: URL) throws {
     let result = bytes.withUnsafeBytes {
         setxattr(url.path, name, $0.baseAddress, $0.count, 0, XATTR_NOFOLLOW)

@@ -350,6 +350,11 @@ private struct TARBrowserView:View {
     private(set) var controller:TARBrowserWindowController?
     private var retirement:Task<Void,Never>?
     func show(_ url:URL,from browser:BrowserViewController,reviewExtraction:Bool=false) {
+        if GeneratedArchiveDriveReview.requested,
+           !GeneratedArchiveDriveReview.permitsFixtureLocations([url]) {
+            browser.status.stringValue = "This review accepts generated archive fixtures only."
+            return
+        }
         guard TARBrowseFeature.available,retirement==nil,!ApplicationFileActivity.gate.isClosed else{return}
         if controller==nil {
             let reader=ApplicationCompressedArchives.shared.reader(excluding:(browser.developmentStateDirectory.map{[$0]} ?? [])+AppStorageLocations.protectedDirectories)

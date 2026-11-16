@@ -22,6 +22,7 @@ import uuid
 from bundle_helper import publish, regular
 from distribution import helper_symbols
 from distribution import remote_editor_qa
+from distribution import archive_drive_qa
 from build_architecture import selected
 
 sys.dont_write_bytecode = True
@@ -387,6 +388,9 @@ def main() -> None:
 def _main_locked(embed: bool) -> None:
     qualification = sandbox_foundation_case(os.environ) if embed else None
     remote_editor_qa_case = remote_editor_qa.admitted_build(os.environ) if embed else None
+    archive_drive_qa_case = archive_drive_qa.admitted_build(os.environ) if embed else None
+    if archive_drive_qa_case and (qualification or remote_editor_qa_case):
+        raise ValueError('Mixed archive/drive and sandbox QA roles')
     binary = _build_locked()
     if not embed:
         print(binary)
@@ -400,7 +404,8 @@ def _main_locked(embed: bool) -> None:
     helper = destination / binary.name
     if helper.is_symlink() or (helper.exists() and (not helper.is_file() or helper.stat().st_nlink != 1)):
         raise ValueError("Refusing a redirected bundled helper")
-    identity = remote_editor_qa.signer(remote_editor_qa_case)[0] if remote_editor_qa_case \
+    identity = archive_drive_qa.admitted_case(archive_drive_qa_case.name)[1]['signingIdentity'] if archive_drive_qa_case \
+        else remote_editor_qa.signer(remote_editor_qa_case)[0] if remote_editor_qa_case \
         else os.environ.get("EXPANDED_CODE_SIGN_IDENTITY") or "-"
     if os.environ.get('PRODUCT_BUNDLE_IDENTIFIER') == 'com.respawnstudios.traverse':
         from distribution.store_helpers import configuration
@@ -421,7 +426,7 @@ def _main_locked(embed: bool) -> None:
     arguments = ["/usr/bin/codesign", "--force", "--sign", identity, "--timestamp=none"]
     if local_development:
         arguments += ["--identifier", helper.name]
-    if os.environ.get('PRODUCT_BUNDLE_IDENTIFIER') == 'com.respawnstudios.traverse' or remote_editor_qa_case:
+    if os.environ.get('PRODUCT_BUNDLE_IDENTIFIER') == 'com.respawnstudios.traverse' or remote_editor_qa_case or archive_drive_qa_case:
         arguments += ['--options', 'runtime']
     if os.environ.get('ENABLE_APP_SANDBOX') == 'YES':
         arguments += ['--entitlements', str(ROOT / 'Distribution/HelperInherit.entitlements')]
@@ -438,6 +443,17 @@ def _main_locked(embed: bool) -> None:
                 _record_embed(binary, helper, signing, facts)
     helper_symbols.publish_for_xcode(binary, helper, os.environ)
     print("Bundled verified storage scanner" if reused else "Bundled signed storage scanner")
+    if archive_drive_qa_case:
+        app = target / relative.parent
+        if any(path.name != 'storage-scanner-worker' for path in destination.iterdir()) \
+                or any((app / 'Contents/Resources' / name).exists() for name in
+                       ['SMBHelperManifest.plist', 'SFTPHelperManifest.plist']) \
+                or (app / 'Contents/XPCServices').exists():
+            raise ValueError('Archive/drive QA contains an unselected helper or service')
+        from distribution.bundle_notices import embed as embed_notices
+        embed_notices(target / 'Mac Explorer.app')
+        print('Archive/drive QA: only the signed local scanner was embedded')
+        return
     if qualification:
         # This packet tests local sandbox grants, not distribution SMB trust.
         # Refuse stale network code rather than deleting or reinterpreting it.

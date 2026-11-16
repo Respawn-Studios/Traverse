@@ -60,8 +60,13 @@ final class ApplicationPrivateNames: ObservableObject {
         self.enablesImport = enablesImport
     }
     func configure(_ browser: BrowserViewController) {
-        guard directory == nil, !browser.isVerificationSession, !browser.isReadOnlyFileSession else { return }
-        directory = browser.developmentStateDirectory?.appendingPathComponent("private-names", isDirectory: true)
+        let state = browser.developmentStateDirectory
+        let selectedState = GeneratedArchiveDriveReview.selection?.journalDirectory.deletingLastPathComponent()
+        let generatedArchiveReview = GeneratedArchiveDriveReview.archiveAdmitted
+            && state != nil && state?.standardizedFileURL == selectedState?.standardizedFileURL
+        guard directory == nil, !browser.isReadOnlyFileSession,
+              (!browser.isVerificationSession || generatedArchiveReview) else { return }
+        directory = state?.appendingPathComponent("private-names", isDirectory: true)
         settings = browser.settings
     }
     func observe(_ id: UUID, _ body: @escaping @MainActor (PrivateNameChange) -> Void) { observers[id] = body }

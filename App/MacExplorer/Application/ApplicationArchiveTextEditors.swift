@@ -16,7 +16,8 @@ enum ZIPTextEditorFeature {
 
 enum TARArchiveEditingFeature {
     static var available: Bool {
-        AppFeatureAvailability.policy.edition == .development && TARBrowseFeature.available
+        if GeneratedArchiveDriveReview.requested { return GeneratedArchiveDriveReview.archiveForwardAdmitted }
+        return AppFeatureAvailability.policy.edition == .development && TARBrowseFeature.available
             && !GeneratedSandboxReview.admitted
     }
 }
@@ -65,6 +66,12 @@ enum TARArchiveEditingFeature {
     func open(_ request: ArchiveTextEditorRequest, source: URL, path: String,
               engine: RecoverableFileOperations, access: FileAccessLifetimes, settings: BrowserSettings,
               interactions: ArchiveEditorInteractions, report: @escaping (String) -> Void) {
+        if GeneratedArchiveDriveReview.requested,
+           (!GeneratedArchiveDriveReview.archiveForwardAdmitted
+            || !GeneratedArchiveDriveReview.permitsFixtureLocations([source])) {
+            report("This review accepts generated archive fixtures only.")
+            return
+        }
         let key = Key(source: source, path: path)
         guard !reviewingTermination, opening[key] == nil, !showExisting(source: source, path: path) else { return }
         report("Opening archive text…")

@@ -1,4 +1,4 @@
-#if DEBUG || TRAVERSE_SFTP_EDITOR_QA
+#if DEBUG || TRAVERSE_SFTP_EDITOR_QA || TRAVERSE_ARCHIVE_DRIVE_QA
 import Darwin
 import Foundation
 
@@ -2175,6 +2175,558 @@ import Foundation
         value.recordID == recordID && value.targetURL == file && value.state == .committed
             && value.retention == .retired && value.metadataIsDurable && !value.canUndo
             && value.undoDisposition == .endedByRetirement
+    }
+}
+#endif
+
+#if TRAVERSE_ARCHIVE_DRIVE_QA && !TRAVERSE_SFTP_EDITOR_QA && !DEBUG
+import AppKit
+import CoreServices
+import CryptoKit
+import FileOperations
+import LocalStorage
+
+/// The authored phase of the existing signed access/recovery checks. It drives
+/// the real creation review, native editor and browser recovery command. There
+/// is no alternate writer or executable command supplied by fixture data.
+@MainActor enum OperationAccessRecoverySignedVerification {
+    private enum Refusal: Error { case check(String) }
+    private struct Observation: Codable, Equatable, Sendable {
+        let sha256: String
+        let bytes: Int
+        let publiclyMarked: Bool
+        let device: Int64
+        let inode: UInt64
+        let mode: UInt32
+        let modifiedSeconds: Int64
+        let modifiedNanoseconds: Int64
+    }
+    private struct Step: Codable, Sendable {
+        let recordID: UUID
+        let kind: String
+        let format: String
+        let output: String
+        let before: Observation?
+        let after: Observation
+    }
+    private struct Receipt: Codable, Sendable {
+        let phase: String
+        let pid: Int32
+        let inputs: [String: Observation]
+        let steps: [Step]
+    }
+    private struct Outcome: Codable, Sendable {
+        let passed: Bool
+        let phase: String
+        let stage: String
+        let refusal: String?
+        let pid: Int32
+    }
+    private struct DriveReceipt: Codable, Sendable {
+        let jobID: UUID
+        let phase: String
+        let unresolved: Bool
+        let beforeSHA256: String
+        let afterSHA256: String
+        let nativeMutationHeld: Bool
+    }
+    nonisolated private static let expectedInputs = [
+        "Source/Notes.txt": Data("before\n".utf8),
+        "Source/Nested/Config.json": Data("{\"generated\":true}\n".utf8)
+    ]
+    private static func require(_ value: Bool, _ code: String) throws {
+        if !value { throw Refusal.check(code) }
+    }
+    private static func wait(_ code: String, _ ready: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while !ready() {
+            try Task.checkCancellation()
+            guard .now < deadline else { throw Refusal.check(code) }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+    }
+    private nonisolated static func observe(_ file: URL) throws -> Observation {
+        var before = stat(), after = stat()
+        guard lstat(file.path, &before) == 0 else { throw Refusal.check("generated-file-observation") }
+        guard let bytes = OperationAccessFixtureIO.readRegular(file, maximum: 1 << 20) else {
+            throw Refusal.check("bounded-generated-file")
+        }
+        // Do not reuse a URL's resource cache across archive replacement.
+        let fresh = URL(fileURLWithPath: file.path)
+        let properties = try fresh.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties
+        guard lstat(file.path, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+              before.st_size == after.st_size, before.st_mode == after.st_mode,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
+            throw Refusal.check("generated-file-changed-during-observation")
+        }
+        return Observation(sha256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            bytes: bytes.count, publiclyMarked: properties?.isEmpty == false,
+            device: Int64(after.st_dev), inode: after.st_ino, mode: UInt32(after.st_mode),
+            modifiedSeconds: Int64(after.st_mtimespec.tv_sec), modifiedNanoseconds: Int64(after.st_mtimespec.tv_nsec))
+    }
+    private static func observeFile(_ file: URL) async throws -> Observation {
+        try await Task.detached { try observe(file) }.value
+    }
+    private static func inputs(_ fixture: URL) async throws -> [String: Observation] {
+        try await Task.detached {
+            var result: [String: Observation] = [:]
+            for (name, expected) in expectedInputs {
+                let file = fixture.appendingPathComponent(name)
+                guard OperationAccessFixtureIO.readRegular(file, maximum: 4096) == expected else {
+                    throw Refusal.check("generated-source-content")
+                }
+                result[name] = try observe(file)
+            }
+            guard Set(try FileManager.default.contentsOfDirectory(atPath: fixture.appendingPathComponent("Source").path))
+                    == Set(["Notes.txt", "Nested", "Empty"]),
+                  try FileManager.default.contentsOfDirectory(atPath: fixture.appendingPathComponent("Source/Nested").path)
+                    == ["Config.json"] else { throw Refusal.check("exact-generated-source-tree") }
+            var empty = stat()
+            let folder = fixture.appendingPathComponent("Source/Empty")
+            guard lstat(folder.path, &empty) == 0, empty.st_mode & S_IFMT == S_IFDIR,
+                  empty.st_uid == geteuid(),
+                  try FileManager.default.contentsOfDirectory(atPath: folder.path).isEmpty else {
+                throw Refusal.check("generated-empty-folder")
+            }
+            return result
+        }.value
+    }
+    private static func requireInputs(_ fixture: URL, unchanged before: [String: Observation]) async throws {
+        let after = try await inputs(fixture)
+        try require(after == before, "source-inputs-preserved")
+    }
+    private static func markGeneratedInputs(_ fixture: URL) async throws {
+        let initial = try await inputs(fixture)
+        try require(initial.values.allSatisfy { !$0.publiclyMarked }, "fresh-generated-input-marks")
+        try await Task.detached {
+            for name in expectedInputs.keys {
+                var file = fixture.appendingPathComponent(name)
+                var values = URLResourceValues()
+                values.quarantineProperties = [
+                    kLSQuarantineAgentNameKey as String: "Traverse Generated Archive Check",
+                    kLSQuarantineTimeStampKey as String: Date()
+                ]
+                try file.setResourceValues(values)
+                guard try observe(file).publiclyMarked else { throw Refusal.check("generated-public-mark") }
+            }
+        }.value
+    }
+    private static func write<T: Encodable & Sendable>(_ value: T, name: String, root: URL) async throws {
+        try await Task.detached {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(value)
+            guard data.count <= 1 << 20, !name.contains("/"), name.hasSuffix(".json") else {
+                throw Refusal.check("receipt-size-or-name")
+            }
+            let directory = root.appendingPathComponent("evidence")
+            let parent = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
+            guard parent >= 0 else { throw Refusal.check("receipt-parent") }
+            defer { close(parent) }
+            var facts = stat()
+            guard fstat(parent, &facts) == 0, facts.st_uid == geteuid(), facts.st_mode & 0o077 == 0 else {
+                throw Refusal.check("receipt-owner")
+            }
+            let fd = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { throw Refusal.check("receipt-replay") }
+            defer { close(fd) }
+            var offset = 0
+            while offset < data.count {
+                let written = data.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), data.count - offset) }
+                guard written > 0 else { throw Refusal.check("receipt-write") }
+                offset += written
+            }
+            guard fsync(fd) == 0, fsync(parent) == 0 else { throw Refusal.check("receipt-durability") }
+        }.value
+    }
+    private static func nativeEditor() -> NativeTextEditorWindow? {
+        let editors = NSApp.windows.filter(\.isVisible).compactMap { $0.windowController as? NativeTextEditorWindow }
+        return editors.count == 1 ? editors.first : nil
+    }
+    private static func descendants(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap(descendants)
+    }
+    private static func copyChoice(_ native: NativeTextEditorWindow, name: String?, cancel: Bool) async throws {
+        native.saveAsButton.performClick(nil)
+        try await wait("native-copy-review") { native.window?.attachedSheet != nil }
+        guard let sheet = native.window?.attachedSheet, let content = sheet.contentView else {
+            throw Refusal.check("native-copy-sheet")
+        }
+        if let name {
+            guard let field = descendants(content).compactMap({ $0 as? NSTextField })
+                .first(where: { $0.accessibilityLabel() == "Archive copy name" }) else {
+                throw Refusal.check("native-copy-name")
+            }
+            try require(sheet.makeFirstResponder(field), "native-copy-focus")
+            field.selectText(nil)
+            guard let editor = field.currentEditor() as? NSTextView else { throw Refusal.check("native-copy-editor") }
+            editor.insertText(name, replacementRange: .init(location: 0, length: editor.string.utf16.count))
+            _ = sheet.makeFirstResponder(nil)
+            try require(field.stringValue == name, "native-copy-typed-name")
+        }
+        guard let button = descendants(content).compactMap({ $0 as? NSButton })
+            .first(where: { $0.title == (cancel ? "Cancel" : "Save Copy") }) else {
+            throw Refusal.check("native-copy-button")
+        }
+        button.performClick(nil)
+        try await wait("native-copy-sheet-finished") { native.window?.attachedSheet == nil }
+    }
+    private static func openEditor(_ output: URL, format: ArchiveCreationFormat,
+        browser: BrowserViewController) async throws {
+        let access = await browser.accessLifetime(for: [output])
+        if format == .zip {
+            let reader = ZIPArchiveReader(activity: ApplicationFileActivity.gate)
+            let session = try await reader.open(output, retaining: access)
+            do {
+                let folder = try await session.folder(at: ["Source"])
+                let page = try await session.page(in: folder)
+                guard let item = page.items.first(where: { $0.name == "Notes.txt" }) else { throw Refusal.check("zip-note") }
+                let selection = try await session.selectionForTextPreview(item.id)
+                ApplicationLocalTextEditors.shared.openArchiveText(selection, source: output,
+                    path: "Source/Notes.txt", reader: reader, retaining: access, from: browser)
+                try await wait("zip-native-editor") { nativeEditor()?.surface.textView.string == "before\n" }
+                await session.close()
+            } catch { await session.close(); throw error }
+        } else {
+            let reader = ApplicationCompressedArchives.shared.reader(excluding: AppStorageLocations.protectedDirectories)
+            if format != .tar { try await ApplicationCompressedArchives.shared.prepareStorage() }
+            let session = try await (format == .tar ? reader.open(output, retaining: access)
+                : reader.prepareCompressed(output, retaining: access))
+            do {
+                let folder = try await session.folder(at: ["Source"])
+                let page = try await session.page(in: folder)
+                guard let item = page.items.first(where: { $0.name == "Notes.txt" }) else { throw Refusal.check("tar-note") }
+                let selection = try await session.selectionForTextPreview(item.id)
+                ApplicationLocalTextEditors.shared.openArchiveText(selection, source: output,
+                    path: "Source/Notes.txt", reader: reader, retaining: access, from: browser)
+                try await wait("tar-native-editor") { nativeEditor()?.surface.textView.string == "before\n" }
+                await session.close()
+            } catch { await session.close(); throw error }
+        }
+    }
+    private static func retainedStep(_ id: UUID, kind: String, format: ArchiveCreationFormat,
+        file: URL, before: Observation?, engine: RecoverableFileOperations) async throws -> Step {
+        let history = try await engine.inspectExistingHistory()
+        guard let record = history.records.first(where: { $0.id == id }) else { throw Refusal.check("record-missing") }
+        try require(record.state == "committed" && record.canUndo && !record.canRecover,
+            "committed-record-not-uncertain")
+        if kind == "update" {
+            try require(!record.canRestoreOriginalArchive && record.operation == "Update " + format.displayName,
+                "format-specific-update-contract")
+        }
+        let observation = try await observeFile(file)
+        try require(observation.publiclyMarked && observation.bytes <= 1 << 20, "authored-public-mark")
+        return Step(recordID: id, kind: kind, format: format.rawValue,
+            output: file.lastPathComponent, before: before, after: observation)
+    }
+    private static func warm(_ selection: GeneratedArchiveDriveReview.Selection,
+        browser: BrowserViewController, engine: RecoverableFileOperations, stage: inout String) async throws {
+        let initial = try await inputs(selection.fixtureRoot)
+        try await write(Receipt(phase: "warm-attempt", pid: getpid(), inputs: initial, steps: []),
+            name: "authored-warm-attempt.json", root: selection.caseRoot)
+        // Only the exact two generated inputs are marked, using the same public
+        // resource API as the ordinary authored-archive check. No raw flags are
+        // interpreted and no personal source is discovered or modified.
+        try await markGeneratedInputs(selection.fixtureRoot)
+        let before = try await inputs(selection.fixtureRoot)
+        try require(before.values.allSatisfy(\.publiclyMarked), "marked-generated-inputs")
+        try require((try await engine.inspectExistingHistory()).records.isEmpty, "fresh-authored-history")
+        var steps: [Step] = []
+        for format in ArchiveCreationFormat.allCases {
+            stage = format.rawValue + "/create-review"
+            browser.navigate(to: .directory(selection.fixtureRoot))
+            try await wait(stage) { !browser.isLoading && browser.orderingTask == nil }
+            let source = selection.fixtureRoot.appendingPathComponent("Source")
+            browser.reloadFileRows(preserving: [source])
+            try require(browser.canCreateZIP, "native-create-selection")
+            ApplicationArchiveCreation.shared.show(sources: [source], from: browser)
+            guard let panel = ApplicationArchiveCreation.shared.controller else { throw Refusal.check("creation-controller") }
+            panel.model.chooseOutputFormat(format)
+            panel.model.name = "Occupied." + format.rawValue
+            try await wait("create-collision-preview") {
+                !panel.model.isPreparing && panel.model.notice == FileOperationFailure.conflict.userMessage
+            }
+            try require(!panel.model.canCreate && panel.model.outcome == nil, "collision-refused-before-create")
+            panel.window?.performClose(nil)
+            await ApplicationArchiveCreation.shared.closeAndDrain()
+            try require((try await engine.inspectExistingHistory()).records.count == steps.count, "cancel-kept-history")
+            ApplicationArchiveCreation.shared.show(sources: [source], from: browser)
+            guard let created = ApplicationArchiveCreation.shared.controller else { throw Refusal.check("fresh-create-controller") }
+            created.model.chooseOutputFormat(format)
+            created.model.name = "Review." + format.rawValue
+            try await wait("create-preview-ready") { created.model.canCreate }
+            let expectedBytes = before.values.reduce(0) { $0 + $1.bytes }
+            try require(created.model.plan?.files == 2 && created.model.plan?.folders == 3
+                && created.model.plan?.logicalBytes == UInt64(expectedBytes), "exact-bounded-creation-preview")
+            try await requireInputs(selection.fixtureRoot, unchanged: before)
+            stage = format.rawValue + "/create"
+            created.model.create()
+            try await wait("create-terminal") { created.model.outcome != nil && !created.model.isRunning }
+            guard let outcome = created.model.outcome else { throw Refusal.check("create-result") }
+            if let item = outcome.result.items.first, case .failed(let failure) = item.status {
+                throw Refusal.check("create-" + failure.rawValue)
+            }
+            guard outcome.result.disposition == .succeeded,
+                  let createID = outcome.recordID else { throw Refusal.check("create-result") }
+            let output = selection.fixtureRoot.appendingPathComponent("Review." + format.rawValue)
+            let made = try await retainedStep(createID, kind: "create", format: format, file: output,
+                before: nil, engine: engine)
+            steps.append(made)
+            await ApplicationArchiveCreation.shared.closeAndDrain()
+            stage = format.rawValue + "/editor"
+            try await openEditor(output, format: format, browser: browser)
+            guard let editor = nativeEditor() else { throw Refusal.check("single-native-editor") }
+            let edited = "before\nsigned edit " + format.rawValue + "\n"
+            editor.surface.textView.insertText(edited,
+                replacementRange: .init(location: 0, length: editor.surface.textView.string.utf16.count))
+            try await wait("editor-edit-ready") { editor.window?.isDocumentEdited == true && editor.saveButton.isEnabled }
+            stage = format.rawValue + "/save"
+            editor.saveButton.performClick(nil)
+            try await wait("editor-save-terminal") { !ApplicationLocalTextEditors.shared.hasFileWork }
+            try require(editor.window?.isDocumentEdited == false && editor.saveButton.isEnabled,
+                "editor-save-confirmed")
+            guard let updateID = browser.lastRecoveryRecordID, updateID != createID else { throw Refusal.check("editor-update-record") }
+            steps.append(try await retainedStep(updateID, kind: "update", format: format, file: output,
+                before: made.after, engine: engine))
+            let copied = edited + "saved copy\n"
+            editor.surface.textView.insertText(copied,
+                replacementRange: .init(location: 0, length: editor.surface.textView.string.utf16.count))
+            try await wait("copy-edit-ready") { editor.window?.isDocumentEdited == true && editor.saveAsButton.isEnabled }
+            stage = format.rawValue + "/copy-cancel"
+            try await copyChoice(editor, name: nil, cancel: true)
+            try await wait("copy-cancel-idle") { !ApplicationLocalTextEditors.shared.hasFileWork }
+            let afterCancel = try await engine.inspectExistingHistory()
+            try require(editor.window?.isDocumentEdited == true && afterCancel.records.count == steps.count,
+                "copy-cancel-retained-draft")
+            stage = format.rawValue + "/save-copy"
+            let copy = selection.fixtureRoot.appendingPathComponent("Edited Copy." + format.rawValue)
+            try await copyChoice(editor, name: copy.lastPathComponent, cancel: false)
+            try await wait("editor-copy-terminal") { !ApplicationLocalTextEditors.shared.hasFileWork }
+            try require(editor.window?.isDocumentEdited == false && editor.saveButton.isEnabled,
+                "editor-copy-confirmed")
+            guard let copyID = browser.lastRecoveryRecordID, copyID != updateID else { throw Refusal.check("editor-copy-record") }
+            steps.append(try await retainedStep(copyID, kind: "copy", format: format, file: copy,
+                before: nil, engine: engine))
+            let unchanged = try await observeFile(output)
+            try require(unchanged == steps[steps.count - 2].after, "save-copy-kept-original")
+            editor.window?.performClose(nil)
+            try await wait("editor-native-close-drain") {
+                ApplicationLocalTextEditors.shared.documentReservationCount == 0
+                    && !ApplicationLocalTextEditors.shared.hasFileWork
+            }
+            try await requireInputs(selection.fixtureRoot, unchanged: before)
+            try await write(Receipt(phase: format.rawValue + "-committed", pid: getpid(), inputs: before, steps: steps),
+                name: "authored-prefix-" + String(steps.count) + ".json", root: selection.caseRoot)
+        }
+        try require(steps.count == 12 && Set(steps.map(\.recordID)).count == 12, "exact-forward-job-count")
+        try await write(Receipt(phase: "warm-completed", pid: getpid(), inputs: before, steps: steps),
+            name: "authored-warm.json", root: selection.caseRoot)
+    }
+    private static func cold(_ selection: GeneratedArchiveDriveReview.Selection,
+        browser: BrowserViewController, engine: RecoverableFileOperations, stage: inout String) async throws {
+        let receipt = try await Task.detached {
+            guard let data = OperationAccessFixtureIO.readRegular(selection.caseRoot.appendingPathComponent("evidence/authored-warm.json"),
+                maximum: 1 << 20) else { throw Refusal.check("warm-receipt") }
+            return try JSONDecoder().decode(Receipt.self, from: data)
+        }.value
+        try require(receipt.phase == "warm-completed" && receipt.pid != getpid() && receipt.steps.count == 12
+            && Set(receipt.steps.map(\.recordID)).count == 12, "true-cold-process-and-jobs")
+        let warm = try await Task.detached {
+            guard let data = OperationAccessFixtureIO.readRegular(selection.caseRoot.appendingPathComponent("evidence/archive-warm-result.json"),
+                maximum: 4096) else { throw Refusal.check("warm-terminal-receipt") }
+            return try JSONDecoder().decode(Outcome.self, from: data)
+        }.value
+        try require(warm.passed && warm.phase == "archive-warm" && warm.stage == "completed"
+            && warm.pid == receipt.pid, "warm-owner-drain-confirmed")
+        for (index, step) in receipt.steps.enumerated() {
+            let format = ArchiveCreationFormat.allCases[index / 3]
+            let kind = ["create", "update", "copy"][index % 3]
+            try require(step.format == format.rawValue && step.kind == kind
+                && step.output == (kind == "copy" ? "Edited Copy." : "Review.") + format.rawValue,
+                "fixed-authored-job-sequence")
+            if kind == "update" {
+                try require(step.before == receipt.steps[index - 1].after, "exact-update-before-image")
+            } else { try require(step.before == nil, "new-copy-has-no-replacement") }
+        }
+        try await requireInputs(selection.fixtureRoot, unchanged: receipt.inputs)
+        try await write(Receipt(phase: "cold-attempt", pid: getpid(), inputs: receipt.inputs, steps: []),
+            name: "authored-cold-attempt.json", root: selection.caseRoot)
+        for (index, step) in receipt.steps.reversed().enumerated() {
+            stage = step.format + "/undo-" + step.kind
+            try require(ArchiveCreationFormat(rawValue: step.format) != nil && !step.output.contains("/")
+                && step.output != "." && step.output != "..", "recorded-output-leaf")
+            let file = selection.fixtureRoot.appendingPathComponent(step.output)
+            let current = try await observeFile(file)
+            try require(current == step.after && current.publiclyMarked, "cold-exact-output")
+            let history = try await engine.inspectExistingHistory()
+            guard let record = history.records.first(where: { $0.id == step.recordID }),
+                  record.state == "committed", record.canUndo
+            else { throw Refusal.check("cold-record-and-parent") }
+            let requirement = try await engine.undoAccessRequirement(recordID: step.recordID)
+            if step.kind == "update" {
+                // Original updates already bind their retained archive and
+                // parent. The separate folder-grant requirement is for newly
+                // produced outputs, not these native replacement records.
+                try require(requirement == nil && !record.canRestoreOriginalArchive,
+                    "committed-update-uses-ordinary-undo")
+            } else {
+                try require(requirement?.directory.path.utf8.elementsEqual(selection.fixtureRoot.path.utf8) == true,
+                    "created-output-parent-requirement")
+            }
+            var result: RecoverableOperationResult?
+            browser.startRecoveryOperation(record, rollback: false, presentsResult: false) { result = $0 }
+            try await wait("native-cold-undo") { result != nil || browser.view.window?.attachedSheet != nil }
+            try require(browser.view.window?.attachedSheet == nil && result?.result.disposition == .succeeded,
+                "native-cold-undo-without-grant-or-overwrite")
+            await browser.operationTask?.value
+            if let expected = step.before {
+                let restored = try await observeFile(file)
+                try require(restored == expected && restored.publiclyMarked, "exact-earlier-archive-restored")
+            } else {
+                let absent = await Task.detached {
+                    var facts = stat(); return lstat(file.path, &facts) < 0 && errno == ENOENT
+                }.value
+                try require(absent, "exact-created-output-undone")
+            }
+            let final = try await engine.inspectExistingHistory()
+            try require(final.records.contains { $0.id == step.recordID && $0.state == "undone" && !$0.canUndo },
+                "cold-terminal-history")
+            try await write(Receipt(phase: "cold-prefix-" + String(index + 1), pid: getpid(),
+                inputs: receipt.inputs, steps: [step]), name: "authored-cold-" + String(index + 1) + ".json",
+                root: selection.caseRoot)
+        }
+        try await requireInputs(selection.fixtureRoot, unchanged: receipt.inputs)
+        try await write(Receipt(phase: "cold-completed", pid: getpid(), inputs: receipt.inputs, steps: receipt.steps),
+            name: "authored-cold.json", root: selection.caseRoot)
+    }
+    static func runAuthoredArchives(selection: GeneratedArchiveDriveReview.Selection) async {
+        var owner: BrowserWindowController?, stage = "admission"
+        do {
+            try require(GeneratedArchiveDriveReview.archiveAdmitted && !TraverseAccessPolicy.requiresFolderSelection,
+                "exact-archive-review-admission")
+            if selection.phase == .archiveCold {
+                try require(!ArchiveCreationActivation.available && !TARArchiveEditingFeature.available
+                    && !ZIPMemberRenameFeature.available, "cold-forward-controls-held")
+            }
+            let settings = BrowserSettings(persist: false)
+            settings.autoRefreshFolders = false; settings.folderSummariesEnabled = false
+            settings.reviewsRecoveryAtStartup = false; settings.restoresSession = false
+            settings.opensArchivesInTraverse = true; settings.motion.mode = .reduced
+            InterfacePresentation.shared.bind(settings)
+            let controller = BrowserWindowController(settings: settings); owner = controller
+            let browser = controller.browser
+            browser.privateNames.configure(browser)
+            let namesDirectory = selection.journalDirectory.deletingLastPathComponent()
+                .appendingPathComponent("private-names", isDirectory: true)
+            try require(browser.privateNames.directory?.path == namesDirectory.path,
+                "generated-saved-name-owner")
+            browser.recoverableFileOperations = browser.operationCoordinator.engine(at: selection.journalDirectory)
+            controller.beginBrowsing()
+            await controller.workspace.startupTask?.value
+            guard let engine = browser.recoverableFileOperations, let window = controller.window else { throw Refusal.check("browser-engine") }
+            window.title = "Signed archive review · generated files"
+            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            browser.navigate(to: .directory(selection.fixtureRoot))
+            try await wait("review-folder") { !browser.isLoading && browser.orderingTask == nil }
+            switch selection.phase {
+            case .archiveWarm: try await warm(selection, browser: browser, engine: engine, stage: &stage)
+            case .archiveCold: try await cold(selection, browser: browser, engine: engine, stage: &stage)
+            case .driveReadOnly: throw Refusal.check("archive-phase")
+            }
+            try require(await ApplicationLocalTextEditors.shared.prepareForTermination(), "editor-owner-drain")
+            await ApplicationArchiveCreation.shared.closeAndDrain()
+            await ArchiveTabCatalogPool.shared.closeAndDrain()
+            try require(await ApplicationCompressedArchives.shared.closeAndDrain(), "compressed-owner-drain")
+            try require(ApplicationFileActivity.gate.activeCount == 0 && browser.operationTask == nil
+                && browser.operationPreparationTask == nil, "actual-archive-work-drain")
+            stage = "completed"
+            try await write(Outcome(passed: true, phase: selection.phase.rawValue, stage: stage, refusal: nil, pid: getpid()),
+                name: selection.phase.rawValue + "-result.json", root: selection.caseRoot)
+        } catch {
+            let code: String
+            if case Refusal.check(let detail) = error { code = detail }
+            else if let failure = error as? FileOperationFailure { code = failure.rawValue }
+            else { code = "operation-refused" }
+            let browser = owner?.browser
+            browser?.operationPreparationTask?.cancel(); browser?.operationTask?.cancel()
+            await browser?.operationPreparationTask?.value; await browser?.operationTask?.value
+            await ApplicationArchiveCreation.shared.closeAndDrain()
+            if let editor = nativeEditor(), editor.stopButton.isEnabled { editor.stopButton.performClick(nil) }
+            try? await wait("failed-editor-work-drain") { !ApplicationLocalTextEditors.shared.hasFileWork }
+            try? await write(Outcome(passed: false, phase: selection.phase.rawValue, stage: stage,
+                refusal: code, pid: getpid()),
+                name: selection.phase.rawValue + "-result.json", root: selection.caseRoot)
+            let failures = browser?.lastOperationResult?.items.compactMap { item -> String? in
+                if case .failed(let failure) = item.status { return failure.rawValue }
+                return nil
+            } ?? []
+            try? await write(["stage": stage, "codes": failures.joined(separator: ",")],
+                name: "failed-operation-codes.json", root: selection.caseRoot)
+            // Only a known generated draft may be retained and discarded here.
+            // Unexpected typing remains in its window for an explicit decision.
+            if let editor = nativeEditor(), let window = editor.window,
+               !ApplicationLocalTextEditors.shared.hasFileWork {
+                let draft = editor.surface.textView.string
+                let generated = Set(["before\n"] + ArchiveCreationFormat.allCases.flatMap { format in
+                    let edited = "before\nsigned edit " + format.rawValue + "\n"
+                    return [edited, edited + "saved copy\n"]
+                })
+                if generated.contains(draft) {
+                    do {
+                        try await write(["draft": draft, "origin": "exact-generated-archive-text"],
+                            name: "failed-generated-draft.json", root: selection.caseRoot)
+                        window.performClose(nil)
+                        try await wait("failed-draft-close-choice") { !window.isVisible || window.attachedSheet != nil }
+                        if let sheet = window.attachedSheet, let content = sheet.contentView {
+                            guard let discard = descendants(content).compactMap({ $0 as? NSButton })
+                                .first(where: { $0.title == "Don’t Save" || $0.title == "Close and Discard Visible Text" }) else {
+                                throw Refusal.check("failed-draft-discard-choice")
+                            }
+                            discard.performClick(nil)
+                        }
+                        try await wait("failed-draft-native-close") {
+                            !window.isVisible && ApplicationLocalTextEditors.shared.documentReservationCount == 0
+                        }
+                    } catch { /* Keep the native draft/window if its normal close cannot finish. */ }
+                }
+            }
+        }
+        await owner?.browser.privateNames.close()
+        owner?.suspendBrowsing(); await owner?.flushSession(); owner?.window?.close()
+        NSApp.terminate(nil)
+    }
+    static func runPassiveDriveInspection(selection: GeneratedArchiveDriveReview.Selection) async {
+        var stage = "passive-admission"
+        do {
+            try require(GeneratedArchiveDriveReview.driveAdmitted && !GeneratedArchiveDriveReview.archiveAdmitted
+                && !AppFeatureAvailability.allows(.apfsVolumeCreation), "passive-drive-role")
+            guard let state = AppStorageLocations.stateDirectory,
+                  state.path.utf8.elementsEqual(selection.journalDirectory.deletingLastPathComponent().path.utf8),
+                  let store = NativeDriveJobStore.applicationStore() else { throw Refusal.check("passive-drive-store") }
+            let file = state.appendingPathComponent("drive-jobs/native-drive-job-v1.json")
+            let before = try await observeFile(file)
+            stage = "passive-job-load"
+            let snapshot = try await store.load()
+            guard let record = snapshot.record, record.validate(), record.isUnresolved,
+                  record.phase == .compatibleReplacement else { throw Refusal.check("provisional-job-remains-unresolved") }
+            let after = try await observeFile(file)
+            try require(before.sha256 == after.sha256 && before.bytes == after.bytes
+                && !AppFeatureAvailability.allows(.apfsVolumeCreation), "passive-job-unchanged-no-mutation")
+            try await write(DriveReceipt(jobID: record.id, phase: record.phase.rawValue, unresolved: true,
+                beforeSHA256: before.sha256, afterSHA256: after.sha256, nativeMutationHeld: true),
+                name: "passive-drive-record.json", root: selection.caseRoot)
+            stage = "completed"
+            try await write(Outcome(passed: true, phase: selection.phase.rawValue, stage: stage, refusal: nil, pid: getpid()),
+                name: "drive-read-only-result.json", root: selection.caseRoot)
+        } catch {
+            let code: String
+            if case Refusal.check(let detail) = error { code = detail } else { code = "passive-job-refused" }
+            try? await write(Outcome(passed: false, phase: selection.phase.rawValue, stage: stage, refusal: code, pid: getpid()),
+                name: "drive-read-only-result.json", root: selection.caseRoot)
+        }
+        NSApp.terminate(nil)
     }
 }
 #endif

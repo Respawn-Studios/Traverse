@@ -42,6 +42,15 @@ enum AppStorageLocations {
         #endif
         var support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         var caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        #if TRAVERSE_ARCHIVE_DRIVE_QA
+        // The exact signed review uses a portable namespace inside its
+        // generated case; it never reads or creates an OS user profile.
+        guard let selection = GeneratedArchiveDriveReview.selection else { return nil }
+        let library = selection.caseRoot.appendingPathComponent("source/Library", isDirectory: true)
+        support = library.appendingPathComponent("Application Support", isDirectory: true)
+        caches = library.appendingPathComponent("Caches", isDirectory: true)
+        mode = "portable"
+        #endif
         #if DEBUG
             // A dedicated generated adapter may replace only these bases. Ordinary
             // launches and distribution builds ignore environment storage overrides.

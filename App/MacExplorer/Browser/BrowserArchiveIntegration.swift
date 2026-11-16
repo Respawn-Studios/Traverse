@@ -41,6 +41,11 @@ extension BrowserViewController {
     func loadArchiveLocation(_ value: ArchiveLocation) {
         isLoading = false; folderLoadingFeedbackTask?.cancel(); folderLoadingFeedbackTask = nil
         restoringScroll = false; overlay.isHidden = true
+        if GeneratedArchiveDriveReview.requested,
+           !GeneratedArchiveDriveReview.permitsFixtureLocations([value.source]) {
+            status.stringValue = "This review accepts generated archive fixtures only."
+            return
+        }
         guard InlineArchiveFeature.available else {
             status.stringValue = "Archive tabs are not available in this edition yet. Open the archive from its containing folder."
             return

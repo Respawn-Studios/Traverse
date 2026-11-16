@@ -88,7 +88,8 @@ enum CompressedTARFeature {
 /// Restored locations and distributed builds keep their separate Prepare step.
 @MainActor enum CompressedArchiveOpenFeature {
     static var available: Bool {
-        AppFeatureAvailability.policy.edition == .development
+        if GeneratedArchiveDriveReview.requested { return GeneratedArchiveDriveReview.archiveAdmitted }
+        return AppFeatureAvailability.policy.edition == .development
             && !GeneratedSandboxReview.admitted && CompressedTARFeature.available
     }
 }

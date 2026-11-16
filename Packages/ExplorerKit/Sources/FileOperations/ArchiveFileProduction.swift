@@ -434,7 +434,8 @@ extension RecoverableFileOperations {
     @_spi(ArchiveProduction) public func prepareArchiveCreation(sources: [URL], parent: URL, name: String,
         observing selection: FileOperationSelection, authoredFormat: AuthoredArchiveFormat = .zip,
         makeProducer: @escaping @Sendable (@Sendable () throws -> Void) throws -> any ArchiveFileProducer) async throws -> ArchiveCreationPlan {
-        try await worker { cancellation in
+        try await worker(archiveAction: .forward) { cancellation in
+            try self.requireArchiveFixturePaths(sources + [parent.appendingPathComponent(name)])
             if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
             if authoredFormat == .strictPortableTAR {
                 switch self.strictPortableTARCreationPolicy {
@@ -492,7 +493,7 @@ extension RecoverableFileOperations {
         let reporter = OperationProgressReporter(callback: progress)
         let result: RecoverableOperationResult
         do {
-            result = try await worker(progress: reporter) { cancellation in
+            result = try await worker(progress: reporter, archiveAction: .forward) { cancellation in
                 if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
                 guard plan.consume(by: self.continuationSession) else { throw FileOperationFailure.invalidRequest }
                 defer { plan.producer.finished() }
@@ -506,6 +507,7 @@ extension RecoverableFileOperations {
     }
     internal func validateArchiveCreation(_ plan: ArchiveCreationPlan, cancellation: OperationCancellation) throws {
         try cancellation.check()
+        try requireArchiveFixturePaths(plan.sources + [plan.destination])
         switch plan.authoredFormat {
         case .zip:
             guard !plan.receivedFile, !(plan.producer is any StrictPortableTARFileProducer) else {

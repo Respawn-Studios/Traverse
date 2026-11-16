@@ -156,7 +156,8 @@ extension RecoverableFileOperations {
         authoredFormat: AuthoredArchiveFormat = .zip,
         makeProducer: @escaping @Sendable (@Sendable () throws -> Void) throws -> any ArchiveFileProducer
     ) async throws -> ArchiveUpdatePlan {
-        try await worker { cancellation in
+        try await worker(archiveAction: .forward) { cancellation in
+            try self.requireArchiveFixturePaths(sources + [original])
             if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
             guard !sources.isEmpty, sources.count <= 512, sources.first == original,
                   sources.count == selection.urls.count, sources.count == selection.identities.count,
@@ -231,7 +232,7 @@ extension RecoverableFileOperations {
         let reporter = OperationProgressReporter(callback: progress)
         let result: RecoverableOperationResult
         do {
-            result = try await worker(progress: reporter) { cancellation in
+            result = try await worker(progress: reporter, archiveAction: .forward) { cancellation in
                 if case .generatedFixture = self.copyExecutionAuthorization { throw FileOperationFailure.unsupported }
                 guard plan.consume(by: self.continuationSession) else { throw FileOperationFailure.invalidRequest }
                 defer { plan.producer.finished() }
@@ -249,20 +250,23 @@ extension RecoverableFileOperations {
     /// later Undo or recovery. An absent candidate is normal; no URL grants
     /// mutation authority, and the journal is revalidated during the action.
     public func archiveUpdateReferenceLocations(recordID: UUID) async throws -> [URL]? {
-        try await worker { cancellation in
+        try await worker(archiveAction: .read) { cancellation in
             try cancellation.check()
             let journal = try OperationJournal(self.directory, hooks: self.hooks.journalHooks,
                                                cancellation: cancellation)
             guard let record = try journal.inspectRecord(recordID), ArchiveUpdateProfile.isUpdate(record.version),
                   let first = record.steps.first, let area = record.areas.first else { return nil }
-            return [first.source, area.url.appendingPathComponent("displaced"),
-                    area.url.appendingPathComponent("payload")]
+            let locations = [first.source, area.url.appendingPathComponent("displaced"),
+                             area.url.appendingPathComponent("payload")]
+            try self.requireArchiveFixturePaths(locations)
+            return locations
         }
     }
 
     internal func validateArchiveOriginalUpdate(_ plan: ArchiveUpdatePlan,
                                                 cancellation: OperationCancellation) throws {
         try cancellation.check()
+        try requireArchiveFixturePaths(plan.sources + [plan.destination])
         if plan.authoredFormat != .zip {
             guard nativeArchiveUpdateEnabled(for: plan.authoredFormat),
                   (plan.producer as? any NativeAuthoredArchiveFileProducer)?.authoredArchiveFormat == plan.authoredFormat else {

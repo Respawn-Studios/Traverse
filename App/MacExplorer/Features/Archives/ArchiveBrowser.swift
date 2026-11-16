@@ -1285,6 +1285,11 @@ private struct ArchiveNameQueryField: NSViewRepresentable {
     private(set) var controller: ArchiveBrowserWindowController?
     private var retirement: Task<Void, Never>?
     func show(_ url: URL, from browser: BrowserViewController) {
+        if GeneratedArchiveDriveReview.requested,
+           !GeneratedArchiveDriveReview.permitsFixtureLocations([url]) {
+            browser.status.stringValue = "This review accepts generated archive fixtures only."
+            return
+        }
         guard retirement == nil, !ApplicationFileActivity.gate.isClosed else { browser.status.stringValue = "Finishing the previous archive read. Try again when it stops."; return }
         if controller == nil {
             let reader = ZIPArchiveReader(activity: ApplicationFileActivity.gate,

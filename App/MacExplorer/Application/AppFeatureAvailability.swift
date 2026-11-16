@@ -7,6 +7,17 @@ enum AppFeatureAvailability {
     static let policy = ProductCapabilities(edition: edition)
 
     static func allows(_ feature: ProductCapabilities.Feature) -> Bool {
+        if GeneratedArchiveDriveReview.requested {
+            guard GeneratedArchiveDriveReview.archiveAdmitted else { return false }
+            switch feature {
+            case .archiveTabs, .tarBrowsing, .archiveTextPreview:
+                return true
+            case .tarCreation, .authoredZIPChanges, .archiveMemberChanges:
+                return GeneratedArchiveDriveReview.archiveForwardAdmitted
+            default:
+                return false
+            }
+        }
         // This generated certificate role authenticates and lists metadata
         // only. It cannot select a product mutation/body-transfer candidate.
         if GeneratedSandboxReview.certificateConnectionAdmitted { return false }

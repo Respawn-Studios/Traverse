@@ -9,6 +9,7 @@ enum ArchiveCreationActivation {
     static let enabled = true
     static var commandTitle: String { "Compress…" }
     static var available: Bool {
+        if GeneratedArchiveDriveReview.requested { return GeneratedArchiveDriveReview.archiveForwardAdmitted }
         if GeneratedSandboxReview.publicationOnlyReviewAdmitted || GeneratedSandboxReview.archiveInternalAdmitted { return false }
         #if DEBUG
         return enabled || ProcessInfo.processInfo.arguments.contains("--check-zip-creation")
@@ -33,7 +34,8 @@ enum ArchiveCreationFormat: String, Codable, CaseIterable, Sendable {
         guard !GeneratedSandboxReview.nativeTARCreateAdmitted else { return false }
         switch self {
         case .zip: return true
-        case .tar: return AppFeatureAvailability.policy.edition == .development
+        case .tar: return (AppFeatureAvailability.policy.edition == .development
+            || GeneratedArchiveDriveReview.archiveForwardAdmitted)
             && AppFeatureAvailability.allows(.tarCreation)
         case .tarGzip: return AppFeatureAvailability.allows(.tarCreation) && TARGzipCreationFeature.available
         case .tarBzip2: return AppFeatureAvailability.allows(.tarCreation) && TARBzip2Feature.available
@@ -42,7 +44,8 @@ enum ArchiveCreationFormat: String, Codable, CaseIterable, Sendable {
 }
 enum TARGzipCreationFeature {
     static var available: Bool {
-        AppFeatureAvailability.policy.edition == .development && AppFeatureAvailability.allows(.tarCreation)
+        (AppFeatureAvailability.policy.edition == .development || GeneratedArchiveDriveReview.archiveForwardAdmitted)
+            && AppFeatureAvailability.allows(.tarCreation)
             && !GeneratedSandboxReview.admitted
     }
 }
@@ -363,6 +366,12 @@ enum ZIPMemberRenameFeature {
             let chosenMemberName = memberName
             let chosenBatch = batchOptions, chosenBatchNames = batchNames
             let chosenCollisions = additionCollisions
+            if GeneratedArchiveDriveReview.requested,
+               (!GeneratedArchiveDriveReview.archiveForwardAdmitted
+                || !GeneratedArchiveDriveReview.permitsFixtureLocations(chosenSources + [chosenParent])) {
+                notice = "This review accepts generated archive fixtures only."
+                continue
+            }
             if debouncesPreview { try? await Task.sleep(for: .milliseconds(160)) }
             guard token == generation else { continue }
             if case .rename(let selected) = memberEdit,
@@ -1045,6 +1054,9 @@ private struct ArchiveCreationView: View {
               updateOriginal: Bool = false, addedSource: ArchiveAdditionInput? = nil,
               onMemberCreated: ((URL, String) -> Void)? = nil, onOriginalUpdated: (() -> Void)? = nil,
               automaticFormat: ArchiveCreationFormat? = nil) {
+        if GeneratedArchiveDriveReview.requested,
+           (!GeneratedArchiveDriveReview.archiveForwardAdmitted
+            || !GeneratedArchiveDriveReview.permitsFixtureLocations(sources)) { return }
         let quickAllowed = automaticFormat.map {
             memberEdit == nil && $0.availableForQuickAction && browser.canCreateZIP
                 && browser.orderedSelectedURLs == sources

@@ -84,6 +84,17 @@ final class ApplicationOperationCoordinator: ObservableObject {
     }
 
     func engine(at directory: URL) -> RecoverableFileOperations {
+        let archiveQA = GeneratedArchiveDriveReview.archiveAdmitted
+        let archiveFixturePhase: ArchiveFixturePhase? = switch GeneratedArchiveDriveReview.selection?.phase {
+        case .archiveWarm: .warmForward
+        case .archiveCold: .coldInverse
+        default: nil
+        }
+        if GeneratedArchiveDriveReview.requested {
+            guard archiveQA, directory == GeneratedArchiveDriveReview.selection?.journalDirectory else {
+                fatalError("Archive/drive QA refused an unselected operation history")
+            }
+        }
         if let engine = engines[directory] { return engine }
         let engine: RecoverableFileOperations
         #if DEBUG
@@ -96,43 +107,44 @@ final class ApplicationOperationCoordinator: ObservableObject {
         // policy. Original Update has its own reviewed admission; extraction
         // and received Download keep their independent gates.
         let zipMetadata: AuthoredZIPMetadataPolicy =
-            markedArchiveReview || NativeLocalProtectionPolicy.authoredZIPCreateCopyAvailable
+            archiveQA || markedArchiveReview || NativeLocalProtectionPolicy.authoredZIPCreateCopyAvailable
                 ? .nativeCreate
                 : GeneratedSandboxReview.admitted && !GeneratedSandboxReview.publicationOnlyReviewAdmitted
                     && !GeneratedSandboxReview.nativeTARCreateAdmitted
                     ? .exactSourceCloneQualification : .exactSource
-        let downloadAdoption: DownloadAdoptionPolicy = RemoteDownloadPublicationFeature.qualifiesSingleFileAdoption
+        let downloadAdoption: DownloadAdoptionPolicy = !archiveQA && RemoteDownloadPublicationFeature.qualifiesSingleFileAdoption
             ? .sourceQualification : .held
         let publicDownload: ReceivedDownloadPublicQuarantinePolicy =
-            RemoteDownloadPublicationFeature.qualifiesPublicQuarantineDownload
+            !archiveQA && (RemoteDownloadPublicationFeature.qualifiesPublicQuarantineDownload
                 || RemoteDownloadPublicationFeature.qualifiesSMBPublicQuarantineDownload
+                )
             ? .sourceQualification : .held
         let zipOneFileExtraction: ZIPOneFilePublicExtractionPolicy =
-            ArchiveExtractionActivation.qualifiedZIPFileAvailable ? .sourceQualification : .held
+            !archiveQA && ArchiveExtractionActivation.qualifiedZIPFileAvailable ? .sourceQualification : .held
         let receivedFolder: ReceivedFolderPublicQuarantinePolicy =
-            RemoteDownloadPublicationFeature.qualifiesPublicQuarantineFolderDownload ? .sourceQualification : .held
+            !archiveQA && RemoteDownloadPublicationFeature.qualifiesPublicQuarantineFolderDownload ? .sourceQualification : .held
         let zipTree: ZIPTreePublicExtractionPolicy =
-            ArchiveExtractionActivation.qualifiesPublicZIPTree ? .sourceQualification : .held
+            !archiveQA && ArchiveExtractionActivation.qualifiesPublicZIPTree ? .sourceQualification : .held
         let tarTree: TARTreePublicExtractionPolicy =
-            ArchiveExtractionActivation.qualifiesPublicTARTree ? .sourceQualification : .held
+            !archiveQA && ArchiveExtractionActivation.qualifiesPublicTARTree ? .sourceQualification : .held
         let tarFile: TAROneFilePublicExtractionPolicy =
-            ArchiveExtractionActivation.qualifiesPublicTARFile ? .sourceQualification : .held
+            !archiveQA && ArchiveExtractionActivation.qualifiesPublicTARFile ? .sourceQualification : .held
         let zipOriginalUpdate: AuthoredZIPOriginalUpdateNativePolicy =
-            NativeLocalProtectionPolicy.authoredZIPOriginalUpdateAvailable ? .qualifiedNativeStage : .held
+            archiveQA || NativeLocalProtectionPolicy.authoredZIPOriginalUpdateAvailable ? .qualifiedNativeStage : .held
         #if DEBUG
         let nativeTrashPolicy: NativeTrashMutationPolicy = nativeAnalyzerHistoryForVerification == directory
             ? .regularFilesAndDirectories : NativeLocalProtectionPolicy.trashPolicy
         #else
-        let nativeTrashPolicy = NativeLocalProtectionPolicy.trashPolicy
+        let nativeTrashPolicy: NativeTrashMutationPolicy = archiveQA ? .held : NativeLocalProtectionPolicy.trashPolicy
         #endif
         let ordinaryHistory = AppStorageLocations.stateDirectory.map {
             $0.appendingPathComponent("operation-recovery", isDirectory: true).standardizedFileURL.path
                 == directory.standardizedFileURL.path
         } == true
-        let localTextRetirementPolicy = NativeLocalProtectionPolicy.localTextRetirementPolicy(
-            ordinaryHistory: ordinaryHistory)
+        let localTextRetirementPolicy: LocalTextRetirementPolicy = archiveQA ? .held
+            : NativeLocalProtectionPolicy.localTextRetirementPolicy(ordinaryHistory: ordinaryHistory)
         let portableTAR: StrictPortableTARCreationPolicy
-        if markedArchiveReview || GeneratedSandboxReview.nativeTARCreateAdmitted
+        if archiveQA || markedArchiveReview || GeneratedSandboxReview.nativeTARCreateAdmitted
             || NativeLocalProtectionPolicy.nativeTARCreateAvailable || TARArchiveEditingFeature.available {
             portableTAR = .nativeCreateQualification
         } else if AppFeatureAvailability.policy.edition == .development
@@ -140,17 +152,21 @@ final class ApplicationOperationCoordinator: ObservableObject {
             portableTAR = .developmentExactSource
         } else { portableTAR = .held }
         let authoredPublicMark: NativeAuthoredCreatePublicMarkPolicy =
-            markedArchiveReview || NativeLocalProtectionPolicy.nativeAuthoredCreatePublicMarkAvailable
+            archiveQA || markedArchiveReview || NativeLocalProtectionPolicy.nativeAuthoredCreatePublicMarkAvailable
                 || TARArchiveEditingFeature.available
                 ? .sourceQualification : .held
         let authoredUpdatePublicMark: NativeAuthoredUpdatePublicMarkPolicy = TARArchiveEditingFeature.available
             ? .sourceQualification : .held
-        let tarOriginalUpdate: AuthoredTAROriginalUpdatePolicy = TARArchiveEditingFeature.available
+        // The cold signed visit needs these native policies to recognize and
+        // Undo committed updates. The fixture phase still rejects forward work.
+        let tarOriginalUpdate: AuthoredTAROriginalUpdatePolicy = archiveQA || TARArchiveEditingFeature.available
             ? .developmentNativeStage : .held
-        let tarGzipUpdate: AuthoredTARGzipOriginalUpdatePolicy = TARGzipEditingFeature.available ? .developmentNativeStage : .held
+        let tarGzipUpdate: AuthoredTARGzipOriginalUpdatePolicy = archiveQA || TARGzipEditingFeature.available
+            ? .developmentNativeStage : .held
         let tarGzipCreate: TARGzipCreationPolicy = TARGzipCreationFeature.available ? .developmentNativeCreate : .held
         let tarBzip2Create: TARBzip2CreationPolicy = TARBzip2Feature.available ? .developmentNativeCreate : .held
-        let tarBzip2Update: AuthoredTARBzip2OriginalUpdatePolicy = TARBzip2Feature.available ? .developmentNativeStage : .held
+        let tarBzip2Update: AuthoredTARBzip2OriginalUpdatePolicy = archiveQA || TARBzip2Feature.available
+            ? .developmentNativeStage : .held
         let protectedNames = [directory.deletingLastPathComponent(),
                               directory.deletingLastPathComponent().appendingPathComponent("private-names", isDirectory: true),
                               directory.deletingLastPathComponent().appendingPathComponent("drive-protection", isDirectory: true),
@@ -196,7 +212,7 @@ final class ApplicationOperationCoordinator: ObservableObject {
                                                                  tarTreePublicExtractionPolicy: tarTree,
                                                                  tarOneFilePublicExtractionPolicy: tarFile) {
             engine = preview
-        } else if let scope = DevelopmentCopyPreviewQualification.scope {
+        } else if !archiveQA, let scope = DevelopmentCopyPreviewQualification.scope {
             engine = RecoverableFileOperations(journalDirectory: directory, qualifiedCopyPreview: scope,
                 protecting: protectedNames, activity: ApplicationFileActivity.beginOperation,
                 authoredZIPMetadataPolicy: zipMetadata,
@@ -233,7 +249,9 @@ final class ApplicationOperationCoordinator: ObservableObject {
                 receivedFolderPublicQuarantinePolicy: receivedFolder, zipTreePublicExtractionPolicy: zipTree,
                 tarTreePublicExtractionPolicy: tarTree,
                 nativeTrashPolicy: nativeTrashPolicy,
-                localTextRetirementPolicy: localTextRetirementPolicy)
+                localTextRetirementPolicy: localTextRetirementPolicy,
+                archiveFixtureRoot: archiveQA ? GeneratedArchiveDriveReview.selection?.fixtureRoot : nil,
+                archiveFixturePhase: archiveFixturePhase)
         }
         engines[directory] = engine
         return engine

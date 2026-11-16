@@ -12,6 +12,7 @@ struct ArchiveAdditionInput {
 
 enum ZIPOriginalUpdateFeature {
     static var available: Bool {
+        if GeneratedArchiveDriveReview.requested { return GeneratedArchiveDriveReview.archiveForwardAdmitted }
         if GeneratedSandboxReview.publicationOnlyReviewAdmitted || GeneratedSandboxReview.archiveInternalAdmitted { return false }
         // The newly sealed local-files review selects the separate v13 policy;
         // older immutable Create/Copy receipts do not qualify Original Update.
