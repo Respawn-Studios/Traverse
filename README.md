@@ -35,8 +35,8 @@
   I'm building Traverse with substantial assistance from Codex for coding,<br>
   debugging and testing. Its help has brought this project to life much sooner<br>
   than the months it would have taken me working alone.<br>
-  I'm using this project to learn Swift-based app development as I go<br>
-  But I still guide the project and take responsibility for what ships.
+  I'm using this project to learn Swift-based app development as I go.<br>
+  I still guide the project and take responsibility for what ships.
 </p>
 
 <p align="center">
@@ -99,15 +99,17 @@
 
 ## Work inside archives
 
-- **Browse ZIPs like folders.** Open archive tabs, navigate their folders and
-  preview supported text, hex and images without extracting everything.
-- **Change supported ZIP contents.** Rename, add, remove, create files or folders,
-  and edit text members. Update the original ZIP or save a separate copy.
-- **Compress and extract with fewer steps.** Use direct Compress to ZIP and
-  Extract actions for common jobs, or open the full review for more control.
-  Copy archive selections into another pane with the same extraction workflow.
-- **Use TAR when you need it.** Browse and extract supported TARs, explicitly
-  prepare `.tar.gz` or `.tgz` files, and create plain TAR archives.
+- **Browse archives like folders.** Open ZIP, TAR, TAR.gz and TAR.bz2 tabs,
+  navigate their folders, and preview supported text, hex and images.
+- **Make changes inside.** Rename, add, remove, duplicate or move supported
+  members, create files and folders, and edit text. Update the original or save
+  a separate copy, with guarded Undo for eligible changes.
+- **Compress and extract with fewer steps.** Choose a Quick Compress format in
+  Operations settings, then compress in one click. Compress… and Extract… keep
+  the full controls available, including supported compression settings.
+- **Drag straight into Finder.** Deliver a supported file or folder from ZIP or
+  TAR, including gzip and bzip2 variants. Completed exports support Undo after
+  reopening Traverse. Archive selections can also copy into another local pane.
 
 [Archive formats and limits](docs/guides/features.md#archives)
 
@@ -121,8 +123,8 @@
   formatting, line comments, line sorting and surrounding pairs share native
   text selection and Undo. JSON bracket completion and indentation have their
   own preferences.
-- **Text inside ZIPs too.** Edit an eligible member in the same editor, save it
-  back through the ZIP review, or save a text copy elsewhere.
+- **Text inside archives too.** Edit an eligible ZIP or TAR member in the same
+  editor, save it through the archive review, or save a text copy elsewhere.
 
 [Editor behavior and saved versions](docs/guides/features.md#text-editor)
 

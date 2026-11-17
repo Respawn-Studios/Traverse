@@ -136,6 +136,15 @@ publishes the artifact nor creates a tap. Before separately publishing a recipe,
 verify the official download is live and matches the recorded checksum, and
 perform the applicable Homebrew review and installed acceptance.
 
+The official [Homebrew tap](https://github.com/Respawn-Studios/homebrew-tap)
+checks the latest immutable full GitHub release hourly, with a manual Actions
+trigger when needed. Its updater checks both architecture catalogs, source-kit
+agreement, GitHub asset digests and the delivered installer bytes before making
+a cask commit. Drafts and prereleases are excluded; a failed check leaves the
+existing cask unchanged. Publish and verify both download routes before promoting
+a release to Latest. This tap automation does not replace signed app-feed
+generation, installed acceptance or the user's choice to upgrade.
+
 ## Symbols and crash reports
 
 Retain the app and required helper dSYMs with matching binary UUIDs and

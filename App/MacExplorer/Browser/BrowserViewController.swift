@@ -1120,8 +1120,13 @@ final class BrowserViewController: NSViewController {
         validateNavigationButtons()
     }
 
-    func validateNavigationButtons() {
+    func updateFileViewControl() {
         viewModeControl.isEnabled = !isRemoteLocation && !isArchiveLocation
+        viewModeControl.selectedSegment = BrowserViewMode.allCases.firstIndex(of: effectiveViewMode) ?? 0
+    }
+
+    func validateNavigationButtons() {
+        updateFileViewControl()
         tabStrip.refreshManagementAvailability()
         recoveryAttentionButton.isHidden = !hasRecoveryAttention
         recoveryAttentionButton.title = recoveryUnfinishedCount > 0 ? "Recovery (\(recoveryUnfinishedCount))" : "Recovery"

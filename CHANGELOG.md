@@ -4,9 +4,9 @@ Public Traverse releases live here. Each download also has its own notes on
 [GitHub Releases](https://github.com/Respawn-Studios/Traverse/releases).
 Earlier private-beta version numbers belong to a separate release history.
 
-## Unreleased
+## [0.3.0] - 2026-11-17
 
-### In development
+### Added
 
 - Open Terminal at the current local folder, with a default-on navigation
   button and a selected-folder context action. General and setup let you hide it.
@@ -20,16 +20,15 @@ Earlier private-beta version numbers belong to a separate release history.
   crash-time capture; the editable report remains the source of what is shared.
 - Plain and prepared gzip/bzip2 TAR member editing through the shared archive workbench and native
   editor: Rename, batch Rename, Remove, Duplicate, Move, Add, Create File/Folder, Group and
-  Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo.
-  These flows are qualified in the signed direct-build source, including Undo
-  after restart. They are not part of the published 0.2.0 package.
+  Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo,
+  including after restart.
 - TAR.gz and TAR.bz2 creation through the shared archive publisher, with
   compression choices and guarded Undo. Gzip edits preserve bounded optional
   headers; bzip2 edits keep the current compression setting by default.
   Common `.tgz`, `.tbz2` and `.tbz` names keep their wrapper identity through
   opening, editing and creation.
-- A saved Quick Compress format in Operations settings. The next direct build will
-  offer ZIP, TAR, TAR.gz and TAR.bz2; the one-click command uses the selected
+- A saved Quick Compress format in Operations settings. Choose from ZIP, TAR,
+  TAR.gz and TAR.bz2; the one-click command uses the selected
   format and numbers occupied names without splitting compound extensions.
   Compress… keeps the full creation controls.
 - Explicit Replace Files for TAR additions, with binary-file support, a
@@ -46,14 +45,16 @@ Earlier private-beta version numbers belong to a separate release history.
   while late work cannot replace a newer archive view's message.
   Early destination/admission refusals leave a source-window explanation and
   a sanitized diagnostic event.
-- Drag files and folders from plain, gzip or bzip2 TARs into Finder in the next
-  direct build, with guarded Undo after restart. The same export owner handles
+- Drag files and folders from plain, gzip or bzip2 TARs into
+  Finder, with guarded Undo after restart. The same export owner handles
   ZIP and TAR delivery.
 - Editor closing follows animation preferences while retaining text until the
   native window closes. Quit joins a Close or its chosen Save already in progress.
 
 ### Fixed
 
+- Returning from an archive restored at startup keeps the current local file
+  view selected in the footer.
 - Context-menu shortcuts follow the focused separate ZIP or TAR window, using
   the same configured keys and selection as the workspace.
 - Changed or cleared shortcuts also update the header menu buttons before
@@ -145,6 +146,7 @@ The [feature guide](docs/guides/features.md) covers formats, limits and supporte
 workflows. Intel builds, broad external-drive SMART support and physical drive
 formatting were not qualified for this release.
 
+[0.3.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.1.0

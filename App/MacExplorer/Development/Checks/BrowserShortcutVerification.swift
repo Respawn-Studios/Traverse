@@ -23,6 +23,7 @@ enum BrowserShortcutVerification {
             NSApplication.shared.mainMenu = originalMenu
         }
         browser.navigate(to: .directory(fixture)); try await UIVerification.settled(browser)
+        try await verifyRestoredArchiveViewControl(fixture: fixture)
         settings.keyboardProfile = .explorer; settings.shortcutPreferences = .init()
         browser.focusBrowserContent()
 
@@ -137,6 +138,30 @@ enum BrowserShortcutVerification {
                 "Shortcut/conflict/eject preferences round trip; invalid hidden Custom data fails safely",
                 "Custom scope shortcuts preserve text, explicitly choose Filter/Folder/This Mac and defer to native text focus without auto-search"]
     }
+    private static func verifyRestoredArchiveViewControl(fixture: URL) async throws {
+        let settings = BrowserSettings(persist: false)
+        settings.autoRefreshFolders = false
+        settings.reviewsRecoveryAtStartup = false
+        let cold = BrowserViewController(settings: settings)
+        cold.permitsBackgroundVerification = true
+        cold.folderAccess = FolderAccessController(stateDirectory: nil)
+        let reference = try ArchiveLocation(source: fixture.appendingPathComponent("Unprepared.tar.gz"), format: .tar)
+        let tab = BrowserTab(location: .archive(reference))
+        cold.tabs = [tab]; cold.activeID = tab.id
+        cold.tabs[0].resolveFolderView(mode: .details, sort: .init())
+        _ = cold.view
+        defer { cold.suspendBrowser() }
+        // Restore a passive reference before constructing the native controls;
+        // this must not prepare or read the referenced archive body.
+        cold.applyDisplayPreferences(); cold.updateNavigation()
+        try require(!cold.viewModeControl.isEnabled, "A restored archive enabled local view choices")
+        cold.navigate(to: .directory(fixture))
+        try await UIVerification.settled(cold)
+        let expected = BrowserViewMode.allCases.firstIndex(of: cold.effectiveViewMode)
+        try require(cold.viewModeControl.isEnabled && cold.viewModeControl.selectedSegment == expected,
+                    "Returning from a cold restored archive lost the selected local file-view control")
+    }
+
     static func verifyArchiveContextMenu(_ table: FileTableView, browser: BrowserViewController,
                                         settings: BrowserSettings, label: String) throws {
         guard let window = table.window, window.isKeyWindow, table.numberOfRows >= 2,

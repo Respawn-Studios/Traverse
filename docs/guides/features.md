@@ -117,7 +117,7 @@ unsupported archive, unsafe name or changed original can refuse the edit.
 Existing folders are not silently merged during ZIP member changes.
 
 Quick Compress performs the common task with current preferences; ZIP is the
-default. The next direct build also lets you save TAR, TAR.gz or TAR.bz2 in Operations.
+default. Operations also lets you choose TAR, TAR.gz or TAR.bz2.
 The command shows the chosen format and numbers occupied names. Compress… opens
 the full options. Extract to the named folder uses a fresh sibling
 destination; Extract opens the destination review. Copy/Paste from an archive
@@ -127,23 +127,23 @@ arrives by its own name; groups retain their archive paths inside a new folder.
 | Format | Browse and preview | Create or change |
 | --- | --- | --- |
 | ZIP | Folders, supported text/hex/images, extraction and internal pane copies | ZIP creation and supported member edits; eligible text members open in the editor |
-| Plain TAR | Folders, supported previews, extraction and internal pane copies | Creation; member editing in the next direct build |
-| Gzip TAR (`.tar.gz`, `.tgz`) | Bounded preparation, folders and supported previews; deliberate Open prepares in the next direct build | Creation and member editing in the next direct build |
-| Bzip2 TAR (`.tar.bz2`, `.tbz2`, `.tbz`) | Bounded preparation, folders and supported previews in the next direct build | Creation and member editing in the next direct build |
+| Plain TAR | Folders, supported previews, extraction and internal pane copies | Creation and supported member editing |
+| Gzip TAR (`.tar.gz`, `.tgz`) | Bounded preparation, folders and supported previews; deliberate Open requests preparation | Creation and supported member editing |
+| Bzip2 TAR (`.tar.bz2`, `.tbz2`, `.tbz`) | Bounded preparation, folders and supported previews | Creation and supported member editing |
 
-The upcoming direct build adds TAR Rename, batch Rename, Remove, Duplicate, Move,
+TAR supports Rename, batch Rename, Remove, Duplicate, Move,
 Add, Group, Create File/Folder and internal Cut/Copy/Paste, plus text editing in
 plain or prepared compressed TARs. These reuse the ZIP workbench and editor.
 Keep Both is the default when adding files; Replace Files is explicit and never
 merges folders. Compressed TARs offer compression choices, while bzip2 edits can
-keep the current setting. These flows have passed signed operation and restart/Undo
-checks. They are not part of the published 0.2.0 package; final packaged-app checks
-remain separate.
+keep the current setting. Eligible original updates, local copies and Finder
+exports support guarded Undo after restart. Older releases have a smaller archive feature set; see their
+release notes when using an earlier download.
 
 Archive size, metadata and member-type limits apply. Compressed preparation uses a
 bounded temporary copy and is not started by passive tab restore or merely
-searching filenames. In the upcoming direct build, deliberately opening a supported compressed
-TAR, including a search result, also requests preparation. Stop cancels that
+searching filenames. Deliberately opening a supported compressed TAR, including
+a search result, also requests preparation. Stop cancels that
 request; returning to a changed archive passively asks for Prepare again.
 Encrypted archives, ZIP64 and unsupported member metadata may be refused by a
 particular write route. A ZIP external drag and a remote external drag are

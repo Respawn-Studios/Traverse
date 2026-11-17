@@ -139,6 +139,7 @@ extension BrowserViewController {
     }
 
     func applyDisplayPreferences() {
+        updateFileViewControl()
         for owner in sftpTabs.values { owner.rows.refreshOpeningPresentation() }
         if isArchiveLocation { currentArchive?.render(); updateFilePresentationVisibility(); return }
         let selection = selectedURLs
@@ -158,7 +159,6 @@ extension BrowserViewController {
             detailsHeader = table.headerView ?? NSTableHeaderView(frame: NSRect(x: 0, y: 0, width: 1000, height: 28))
         }
         table.headerView = effectiveViewMode == .details ? detailsHeader : nil
-        viewModeControl.selectedSegment = BrowserViewMode.allCases.firstIndex(of: effectiveViewMode) ?? 0
         // One sizing owner fits the visible set without turning these
         // programmatic changes into native header-resize preferences.
         table.columnAutoresizingStyle = .noColumnAutoresizing
