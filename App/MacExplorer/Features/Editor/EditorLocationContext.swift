@@ -13,7 +13,7 @@ struct EditorLocationContext: Equatable {
     }
     static func archive(_ url: URL, member: String) -> Self {
         .init(label: url.lastPathComponent + " › " + member,
-              detail: url.path + "\nZIP member: " + member, symbol: "archivebox")
+              detail: url.path + "\nArchive member: " + member, symbol: "archivebox")
     }
     static func remote(server: String, path: String) -> Self {
         .init(label: server + " › " + path,

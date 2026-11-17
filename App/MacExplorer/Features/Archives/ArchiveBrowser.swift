@@ -1252,7 +1252,7 @@ private struct ArchiveNameQueryField: NSViewRepresentable {
     }
 }
 
-@MainActor private final class ArchiveBrowserWindow: ToolMotionWindow {
+@MainActor private final class ArchiveBrowserWindow: ArchiveKeyboardWindow {
     var focusArchiveSearch: (() -> Void)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,

@@ -44,6 +44,7 @@ import SwiftUI
         rows.onGroup = nil; rows.canGroup = nil
         rows.onNewFile = nil
         rows.table.onRename = nil; rows.table.nameClickRenameEnabled = nil
+        rows.table.keyboardContextSettings = nil
         rows.onAddFiles = nil; rows.canAddFiles = nil
         rows.canPreview = nil
         rows.canExtract = nil
@@ -123,6 +124,7 @@ import SwiftUI
     /// Embedded and standalone archive views share these model callbacks.
     /// Row views do not infer filesystem authority.
     func bindActions(to model: ArchiveBrowserModel) {
+        table.keyboardContextSettings = model.settings
         table.nameClickRenameEnabled = { [weak model] in
             guard let model else { return false }
             return model.settings.renamesSelectedNameOnClick && model.selection.count == 1
@@ -623,8 +625,46 @@ import SwiftUI
     }
 }
 
+/// Both standalone archive windows update menu ownership after native focus
+/// changes. Embedded tabs keep their browser's existing command route.
+@MainActor class ArchiveKeyboardWindow: ToolMotionWindow {
+    override func becomeKey() {
+        super.becomeKey()
+        BrowserShortcutMenus.refreshMainMenuForCurrentFocus()
+    }
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        if accepted { BrowserShortcutMenus.refreshMainMenuForCurrentFocus() }
+        return accepted
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        BrowserShortcutMenus.refreshMainMenuForCurrentFocus()
+        if event.isARepeat, let table = firstResponder as? ArchiveMetadataTable,
+           let settings = table.keyboardContextSettings, KeyboardContextMenu.matches(event, settings: settings) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 @MainActor final class ArchiveMetadataTable: FileTableView {
     weak var memberDragSource: ArchiveMemberDragSource?
+    weak var keyboardContextSettings: BrowserSettings?
+
+    private var canShowKeyboardContextMenu: Bool {
+        window is ArchiveKeyboardWindow && embeddedShortcut == nil && keyboardContextSettings != nil
+            && window?.firstResponder === self && KeyboardContextMenu.canPresent(in: self)
+    }
+
+    @objc func showKeyboardContextMenu(_ sender: Any?) {
+        guard canShowKeyboardContextMenu, let menu = contextMenuProvider?() ?? menu else { return }
+        KeyboardContextMenu.prepare(in: self, menu: menu)?.present()
+    }
+
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(showKeyboardContextMenu(_:)) {
+            return canShowKeyboardContextMenu && (contextMenuProvider != nil || menu != nil)
+        }
+        return super.validateMenuItem(item)
+    }
     #if DEBUG
     private(set) var mouseDownsForVerification = 0
     private(set) var lastMouseRowForVerification = -1
@@ -652,6 +692,11 @@ import SwiftUI
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func keyDown(with event: NSEvent) {
         if embeddedShortcut?(event) == true { return }
+        if window is ArchiveKeyboardWindow, embeddedShortcut == nil, window?.firstResponder === self, let settings = keyboardContextSettings,
+           KeyboardContextMenu.matches(event, settings: settings) {
+            if !event.isARepeat { showKeyboardContextMenu(nil) }
+            return
+        }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if [36, 76].contains(event.keyCode), modifiers.intersection([.command, .control, .option]).isEmpty {
             onOpen?()

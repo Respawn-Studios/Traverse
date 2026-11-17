@@ -10,6 +10,7 @@ import LocalStorage
     private static var compressedPool: TARCompressedPreparationPool?
     private static var openedAccess: CountedAccess?
     private static var phase = "startup"
+    private static var keyboardMenusChecked = false
     private final class CountedAccess: FolderAccessBackend, @unchecked Sendable {
         private let lock = NSLock()
         private var starts = 0, stops = 0
@@ -115,7 +116,7 @@ import LocalStorage
             "drained": drained, "maximumMainActorGapSeconds": clock.gap, "ticks": clock.ticks, "peakRSSBytes": usage.ru_maxrss,
             "actualPromiseCallbacks": true, "physicalGesture": false, "sandboxGrantExercised": false,
             "publicPublication": publicPublication, "archiveFormat": format, "spoolsDrained": spoolsDrained,
-            "network": 0, "personalArchives": 0], options: [.prettyPrinted, .sortedKeys])
+            "network": 0, "personalArchives": 0, "archiveKeyboardMenus": keyboardMenusChecked], options: [.prettyPrinted, .sortedKeys])
             .write(to: root.appendingPathComponent("evidence/native-archive-promise-export.json"), options: .withoutOverwriting)
         NSApp.terminate(nil)
     }
@@ -214,6 +215,17 @@ import LocalStorage
             ApplicationZIPBrowser.shared.show(source, from: browser)
             guard let model = ApplicationZIPBrowser.shared.controller?.model else { throw FileOperationFailure.unavailable }
             try await wait { model.viewIsCurrent && !model.isLoading && !model.isPaging }
+            if !ProcessInfo.processInfo.arguments.contains("--offscreen") {
+                try await wait { (model.rowsForVerification?.table.numberOfRows ?? 0) >= 2 }
+                guard let rows = model.rowsForVerification, let archiveWindow = rows.window else { throw FileOperationFailure.unavailable }
+                archiveWindow.title = "Archive menu · generated keyboard review"
+                archiveWindow.center()
+                NSApp.activate(ignoringOtherApps: true)
+                archiveWindow.makeKeyAndOrderFront(nil)
+                try await wait { archiveWindow.isKeyWindow }
+                try BrowserShortcutVerification.verifyArchiveContextMenu(rows.table, browser: browser, settings: model.settings, label: "Separate ZIP window")
+                keyboardMenusChecked = true
+            }
             guard let item = model.visibleItems.first(where: { $0.name == "First.txt" }) else { throw FileOperationFailure.unavailable }
             model.selection = [item.id]
             try await wait { model.externalExportReady }

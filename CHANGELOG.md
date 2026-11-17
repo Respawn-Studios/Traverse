@@ -54,6 +54,10 @@ Earlier private-beta version numbers belong to a separate release history.
 
 ### Fixed
 
+- Context-menu shortcuts follow the focused separate ZIP or TAR window, using
+  the same configured keys and selection as the workspace.
+- Changed or cleared shortcuts also update the header menu buttons before
+  dispatch, so a cached menu cannot invoke an old binding.
 - Sidebar collapse and its restore button now follow the same live layout
   transition, including a reversal before the previous movement finishes.
 - Pane transitions reuse foreground snapshots instead of capturing native Glass

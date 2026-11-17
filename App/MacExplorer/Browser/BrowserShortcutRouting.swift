@@ -298,6 +298,18 @@ final class BrowserShortcutMenus: NSObject, NSMenuDelegate {
             refresh(menu, browser: browser)
         }
     }
+    static func refreshMainMenuForCurrentFocus() {
+        guard let menu = NSApp.mainMenu, let browser = shared.owners.object(forKey: menu) else { return }
+        refresh(menu, browser: browser)
+    }
+    static func refreshWindowMenus(_ window: NSWindow, browser: BrowserViewController) {
+        refresh(NSApp.mainMenu, browser: browser)
+        // Native toolbar buttons own separate menus. AppKit can use their
+        // equivalents without opening them or asking their delegate to update.
+        for item in window.toolbar?.items ?? [] {
+            if let item = item as? NSMenuToolbarItem { refresh(item.menu, browser: browser) }
+        }
+    }
     func menuNeedsUpdate(_ menu: NSMenu) {
         if let owner = owners.object(forKey: menu) { Self.refresh(menu, browser: owner) }
     }
@@ -307,8 +319,14 @@ final class BrowserShortcutMenus: NSObject, NSMenuDelegate {
         let responder = browser.viewIfLoaded?.window?.firstResponder
         let fileSurface = !editing && (responder === browser.activeFileView || responder === browser.volumeBrowser.collectionView)
         let map = browser.settings.shortcutMap
+        let archive = (NSApplication.shared.keyWindow?.firstResponder as? ArchiveMetadataTable)
+            .flatMap { $0.window is ArchiveKeyboardWindow && $0.embeddedShortcut == nil ? $0 : nil }
         for item in menu.items {
             if let action = BrowserCommand.command(for: item) {
+                // The standalone archive owns this one command. Shared browser
+                // surfaces keep their existing pane/selection validation route.
+                if action == .selectionMenu { item.target = archive ?? browser }
+                let shortcuts = action == .selectionMenu ? (archive?.keyboardContextSettings?.shortcutMap ?? map) : map
                 let nativeText: [BrowserCommand: String] = [.copy: "c", .cut: "x", .paste: "v", .undo: "z", .selectAll: "a"]
                 if action == .undo, item.action == action.selector {
                     // Edit → Undo owns the shortcut and follows the responder
@@ -321,7 +339,7 @@ final class BrowserShortcutMenus: NSObject, NSMenuDelegate {
                     // a native item whose target AppKit has resolved already.
                     if item.action == action.selector { item.keyEquivalent = "" }
                     else { item.keyEquivalent = key; item.keyEquivalentModifierMask = .command }
-                } else if let primary = map.shortcuts(for: action).first(where: { fileSurface || !$0.requiresFileSurface }) {
+                } else if let primary = shortcuts.shortcuts(for: action).first(where: { fileSurface || !$0.requiresFileSurface }) {
                     item.keyEquivalent = primary.menuEquivalent; item.keyEquivalentModifierMask = primary.nativeModifiers
                 } else { item.keyEquivalent = "" }
             }

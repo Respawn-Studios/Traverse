@@ -1107,7 +1107,9 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                 ("Stopped", "BoundParent", "OtherParent", "Busy", "PostedCallback", "ClosedSource/Folder/Empty"))
             if archive_format == "zip":
                 exact &= _generated_path_absent(state / "RepeatedSelection/Again.txt")
-            if not exact or len(value.get("checks", [])) != 12:
+            keyboard_required = archive_format == "zip" and not offscreen
+            if not exact or len(value.get("checks", [])) != 12 \
+                    or keyboard_required and value.get("archiveKeyboardMenus") is not True:
                 raise RuntimeError("Independent archive callback outputs differ")
     if compiled["productSHA256"] != product_inputs(APP):
         raise RuntimeError("The checked app changed during native acceptance")

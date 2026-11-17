@@ -28,7 +28,7 @@ import LocalStorage
             let offscreen = ProcessInfo.processInfo.arguments.contains("--offscreen")
             func show(_ window: NSWindow) {
                 if offscreen { window.setFrameOrigin(.init(x: -12000, y: -12000)) }
-                else { window.center() }
+                else { window.center(); NSApp.activate(ignoringOtherApps: true) }
                 window.makeKeyAndOrderFront(nil)
             }
             func capture(_ window: NSWindow, _ name: String) async throws {
@@ -201,6 +201,31 @@ import LocalStorage
             guard let content=window.contentView,let rows=descendants(content).compactMap({$0 as? TARMetadataRows}).first else{throw Failure.check(#line)}
             // The model publishes before its coalesced AppKit table render.
             try await wait { rows.table.numberOfRows == 2 && rows.rowIDsForVerification == model.items.map(\.id) }
+            if !offscreen {
+                try BrowserShortcutVerification.verifyArchiveContextMenu(rows.table, browser: browser, settings: model.settings, label: "TAR member table")
+                checks.append("TAR keyboard and native ShowMenu actions preserve multiple selection and respect preset/custom/cleared bindings")
+                if inline && !compressed {
+                    ApplicationTARBrowser.shared.show(source, from: browser)
+                    guard let separate = ApplicationTARBrowser.shared.controller,
+                          let separateWindow = separate.window else { throw Failure.check(#line) }
+                    show(separateWindow)
+                    try await wait {
+                        separate.model.current && !separate.model.busy
+                            && separateWindow.contentView.map {
+                                descendants($0).contains { ($0 as? TARMetadataRows)?.table.numberOfRows == 2 }
+                            } == true
+                    }
+                    guard let content = separateWindow.contentView,
+                          let separateRows = descendants(content).compactMap({ $0 as? TARMetadataRows }).first else { throw Failure.check(#line) }
+                    try await wait { separateWindow.isKeyWindow }
+                    try BrowserShortcutVerification.verifyArchiveContextMenu(separateRows.table, browser: browser,
+                        settings: separate.model.settings, label: "Separate TAR window")
+                    await ApplicationTARBrowser.shared.closeAndDrain()
+                    show(window)
+                    try await wait { window.isKeyWindow }
+                    checks.append("Separate TAR uses the same focus/menu bridge as ZIP; closing it drains its reader while the embedded archive stays current")
+                }
+            }
             try require(rows.table.marquee != nil)
             checks.append("ordinary Browse Archive routing, metadata-only summary and the shared native selection controller")
             for(label,back)in[("tar-folder-open",false),("tar-folder-back",true)] {

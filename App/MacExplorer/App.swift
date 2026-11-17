@@ -1232,7 +1232,7 @@ final class BrowserWindow: NSWindow {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if let browser {
-            BrowserShortcutMenus.refresh(NSApplication.shared.mainMenu, browser: browser)
+            BrowserShortcutMenus.refreshWindowMenus(self, browser: browser)
             if !(firstResponder is NSTextView), event.isARepeat, let shortcut = BrowserShortcut(event),
                let action = browser.settings.shortcutMap.resolve(shortcut,
                     fileSurface: firstResponder === browser.activeFileView || firstResponder === browser.volumeBrowser.collectionView),

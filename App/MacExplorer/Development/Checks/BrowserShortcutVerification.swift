@@ -137,6 +137,110 @@ enum BrowserShortcutVerification {
                 "Shortcut/conflict/eject preferences round trip; invalid hidden Custom data fails safely",
                 "Custom scope shortcuts preserve text, explicitly choose Filter/Folder/This Mac and defer to native text focus without auto-search"]
     }
+    static func verifyArchiveContextMenu(_ table: FileTableView, browser: BrowserViewController,
+                                        settings: BrowserSettings, label: String) throws {
+        guard let window = table.window, window.isKeyWindow, table.numberOfRows >= 2,
+              window.makeFirstResponder(table) else {
+            throw UIVerification.Failure(message: "\(label) keyboard menu needs its actual focused member table")
+        }
+        let profile = settings.keyboardProfile, bindings = settings.shortcutPreferences, behavior = settings.customBehavior
+        let provider = table.contextMenuProvider, menu = table.menu, selection = table.selectedRowIndexes
+        let mainMenu = NSApp.mainMenu, windowMenu = NSApp.windowsMenu, helpMenu = NSApp.helpMenu
+        defer {
+            table.contextMenuProvider = provider; table.menu = menu
+            settings.customBehavior = behavior; settings.shortcutPreferences = bindings; settings.keyboardProfile = profile
+            table.selectRowIndexes(selection, byExtendingSelection: false)
+            NSApp.mainMenu = mainMenu; NSApp.windowsMenu = windowMenu; NSApp.helpMenu = helpMenu
+        }
+        // Direct table routing is checked separately from menu interception.
+        // The complete production event path below uses the real app menu.
+        NSApp.mainMenu = nil
+        let members = IndexSet([0, table.numberOfRows - 1])
+        table.selectRowIndexes(members, byExtendingSelection: false)
+        var requests = 0
+        // Reach the actual key route without entering a native menu tracking
+        // loop. Returning no menu preserves an unattended, bounded regression.
+        table.menu = nil
+        table.contextMenuProvider = { requests += 1; return nil }
+        func direct(_ event: NSEvent) {
+            // Browser preference subscribers can rebuild the menu while this
+            // check switches presets. Keep each direct route isolated; the
+            // normal menu/event pipeline is exercised separately below.
+            NSApp.mainMenu = nil
+            BrowserShortcutMenus.refreshWindowMenus(window, browser: browser)
+            table.keyDown(with: event)
+        }
+        SystemShortcutSnapshot.shared.refresh()
+        let key = UIVerification.key(String(UnicodeScalar(NSF10FunctionKey)!), code: 109, flags: .shift, window: window)
+        try require(!SystemShortcutSnapshot.shared.conflicts(key), "The system reserves the generated Show Context Menu chord")
+        for preset in [KeyboardProfile.mac, .explorer] {
+            settings.keyboardProfile = preset; settings.shortcutPreferences = .init(); requests = 0
+            direct(key)
+            try require(requests == 1 && table.selectedRowIndexes == members,
+                "\(label) did not route Show Context Menu to its existing menu without changing the selection")
+        }
+        settings.customizeBehavior()
+        settings.shortcutPreferences = .init(overrides: [.selectionMenu: []]); requests = 0
+        try require(settings.shortcutMap.shortcuts(for: .selectionMenu).isEmpty && settings === browser.settings,
+            "\(label) generated cleared-binding setup disagrees with its browser settings")
+        if !(window is ArchiveKeyboardWindow) {
+            NSApp.mainMenu = BrowserMenus.applicationMenu(target: browser)
+            NSApp.sendEvent(key)
+            try require(requests == 0 && table.selectedRowIndexes == members,
+                "\(label) native dispatch retained a cleared default key through a header menu")
+        }
+        direct(key)
+        try require(requests == 0 && table.selectedRowIndexes == members,
+            "\(label) retained a cleared context-menu binding or changed the selection")
+        let candidates: [(ShortcutSpecialKey, UInt16)] = [(.f7, 98), (.f8, 100), (.f9, 101), (.f10, 109), (.f11, 103), (.f12, 111)]
+        guard let custom = candidates.map({ event($0.0, code: $0.1, window: window) })
+            .first(where: { !SystemShortcutSnapshot.shared.conflicts($0) }), let chord = BrowserShortcut(custom) else {
+            throw UIVerification.Failure(message: "No free generated context-menu chord")
+        }
+        settings.shortcutPreferences = .init(overrides: [.selectionMenu: [chord]]); requests = 0
+        direct(custom)
+        try require(requests == 1 && table.selectedRowIndexes == members,
+            "\(label) lost its custom context-menu binding or multiple selection")
+        requests = 0
+        table.showContextMenuForSelection(nil)
+        try require(requests == 1 && table.selectedRowIndexes == members,
+            "\(label) changed its selection through the native keyboard/Accessibility menu action")
+        settings.keyboardProfile = .explorer; settings.shortcutPreferences = .init(); requests = 0
+        NSApp.mainMenu = BrowserMenus.applicationMenu(target: browser)
+        let action = #selector(BrowserViewController.showKeyboardContextMenu(_:))
+        let go = NSApp.mainMenu?.items.first { $0.submenu?.title == "Go" }?.submenu
+        let navigation = go?.items.first { $0.title == "Keyboard Navigation" }?.submenu
+        guard let command = navigation?.items.first(where: { $0.action == action }) else {
+            throw UIVerification.Failure(message: "Generated main menu lost Show Context Menu")
+        }
+        if window is ArchiveKeyboardWindow {
+            try require(window.makeFirstResponder(nil), "Archive window did not release its member-table focus")
+            try require(!table.validateMenuItem(command), "Cached archive menu stayed enabled after focus left its table")
+            (table as? ArchiveMetadataTable)?.showKeyboardContextMenu(nil)
+            try require(requests == 0 && table.selectedRowIndexes == members,
+                "A cached archive menu acted after focus moved to another control")
+            try require(window.makeFirstResponder(table), "Archive window did not restore member-table focus")
+            try require(command.target as? ArchiveMetadataTable === table,
+                "Archive focus did not update the real main menu's target")
+        }
+        try require(NSApp.mainMenu?.performKeyEquivalent(with: key) == true && requests == 1 && table.selectedRowIndexes == members,
+            "\(label) menu-bar equivalent did not reach the focused archive table")
+        requests = 0
+        NSApp.sendEvent(key)
+        try require(requests == 1 && table.selectedRowIndexes == members,
+            "\(label) full native event dispatch lost its menu request or dispatched twice")
+        settings.customizeBehavior(); settings.shortcutPreferences = .init(overrides: [.selectionMenu: [chord]])
+        try require(window.makeFirstResponder(nil) && window.makeFirstResponder(table), "Custom menu focus did not return")
+        requests = 0; NSApp.sendEvent(custom)
+        try require(requests == 1 && table.selectedRowIndexes == members,
+            "\(label) custom chord did not survive the real window/menu event path")
+        settings.shortcutPreferences = .init(overrides: [.selectionMenu: []])
+        try require(window.makeFirstResponder(nil) && window.makeFirstResponder(table), "Cleared menu focus did not return")
+        requests = 0; NSApp.sendEvent(custom)
+        try require(requests == 0 && table.selectedRowIndexes == members,
+            "\(label) real menu event retained a cleared custom chord")
+    }
+
     private static func event(_ key: ShortcutSpecialKey, code: UInt16, window: NSWindow, repeated: Bool = false) -> NSEvent {
         let shortcut = BrowserShortcut(.special(key), [.control, .option, .shift])
         return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shortcut.nativeModifiers,

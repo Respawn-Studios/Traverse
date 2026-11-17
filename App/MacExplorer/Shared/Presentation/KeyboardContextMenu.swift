@@ -1,8 +1,16 @@
 import AppKit
+import ExplorerCore
 
 /// A keyboard request uses the same menu and selected item as a pointer request.
 /// It never relies on the cursor's position or changes a multiple selection.
 @MainActor enum KeyboardContextMenu {
+    static func matches(_ event: NSEvent, settings: BrowserSettings) -> Bool {
+        guard let shortcut = BrowserShortcut(event),
+              settings.shortcutMap.resolve(shortcut, fileSurface: true) == .selectionMenu else { return false }
+        return !SystemShortcutSnapshot.shared.conflicts(event)
+            && !BrowserShortcutMenus.hasUserOverride(.selectionMenu, in: NSApp.mainMenu)
+    }
+
     struct Request {
         let menu: NSMenu
         let view: NSView
@@ -10,9 +18,14 @@ import AppKit
         func present() { menu.popUp(positioning: nil, at: point, in: view) }
     }
 
-    static func prepare(in view: NSView, menu: NSMenu) -> Request? {
+    static func canPresent(in view: NSView) -> Bool {
         guard let window = view.window, window.isKeyWindow, !view.isHiddenOrHasHiddenAncestor,
-              window.attachedSheet == nil, !(window.firstResponder is NSTextView) else { return nil }
+              window.attachedSheet == nil, !(window.firstResponder is NSTextView) else { return false }
+        return true
+    }
+
+    static func prepare(in view: NSView, menu: NSMenu) -> Request? {
+        guard canPresent(in: view) else { return nil }
         let anchor: NSRect
         if let table = view as? NSTableView {
             if table.selectedRow >= 0 {

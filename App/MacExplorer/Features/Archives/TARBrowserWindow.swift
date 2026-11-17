@@ -91,7 +91,9 @@ private struct TARBrowserView:View {
     private let scroll=NSScrollView()
     var fileScrollView:NSScrollView {scroll}
     var animatesNewRows = true
-    var embeddedShortcut:((NSEvent)->Bool)?
+    var embeddedShortcut:((NSEvent)->Bool)? {
+        didSet { table.embeddedShortcut = embeddedShortcut }
+    }
     var onCut: (() -> Void)?
     var onCopyMembers: (() -> Void)?
     var canCaptureClipboard: ((TransferClipboardFeedback.Intent) -> Bool)?
@@ -106,6 +108,7 @@ private struct TARBrowserView:View {
     #endif
     init(model:TARBrowserModel) {
         self.model=model;super.init(frame:.zero)
+        table.keyboardContextSettings = model.settings
         memberDragSource = .init(tar: model, table: table); table.memberDragSource = memberDragSource
         table.usesAutomaticRowHeights=false;InterfaceMetrics.setRowHeight(table,base:26)
         for(key,title,width)in[("name","Name",310.0),("size","Size",100.0),("modified","Date Modified",172.0),
@@ -330,7 +333,7 @@ private struct TARBrowserView:View {
     required init?(coder:NSCoder){nil}
     func windowWillClose(_ notification:Notification){onClose?()}
 }
-@MainActor private final class TARBrowserWindow:ToolMotionWindow {
+@MainActor private final class TARBrowserWindow:ArchiveKeyboardWindow {
     override func performKeyEquivalent(with event:NSEvent)->Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,event.charactersIgnoringModifiers?.lowercased()=="f",let content=contentView {
             var pending=[content],count=0
