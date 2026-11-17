@@ -16,7 +16,7 @@ struct TraverseReleaseNote: Identifiable, Sendable {
 
 enum TraverseReleaseNotes {
     static let all: [TraverseReleaseNote] = [
-        .init(version: "0.3.0", build: 97, state: .unreleased,
+        .init(version: "0.3.0", build: 98, state: .unreleased,
               date: "2026-11-17", title: "More archives, a steadier workspace",
               summary: "Edit more archive formats, keep panes and controls in place, and reach local tools from the keyboard.", changes: [
                 "Plain, gzip and bzip2 TAR archives share the workbench and text editor for Rename, Add, Remove, Duplicate, Move, grouping, file/folder creation and internal Cut/Copy/Paste. Original updates retain the earlier archive for guarded Undo, including after restart.",
@@ -28,13 +28,13 @@ enum TraverseReleaseNotes {
                 "Benchmarks add block-size and file-cache choices, a bounded Quick Mix suite, matched comparisons and completed-call latency distributions. Results and exports distinguish requested cache settings from actual behavior.",
                 "Open Terminal at the current local folder or a selected folder. Its navigation button is on by default, with a preference in General and setup. Server and archive locations retain their own commands.",
                 "Compare two local files in Kaleidoscope, Beyond Compare, Visual Studio Code or FileMerge from the active Xcode installation. Automatic finds an installed supported app; General lets you choose your preference. Display order determines the left and right files.",
-                "F6 and Shift-F6 move between browser controls in both keyboard presets. Control-Tab and Control-Shift-Tab change tabs; Shift-F10 opens the selection’s shared context menu without changing the selection. Existing custom bindings, native text editing and marked input retain priority.",
+                "F6 and Shift-F6 move between browser controls in both keyboard presets. Control-Tab and Control-Shift-Tab change tabs; Shift-F10 opens the selection’s shared context menu without changing the selection. Existing custom bindings, native text editing and marked input retain priority. Separate ZIP/TAR windows use the same configured context-menu keys, and header menus no longer retain a removed shortcut.",
                 "Crash-report review includes available capture-device model/core details and a separately labelled current CPU/memory snapshot by default. The report stays editable, private-detail hiding remains available, and nothing is sent automatically.",
                 "The sidebar and its restore button follow one live layout transition, including reversing direction midway. Pane transitions reuse foreground-only snapshots while native Glass stays live, and unchanged split branches remain attached.",
                 "This Mac, sidebar rows, file icons and drive tiles share responder-based active/inactive emphasis. Moving into the file area no longer leaves the sidebar with active blue keyboard emphasis.",
                 "Creating a folder and finishing Rename keep the listing visible while its replacement loads. Responsive columns reserve usable name space in narrow panes and enlarged layouts.",
                 "Properties keeps chart grouping and scroll position steady while drilling into storage totals or going Back. Settings, Help, Properties, Analyzer, archive browsers and editor windows follow shared opening/closing preferences without discarding pending work.",
-                "USB and other filesystems still use the current copy-integrity checks. A destination that cannot preserve the required file details may refuse a copy and retain its original and staging data; this candidate does not silently relax that protection."
+                "USB and other filesystems still use the current copy-integrity checks. A destination that cannot preserve the required file details may refuse a copy and retain its original and staging data; this candidate does not silently relax that protection. Optional App Logs distinguish the failed copy-metadata validation boundary without recording paths or attribute values."
               ]),
         .init(version: "0.2.0", build: 95, state: .published,
               date: "2026-11-15", title: "Intel Macs join the workspace",
