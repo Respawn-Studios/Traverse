@@ -140,7 +140,9 @@ The official [Homebrew tap](https://github.com/Respawn-Studios/homebrew-tap)
 checks the latest immutable full GitHub release hourly, with a manual Actions
 trigger when needed. Its updater checks both architecture catalogs, source-kit
 agreement, GitHub asset digests and the delivered installer bytes before making
-a cask commit. Drafts and prereleases are excluded; a failed check leaves the
+a cask commit. A matching release acceptance asset must bind the recipe and both
+installer hashes to both-architecture parsing and a real ARM installation with
+cold startup. Drafts and prereleases are excluded; a failed check leaves the
 existing cask unchanged. Publish and verify both download routes before promoting
 a release to Latest. This tap automation does not replace signed app-feed
 generation, installed acceptance or the user's choice to upgrade.
