@@ -101,6 +101,9 @@ extension DiagnosticErrorCode {
         let base: Int64
         switch domain {
         case .operation:
+            if (601...603).contains(code) {
+                return ["copy.metadataComparison", "copy.receiptCoverage", "copy.nativeReceipt"][Int(code - 601)]
+            }
             if (510...513).contains(code) {
                 return ["download.adoption.pathBinding", "download.adoption.rawQuarantine",
                         "download.adoption.provenance", "download.adoption.publicProperties"][Int(code - 510)]

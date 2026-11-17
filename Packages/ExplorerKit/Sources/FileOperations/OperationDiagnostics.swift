@@ -19,6 +19,7 @@ public enum OperationDiagnosticCheckpoint: Sendable, Equatable {
     case downloadAdoptionAdmission, downloadAdoptionArea, downloadAdoptionIntent
     case downloadAdoptionMove, downloadAdoptionStage, downloadAdoptionPublication
     case downloadAdoptionCommit
+    case copyMetadataComparison, copyReceiptCardinality, copyReceiptValidation
 }
 
 /// Closed projection of the error actually caught at a named boundary. Unlike

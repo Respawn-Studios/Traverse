@@ -88,18 +88,24 @@ internal final class NativeCopyReceipts: @unchecked Sendable {
     }
     func validate(source: CopyComparison, destination: CopyComparison, policy: TransferMetadataPolicy) throws {
         guard source.contentDigest == destination.contentDigest else { throw FileOperationFailure.copyContentMismatch }
-        guard source.metadataDigest == destination.metadataDigest else { throw FileOperationFailure.copyMetadataMismatch }
+        guard source.metadataDigest == destination.metadataDigest else { throw Self.mismatch(.copyMetadataComparison) }
         try lock.withLock {
-            guard source.nodes.count == destination.nodes.count, values.count == source.nodes.count else { throw FileOperationFailure.copyMetadataMismatch }
+            guard source.nodes.count == destination.nodes.count, values.count == source.nodes.count else {
+                throw Self.mismatch(.copyReceiptCardinality)
+            }
             for (path, original) in source.nodes {
                 guard let copied = destination.nodes[path], let receipt = values[path],
                       receipt.source.sameObject(as: original.identity), receipt.destination.sameObject(as: copied.identity),
                       receipt.sourceBefore == original.security, receipt.destinationAfter == copied.security,
                       receipt.destinationOwnership == copied.ownership,
-                      receipt.permitsSecurityTransition() else { throw FileOperationFailure.copyMetadataMismatch }
+                      receipt.permitsSecurityTransition() else { throw Self.mismatch(.copyReceiptValidation) }
             }
         }
         guard policy == .destinationOwnership || source.ownershipDigest == destination.ownershipDigest else { throw FileOperationFailure.copyOwnershipMismatch }
+    }
+    private static func mismatch(_ checkpoint: OperationDiagnosticCheckpoint) -> FileOperationFailure {
+        FileOperationDiagnostics.caughtFailure(checkpoint, FileOperationFailure.copyMetadataMismatch)
+        return .copyMetadataMismatch
     }
 }
 

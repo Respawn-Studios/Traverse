@@ -93,6 +93,15 @@ import FileOperations
                 let projected = DiagnosticErrors.operationBoundary(checkpoint)
                 try require(projected?.code == code && projected?.symbol?.hasPrefix("download.adoption.") == true)
             }
+            let copyBoundaries: [(OperationDiagnosticCheckpoint, Int64, String)] = [
+                (.copyMetadataComparison, 601, "copy.metadataComparison"),
+                (.copyReceiptCardinality, 602, "copy.receiptCoverage"),
+                (.copyReceiptValidation, 603, "copy.nativeReceipt")
+            ]
+            for (checkpoint, code, symbol) in copyBoundaries {
+                let projected = DiagnosticErrors.operationBoundary(checkpoint)
+                try require(projected?.domain == .operation && projected?.code == code && projected?.symbol == symbol)
+            }
             await logger.flush()
             let events = try await recordedEvents(logger)
             let own = events.filter { $0.trace == trace.trace && $0.action == .remoteDownload }
@@ -139,6 +148,7 @@ import FileOperations
                 "oneTerminal": true, "actualEngineCorrelation": true, "privacyCanariesExcluded": true,
                 "publicationFailureAtTerminal": true, "partialCausesBounded": true,
                 "adoptionBoundaryMappings": adoptionBoundaries.count,
+                "copyMetadataBoundaryMappings": copyBoundaries.count,
                 "pauseIsInert": true, "failedWriterDoesNotControlCopyUndo": true, "networkRequests": 0, "keychainCalls": 0], root: admitted)
         } catch {
             var line: UInt = 0; if case let Failure.check(value) = error { line = value }

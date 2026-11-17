@@ -37,6 +37,19 @@ have explicit verification rules. Strict preservation and native owner/group
 copying are separate choices; neither silently changes ACL policy or downgrades
 a failed validation. Same-volume rename retains the original object.
 
+When App Logs are enabled, copy verification can identify three failure
+boundaries without recording paths, attribute names, values or fingerprints:
+
+| Diagnostic symbol | Check that failed |
+| --- | --- |
+| `copy.metadataComparison` | Ordinary metadata comparison |
+| `copy.receiptCoverage` | Complete source, destination and native receipt coverage |
+| `copy.nativeReceipt` | Native receipt identity, security and ownership observations |
+
+These labels explain where verification stopped, not which individual attribute
+changed or which filesystem caused it. Other refusal points keep their generic
+error. Logging does not change the validation result or authorize a retry.
+
 Authored archives and received-file routes use their concrete documented macOS
 protection contracts. Do not infer security meaning from undocumented raw
 quarantine bytes, promise identical Gatekeeper decisions, or strip protection

@@ -150,7 +150,8 @@ private enum DiagnosticTaskTrace {
                      .nativeTrashDeleteStagePostWalk?, .nativeTrashDeleteStageTransition?,
                      .nativeTrashDeleteStageJournal?, .nativeTrashDeleteUnlink?:
                     checkpoint = .init(.nativeStatus, flags: familyFlags)
-                case .downloadStageMark?, .downloadTransitionShape?, .downloadSourceMark?,
+                case .copyMetadataComparison?, .copyReceiptCardinality?, .copyReceiptValidation?,
+                     .downloadStageMark?, .downloadTransitionShape?, .downloadSourceMark?,
                      .downloadSourceProvenance?, .downloadStageProvenance?, .downloadMarkReplace?,
                      .downloadStageRecheck?, .downloadSourceRecheck?, .downloadProvenanceRecheck?,
                      .downloadAdoptionPathBinding?, .downloadAdoptionRawQuarantine?, .downloadAdoptionProvenance?,

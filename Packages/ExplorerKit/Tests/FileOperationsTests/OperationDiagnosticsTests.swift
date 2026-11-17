@@ -83,6 +83,44 @@ import Testing
         #expect(observed)
         #expect(try Data(contentsOf: file) == before)
     }
+    @Test(arguments: [false, true])
+    func failedCopyDistinguishesMetadataAndReceiptWithoutChangingRefusal(_ receiptChanged: Bool) async throws {
+        let root = try FileOperationTestFixtures.base().appendingPathComponent("copy-diagnostic-" + UUID().uuidString)
+        try FileManager().createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager().removeItem(at: root) }
+        let source = root.appendingPathComponent("Generated-private-name.txt")
+        let destination = root.appendingPathComponent("Destination")
+        try Data("Generated private bytes\n".utf8).write(to: source, options: .withoutOverwriting)
+        try FileManager().setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path)
+        try FileManager().createDirectory(at: destination, withIntermediateDirectories: false)
+        let original = try verifiedTree(source, cancellation: .init())
+        let values = DiagnosticStageProbe()
+        FileOperationDiagnostics.install { values.receive($0) }
+        defer { FileOperationDiagnostics.install(nil) }
+        let hooks = CopyFaultHooks(afterNativeCopy: { _, target in
+            if !receiptChanged {
+                guard fchmod(target, 0o600) == 0 else { throw posixFailure() }
+            }
+        }, afterSecurityReceipt: { _, target in
+            if receiptChanged {
+                let mark = Data("0083;67000000;GeneratedDiagnosticFixture;00000000-0000-0000-0000-000000000001".utf8)
+                guard mark.withUnsafeBytes({ fsetxattr(target, "com.apple.quarantine", $0.baseAddress, mark.count, 0, 0) }) == 0
+                else { throw posixFailure() }
+            }
+        })
+        let engine = RecoverableFileOperations(journalDirectory: root.appendingPathComponent("History"),
+            hooks: .init(copyFaults: hooks))
+        let result = await engine.perform(.copy(sources: [source], destinationDirectory: destination))
+        let checkpoint: OperationDiagnosticCheckpoint = receiptChanged ? .copyReceiptValidation : .copyMetadataComparison
+        #expect(result.result.items.contains { $0.status == .failed(.copyMetadataMismatch) })
+        #expect(original.matches(try verifiedTree(source, cancellation: .init())))
+        #expect(!FileManager().fileExists(atPath: destination.appendingPathComponent(source.lastPathComponent).path))
+        let caught = values.snapshot.filter { $0.checkpoint == checkpoint }
+        #expect(caught.count == 1)
+        if case .operation(.copyMetadataMismatch)? = caught.first?.failure {}
+        else { Issue.record("Failed copy lost its closed diagnostic category") }
+        #expect(caught.first?.phase == .verifying)
+    }
     @Test func inverseDirectoryStagesCarryOnlyClosedFamiliesAndRecordIdentity() {
         let values = DiagnosticStageProbe()
         let job = UUID(), record = UUID()

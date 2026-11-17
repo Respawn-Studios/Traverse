@@ -158,6 +158,18 @@ private struct DiagnosticFixture {
         #expect(DiagnosticErrorCode(domain: .network, code: 615).symbol == "sftp.upload.openingFinal")
         #expect(DiagnosticErrorCode(domain: .network, code: 704).symbol == "sftp.status.permissionDenied")
     }
+    @Test func copyMetadataBoundariesRoundtripAsClosedSymbols() throws {
+        for (offset, symbol) in ["copy.metadataComparison", "copy.receiptCoverage", "copy.nativeReceipt"].enumerated() {
+            let event = DiagnosticEvent(session: UUID(), trace: UUID(), action: .fileOperation, phase: .failed,
+                error: .init(domain: .operation, code: Int64(601 + offset)),
+                context: .init(.nativeStatus), causes: [.init(domain: .operation, code: 8)])
+            let decoded = try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event))
+            #expect(decoded == event && decoded.error?.symbol == symbol)
+            #expect(decoded.causes?.first?.symbol == "copyMetadataMismatch")
+        }
+        #expect(DiagnosticErrorCode(domain: .operation, code: 600).symbol == nil)
+        #expect(DiagnosticErrorCode(domain: .operation, code: 604).symbol == nil)
+    }
     @Test func smbActionPreflightUsesOnlyFixedComparisonSymbols() {
         let expected = ["sourceDirectory", "sourceAttributes", "sourceSize", "sourceModifiedTime", "sourceObjectID",
                         "sourceLinkCount", "sourceVolumeSerial", "sourceVolumeCreation", "createAttributes", "createModifiedTime"]

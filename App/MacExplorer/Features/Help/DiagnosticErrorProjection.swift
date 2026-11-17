@@ -151,6 +151,9 @@ enum DiagnosticErrors {
     static func operationBoundary(_ checkpoint: OperationDiagnosticCheckpoint?) -> DiagnosticErrorCode? {
         let code: Int64
         switch checkpoint {
+        case .copyMetadataComparison?: code = 601
+        case .copyReceiptCardinality?: code = 602
+        case .copyReceiptValidation?: code = 603
         case .downloadStageMark?: code = 501
         case .downloadTransitionShape?: code = 502
         case .downloadSourceMark?: code = 503
