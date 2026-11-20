@@ -423,7 +423,7 @@ private struct DiagnosticFixture {
         let writer = DiagnosticRecorder(directory: fixture.store, limits: try fixture.limits, recording: true)
         writer.record(fixture.event()); await writer.closeAndDrain()
         let segment = try #require(fixture.segments().first)
-        var lines = try Data(contentsOf: segment).split(separator: 10).map(Data.init)
+        var lines = try Data(contentsOf: segment).split(separator: 10).map { Data($0) }
         var value = try #require(JSONSerialization.jsonObject(with: lines[1]) as? [String: Any])
         value["untrustedPath"] = "/Users/GeneratedPrivate/Hidden.txt"
         value["untrustedPassword"] = "generated-secret-must-not-export"

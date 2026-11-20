@@ -58,7 +58,7 @@ public struct StoredLargestFiles: Sendable {
                     throw StorageScanFailure.invalidOutput
                 }
                 let components = path.split(separator: 47, omittingEmptySubsequences: false)
-                guard components.count <= maximumPathComponents, components.last.map(Data.init) == name,
+                guard components.count <= maximumPathComponents, let basename = components.last, basename.elementsEqual(name),
                       components.allSatisfy({ StoredAnalysisPage.validName(Data($0)) }) else { throw StorageScanFailure.invalidOutput }
                 var location = Data([UInt8(source)]); location.append(path)
                 guard locations.insert(location).inserted else { throw StorageScanFailure.invalidOutput }
