@@ -56,6 +56,22 @@ jobs:
       - name: Install pinned Rust and fetch worker dependencies
         run: python3 -B tools/worker_setup.py --install-toolchain --fetch
       - name: Compile the unsigned app
+        id: compile
         run: python3 -B tools/dev.py build --unsigned
+      - name: Show compiler diagnostics
+        if: ${{ failure() && steps.compile.conclusion == 'failure' }}
+        run: |
+          for result in .build/results/build-*.xcresult; do
+            if [ -d "$result" ]; then
+              xcrun xcresulttool get build-results --path "$result" --compact | python3 -B -c '
+          import json, sys
+          result = json.load(sys.stdin)
+          for issue in result.get("errors", [])[:16]:
+              print(issue.get("issueType", "Build error"), issue.get("sourceURL", ""), issue.get("message", "")[:800])
+          ' || true
+            fi
+          done
+          df -h .
+          /usr/bin/grep -E -i 'out of memory|no space left|stack dump|terminated|killed|signal [0-9]+|failed with a nonzero exit code' .build/logs/build-*.log | tail -n 24 || true
       - name: Run ExplorerKit tests
         run: python3 -B tools/dev.py test --serial
