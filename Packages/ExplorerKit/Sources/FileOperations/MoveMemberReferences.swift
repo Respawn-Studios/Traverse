@@ -1,4 +1,5 @@
 import Darwin
+import ExplorerCore
 import Foundation
 
 /// Root-relative identity chain; names select entries, identities prove them.
@@ -11,7 +12,7 @@ internal struct MoveReferenceChain: Codable, Equatable, Sendable {
     var location: URL { components.reduce(root) { $0.appendingPathComponent($1) } }
 
     func validateFormat() throws {
-        guard root.isFileURL, root == root.standardizedFileURL, root.path.hasPrefix("/"),
+        guard root.hasStandardizedFilePath, root.path.hasPrefix("/"),
               root.path.utf8.count <= 8_192, !root.path.utf8.contains(0), rootParent.isDirectory,
               (1..<OperationLimits.maximumDepth).contains(components.count), ancestors.count == components.count,
               ancestors.allSatisfy({ $0.isDirectory && $0.device == rootParent.device }) else {
@@ -131,7 +132,7 @@ extension RecoverableFileOperations {
             var tickets: [MoveReferenceTicket] = [], unique = Set<String>(), bytes = 0
             for candidate in candidates {
                 try cancellation.check()
-                guard candidate.isFileURL, candidate == candidate.standardizedFileURL,
+                guard candidate.hasStandardizedFilePath,
                       unique.insert(candidate.path).inserted else { continue }
                 var current = candidate, selected: TransferEntry?
                 for _ in 0...OperationLimits.maximumDepth {

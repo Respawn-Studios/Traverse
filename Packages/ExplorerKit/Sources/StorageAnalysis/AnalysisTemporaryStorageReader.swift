@@ -119,8 +119,9 @@ public final class AnalysisTemporaryStorageReader: @unchecked Sendable {
     }
     private static func inspect(_ directory: URL, maximumSessions: Int, cancelled: () -> Bool,
                                 afterInventory: (@Sendable () throws -> Void)? = nil) throws -> AnalysisTemporaryStorageObservation {
-        guard directory.isFileURL, directory.host == nil || directory.host == "", directory.query == nil, directory.fragment == nil,
-              directory.standardizedFileURL == directory, directory.path.utf8.count < 1024 else { throw StorageScanFailure.unsupportedLocation }
+        guard directory.hasStandardizedFilePath, directory.host == nil || directory.host == "",
+              directory.query == nil, directory.fragment == nil,
+              directory.path.utf8.count < 1024 else { throw StorageScanFailure.unsupportedLocation }
         let previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
         guard previous >= 0 else { throw StorageScanFailure.unsupportedLocation }
         defer { _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous) }

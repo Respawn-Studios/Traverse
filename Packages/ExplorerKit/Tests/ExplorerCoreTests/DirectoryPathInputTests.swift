@@ -3,6 +3,19 @@ import Foundation
 import XCTest
 
 final class DirectoryPathInputTests: XCTestCase {
+    func testStandardizedFilePathAcceptsEitherDirectoryHint() {
+        let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let withDirectoryHint = URL(fileURLWithPath: folder.path, isDirectory: true)
+        let withoutDirectoryHint = URL(fileURLWithPath: folder.path, isDirectory: false)
+        XCTAssertTrue(withDirectoryHint.hasDirectoryPath)
+        XCTAssertFalse(withoutDirectoryHint.hasDirectoryPath)
+        XCTAssertTrue(withDirectoryHint.hasStandardizedFilePath)
+        XCTAssertTrue(withoutDirectoryHint.hasStandardizedFilePath)
+        let dotComponent = URL(fileURLWithPath: folder.path + "/./child", isDirectory: true)
+        XCTAssertFalse(dotComponent.hasStandardizedFilePath)
+        XCTAssertFalse(URL(string: "https://example.invalid/folder")!.hasStandardizedFilePath)
+    }
+
     func testTildeUsesSuppliedAccountHomeRatherThanProcessContainer() throws {
         let account = URL(fileURLWithPath: "/Volumes/Generated Home/Zoë", isDirectory: true)
         XCTAssertEqual(try DirectoryPathInput.resolve("~", home: account), account)

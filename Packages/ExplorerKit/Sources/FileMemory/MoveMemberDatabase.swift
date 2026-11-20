@@ -1,3 +1,4 @@
+import ExplorerCore
 import FileOperations
 import Foundation
 import SQLite3
@@ -91,7 +92,7 @@ extension PersistentNameStore {
         defer { withExtendedLifetime(lease) {}; withExtendedLifetime(use) {} }
         try requireOpen(); try catalog.validate()
         guard try database.hasMemberFormat, (1...2_048).contains(limit), roots.count <= 1_024,
-              roots.allSatisfy({ $0.isFileURL && $0 == $0.standardizedFileURL && $0.path.hasPrefix("/") }) else {
+              roots.allSatisfy({ $0.hasStandardizedFilePath && $0.path.hasPrefix("/") }) else {
             throw NameStoreFailure.invalidRequest
         }
         let cancellation = RememberedNameCancellation()

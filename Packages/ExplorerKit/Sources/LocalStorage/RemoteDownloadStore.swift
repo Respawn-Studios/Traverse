@@ -1,5 +1,6 @@
 import CryptoKit
 import Darwin
+import ExplorerCore
 import Foundation
 @_spi(ArchiveProduction) import FileOperations
 
@@ -57,8 +58,8 @@ final class RemoteDownloadStore: Sendable {
     let executor = DownloadExecutor()
     let hooks: DownloadIOHooks
     init(directory: URL, hooks: DownloadIOHooks = .init()) throws {
-        guard directory.isFileURL, directory.host == nil || directory.host == "", directory.query == nil,
-              directory.fragment == nil, directory == directory.standardizedFileURL else { throw RemoteDownloadStorageFailure.unsafe }
+        guard directory.hasStandardizedFilePath, directory.host == nil || directory.host == "",
+              directory.query == nil, directory.fragment == nil else { throw RemoteDownloadStorageFailure.unsafe }
         self.directory = directory; self.hooks = hooks
     }
     func inspect() async throws -> [RemoteDownloadSummary] {

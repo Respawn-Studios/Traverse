@@ -1,4 +1,5 @@
 import Darwin
+import ExplorerCore
 import Foundation
 
 @_spi(Qualification) public enum SMBTemporaryStorageFailure: Error, Sendable, Equatable {
@@ -15,8 +16,8 @@ import Foundation
     public let poolByteLimit: UInt64
     public init(directory: URL, sessionByteLimit: UInt64 = maximumSessionBytes,
                 poolByteLimit: UInt64 = maximumPoolBytes) throws {
-        guard directory.isFileURL, directory.host == nil || directory.host == "",
-              directory.query == nil, directory.fragment == nil, directory.standardizedFileURL == directory,
+        guard directory.hasStandardizedFilePath, directory.host == nil || directory.host == "",
+              directory.query == nil, directory.fragment == nil,
               (1 << 20...Self.maximumSessionBytes).contains(sessionByteLimit),
               sessionByteLimit <= poolByteLimit, poolByteLimit <= Self.maximumPoolBytes else {
             throw SMBTemporaryStorageFailure.unsafe

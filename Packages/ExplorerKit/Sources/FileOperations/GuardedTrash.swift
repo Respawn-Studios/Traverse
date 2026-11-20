@@ -1,4 +1,5 @@
 import Darwin
+import ExplorerCore
 import Foundation
 
 /// A fresh, metadata-only selection for the stricter selected-cleanup route.
@@ -225,8 +226,8 @@ internal final class GuardedTrashPolicy: @unchecked Sendable {
             && withUnsafeBytes(of: &value.f_fstypename) { $0.prefix(while: { $0 != 0 }).elementsEqual(Array("apfs".utf8)) }
     }
     private static func requirePath(_ url: URL) throws {
-        guard url.isFileURL, url.query == nil, url.fragment == nil,
-              url == url.standardizedFileURL, url.path.utf8.count < 1024 else { throw FileOperationFailure.invalidRequest }
+        guard url.hasStandardizedFilePath, url.query == nil, url.fragment == nil,
+              url.path.utf8.count < 1024 else { throw FileOperationFailure.invalidRequest }
         let parts = Array(url.pathComponents.dropFirst()).map { $0.lowercased() }
         let logical = parts.starts(with: ["system", "volumes", "data"]) ? Array(parts.dropFirst(3)) : parts
         guard logical.count > 1, !["system", "private", "dev", "network", "net", ".vol"].contains(logical[0]),

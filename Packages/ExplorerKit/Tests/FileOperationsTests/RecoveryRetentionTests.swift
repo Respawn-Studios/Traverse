@@ -13,7 +13,7 @@ private struct RetentionFixture: Sendable {
     init() throws {
         let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let base = package.appendingPathComponent(".build/test-fixtures")
+        let base = package.appendingPathComponent(".build/test-fixtures", isDirectory: true)
         guard base.resolvingSymlinksInPath() == base else { throw FileOperationFailure.invalidRequest }
         try FileManager().createDirectory(at: base, withIntermediateDirectories: true)
         root = base.appendingPathComponent("retention-" + UUID().uuidString)
@@ -31,7 +31,7 @@ private struct RetentionFixture: Sendable {
         let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let repository = package.deletingLastPathComponent().deletingLastPathComponent()
-        let base = repository.appendingPathComponent(".build/test-fixtures")
+        let base = repository.appendingPathComponent(".build/test-fixtures", isDirectory: true)
         guard base.resolvingSymlinksInPath() == base, workerRoot.deletingLastPathComponent() == base,
               workerRoot.lastPathComponent.hasPrefix("retention-crash-"),
               UUID(uuidString: String(workerRoot.lastPathComponent.dropFirst("retention-crash-".count))) != nil else {

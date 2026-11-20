@@ -1,4 +1,5 @@
 import Darwin
+import ExplorerCore
 import Foundation
 
 /// One-shot engine authority. Allocating the future ID performs no history I/O.
@@ -67,7 +68,7 @@ public struct MoveReferenceTicket: Sendable, Equatable, Codable {
               [sourceIdentity.type].allSatisfy({ $0 == S_IFREG || $0 == S_IFDIR }),
               sourceParent.isDirectory, destinationParent.isDirectory else { throw FileOperationFailure.invalidRequest }
         for url in [source, historyDirectory, destinationDirectory] {
-            guard url.isFileURL, url == url.standardizedFileURL, url.path.hasPrefix("/"),
+            guard url.hasStandardizedFilePath, url.path.hasPrefix("/"),
                   url.path.utf8.count <= 8_192, !url.path.utf8.contains(0) else { throw FileOperationFailure.invalidRequest }
         }
         if let member {

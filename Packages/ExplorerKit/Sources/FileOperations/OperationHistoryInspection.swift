@@ -1,4 +1,5 @@
 import Darwin
+import ExplorerCore
 import Foundation
 
 /// One worker owns the budget and SQLite callback; it never escapes the inspection.
@@ -115,7 +116,7 @@ internal enum OperationHistoryInspector {
                         allowReceivedFolderUndoHint: Bool = false,
                         allowZIPTreeUndoHint: Bool = false,
                         allowTARTreeUndoHint: Bool = false) throws -> OperationRecoveryInspection {
-        guard directory.isFileURL, directory == directory.standardizedFileURL, (1...128).contains(limit),
+        guard directory.hasStandardizedFilePath, (1...128).contains(limit),
               (1...16_384).contains(maximumEntries) else {
             throw FileOperationFailure.invalidRequest
         }
