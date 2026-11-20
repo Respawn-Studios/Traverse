@@ -1,3 +1,4 @@
+import ExplorerCore
 import Foundation
 import Testing
 @testable import LocalStorage
@@ -21,9 +22,10 @@ struct DriveHealthServiceIdentityTests {
          "MacExplorerStorageMode": "portable",
          "MacExplorerAccessPolicy": "local-user-v1",
          "TraverseDirectPublicUpdaterVersion": "2.10.0",
+         "TraverseDirectArchitecture": DirectPublicEditionIdentity.architecture,
          "TraverseDirectStorageNamespace": "com.respawnstudios.traverse.direct",
          "MacExplorerFolderServices": "public-folders-service-v1",
-         "SUFeedURL": "https://respawn-studios.com/products/traverse/direct-updates/appcast.xml",
+         "SUFeedURL": DirectPublicEditionIdentity.feedURL,
          "SUPublicEDKey": "MG4sBFr76ad6D4nGo+i2VuZ4hxVMEQZToBUjYyui3IA=",
          "SUVerifyUpdateBeforeExtraction": true,
          "SURequireSignedFeed": true,
@@ -188,12 +190,14 @@ struct DriveHealthServiceIdentityTests {
         var wrongManifest = manifest
         wrongManifest["accessPolicy"] = "sandbox-selected-v1"
         #expect(!profile.acceptsManifest(wrongManifest))
+        let otherArchitecture = DirectPublicEditionIdentity.architecture == "arm64" ? "x86_64" : "arm64"
         let changes: [[String: Any]] = [
             ["TraverseDriveHealthServiceVersion": true],
             ["TraverseDriveHealthServiceVersion": 2],
             ["TraverseDriveHealthHelperVersion": 2],
             ["TraversePrivateUpdaterVersion": "2.10.0"],
             ["TraverseDirectStorageNamespace": "com.respawnstudios.traverse"],
+            ["TraverseDirectArchitecture": otherArchitecture],
             ["MacExplorerAccessPolicy": "sandbox-selected-v1"],
             ["MacExplorerSandboxQualificationCase": tag],
             ["SUFeedURL": "https://respawn-studios.com/products/traverse/public-updates/appcast.xml"]]
