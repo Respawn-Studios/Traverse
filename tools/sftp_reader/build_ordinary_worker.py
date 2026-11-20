@@ -101,6 +101,8 @@ def build():
     label=str(time.time_ns());log=OUTPUT/('build-'+label+'.log')
     with log.open('xb') as output:
         env=profile_packet.rust_environment(OUTPUT);env['SDKROOT']=wanted['sdk']
+        if developer_dir := os.environ.get('DEVELOPER_DIR'):
+            env['DEVELOPER_DIR'] = developer_dir
         env.pop('CARGO_BUILD_TARGET',None)
         if RELEASE:
             # Reuse the release cache recognized by the shared symbol policy.

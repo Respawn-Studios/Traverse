@@ -157,7 +157,8 @@ def check_source_backups() -> None:
         raise RuntimeError("Move source backups into an ignored build root before building the app.")
 
 
-def build(*, preserve_project: bool = True, configuration: str = "debug", architecture: str | None = None) -> None:
+def build(*, preserve_project: bool = True, configuration: str = "debug", architecture: str | None = None,
+          unsigned: bool = False) -> None:
     if configuration not in ("debug", "release"):
         raise ValueError("Unknown native build configuration")
     target = host() if architecture is None else named(architecture)
@@ -173,11 +174,16 @@ def build(*, preserve_project: bool = True, configuration: str = "debug", archit
     prepare_crash_reporter()
     if not preserve_project or not (ROOT / "MacExplorer.xcodeproj/project.pbxproj").is_file():
         generate()
-    derived = local_directory("xcode" if configuration == "debug" else "xcode-release")
+    output = "xcode" if configuration == "debug" else "xcode-release"
+    derived = local_directory(output + "-unsigned" if unsigned else output)
     application = derived / "Build/Products" / configuration.title() / "Mac Explorer.app"
     packages = local_directory("source-packages")
     result = local_directory("results") / f"build-{stamp()}.xcresult"
     sources = source_inputs()
+    # The compile-only app is unsigned. Bundled worker assembly still validates
+    # each worker's local ad-hoc signature and manifest.
+    signing = ["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "EXPANDED_CODE_SIGN_IDENTITY=-"] \
+        if unsigned else ["CODE_SIGN_STYLE=Manual"]
     build_log = execute([
         "xcodebuild", "-project", str(ROOT / "MacExplorer.xcodeproj"),
         "-scheme", "MacExplorer", "-configuration", configuration.title(), "-destination", f"platform=macOS,arch={target.name}",
@@ -185,7 +191,7 @@ def build(*, preserve_project: bool = True, configuration: str = "debug", archit
         "-resultBundlePath", str(result), "-skipPackageUpdates", "-disableAutomaticPackageResolution",
         "-disablePackageRepositoryCache", "-packageCachePath", str(local_directory("package-cache")),
         "-packageAuthorizationProvider", "netrc", "-jobs", "4",
-        "CODE_SIGN_STYLE=Manual",
+        *signing,
         "COMPILER_INDEX_STORE_ENABLE=NO",
         "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
         "ONLY_ACTIVE_ARCH=YES", f"ARCHS={target.name}", f"TRAVERSE_BUILD_ARCH={target.name}",
@@ -196,10 +202,16 @@ def build(*, preserve_project: bool = True, configuration: str = "debug", archit
     ], "build" if configuration == "debug" else "build-release")
     if not application.is_dir():
         raise RuntimeError(f"Build succeeded without the expected native application: {application}")
-    signature_log = execute(["codesign", "--verify", "--strict", str(application)], "verify-signature")
-    products = product_inputs(application)
+    signature_log = None if unsigned else execute(["codesign", "--verify", "--strict", str(application)], "verify-signature")
     if sources != source_inputs():
         raise RuntimeError(f"Native build inputs changed during compilation; retain {build_log} and rebuild current source.")
+    if unsigned:
+        if (application / "Contents/_CodeSignature/CodeResources").exists():
+            raise RuntimeError("The compile-only output unexpectedly has an app bundle signature.")
+        print(f"Compile-only application: {application}")
+        return
+    assert signature_log is not None
+    products = product_inputs(application)
     # One current manifest, not a new copied build graph or per-run artifact.
     # Consumers pin this record and the exact product before any live check.
     manifest = local_directory("results") / f"current-build-{configuration}.json"
@@ -330,8 +342,9 @@ def test(filter_expression: str | None, configuration: str = "debug", *, serial:
             print("Waiting for the current package-test run to drain…", flush=True)
             fcntl.flock(lock, fcntl.LOCK_EX)
         prior_fixtures = generated_test_fixture_roots()
-        log = execute(command, "test", timeout=300, fixture_root=fixture_root)
-        if "error: unable to attach DB:" in log.read_text():
+        log = execute(command, "test", timeout=300 if filter_expression else 900, fixture_root=fixture_root)
+        transcript = log.read_text()
+        if "error: unable to attach DB:" in transcript:
             raise RuntimeError(f"Shared build-database collision; test result is not accepted: {log}")
         # Failed runs retain their fixtures. Only the completed, exclusive run
         # can dispose its new generated roots; never touch real Trash.
@@ -776,6 +789,8 @@ def main() -> int:
                               help="Native optimization configuration; Release uses separate build products.")
     native_build.add_argument("--arch", choices=tuple(ARCHITECTURES), default=host().name,
                               help="Build the app and every bundled helper for this Mac architecture.")
+    native_build.add_argument("--unsigned", action="store_true",
+                              help="Build a separate app bundle without app signing or a run-ready build receipt.")
     native_build.add_argument("--preserve-project", action="store_true",
                               help="Build the existing Xcode project without regenerating owner edits.")
     native_build.add_argument("--regenerate-project", action="store_false", dest="preserve_project",
@@ -925,7 +940,8 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
     args = parser.parse_args()
     try:
         if args.command == "build":
-            build(preserve_project=args.preserve_project, configuration=args.configuration, architecture=args.arch)
+            build(preserve_project=args.preserve_project, configuration=args.configuration, architecture=args.arch,
+                  unsigned=args.unsigned)
         elif args.command == "test":
             test(args.filter, args.configuration, serial=args.serial)
         elif args.command == "native-check":

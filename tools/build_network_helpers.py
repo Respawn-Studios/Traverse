@@ -89,6 +89,8 @@ def fingerprint(sdk):
 def build_locked():
     verify()
     env = environment()
+    if developer_dir := os.environ.get('DEVELOPER_DIR'):
+        env['DEVELOPER_DIR'] = developer_dir
     env.pop('CARGO_BUILD_TARGET', None)
     sdk = subprocess.check_output(['/usr/bin/xcrun', '--show-sdk-path'], env=env, text=True).strip()
     env['SDKROOT'] = sdk

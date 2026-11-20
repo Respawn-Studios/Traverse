@@ -19,6 +19,7 @@
     ".gitignore",
     ".github/FUNDING.yml",
     ".github/pull_request_template.md",
+    ".github/workflows/pull-request.yml",
     "CONTRIBUTING.md",
     "CHANGELOG.md",
     "COMMERCIAL-LICENSING.md",

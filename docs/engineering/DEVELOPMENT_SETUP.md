@@ -15,6 +15,16 @@ or release-signing credentials are required.
 
 ## Install the pinned Rust components
 
+On Apple Silicon, one command prepares the checked compiler and worker dependencies:
+
+```sh
+python3 -B tools/worker_setup.py --install-toolchain --fetch
+```
+
+The installer checks each download before extraction and verifies the staged
+installation before placing it under `.build/`. An existing compiler is checked
+and reused. For manual or cross-build setup, use the components below.
+
 [tools/rust-toolchain.json](../../tools/rust-toolchain.json) defines the required
 version, target, installation prefix, component filenames and SHA-256 hashes.
 The current pin is **Rust 1.99.1**. Its `components` table lists separate
@@ -51,16 +61,17 @@ collector uses them. A full Rust documentation component is unnecessary.
 
 ## Prepare dependencies and build
 
-Fetch the locked production dependencies once:
+If you installed Rust manually, fetch the locked production dependencies once
+with `python3 -B tools/worker_setup.py --fetch`. Then build and run:
 
 ```sh
-python3 -B tools/worker_setup.py --fetch
 python3 -B tools/dev.py build
 python3 -B tools/dev.py run --skip-build
 ```
 
 The explicit `--fetch` step uses the existing SMB/SFTP dependency caches under
-`.build/`, checks the lockfiles and validates notices. It does not regenerate
+`.build/` and fetches the locked graphs for both Mac architectures so the bundled
+notices can be checked. It does not regenerate
 locks or install a global toolchain. The helper rejects unexpected Cargo
 credential/configuration files and unreviewed registry sources. A custom
 corporate registry configuration requires a compatible reviewed setup.

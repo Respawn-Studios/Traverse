@@ -45,7 +45,7 @@ jobs:
           test "$(uname -m)" = "$TRAVERSE_CI_ARCH"
           sw_vers
           xcodebuild -version
-      - name: Prepare pinned worker dependencies
+      - name: Install pinned Rust and fetch worker dependencies
         run: python3 -B tools/worker_setup.py --install-toolchain --fetch
       - name: Compile the app
         run: python3 -B tools/dev.py build --unsigned

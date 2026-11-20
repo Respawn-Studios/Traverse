@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare the two production Cargo caches without historical QA machinery.
+"""Prepare the pinned Rust components and locked production Cargo caches.
 
-Default inspection is offline. --fetch explicitly permits public dependency
-downloads into the existing repository-local caches; it never installs a compiler,
-updates a lockfile, runs an app or changes global Cargo/shell configuration.
+Default inspection is offline. Installation and dependency fetch are explicit
+and use only checkout-local storage.
 """
 from __future__ import annotations
 
@@ -107,11 +106,11 @@ def require_public_manifests() -> None:
             raise RuntimeError("A production manifest selects a new source; review it before fetching")
 
 
-def require_toolchain() -> tuple[str, str]:
-    compiler, cargo = TOOLCHAIN / "bin/rustc", TOOLCHAIN / "bin/cargo"
+def require_toolchain(prefix: Path = TOOLCHAIN) -> tuple[str, str]:
+    compiler, cargo = prefix / "bin/rustc", prefix / "bin/cargo"
     if not compiler.is_file() or not cargo.is_file():
         raise RuntimeError("Install the pinned local Rust toolchain first; see docs/engineering/DEVELOPMENT_SETUP.md")
-    env = {"PATH": str(TOOLCHAIN / "bin") + ":/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"}
+    env = {"PATH": str(prefix / "bin") + ":/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"}
     rust_version = run([str(compiler), "--version"], env).decode().strip()
     cargo_version = run([str(cargo), "--version"], env).decode().strip()
     if not rust_version.startswith("rustc 1.99.1 ") or not cargo_version.startswith("cargo 1.99.1 "):
@@ -119,8 +118,64 @@ def require_toolchain() -> tuple[str, str]:
     return rust_version, cargo_version
 
 
+def install_host_toolchain() -> None:
+    pin = json.loads((ROOT / "tools/rust-toolchain.json").read_text())
+    prefix = Path(pin["prefix"])
+    if prefix != TOOLCHAIN.relative_to(ROOT) or prefix.name != f'rust-{pin["version"]}':
+        raise RuntimeError("Rust installation prefix differs from the build tools")
+    local_directory(prefix.parent.relative_to(".build").as_posix())
+    if TOOLCHAIN.is_symlink():
+        raise RuntimeError("The Rust installation prefix is redirected")
+    if TOOLCHAIN.exists():
+        require_toolchain()
+        return
+
+    target = host().rust_target
+    components = pin["components"][target]
+    names = [f'{role}-{pin["version"]}-{target}.tar.xz' for role in ("rustc", "rust-std", "cargo")]
+    if [item["filename"] for item in components] != names or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", pin["date"]):
+        raise RuntimeError("Unexpected Rust distribution component list")
+
+    with tempfile.TemporaryDirectory(prefix="rust-components-", dir=local_directory("setup")) as temporary:
+        work = Path(temporary)
+        staged = work / "prefix"
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8", "TMPDIR": temporary}
+        for item in components:
+            name = item["filename"]
+            archive = work / name
+            print("Preparing " + name, flush=True)
+            url = f'https://static.rust-lang.org/dist/{pin["date"]}/{name}'
+            subprocess.run(["/usr/bin/curl", "-q", "--fail", "--silent", "--show-error", "--location",
+                "--proto", "=https", "--proto-redir", "=https", "--max-filesize", str(256 << 20),
+                "--output", str(archive), url], env=env, check=True, timeout=180)
+            digest = hashlib.sha256()
+            with archive.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != item["sha256"]:
+                raise RuntimeError(f"Checksum mismatch for {name}")
+            subprocess.run(["/usr/bin/tar", "-xJf", str(archive), "-C", temporary], env=env, check=True, timeout=120)
+            installer = work / name.removesuffix(".tar.xz") / "install.sh"
+            subprocess.run(["/bin/bash", str(installer), f"--prefix={staged}", "--disable-ldconfig"],
+                cwd=work, env=env, check=True, timeout=120)
+        require_toolchain(staged)
+        if not (staged / "lib/rustlib" / target / "lib").is_dir():
+            raise RuntimeError("The verified Rust installation is missing its host standard library")
+        if TOOLCHAIN.is_symlink():
+            raise RuntimeError("The Rust installation prefix is redirected")
+        if not TOOLCHAIN.exists():
+            try:
+                staged.rename(TOOLCHAIN)
+            except OSError:
+                if not TOOLCHAIN.is_dir() or TOOLCHAIN.is_symlink():
+                    raise
+        require_toolchain()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--install-toolchain", action="store_true",
+                        help="Download and verify the pinned compiler, standard library and Cargo for this host.")
     parser.add_argument("--fetch", action="store_true",
                         help="Fetch only the two locked production graphs from public registries.")
     parser.add_argument("--arch", choices=tuple(ARCHITECTURES), default=host().name,
@@ -128,6 +183,8 @@ def main() -> None:
     args = parser.parse_args()
     if platform.system() != "Darwin":
         raise RuntimeError("The bundled workers require the pinned macOS toolchain")
+    if args.install_toolchain:
+        install_host_toolchain()
     target = named(args.arch).rust_target
     cargo = TOOLCHAIN / "bin/cargo"
     version, cargo_version = require_toolchain()
@@ -145,8 +202,10 @@ def main() -> None:
         refuse_private_configuration(env)
         if args.fetch:
             print("Fetching locked " + role.upper() + " dependencies…", flush=True)
+            # The bundled notices cover the locked graphs on both Mac CPUs.
+            notice_targets = [arg for arch in ARCHITECTURES.values() for arg in ("--target", arch.rust_target)]
             run([str(cargo), "fetch", "--manifest-path", str(ROOT / manifest),
-                 "--locked", "--target", target], env, fetch=True)
+                 "--locked", *notice_targets], env, fetch=True)
         metadata = json.loads(run([str(cargo), "metadata", "--manifest-path", str(ROOT / manifest),
                                    "--locked", "--offline", "--format-version", "1",
                                    "--filter-platform", target], env))

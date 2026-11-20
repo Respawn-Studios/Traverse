@@ -59,6 +59,18 @@ python3 -B tools/dev.py native-check --help
 Choose the checks that match the change; these examples are not a required
 sequence. Add a regression for a demonstrated bug or integrity contract. Broaden
 validation when shared behavior changes or a failure exposes another risk.
+Pull requests into `main` run an unsigned app build and the ExplorerKit suites
+on GitHub's Apple Silicon and Intel runners. To run those checks locally with
+the supported Xcode and the pinned dependencies installed:
+
+```sh
+python3 -B tools/dev.py build --unsigned
+python3 -B tools/dev.py test --serial
+```
+
+The app build here is for compilation. Bundled workers use local ad-hoc
+signatures. Interactive macOS checks and release signing run separately.
+
 For visual changes, build and inspect normal and enlarged layouts, keyboard
 focus and the relevant motion settings. State what was checked and what remains
 unexercised; a hidden-window check does not establish visible interaction.
