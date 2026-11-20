@@ -925,9 +925,13 @@ final class ZIPMemberRenameCopyTests: XCTestCase {
         var windows = GeneratedZIP.Member("Folder/Before.txt", mode: 0)
         windows.creator = 0x0a14
         windows.comment = Data(repeating: 0xff, count: 65_535)
-        let ntfs = GeneratedZIP.le(0x000a, 2) + GeneratedZIP.le(32, 2)
-            + Data(repeating: 0, count: 4) + GeneratedZIP.le(1, 2) + GeneratedZIP.le(24, 2)
-            + GeneratedZIP.le(132_000_000_000_000_000, 8) + Data(repeating: 0, count: 16)
+        var ntfs = GeneratedZIP.le(0x000a, 2)
+        ntfs.append(GeneratedZIP.le(32, 2))
+        ntfs.append(Data(repeating: 0, count: 4))
+        ntfs.append(GeneratedZIP.le(1, 2))
+        ntfs.append(GeneratedZIP.le(24, 2))
+        ntfs.append(GeneratedZIP.le(132_000_000_000_000_000, 8))
+        ntfs.append(Data(repeating: 0, count: 16))
         windows.centralExtra = ntfs
         var unix = GeneratedZIP.Member("Folder/Other.txt")
         let prefix = GeneratedZIP.le(0x5455, 2), modified = GeneratedZIP.le(1_700_000_000, 4)

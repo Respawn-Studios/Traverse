@@ -122,7 +122,10 @@ struct DriveHealthWireTests {
     @Test func serviceReplyUsesTheClosedWireEnvelopeWithoutChildEvidence() throws {
         let message = xpc_dictionary_create(nil, nil, 0)
         let bytes = reply(warning: 0x41)
-        bytes.withUnsafeBytes { xpc_dictionary_set_data(message, "reply", $0.baseAddress, $0.count) }
+        try bytes.withUnsafeBytes { buffer in
+            let address = try #require(buffer.baseAddress)
+            xpc_dictionary_set_data(message, "reply", address, buffer.count)
+        }
         let report = try #require(DriveHealthXPCClient.decodeReply(message, nonce: nonce, serviceExited: true))
         #expect(report.transport == .serviceReply(settled: true) && !report.childReaped)
         #expect(report.nativeCleanupConfirmed && report.nvmeMeasurements?.temperatureCelsius != nil)
@@ -147,7 +150,7 @@ struct DriveHealthWireTests {
         #expect(claims <= 1 && control.stopRequested && !control.claimRequest())
     }
 
-    @Test func malformedServiceEnvelopeNeverPublishesHardwareMeasurements() {
+    @Test func malformedServiceEnvelopeNeverPublishesHardwareMeasurements() throws {
         let wrongType = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(wrongType, "reply", "not a hardware reply")
         #expect(DriveHealthXPCClient.decodeReply(wrongType, nonce: nonce, serviceExited: true) == nil)
@@ -156,7 +159,10 @@ struct DriveHealthWireTests {
         #expect(DriveHealthXPCClient.replyFailure(XPC_ERROR_CONNECTION_INVALID) == .connectionEnded)
         for bytes in [Array(reply().dropLast()), reply() + [0]] {
             let message = xpc_dictionary_create(nil, nil, 0)
-            bytes.withUnsafeBytes { xpc_dictionary_set_data(message, "reply", $0.baseAddress, $0.count) }
+            try bytes.withUnsafeBytes { buffer in
+                let address = try #require(buffer.baseAddress)
+                xpc_dictionary_set_data(message, "reply", address, buffer.count)
+            }
             #expect(DriveHealthXPCClient.decodeReply(message, nonce: nonce, serviceExited: true) == nil)
         }
         let absent = DriveHealthDrain(transport: .notStarted, nativeCleanupConfirmed: true)
