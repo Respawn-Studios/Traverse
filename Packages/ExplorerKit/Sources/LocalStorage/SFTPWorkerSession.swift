@@ -993,7 +993,8 @@ private final class SFTPProcessOwner: @unchecked Sendable {
         case .agentCatalog: argument = "--agent-paged-worker"
         #endif
         }
-        var argv = [prepared.helper.path, argument].map { strdup($0) } + [nil]
+        let executablePath: String = prepared.helper.path
+        var argv = [strdup(executablePath), strdup(argument), nil]
         var env = [strdup("LANG=C"), strdup("LC_ALL=C"), nil]
         defer { argv.forEach { free($0) }; env.forEach { free($0) } }
         guard argv.dropLast().allSatisfy({ $0 != nil }), env.dropLast().allSatisfy({ $0 != nil }) else { throw SFTPSessionFailure.unavailable }
@@ -1097,7 +1098,8 @@ private final class SFTPProcessOwner: @unchecked Sendable {
               posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0) == 0,
               posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0) == 0,
               posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) == 0 else { throw SFTPSessionFailure.unavailable }
-        var argv = [executable.path, "--sftp-original-pipe-child", scenario.rawValue].map { strdup($0) } + [nil]
+        let executablePath: String = executable.path
+        var argv = [strdup(executablePath), strdup("--sftp-original-pipe-child"), strdup(scenario.rawValue), nil]
         var environment = [strdup("LANG=C"), strdup("LC_ALL=C"), nil]
         defer { argv.forEach { free($0) }; environment.forEach { free($0) } }
         guard argv.dropLast().allSatisfy({ $0 != nil }), environment.dropLast().allSatisfy({ $0 != nil }) else { throw SFTPSessionFailure.unavailable }
@@ -1180,7 +1182,8 @@ private final class SFTPProcessOwner: @unchecked Sendable {
               posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0) == 0,
               posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0) == 0,
               posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) == 0 else { throw SFTPSessionFailure.unavailable }
-        var argv = [executable.path, "--sftp-inplace-v1-pipe-child", scenario.rawValue].map { strdup($0) } + [nil]
+        let executablePath: String = executable.path
+        var argv = [strdup(executablePath), strdup("--sftp-inplace-v1-pipe-child"), strdup(scenario.rawValue), nil]
         var environment = environmentStrings.map { strdup($0) } + [nil]
         defer { argv.forEach { free($0) }; environment.forEach { free($0) } }
         guard argv.dropLast().allSatisfy({ $0 != nil }), environment.dropLast().allSatisfy({ $0 != nil }) else { throw SFTPSessionFailure.unavailable }
