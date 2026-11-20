@@ -1,0 +1,117 @@
+name: Release installer smoke test
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/release-installers.yml]
+  workflow_dispatch:
+    inputs:
+      release-id:
+        description: GitHub release ID. Leave blank to check the latest published release.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  startup:
+    name: Start the signed app on macOS 15 (${{ matrix.arch }})
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    env:
+      TRAVERSE_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Download and check the matching signed installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release-id }}
+        run: |
+          test "$(uname -m)" = "$TRAVERSE_ARCH"
+          os="$(sw_vers -productVersion)"
+          test "${os%%.*}" = 15
+          release="${RELEASE_ID:-latest}"
+          [[ "$release" == latest || "$release" =~ ^[1-9][0-9]{0,17}$ ]]
+          dir="$RUNNER_TEMP/traverse-release-smoke"
+          mkdir -m 700 "$dir"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release" > "$dir/release.json"
+          version="$(jq -er '.tag_name | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$")) | ltrimstr("v")' "$dir/release.json")"
+          jq -e --arg arch "$TRAVERSE_ARCH" --arg version "$version" '
+            [.assets[] | select(.state == "uploaded" and
+              (.name | startswith("Traverse-" + $version + "-")) and
+              (.name | endswith("-" + $arch + ".dmg")) and
+              (.digest | test("^sha256:[0-9a-f]{64}$")))] |
+            select(length == 1) | .[0]
+          ' "$dir/release.json" > "$dir/asset.json"
+          asset="$(jq -er '.id' "$dir/asset.json")"
+          digest="$(jq -er '.digest | ltrimstr("sha256:")' "$dir/asset.json")"
+          gh api --header 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$asset" > "$dir/Traverse.dmg"
+          printf '%s  %s\n' "$digest" "$dir/Traverse.dmg" | shasum -a 256 --check
+
+      - name: Install in the runner and check startup
+        run: |
+          dir="$RUNNER_TEMP/traverse-release-smoke"
+          image="$dir/Traverse.dmg"
+          version="$(jq -r '.tag_name | ltrimstr("v")' "$dir/release.json")"
+          name="$(jq -r '.name' "$dir/asset.json")"
+          build="${name#"Traverse-$version-"}"
+          build="${build%"-$TRAVERSE_ARCH.dmg"}"
+          [[ "$build" =~ ^[1-9][0-9]{0,9}$ ]]
+          mkdir "$dir/mount" "$dir/Applications"
+          xcrun stapler validate "$image"
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$dir/mount" "$image"
+          trap 'hdiutil detach "$dir/mount"' EXIT
+          app="$dir/Applications/Traverse.app"
+          ditto "$dir/mount/Traverse.app" "$app"
+          trap - EXIT
+          hdiutil detach "$dir/mount"
+          info="$app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleIdentifier raw "$info")" = com.respawnstudios.traverse
+          test "$(plutil -extract CFBundleShortVersionString raw "$info")" = "$version"
+          test "$(plutil -extract CFBundleVersion raw "$info")" = "$build"
+          test "$(xcrun lipo -archs "$app/Contents/MacOS/Traverse")" = "$TRAVERSE_ARCH"
+          codesign --verify --deep --strict "$app"
+          codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'TeamIdentifier=CDLNJRG82U'
+          xcrun stapler validate "$app"
+          cat > "$dir/startup.swift" <<'SWIFT'
+          import AppKit
+          import Darwin
+
+          let bundle = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
+          func app() -> NSRunningApplication? {
+              NSRunningApplication.runningApplications(withBundleIdentifier: "com.respawnstudios.traverse")
+                  .first { $0.bundleURL?.standardizedFileURL.path == bundle.path }
+          }
+          func wait(_ seconds: TimeInterval, for condition: () -> Bool) -> Bool {
+              let deadline = Date().addingTimeInterval(seconds)
+              while !condition(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+              return condition()
+          }
+          guard wait(30, for: { app()?.isFinishedLaunching == true }), let launched = app() else {
+              _ = app()?.terminate()
+              fputs("The installed app did not finish launching.\n", stderr)
+              exit(1)
+          }
+          RunLoop.current.run(until: Date().addingTimeInterval(2))
+          guard !launched.isTerminated, launched.terminate(), wait(15, for: { launched.isTerminated }) else {
+              fputs("The installed app did not settle and quit normally.\n", stderr)
+              exit(1)
+          }
+          print("Verified startup and normal quit of the signed installer on this runner.")
+          SWIFT
+          open -gn "$app"
+          swift "$dir/startup.swift" "$app"

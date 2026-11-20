@@ -13,12 +13,14 @@ import os
 import plistlib
 import re
 from pathlib import Path
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
 import tarfile
 import time
+from typing import NamedTuple
 import uuid
 import zipfile
 
@@ -144,7 +146,12 @@ def execute(arguments: list[str], label: str, timeout: int | None = None,
         # console output compact; the full ignored file remains inspectable.
         lines = log.read_text(errors="replace").splitlines()
         errors = list(dict.fromkeys(line for line in lines if re.search(r"\b(?:fatal )?error:", line)))
-        excerpt = errors[-12:] + lines[-8:] if errors else lines[-24:]
+        if label == "test":
+            issues = list(dict.fromkeys(line for line in lines
+                                    if "recorded an issue" in line or " : XCTAssert" in line or " : XCTFail" in line))
+        else:
+            issues = []
+        excerpt = (errors[-12:] + issues[:80] + lines[-8:]) if errors or issues else lines[-24:]
         print("\n".join(line if len(line) <= 400 else line[:400] + " …" for line in excerpt), file=sys.stderr)
         raise RuntimeError(f"{label} {failure}; full output: {log}")
     verdict = "process completed" if awaits_report else "passed"
@@ -308,6 +315,7 @@ def test(filter_expression: str | None, configuration: str = "debug", *, serial:
     if configuration not in ("debug", "release"):
         raise ValueError("Unknown SwiftPM build configuration")
     scratch = "swift-tests" if configuration == "debug" else "swift-tests-release"
+    results = local_directory("results") / f"tests-{configuration}-{stamp()}.xml"
     command = [
         "xcrun", "swift", "test", "--package-path", str(ROOT / "Packages/ExplorerKit"),
         "--configuration", configuration,
@@ -321,7 +329,7 @@ def test(filter_expression: str | None, configuration: str = "debug", *, serial:
         "--disable-index-store",
         "-Xswiftc", "-warnings-as-errors",
         "-Xswiftc", "-module-cache-path", "-Xswiftc", str(local_directory("compiler-cache/swift")),
-        "--xunit-output", str(local_directory("results") / f"tests-{configuration}-{stamp()}.xml"),
+        "--xunit-output", str(results),
     ]
     if filter_expression:
         command.extend(["--filter", filter_expression])
@@ -348,6 +356,14 @@ def test(filter_expression: str | None, configuration: str = "debug", *, serial:
         transcript = log.read_text()
         if "error: unable to attach DB:" in transcript:
             raise RuntimeError(f"Shared build-database collision; test result is not accepted: {log}")
+        if filter_expression:
+            evidence = (results, results.with_stem(results.stem + "-swift-testing"))
+            # SwiftPM supplies XML for Swift Testing. XCTest still reports its
+            # executed cases to the terminal, even when its XML is absent.
+            swift_cases = any(path.is_file() and re.search(r"<testcase\b", path.read_text()) for path in evidence)
+            xctest_cases = re.search(r"^Test Case '-\[[^\]\n]+\]' passed[ .(]", transcript, re.MULTILINE)
+            if not swift_cases and not xctest_cases:
+                raise RuntimeError(f"No package tests selected by {filter_expression!r}; see {log}")
         # Failed runs retain their fixtures. Only the completed, exclusive run
         # can dispose its new generated roots; never touch real Trash.
         completed_fixtures = generated_test_fixture_roots() - prior_fixtures
@@ -552,12 +568,19 @@ def verify_ui(count: int, fixture_path: str | None, skip_build: bool, offscreen:
               check_everyday: bool = False, check_sidebar: bool = False, layout_matrix: bool = False, check_substantial: bool = False,
               check_tabs: bool = False, check_rename: bool = False, check_polish: bool = False,
               qualify_search_index: str | None = None, profile_rename: bool = False, check_queue: bool = False,
-              check_drag_tracking: bool = False, check_address: bool = False, check_analysis: bool = False) -> None:
-    if check_tabs or check_rename or check_polish or qualify_search_index or profile_rename or check_queue or check_drag_tracking or check_address or check_analysis:
-        if sum((check_tabs, check_rename, check_polish, bool(qualify_search_index), profile_rename, check_queue, check_drag_tracking, check_address, check_analysis)) != 1 or any((qualify_permissions, qualify_trash, qualify_trash_fixture, restore_trash_fixture,
+              check_drag_tracking: bool = False, check_address: bool = False, check_analysis: bool = False,
+              check_git: bool = False, git_index_only: bool = False) -> None:
+    focused = sum((check_tabs, check_rename, check_polish, bool(qualify_search_index), profile_rename,
+                   check_queue, check_drag_tracking, check_address, check_analysis, check_git))
+    if focused:
+        if focused != 1 or any((qualify_permissions, qualify_trash, qualify_trash_fixture, restore_trash_fixture,
                                                qualify_folder_access, qualify_glass, check_presentation, check_chrome, check_workspace,
                                                qualify_permission_retry, check_everyday, check_sidebar, layout_matrix, check_substantial)):
             raise ValueError("Focused workflow checks require one separate generated-fixture mode.")
+    if check_git and offscreen:
+        raise ValueError("The Git review check needs a visible generated window.")
+    if git_index_only and not check_git:
+        raise ValueError("Git index checks require --check-git.")
     if check_substantial and (qualify_permissions or qualify_trash or qualify_trash_fixture or restore_trash_fixture or qualify_folder_access or qualify_glass or check_presentation or check_chrome or check_workspace or qualify_permission_retry or check_everyday or check_sidebar or layout_matrix):
         raise ValueError("Substantial workflow checks require their own generated-fixture mode.")
     if layout_matrix and not check_sidebar:
@@ -664,6 +687,10 @@ def verify_ui(count: int, fixture_path: str | None, skip_build: bool, offscreen:
         command.append("--check-address")
     if check_analysis:
         command.append("--check-analysis")
+    if check_git:
+        command.append("--check-git")
+        if git_index_only:
+            command.append("--git-index-only")
     if qualify_search_index:
         command.extend(["--qualify-search-index", str(Path(qualify_search_index).absolute())])
     if profile_rename:
@@ -783,6 +810,70 @@ def native_check(*args, **options) -> Path:
     return run_native_check(*args, **options)
 
 
+class ValidationSection(NamedTuple):
+    package_filter: str
+    native: tuple[str, ...] = ()
+    browser: tuple[str, ...] = ()
+
+
+# Existing routes only. Candidate reuses the integrated workspace/Git journey
+# and a single ordinary build. No release or live-hardware actions here.
+VALIDATION_SECTIONS = {
+    "workspace": ValidationSection("ExplorerCoreTests|SearchTests|FolderComparisonTests",
+        ("sidebar-layout", "pane-motion"), ("check_address", "check_chrome", "check_tabs")),
+    "git": ValidationSection("GitRevisionTests", browser=("check_git",)),
+    "git-index": ValidationSection("guardedIndex|guardedStage|guardedWorkingReview", browser=("check_git",)),
+    "editor": ValidationSection("TextAlignmentTests|TextPersistentIdentityTests|projectTextReadKeepsItsRootPrivacyAndByteBounds|confinedTextScopeRetainsAllExclusions",
+        ("local-editor", "editor-preferences", "editor-lines")),
+    "editor-comparison": ValidationSection("TextAlignmentTests", ("editor-comparison",)),
+    "settings": ValidationSection("BrowserBehaviorTests|BrowserShortcutTests|FolderViewPresetsTests", ("settings-motion",)),
+    "operations": ValidationSection("FileOperationsTests", ("selection-group", "operation-access"), ("check_rename", "check_queue")),
+    "archives": ValidationSection("ZIP.*Tests|TAR.*Tests|Archive.*Tests",
+        ("create-zip", "create-tar", "compressed-tar", "archive-export", "zip-editor-native", "tar-editor")),
+    "analyzer": ValidationSection("StorageAnalysisTests", ("analysis-persistence", "storage-chart")),
+    "drives": ValidationSection("Drive.*Tests|APFS.*Tests", ("drive-status", "drive-benchmark")),
+    "connections": ValidationSection("SMB.*Tests|SFTP.*Tests|SSHConfigurationTests",
+        ("connection-fields", "connection-metadata", "smb-transfer-menus")),
+    "support": ValidationSection("CrashReportTests|DirectUpdatesTests", ("support-details", "help-motion", "window-lifecycle")),
+}
+
+
+def validate(tier: str, *, sections: tuple[str, ...] = (), filter_expression: str | None = None, plan_only: bool = False) -> None:
+    if tier == "unit":
+        if not filter_expression or not filter_expression.strip():
+            raise ValueError("Choose a nonempty Swift package test filter.")
+        package_filter, native, browser = filter_expression, [], []
+    else:
+        selected = [VALIDATION_SECTIONS[name] for name in dict.fromkeys(sections or VALIDATION_SECTIONS)]
+        package_filter = "|".join(dict.fromkeys(section.package_filter for section in selected)) if tier == "section" else None
+        native = list(dict.fromkeys(route for section in selected for route in section.native))
+        browser = list(dict.fromkeys(route for section in selected for route in section.browser))
+        if "editor-preferences" in native and "editor-comparison" in native:
+            native.remove("editor-comparison")
+        if tier == "candidate":
+            browser.remove("check_git")
+            browser.append("check_substantial")
+    index_only = "git-index" in sections and "git" not in sections
+    steps = [("test", "--serial") + (("--filter", package_filter) if package_filter else ())]
+    if native or browser:
+        steps.append(("build", "--preserve-project"))
+        for mode in browser:
+            index_flags = ("--git-index-only",) if index_only and mode == "check_git" else ()
+            steps.append(("verify-ui", "--skip-build", "--count", "160", "--" + mode.replace("_", "-")) + index_flags)
+        steps.extend(("native-check", feature, "--skip-build") for feature in native)
+    for step in steps:
+        print(shlex.join(("python3", "-B", "tools/dev.py", *step)), flush=True)
+    if plan_only:
+        return
+    test(package_filter, serial=True)
+    if native or browser:
+        build(preserve_project=True)
+    for mode in browser:
+        verify_ui(160, None, True, git_index_only=index_only and mode == "check_git", **{mode: True})
+    for feature in native:
+        native_check(feature, skip_build=True, interactive=False, motion=False)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -803,8 +894,18 @@ def main() -> int:
     tests.add_argument("--serial", action="store_true", help="Serialize a focused selection; the complete baseline is always serial.")
     tests.add_argument("--configuration", choices=("debug", "release"), default="debug",
                        help="SwiftPM optimization configuration; Release uses a separate scratch directory.")
+    checks = subcommands.add_parser("check", help="Select an isolated package test, feature section or candidate baseline.")
+    checks.set_defaults(sections=(), filter_expression=None)
+    tiers = checks.add_subparsers(dest="tier", required=True)
+    unit = tiers.add_parser("unit", help="Run only a matching Swift package test selection.")
+    unit.add_argument("--filter", dest="filter_expression", required=True, help="Swift package suite or case expression.")
+    section = tiers.add_parser("section", help="Run the package and native checks for the selected features on one build.")
+    section.add_argument("sections", nargs="+", choices=tuple(VALIDATION_SECTIONS))
+    candidate = tiers.add_parser("candidate", help="Run the complete package baseline and generated app journeys on one build.")
+    for choice in (unit, section, candidate):
+        choice.add_argument("--plan", action="store_true", help="Print exact commands without building or running anything.")
     focused = subcommands.add_parser("native-check", help="Run an existing feature check using the ordinary app and generated files.")
-    focused.add_argument("feature", choices=("startup-analysis", "sidebar-layout", "local-editor", "operation-access", "external-tools", "archive-pane", "archive-export", "trash-command", "remote-properties", "support-details", "transfer-diagnostics", "clipboard-admission", "connection-fields", "server-prompts", "sftp-profiles", "editor-preferences", "drive-benchmark", "drive-status", "editor-lines", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "batch-rename", "selection-group", "zip-add-copy", "zip-rename-copy", "zip-rename-folder-copy", "zip-remove-copy", "zip-remove-folder-copy", "zip-update-rename", "zip-update-tracked", "zip-update-native", "zip-editor-native", "zip-editor-native-recovery", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "zip-update-new-folder", "zip-update-duplicate", "zip-update-move", "zip-update-copy", "zip-new-folder-copy", "zip-update-folder", "zip-update-remove", "zip-update-empty", "zip-update-add", "analysis-persistence", "settings-motion", "help-motion", "tool-windows", "window-lifecycle", "pane-motion", "storage-chart", "storage-chart-integration", "folder-default", "hover-summary", "connection-metadata", "sftp-batch-download", "sftp-group-upload", "smb-transfer-menus", "connect-model", "smb-connected-uploads", "sftp-connected-actions"))
+    focused.add_argument("feature", choices=("startup-analysis", "sidebar-layout", "local-editor", "operation-access", "external-tools", "archive-pane", "archive-export", "trash-command", "remote-properties", "support-details", "transfer-diagnostics", "clipboard-admission", "connection-fields", "server-prompts", "sftp-profiles", "editor-preferences", "editor-comparison", "drive-benchmark", "drive-status", "editor-lines", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "batch-rename", "selection-group", "zip-add-copy", "zip-rename-copy", "zip-rename-folder-copy", "zip-remove-copy", "zip-remove-folder-copy", "zip-update-rename", "zip-update-tracked", "zip-update-native", "zip-editor-native", "zip-editor-native-recovery", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "zip-update-new-folder", "zip-update-duplicate", "zip-update-move", "zip-update-copy", "zip-new-folder-copy", "zip-update-folder", "zip-update-remove", "zip-update-empty", "zip-update-add", "analysis-persistence", "settings-motion", "help-motion", "tool-windows", "window-lifecycle", "pane-motion", "storage-chart", "storage-chart-integration", "folder-default", "hover-summary", "connection-metadata", "sftp-batch-download", "sftp-group-upload", "smb-transfer-menus", "connect-model", "smb-connected-uploads", "sftp-connected-actions"))
     focused.add_argument("--archive-format", choices=("zip", "tar", "tar.gz", "tar.bz2"), default="zip",
                          help="Concrete format for the shared archive-export callback/Finder flow.")
     focused.add_argument("--skip-build", action="store_true")
@@ -830,7 +931,7 @@ def main() -> int:
                          help="Reuse the existing connection-metadata flow for a focused native browser phase; no real server.")
     focused.add_argument("--large-interface", action="store_true", help="Check supported archive, connection, Settings and Help surfaces at 150%% in Light appearance.")
     focused.add_argument("--motion-mode", choices=("full", "reduced", "off"), default="full",
-                         help="Motion preference for the Settings/Help native checks.")
+                         help="Motion preference for supported native checks, including Editor Compare.")
     focused.add_argument("--generated-port", type=int,
                          help="Already-scoped loopback SMB listener for smb-connected-uploads; reads its generated secret only from stdin and starts no server.")
     focused.add_argument("--generated-fingerprint", help="Exact public fingerprint of the already-approved generated SFTP test server.")
@@ -931,6 +1032,10 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
                     help="Isolated address completion, search locations and quiet startup recovery checks.")
     ui.add_argument("--check-analysis", action="store_true",
                     help="Signed bundled scanner, analyzer window and folder summary checks on generated fixtures only.")
+    ui.add_argument("--check-git", action="store_true",
+                    help="Native Git review and index actions on generated repositories only.")
+    ui.add_argument("--git-index-only", action="store_true",
+                    help="With --check-git, check only Stage and Unstage through the browser, review and editor.")
     ui.add_argument("--check-drag-tracking", action="store_true",
                     help="Isolated native eventTracking-mode drag preparation checks; no physical Finder delivery.")
     ui.add_argument("--qualify-search-index", metavar="FIXTURE_RECEIPT",
@@ -946,18 +1051,20 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
                   unsigned=args.unsigned)
         elif args.command == "test":
             test(args.filter, args.configuration, serial=args.serial)
+        elif args.command == "check":
+            validate(args.tier, sections=tuple(args.sections), filter_expression=args.filter_expression, plan_only=args.plan)
         elif args.command == "native-check":
             zip_edit = args.feature.startswith("zip-")
-            if args.offscreen and not zip_edit and args.feature not in ("archive-export", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "batch-rename", "editor-preferences", "smb-transfer-menus", "connect-model", "sftp-group-upload", "transfer-diagnostics", "clipboard-admission", "support-details", "analysis-persistence", "operation-access"):
+            if args.offscreen and not zip_edit and args.feature not in ("archive-export", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "batch-rename", "editor-preferences", "editor-comparison", "smb-transfer-menus", "connect-model", "sftp-group-upload", "transfer-diagnostics", "clipboard-admission", "support-details", "analysis-persistence", "operation-access"):
                 parser.error("Offscreen functional checks apply only to archive, editor, saved-analysis, diagnostics and connection menu/model flows")
             if args.interactive and (args.feature not in ("sidebar-layout", "external-tools", "smb-transfer-menus", "sftp-group-upload", "zip-update-move", "tar-editor") or args.offscreen):
                 parser.error("Interactive review requires a supported visible native workflow")
-            if args.motion and args.feature not in ("sidebar-layout", "connection-fields", "analysis-persistence", "sftp-batch-download", "drive-benchmark", "drive-status", "editor-preferences", "remote-properties"):
-                parser.error("Motion recording applies to sidebar, connection fields, analysis, transfer, benchmark and editor checks")
-            if args.large_interface and not zip_edit and args.feature not in ("archive-pane", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "batch-rename", "selection-group", "settings-motion", "help-motion", "tool-windows", "pane-motion", "sftp-profiles", "storage-chart", "sftp-batch-download", "sftp-group-upload", "drive-benchmark", "drive-status", "editor-preferences"):
+            if args.motion and args.feature not in ("sidebar-layout", "connection-fields", "analysis-persistence", "storage-chart-integration", "sftp-batch-download", "drive-benchmark", "drive-status", "editor-preferences", "editor-comparison", "remote-properties", "selection-group"):
+                parser.error("Motion recording applies to supported sidebar, rename, connection, analysis, transfer, benchmark and editor checks")
+            if args.large_interface and not zip_edit and args.feature not in ("archive-pane", "tar-archive", "compressed-tar", "create-zip", "create-tar", "create-targz", "create-tarbz2", "tar-editor", "tar-gzip-editor", "tar-bzip2-editor", "batch-rename", "selection-group", "settings-motion", "help-motion", "tool-windows", "pane-motion", "sftp-profiles", "storage-chart", "storage-chart-integration", "sftp-batch-download", "sftp-group-upload", "drive-benchmark", "drive-status", "editor-preferences", "editor-comparison"):
                 parser.error("Large-interface review applies to supported archive, connection, Settings and Help checks")
-            if args.motion_mode != "full" and args.feature not in ("settings-motion", "help-motion", "tool-windows", "pane-motion", "sftp-profiles", "storage-chart", "selection-group"):
-                parser.error("The motion preference applies to Settings, Help, tool-window and grouping checks")
+            if args.motion_mode != "full" and args.feature not in ("settings-motion", "help-motion", "tool-windows", "pane-motion", "sftp-profiles", "storage-chart", "selection-group", "editor-comparison"):
+                parser.error("The motion preference applies to supported native motion and comparison checks")
             native_check(args.feature, skip_build=args.skip_build, interactive=args.interactive, motion=args.motion,
                          large_interface=args.large_interface, motion_mode=args.motion_mode, offscreen=args.offscreen,
                          generated_port=args.generated_port, generated_fingerprint=args.generated_fingerprint,
@@ -984,7 +1091,8 @@ never enables ordinary grouped-copy routing, and retains all fixture data.
         elif args.command == "verify-ui":
             verify_ui(args.count, args.fixture_root, args.skip_build, args.offscreen, args.launcher,
                       args.qualify_permissions, args.qualify_trash, args.qualify_folder_access,
-                      args.qualify_glass, args.check_presentation, args.qualify_trash_fixture, args.restore_trash_fixture, args.check_chrome, args.check_workspace, args.qualify_permission_retry, args.check_everyday, args.check_sidebar, args.layout_matrix, args.check_substantial, args.check_tabs, args.check_rename, args.check_polish, args.qualify_search_index, args.profile_rename, args.check_queue, args.check_drag_tracking, args.check_address, args.check_analysis)
+                      args.qualify_glass, args.check_presentation, args.qualify_trash_fixture, args.restore_trash_fixture, args.check_chrome, args.check_workspace, args.qualify_permission_retry, args.check_everyday, args.check_sidebar, args.layout_matrix, args.check_substantial, args.check_tabs, args.check_rename, args.check_polish, args.qualify_search_index, args.profile_rename, args.check_queue, args.check_drag_tracking, args.check_address, args.check_analysis,
+                      check_git=args.check_git, git_index_only=args.git_index_only)
         elif args.command == "run":
             if not args.skip_build:
                 build()

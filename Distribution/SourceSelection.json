@@ -3,6 +3,8 @@
   "name": "contributor-v1",
   "purpose": "Select the complete application, dependency, test and contributor sources; exclude local maintainer material and generated output.",
   "retainedTrees": [
+    ".github/DISCUSSION_TEMPLATE",
+    ".github/ISSUE_TEMPLATE",
     "App",
     "Distribution",
     "MacExplorer.xcodeproj",
@@ -20,6 +22,7 @@
     ".github/FUNDING.yml",
     ".github/pull_request_template.md",
     ".github/workflows/pull-request.yml",
+    ".github/workflows/release-installers.yml",
     "CONTRIBUTING.md",
     "CHANGELOG.md",
     "COMMERCIAL-LICENSING.md",
@@ -32,9 +35,6 @@
     "docs/PROJECT_FOUNDATION.md",
     "docs/ROADMAP.md",
     "PRIVACY.md",
-    ".github/ISSUE_TEMPLATE/bug_report.md",
-    ".github/ISSUE_TEMPLATE/feature_request.md",
-    ".github/ISSUE_TEMPLATE/config.yml",
     "SECURITY.md",
     "TRADEMARKS.md"
   ],
