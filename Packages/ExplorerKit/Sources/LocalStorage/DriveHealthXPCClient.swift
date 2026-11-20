@@ -85,6 +85,14 @@ internal enum DriveHealthXPCClient {
         guard let bytes = replyData(object) else { return nil }
         return DriveHealthWire.decode(bytes, nonce: nonce, transport: .serviceReply(settled: serviceExited))
     }
+    fileprivate static func setBytes(_ data: Data, on message: xpc_object_t, key: String) -> Bool {
+        data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress, !buffer.isEmpty else { return false }
+            xpc_dictionary_set_data(message, key, base, buffer.count)
+            return true
+        }
+    }
+
     fileprivate static func replyData(_ object: xpc_object_t) -> Data? {
         guard xpc_get_type(object) == XPC_TYPE_DICTIONARY,
               xpc_dictionary_get_count(object) == 1,
@@ -166,8 +174,7 @@ internal enum DriveHealthXPCClient {
             }
             let message = xpc_dictionary_create(nil, nil, 0)
             let bytes = DriveHealthWire.request(selection, nonce: nonce)
-            bytes.withUnsafeBytes { xpc_dictionary_set_data(message, "request", $0.baseAddress, $0.count) }
-            guard control.claimRequest() else {
+            guard DriveHealthXPCClient.setBytes(bytes, on: message, key: "request"), control.claimRequest() else {
                 xpc_connection_activate(peer)
                 finish(failure(.stale, stage: .request, cleanup: true)); return
             }
@@ -189,7 +196,9 @@ internal enum DriveHealthXPCClient {
                 // actually been validated here. A send barrier at the service
                 // cannot prove receipt or keep live-peer validation possible.
                 let acknowledgement = xpc_dictionary_create(nil, nil, 0)
-                nonce.withUnsafeBytes { xpc_dictionary_set_data(acknowledgement, "ack", $0.baseAddress, $0.count) }
+                guard DriveHealthXPCClient.setBytes(nonce, on: acknowledgement, key: "ack") else {
+                    finish(replyState.fail()); return
+                }
                 guard let connection else { finish(replyState.fail(.connectionEnded)); return }
                 xpc_connection_send_message(connection, acknowledgement)
                 if let report = replyState.didAcknowledge() { finish(report) }
