@@ -1,0 +1,18 @@
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to do?
+      description: Describe the workflow and the step that gets in your way. A small example helps.
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: What would make it easier?
+      description: Share an approach you like, options worth weighing, or a sketch. There's room to change your mind.
+  - type: input
+    id: related
+    attributes:
+      label: Related issue or discussion
+      description: Optional. A link helps people find earlier conversations.

@@ -49,10 +49,14 @@ import Testing
         #expect(throws: StorageScanFailure.self) { try bound.validateQueryPrelude(missing, session: session) }
     }
     private func location(_ count: Int) -> [String: Any] {
-        ["kind":"location","location_revision":1,"classification_revision":3,"node":String(count),"source":0,
-         "chain":(1...count).map { index in ["id":String(index),"parent":String(index-1),
-            "name":Data("p".utf8).base64EncodedString(),"type":index == count ? 0 : 1,
-            "device":"1","inode":String(index+100),"flags":"0"] as [String:Any] }]
+        let name = Data("p".utf8).base64EncodedString()
+        let chain: [[String: Any]] = (1...count).map { index in
+            let type = index == count ? 0 : 1
+            return ["id": String(index), "parent": String(index - 1), "name": name, "type": type,
+                    "device": "1", "inode": String(index + 100), "flags": "0"]
+        }
+        return ["kind": "location", "location_revision": 1, "classification_revision": 3,
+                "node": String(count), "source": 0, "chain": chain]
     }
     @Test func longerLocationChainsRequireTheVerifiedBoundAndStillCheckEachParent() throws {
         let frames = [location(128)]

@@ -1,0 +1,19 @@
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: What do you need help with?
+      description: Say what you expected and where you got stuck.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Include commands, settings, or a small example someone else can follow. Remove private paths and server details.
+  - type: input
+    id: version
+    attributes:
+      label: Traverse version and macOS
+      description: Include the build and whether your Mac uses Apple Silicon or Intel if they may matter.
+      placeholder: "Traverse 0.3.0 (99) · macOS 15 · Intel"

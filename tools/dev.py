@@ -143,7 +143,7 @@ def execute(arguments: list[str], label: str, timeout: int | None = None,
         # Logs contain build diagnostics and fixture-only verification output. Keep
         # console output compact; the full ignored file remains inspectable.
         lines = log.read_text(errors="replace").splitlines()
-        errors = [line for line in lines if re.search(r"\b(?:fatal )?error:", line)]
+        errors = list(dict.fromkeys(line for line in lines if re.search(r"\b(?:fatal )?error:", line)))
         excerpt = errors[-12:] + lines[-8:] if errors else lines[-24:]
         print("\n".join(line if len(line) <= 400 else line[:400] + " …" for line in excerpt), file=sys.stderr)
         raise RuntimeError(f"{label} {failure}; full output: {log}")
