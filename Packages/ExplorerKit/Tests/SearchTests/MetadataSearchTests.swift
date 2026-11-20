@@ -235,7 +235,9 @@ private func collect(_ session: SearchSession) async -> ([SearchMatch], SearchCo
         let result = await collect(service.start(request: try SearchRequest(filename: "match"), scope: try SearchScope(root: fixture.root)))
         #expect(result.0.isEmpty)
         #expect(result.1?.isComplete == false)
-        #expect((result.1?.boundaryCounts[.denied] ?? 0) + (result.1?.boundaryCounts[.metadataUnavailable] ?? 0) > 0)
+        let denied = result.1?.boundaryCounts[.denied] ?? 0
+        let unavailable = result.1?.boundaryCounts[.metadataUnavailable] ?? 0
+        #expect(denied > 0 || unavailable > 0)
     }
     let missing = await collect(service.start(request: try SearchRequest(filename: "match"), scope: try SearchScope(root: fixture.root.appendingPathComponent("absent"))))
     #expect(missing.0.isEmpty)
