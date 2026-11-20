@@ -71,9 +71,10 @@ final class CrashReportTests: XCTestCase {
     }
 
     func testDefaultDraftKeepsReferencedImageIndicesWithoutTheUnusedImageInventory() throws {
-        let images = (0..<512).map { index in
-            CrashReport.Image(kind: index == 0 ? .application : .system,
-                uuid: "C04291FD-3D73-47AF-9A6A-74F8EB73F734", base: UInt64(4096 * (index + 1)), size: 4096)
+        let images: [CrashReport.Image] = (0..<512).map { index in
+            let kind: CrashReport.ImageKind = index == 0 ? .application : .system
+            let base = UInt64(index + 1) * 4_096
+            return .init(kind: kind, uuid: "C04291FD-3D73-47AF-9A6A-74F8EB73F734", base: base, size: 4_096)
         }
         let report = try CrashReport(capturedAt: nil, version: "1.0", build: "90", systemVersion: "15",
             systemBuild: nil, architecture: .arm64, signal: .abort, images: images,
