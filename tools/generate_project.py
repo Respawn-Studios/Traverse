@@ -112,6 +112,7 @@ def generate(*, destination: Path | None = None, traverse: bool = False, direct:
     common_project = 'CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;'
     current_release = release_notes.read()['releases'][0]
     common_target = f'CODE_SIGN_STYLE = Manual; ENABLE_APP_SANDBOX = NO; ENABLE_USER_SCRIPT_SANDBOXING = NO; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = App/MacExplorer/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MARKETING_VERSION = {current_release["version"]}; CURRENT_PROJECT_VERSION = {current_release["build"]}; PRODUCT_BUNDLE_IDENTIFIER = local.macexplorer.development; PRODUCT_NAME = "Mac Explorer"; SWIFT_EMIT_LOC_STRINGS = NO; SWIFT_STRICT_CONCURRENCY = complete;'
+    common_target += ' SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;'
     if traverse:
         # App-target settings only: command-line PRODUCT_NAME overrides would
         # also rename Swift package products and cause output collisions.

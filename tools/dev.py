@@ -193,7 +193,6 @@ def build(*, preserve_project: bool = True, configuration: str = "debug", archit
         "-packageAuthorizationProvider", "netrc", "-jobs", "4",
         *signing,
         "COMPILER_INDEX_STORE_ENABLE=NO",
-        "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
         "ONLY_ACTIVE_ARCH=YES", f"ARCHS={target.name}", f"TRAVERSE_BUILD_ARCH={target.name}",
         "OTHER_SWIFT_FLAGS=$(inherited) -j4 -driver-batch-count 4",
         f"CLANG_MODULE_CACHE_PATH={local_directory('compiler-cache/xcode')}",

@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pull-request-checks-${{ github.ref }}
+  group: pull-request-checks-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -47,7 +47,7 @@ jobs:
           xcodebuild -version
       - name: Install pinned Rust and fetch worker dependencies
         run: python3 -B tools/worker_setup.py --install-toolchain --fetch
-      - name: Compile the app
+      - name: Compile the unsigned app
         run: python3 -B tools/dev.py build --unsigned
       - name: Run ExplorerKit tests
         run: python3 -B tools/dev.py test --serial
