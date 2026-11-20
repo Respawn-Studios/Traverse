@@ -148,14 +148,15 @@ request; returning to a changed archive passively asks for Prepare again.
 Encrypted archives, ZIP64 and unsupported member metadata may be refused by a
 particular write route. A ZIP external drag and a remote external drag are
 different capabilities; this guide does not promise remote-to-Finder delivery.
-The upcoming direct build also lets you drag files and folders from plain,
-gzip or bzip2 TARs into Finder, with guarded Undo after restart. This is separate
-from supported archive copies into a Traverse pane and is not in public 0.2.0.
+Public 0.3.0 lets you drag files and folders from plain, gzip or bzip2 TARs
+into Finder, with guarded Undo after restart. You can also copy supported
+archive members into another Traverse pane.
 
 ## Text editor
 
 Use Edit in Traverse for an eligible local, SFTP, SMB or ZIP text document.
-The upcoming direct build also supports eligible plain and prepared compressed TAR text members.
+Public 0.3.0 also supports eligible plain TAR and prepared gzip or bzip2 TAR
+text members.
 Documents can share native tabs or open in separate windows. Opening preferences
 choose Traverse's behavior without changing macOS file associations.
 
