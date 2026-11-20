@@ -115,8 +115,12 @@ private final class CatalogOwner: @unchecked Sendable {
         } catch { continuation.resume(throwing: error) }
     }
     func wait(_ continuation: CheckedContinuation<SMBCatalogDrainResult, Never>) {
-        let result: SMBCatalogDrainResult? = lock.withLock { if let result { return result }; waiting.append(continuation); return nil }
-        if let result { continuation.resume(returning: result) }
+        let completed: SMBCatalogDrainResult? = lock.withLock {
+            if let result { return result }
+            waiting.append(continuation)
+            return nil
+        }
+        if let completed { continuation.resume(returning: completed) }
     }
     private func run() {
         do { try launch() } catch {
