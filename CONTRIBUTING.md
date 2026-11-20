@@ -59,8 +59,8 @@ python3 -B tools/dev.py native-check --help
 Choose the checks that match the change; these examples are not a required
 sequence. Add a regression for a demonstrated bug or integrity contract. Broaden
 validation when shared behavior changes or a failure exposes another risk.
-Pull requests into `main` run an unsigned app build and the ExplorerKit suites
-on GitHub's Apple Silicon and Intel runners. See the
+Pull requests into `main` run ExplorerKit tests on native Apple Silicon and
+Intel runners and compile unsigned apps for both architectures. See the
 [workflow runs](https://github.com/Respawn-Studios/Traverse/actions/workflows/pull-request.yml).
 With the supported Xcode and the pinned dependencies installed, run the same
 checks locally:

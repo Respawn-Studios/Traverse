@@ -118,7 +118,7 @@ def require_toolchain(prefix: Path = TOOLCHAIN) -> tuple[str, str]:
     return rust_version, cargo_version
 
 
-def install_host_toolchain() -> None:
+def install_toolchain(target: str) -> None:
     pin = json.loads((ROOT / "tools/rust-toolchain.json").read_text())
     prefix = Path(pin["prefix"])
     if prefix != TOOLCHAIN.relative_to(ROOT) or prefix.name != f'rust-{pin["version"]}':
@@ -126,15 +126,29 @@ def install_host_toolchain() -> None:
     local_directory(prefix.parent.relative_to(".build").as_posix())
     if TOOLCHAIN.is_symlink():
         raise RuntimeError("The Rust installation prefix is redirected")
-    if TOOLCHAIN.exists():
+    host_target = host().rust_target
+    target_path = Path("lib/rustlib") / target
+    install_host = not TOOLCHAIN.exists()
+    if not install_host:
         require_toolchain()
-        return
+        if (TOOLCHAIN / target_path / "lib").is_dir():
+            return
+        if target == host_target:
+            raise RuntimeError("The existing Rust installation is missing its host standard library")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", pin["date"]):
+        raise RuntimeError("Unexpected Rust distribution date")
 
-    target = host().rust_target
-    components = pin["components"][target]
-    names = [f'{role}-{pin["version"]}-{target}.tar.xz' for role in ("rustc", "rust-std", "cargo")]
-    if [item["filename"] for item in components] != names or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", pin["date"]):
+    roles = ("rustc", "rust-std", "cargo")
+    host_components = pin["components"][host_target]
+    if [item["filename"] for item in host_components] != [f'{role}-{pin["version"]}-{host_target}.tar.xz' for role in roles]:
         raise RuntimeError("Unexpected Rust distribution component list")
+    components = list(host_components) if install_host else []
+    if target != host_target:
+        name = f'rust-std-{pin["version"]}-{target}.tar.xz'
+        target_components = [item for item in pin["components"][target] if item["filename"] == name]
+        if len(target_components) != 1:
+            raise RuntimeError("Unexpected Rust target standard library")
+        components.extend(target_components)
 
     with tempfile.TemporaryDirectory(prefix="rust-components-", dir=local_directory("setup")) as temporary:
         work = Path(temporary)
@@ -158,24 +172,36 @@ def install_host_toolchain() -> None:
             installer = work / name.removesuffix(".tar.xz") / "install.sh"
             subprocess.run(["/bin/bash", str(installer), f"--prefix={staged}", "--disable-ldconfig"],
                 cwd=work, env=env, check=True, timeout=120)
-        require_toolchain(staged)
-        if not (staged / "lib/rustlib" / target / "lib").is_dir():
-            raise RuntimeError("The verified Rust installation is missing its host standard library")
+        staged_target = staged / target_path
+        if not (staged_target / "lib").is_dir():
+            raise RuntimeError("The verified Rust installation is missing the requested standard library")
+        if install_host:
+            require_toolchain(staged)
+            if not (staged / "lib/rustlib" / host_target / "lib").is_dir():
+                raise RuntimeError("The verified Rust installation is missing its host standard library")
         if TOOLCHAIN.is_symlink():
             raise RuntimeError("The Rust installation prefix is redirected")
-        if not TOOLCHAIN.exists():
+        if install_host and not TOOLCHAIN.exists():
             try:
                 staged.rename(TOOLCHAIN)
             except OSError:
                 if not TOOLCHAIN.is_dir() or TOOLCHAIN.is_symlink():
                     raise
         require_toolchain()
+        installed_target = TOOLCHAIN / target_path
+        if not (installed_target / "lib").is_dir():
+            # Publish only the staged target library when extending a toolchain.
+            try:
+                staged_target.rename(installed_target)
+            except OSError:
+                if not (installed_target / "lib").is_dir():
+                    raise
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-toolchain", action="store_true",
-                        help="Download and verify the pinned compiler, standard library and Cargo for this host.")
+                        help="Download and verify the pinned host tools and the selected architecture's standard library.")
     parser.add_argument("--fetch", action="store_true",
                         help="Fetch only the two locked production graphs from public registries.")
     parser.add_argument("--arch", choices=tuple(ARCHITECTURES), default=host().name,
@@ -183,9 +209,9 @@ def main() -> None:
     args = parser.parse_args()
     if platform.system() != "Darwin":
         raise RuntimeError("The bundled workers require the pinned macOS toolchain")
-    if args.install_toolchain:
-        install_host_toolchain()
     target = named(args.arch).rust_target
+    if args.install_toolchain:
+        install_toolchain(target)
     cargo = TOOLCHAIN / "bin/cargo"
     version, cargo_version = require_toolchain()
     if not (TOOLCHAIN / "lib/rustlib" / target / "lib").is_dir():

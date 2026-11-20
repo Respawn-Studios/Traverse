@@ -25,24 +25,33 @@ concurrency:
 
 jobs:
   verify:
-    name: Build and test on ${{ matrix.name }}
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Apple Silicon
+          - name: Apple Silicon app and tests
             runner: xcode-27
-            arch: arm64
+            host-arch: arm64
+            build-arch: arm64
+            test-packages: true
             developer-dir: /Applications/Xcode_27.2.app/Contents/Developer
-          - name: Intel
+          - name: Intel package tests
             runner: macos-26-intel
-            arch: x86_64
-            developer-dir: /Applications/Xcode_26.5.app/Contents/Developer
+            host-arch: x86_64
+            test-packages: true
+            developer-dir: /Applications/Xcode_26.6.app/Contents/Developer
+          - name: Intel app cross-build
+            runner: xcode-27
+            host-arch: arm64
+            build-arch: x86_64
+            developer-dir: /Applications/Xcode_27.2.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: ${{ matrix.developer-dir }}
-      TRAVERSE_CI_ARCH: ${{ matrix.arch }}
+      TRAVERSE_CI_HOST: ${{ matrix.host-arch }}
+      TRAVERSE_CI_TARGET: ${{ matrix.build-arch }}
     steps:
       - name: Check out the proposed merge
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,15 +59,19 @@ jobs:
           persist-credentials: false
       - name: Check the toolchain
         run: |
-          test "$(uname -m)" = "$TRAVERSE_CI_ARCH"
+          test "$(uname -m)" = "$TRAVERSE_CI_HOST"
           sw_vers
           xcodebuild -version
           xcrun swiftc --version
       - name: Install pinned Rust and fetch worker dependencies
-        run: python3 -B tools/worker_setup.py --install-toolchain --fetch
+        if: matrix.build-arch != ''
+        run: python3 -B tools/worker_setup.py --install-toolchain --fetch --arch "$TRAVERSE_CI_TARGET"
       - name: Compile the unsigned app
+        if: matrix.build-arch != ''
         id: compile
-        run: python3 -B tools/dev.py build --unsigned
+        run: |
+          python3 -B tools/dev.py build --unsigned --arch "$TRAVERSE_CI_TARGET"
+          test "$(xcrun lipo -archs '.build/xcode-unsigned/Build/Products/Debug/Mac Explorer.app/Contents/MacOS/Mac Explorer')" = "$TRAVERSE_CI_TARGET"
       - name: Show compiler diagnostics
         if: ${{ failure() && steps.compile.conclusion == 'failure' }}
         run: |
@@ -76,4 +89,5 @@ jobs:
           /usr/bin/grep -E -i 'out of memory|no space left|terminated|killed|signal [0-9]+|failed with a nonzero exit code' .build/logs/build-*.log | tail -n 24 | cut -c1-1200 || true
           /usr/bin/grep -m 1 -B 4 -A 28 '^Stack dump:' .build/logs/build-*.log | cut -c1-1400 || true
       - name: Run ExplorerKit tests
+        if: matrix.test-packages
         run: python3 -B tools/dev.py test --serial

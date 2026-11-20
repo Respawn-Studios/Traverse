@@ -7,9 +7,10 @@ package. Apple's [Xcode release notes](https://developer.apple.com/documentation
 cover Xcode's host requirements.
 
 GitHub's [pull request checks](https://github.com/Respawn-Studios/Traverse/actions/workflows/pull-request.yml)
-build the unsigned app and run the ExplorerKit suites on Apple Silicon with
-Xcode 27.2 and Intel with Xcode 26.6. Native interaction, the minimum macOS
-version, and the installed updater have their own release checks.
+run the ExplorerKit suites natively on Apple Silicon and Intel. They build the
+unsigned app for each architecture using the reference Apple Silicon toolchain.
+App interaction, the minimum macOS version, and the installed updater have
+their own release checks.
 
 Run the commands below from the repository root. Build products, dependency
 caches and development state stay under `.build/`; no global Rust installation
@@ -24,8 +25,8 @@ python3 -B tools/worker_setup.py --install-toolchain --fetch
 ```
 
 The installer checks each download before extraction and verifies the staged
-installation before placing it under `.build/`. An existing compiler is checked
-and reused. For manual or cross-build setup, use the components below.
+installation before placing it under `.build/`. The installer checks and
+reuses an existing compiler. For manual setup, use the components below.
 
 [tools/rust-toolchain.json](../../tools/rust-toolchain.json) defines the required
 version, target, installation prefix, component filenames and SHA-256 hashes.
@@ -91,14 +92,14 @@ build snapshot is not a substitute for corresponding source.
 
 ## Build the Intel app from Apple Silicon
 
-Add only the pinned **x86_64 standard-library** component to the same toolchain
-prefix. Do not replace the host compiler or install the Intel Cargo archive over
-it. Use the same checksum and installation steps above, then:
-
 ```sh
-python3 -B tools/worker_setup.py --fetch --arch x86_64
+python3 -B tools/worker_setup.py --install-toolchain --fetch --arch x86_64
 python3 -B tools/dev.py build --arch x86_64
 ```
+
+Setup uses the native compiler and Cargo and adds the pinned **x86_64 standard
+library**. For manual setup, install that target library in the same prefix as
+the native components.
 
 The app and its workers use the selected architecture. Compiler outputs remain
 separate where Cargo/Xcode require it; helpers cannot reuse a different CPU's
