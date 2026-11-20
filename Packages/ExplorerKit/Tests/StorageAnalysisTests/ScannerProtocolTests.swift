@@ -72,7 +72,7 @@ struct ScannerProtocolTests {
     }
 
     @Test func boundedFramingRowsAndTruncatedEnd() throws {
-        #expect(throws: (any Error).self) { try decoder().consume(Data(repeating: 32, count: 64 << 10)) }
+        #expect(throws: (any Error).self) { try self.decoder().consume(Data(repeating: 32, count: 64 << 10)) }
         let decoder = decoder(); _ = try decoder.consume(header())
         #expect(throws: (any Error).self) { try decoder.finish() }
         #expect(throws: (any Error).self) { try decoder.consume(frame("batch", seq: 1, ["rows": Array(repeating: row(), count: 129)])) }
@@ -82,7 +82,7 @@ struct ScannerProtocolTests {
     @Test func unknownOrNoncanonicalMetricsDoNotBecomeZero() throws {
         for text in ["00", "+1", "-1", "18446744073709551616", "1.0"] {
             let decoder = decoder(); _ = try decoder.consume(header())
-            #expect(throws: (any Error).self) { try decoder.consume(frame("batch", seq: 1, ["rows": [row(value: text)]])) }
+            #expect(throws: (any Error).self) { try decoder.consume(frame("batch", seq: 1, ["rows": [self.row(value: text)]])) }
         }
         let decoder = decoder(); _ = try decoder.consume(header())
         var row = row(); row["data_logical"] = ["state": "not_returned"]
