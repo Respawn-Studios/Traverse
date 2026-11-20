@@ -56,12 +56,14 @@ struct SMBOriginalEditRequest: Sendable {
         let s = before
         let verb = sourceToken == nil ? attributeContract.prepareVerb
             : attributeContract.prepareVerb.replacingOccurrences(of: "PREPARE_EDIT", with: "PREPARE_EDIT_SOURCE")
-        var fields = [verb, id.uuidString, String(ordinal), String(number),
-            selection.snapshot.readID.uuidString, String(selection.snapshot.revision), String(selection.observation.id),
+        var fields: [String] = [verb, id.uuidString, String(ordinal), String(number),
+            selection.snapshot.readID.uuidString, String(selection.snapshot.revision), String(selection.observation.id)]
+        fields.append(contentsOf: [
             String(s.size), String(s.allocated), String(s.created), String(s.modified), String(s.changed),
-            String(s.attributes), String(s.links), String(s.index), String(s.volumeCreated), String(s.volumeSerial),
-            beforeDigest.map { String(format: "%02x", $0) }.joined(), String(editedLength),
-            editedDigest.map { String(format: "%02x", $0) }.joined()]
+            String(s.attributes), String(s.links), String(s.index), String(s.volumeCreated), String(s.volumeSerial)])
+        fields.append(beforeDigest.map { String(format: "%02x", $0) }.joined())
+        fields.append(String(editedLength))
+        fields.append(editedDigest.map { String(format: "%02x", $0) }.joined())
         if let sourceToken { fields.append(sourceToken.uuidString) }
         return fields.joined(separator: " ") + "\n"
     }
