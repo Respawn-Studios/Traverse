@@ -107,4 +107,27 @@ jobs:
           /usr/bin/grep -m 1 -B 4 -A 28 '^Stack dump:' .build/logs/build-*.log | cut -c1-1400 || true
       - name: Run ExplorerKit tests
         if: matrix.test-packages
-        run: python3 -B tools/dev.py test --serial
+        env:
+          TRAVERSE_CI_BOOKMARK_KEYCHAIN: ${{ matrix.os-major == '15' && matrix.host-arch == 'x86_64' && runner.environment == 'github-hosted' }}
+        run: |
+          if [[ "$TRAVERSE_CI_BOOKMARK_KEYCHAIN" == true ]]; then
+            # ScopedBookmarkAgent requires an available per-user keychain on
+            # this runner. Use an empty one owned by this job, without imports.
+            keychain="$RUNNER_TEMP/traverse-bookmarks.keychain-db"
+            test ! -e "$keychain"
+            previous=$(/usr/bin/security default-keychain -d user 2>/dev/null | tr -d '"' | sed 's/^[[:blank:]]*//' || true)
+            password=$(/usr/bin/openssl rand -hex 24)
+            printf '::add-mask::%s\n' "$password"
+            /usr/bin/security create-keychain -p "$password" "$keychain"
+            finish_keychain() {
+              if [[ -n "$previous" ]]; then /usr/bin/security default-keychain -d user -s "$previous"; fi
+              /usr/bin/security delete-keychain "$keychain"
+            }
+            trap finish_keychain EXIT
+            /usr/bin/security set-keychain-settings -lut 3600 "$keychain"
+            /usr/bin/security unlock-keychain -p "$password" "$keychain"
+            /usr/bin/security default-keychain -d user -s "$keychain"
+            unset password
+            python3 -B tools/dev.py test --serial --filter nativeReadOnlyReferenceUsesAResolvableScopedBookmark
+          fi
+          python3 -B tools/dev.py test --serial

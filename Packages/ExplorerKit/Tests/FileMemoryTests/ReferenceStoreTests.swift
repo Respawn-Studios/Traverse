@@ -44,7 +44,7 @@ private final class ReferenceBlock: @unchecked Sendable {
             var process: SecCode?
             let lookup = SecCodeCopySelf(SecCSFlags(), &process)
             let signature = process.map { SecCodeCheckValidity($0, SecCSFlags(), nil) } ?? lookup
-            Issue.record("Scoped bookmark \(stage) failed (\(failure.domain) \(failure.code), cause \(cause?.domain ?? "none") \(cause?.code ?? 0), process signature \(signature)).")
+            print("Scoped bookmark \(stage) failed (\(failure.domain) \(failure.code), cause \(cause?.domain ?? "none") \(cause?.code ?? 0), process signature \(signature)).")
             throw error
         }
     }
