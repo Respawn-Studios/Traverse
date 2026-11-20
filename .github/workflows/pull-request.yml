@@ -1,0 +1,53 @@
+name: Pull request checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths: [.github/workflows/pull-request.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pull-request-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Build and test on ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Silicon
+            runner: xcode-27
+            arch: arm64
+            developer-dir: /Applications/Xcode_27.2.app/Contents/Developer
+          - name: Intel
+            runner: macos-26-intel
+            arch: x86_64
+            developer-dir: /Applications/Xcode_26.6.app/Contents/Developer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer-dir }}
+      TRAVERSE_CI_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Check out the proposed merge
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the toolchain
+        run: |
+          test "$(uname -m)" = "$TRAVERSE_CI_ARCH"
+          sw_vers
+          xcodebuild -version
+      - name: Prepare pinned worker dependencies
+        run: python3 -B tools/worker_setup.py --install-toolchain --fetch
+      - name: Compile the app
+        run: python3 -B tools/dev.py build --unsigned
+      - name: Run ExplorerKit tests
+        run: python3 -B tools/dev.py test --serial
