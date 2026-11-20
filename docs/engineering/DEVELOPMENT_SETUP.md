@@ -1,13 +1,15 @@
 # Development setup
 
-Traverse runs on Apple Silicon and Intel Macs with macOS 15 or later. The
-qualified build host uses **Apple Silicon, Xcode 27.2, Python 3.9 or later**, and
-the pinned Rust compiler. Xcode 27 requires Apple Silicon; an Intel app can still
-be cross-built with its SDK. Building the app on an Intel host with an older
-Xcode/Swift toolchain has not been qualified. See Apple's
-[Xcode release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes)
-for host requirements. Those build requirements do not change the app's macOS 15
-deployment target.
+Traverse runs on Apple Silicon and Intel Macs with macOS 15 or later. Install
+**Python 3.9 or later** and use the pinned Rust compiler. Apple Silicon with
+**Xcode 27.2** is the reference host for release builds, including the Intel
+package. Apple's [Xcode release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes)
+cover Xcode's host requirements.
+
+GitHub's [pull request checks](https://github.com/Respawn-Studios/Traverse/actions/workflows/pull-request.yml)
+build the unsigned app and run the ExplorerKit suites on Apple Silicon with
+Xcode 27.2 and Intel with Xcode 26.6. Native interaction, the minimum macOS
+version, and the installed updater have their own release checks.
 
 Run the commands below from the repository root. Build products, dependency
 caches and development state stay under `.build/`; no global Rust installation
@@ -15,7 +17,7 @@ or release-signing credentials are required.
 
 ## Install the pinned Rust components
 
-On Apple Silicon, one command prepares the checked compiler and worker dependencies:
+This command prepares the checked compiler for the host and fetches the worker dependencies:
 
 ```sh
 python3 -B tools/worker_setup.py --install-toolchain --fetch
@@ -29,8 +31,8 @@ and reused. For manual or cross-build setup, use the components below.
 version, target, installation prefix, component filenames and SHA-256 hashes.
 The current pin is **Rust 1.99.1**. Its `components` table lists separate
 `aarch64-apple-darwin` and `x86_64-apple-darwin` archives. Install the compiler,
-standard library and Cargo for the build host. On the qualified Apple Silicon
-host, use the `aarch64-apple-darwin` set.
+standard library and Cargo for the build host. Use `aarch64-apple-darwin` on
+Apple Silicon and `x86_64-apple-darwin` on Intel.
 
 Download the listed `rustc`, `rust-std` and `cargo` standalone archives from the
 official Rust distribution location:
