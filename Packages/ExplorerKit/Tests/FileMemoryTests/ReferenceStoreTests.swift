@@ -1,6 +1,7 @@
 import Darwin
 import ExplorerCore
 import Foundation
+import Security
 import SQLite3
 import Testing
 @testable import FileMemory
@@ -25,6 +26,38 @@ private final class ReferenceBlock: @unchecked Sendable {
     func waitForEntry() -> Bool { entered.wait(timeout: .now() + 5) == .success }
     func markFinished() { lock.withLock { finished = true } }
     var isFinished: Bool { lock.withLock { finished } }
+}
+
+@Test func nativeReadOnlyReferenceUsesAResolvableScopedBookmark() async throws {
+    guard NameStoreFixture.nativePacket else { return }
+    let fixture = try MoveFixture()
+    let source = try fixture.file("Bookmark fixture.txt")
+    let reader = NativeDocumentReferenceReader(activity: nil)
+    try await reader.qualificationEnableTracking(source, cancellation: .init())
+    _ = try #require(try await reader.currentIdentity(source, cancellation: .init()))
+
+    func requireBookmark<T>(_ stage: String, _ operation: () throws -> T) throws -> T {
+        do { return try operation() }
+        catch {
+            let failure = error as NSError
+            let cause = failure.userInfo[NSUnderlyingErrorKey] as? NSError
+            var process: SecCode?
+            let lookup = SecCodeCopySelf(SecCSFlags(), &process)
+            let signature = process.map { SecCodeCheckValidity($0, SecCSFlags(), nil) } ?? lookup
+            Issue.record("Scoped bookmark \(stage) failed (\(failure.domain) \(failure.code), cause \(cause?.domain ?? "none") \(cause?.code ?? 0), process signature \(signature)).")
+            throw error
+        }
+    }
+    let data = try requireBookmark("creation") {
+        try source.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess], includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+    var stale = false
+    let reopened = try requireBookmark("resolution") {
+        try URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
+    }
+    #expect(reopened.path == source.path)
+    #expect(!stale)
+    try fixture.receipt(["readOnlyBookmarkRoundTrip": true])
 }
 
 @Test func b07ExactBindingObservationIncludesRecoveryMembersWithoutAdoption() async throws {

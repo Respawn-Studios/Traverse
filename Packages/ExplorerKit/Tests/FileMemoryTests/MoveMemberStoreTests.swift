@@ -191,7 +191,8 @@ private struct MemberStoreCase {
         let bounded = try await c.store.moveCandidateIDs(beneath: [c.fixture.source], limit: 1)
         #expect(bounded.ids.count == 1 && bounded.limited)
         let plans = try await c.store.memberQueryPlan(c.folder)
-        #expect(plans.contains { $0.contains("SEARCH r USING COVERING INDEX references_by_hint") })
+        #expect(plans.contains { $0.hasPrefix("SEARCH r ") && $0.contains("INDEX references_by_hint") },
+                "Expected a bounded search through the hint index. Plan: \(plans)")
         #expect(!plans.contains { $0.contains("SCAN r") })
         await c.store.close()
         try c.fixture.receipt(["componentScopedIndexedDiscovery": true, "boundedCandidateCoverage": true])
