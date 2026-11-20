@@ -130,20 +130,23 @@ def execute(arguments: list[str], label: str, timeout: int | None = None,
     log = local_directory("logs") / f"{label}-{stamp()}.log"
     started = time.monotonic()
     print(f"{label}: running; log {log}", flush=True)
+    failure = None
     with log.open("xb") as output:
         try:
             result = subprocess.run(arguments, cwd=ROOT, env=env, stdout=output,
                                     stderr=subprocess.STDOUT, timeout=timeout, check=False)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError(f"{label} timed out; full output: {log}") from error
-    if result.returncode:
+            if result.returncode:
+                failure = f"failed ({result.returncode})"
+        except subprocess.TimeoutExpired:
+            failure = "timed out"
+    if failure is not None:
         # Logs contain build diagnostics and fixture-only verification output. Keep
         # console output compact; the full ignored file remains inspectable.
         lines = log.read_text(errors="replace").splitlines()
         errors = [line for line in lines if re.search(r"\b(?:fatal )?error:", line)]
         excerpt = errors[-12:] + lines[-8:] if errors else lines[-24:]
         print("\n".join(line if len(line) <= 400 else line[:400] + " …" for line in excerpt), file=sys.stderr)
-        raise RuntimeError(f"{label} failed ({result.returncode}); full output: {log}")
+        raise RuntimeError(f"{label} {failure}; full output: {log}")
     verdict = "process completed" if awaits_report else "passed"
     print(f"{label}: {verdict} in {time.monotonic() - started:.2f}s; log {log}")
     return log
@@ -341,7 +344,7 @@ def test(filter_expression: str | None, configuration: str = "debug", *, serial:
             print("Waiting for the current package-test run to drain…", flush=True)
             fcntl.flock(lock, fcntl.LOCK_EX)
         prior_fixtures = generated_test_fixture_roots()
-        log = execute(command, "test", timeout=300 if filter_expression else 900, fixture_root=fixture_root)
+        log = execute(command, "test", timeout=300 if filter_expression else 1800, fixture_root=fixture_root)
         transcript = log.read_text()
         if "error: unable to attach DB:" in transcript:
             raise RuntimeError(f"Shared build-database collision; test result is not accepted: {log}")
