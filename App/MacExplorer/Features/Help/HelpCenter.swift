@@ -401,6 +401,9 @@ private struct TraverseHelpView: View {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted,.sortedKeys,.withoutEscapingSlashes]
         return (try? encoder.encode(event)).map { String(decoding: $0, as: UTF8.self) } ?? "Log entry unavailable"
     }
+    private var bundleVersion: String? { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
+    private var bundleBuild: String? { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String }
+
     private var about: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 16) {
@@ -408,8 +411,7 @@ private struct TraverseHelpView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Traverse")
                         .interfaceFont(.largeTitle.bold())
-                    Text("Version " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
-                        + " · Build " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"))
+                    Text(verbatim: "Version \(bundleVersion ?? "—") · Build \(bundleBuild ?? "—")")
                         .interfaceFont(.callout.monospaced())
                     Text(AppFeatureAvailability.editionTitle)
                         .interfaceFont(.callout).foregroundStyle(.secondary)
@@ -450,8 +452,7 @@ private struct TraverseHelpView: View {
     private var updateSettings: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Traverse " + (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "")
-                + " (" + (Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "") + ")").interfaceFont(.headline)
+            Text(verbatim: "Traverse \(bundleVersion ?? "") (\(bundleBuild ?? ""))").interfaceFont(.headline)
             if updates.directUpdatesAvailable {
                 Text("Review changes and choose when to install. Traverse asks before downloading an update and restarting.").foregroundStyle(.secondary)
                 if updates.requiresInvitation {
