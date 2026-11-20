@@ -22,11 +22,11 @@ enum GlassVerification {
                 && abs(rect.minY - bounds.minY) < 1 && abs(rect.width - bounds.width) < 1
                 && abs(rect.height - bounds.height) < 1
         }
-        var nativeGlass = false
+        var hasNativeGlass = false
         var correctContent = false
         var style = "fallback"
         if #available(macOS 26.0, *), let glass = material as? NSGlassEffectView {
-            nativeGlass = true
+            hasNativeGlass = true
             correctContent = glass.contentView === content
             style = glass.style == .regular ? "regular" : "clear"
         }
@@ -39,7 +39,7 @@ enum GlassVerification {
         if surface == nil { failures.append("Missing navigation surface") }
         if !covers(materialBounds) { failures.append("Material does not cover navigation bounds") }
         if !covers(contentBounds) { failures.append("Content geometry does not cover navigation bounds") }
-        if expectsNativeGlass && !nativeGlass { failures.append("Glass preference did not install NSGlassEffectView") }
+        if expectsNativeGlass && !hasNativeGlass { failures.append("Glass preference did not install NSGlassEffectView") }
         if expectsNativeGlass && !correctContent { failures.append("Native glass does not own the navigation content") }
         if expectsNativeGlass && (browser.tabStrip.drawsSolidBackground || browser.pathContainer.drawsSolidBackground) {
             failures.append("An opaque navigation row fill covers the material")
@@ -53,7 +53,7 @@ enum GlassVerification {
             "reduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
             "navigationPreference": browser.settings.navigationStyle.rawValue,
             "materialClass": material.map { String(describing: type(of: $0)) } ?? "missing",
-            "nativeGlass": nativeGlass, "style": style, "correctContentOwner": correctContent,
+            "nativeGlass": hasNativeGlass, "style": style, "correctContentOwner": correctContent,
             "surfaceBounds": NSStringFromRect(bounds), "materialBounds": NSStringFromRect(materialBounds),
             "contentBounds": NSStringFromRect(contentBounds),
             "tabStripSolidFill": browser.tabStrip.drawsSolidBackground,
