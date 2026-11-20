@@ -94,6 +94,8 @@ private struct JSONSchemaEvaluation {
     private var steps = 100_000
     private var issueLimit = 24
 
+    init(root: JSONCheckValue) { self.root = root }
+
     private static let annotations: Set<String> = [
         "title", "description", "default", "examples", "readOnly", "writeOnly", "deprecated", "$comment"
     ]
