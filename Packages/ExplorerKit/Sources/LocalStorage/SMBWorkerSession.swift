@@ -229,7 +229,7 @@ private final class SMBWorkerOwner: @unchecked Sendable {
               posix_spawn_file_actions_adddup2(&actions, pair[1], STDIN_FILENO) == 0,
               posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) == 0,
               posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0 else { throw SMBWorkerFailure.unavailable }
-        var argv = [helper.path, "--ipc-worker"].map { strdup($0) } + [nil]
+        var argv = [strdup(helper.path), strdup("--ipc-worker"), nil]
         var env = [strdup("LANG=C"), strdup("LC_ALL=C"), nil]
         defer { argv.forEach { free($0) }; env.forEach { free($0) } }
         guard !argv.dropLast().contains(where: { $0 == nil }), !env.dropLast().contains(where: { $0 == nil }) else { throw SMBWorkerFailure.unavailable }
@@ -292,8 +292,8 @@ private final class SMBWorkerOwner: @unchecked Sendable {
         if !pendingEvents.isEmpty { return pendingEvents.removeFirst() }
         let fd = lock.withLock { descriptor }
         guard fd >= 0, !eof else { throw SMBWorkerFailure.workerExited }
-        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        let ready = poll(&descriptor, 1, 20)
+        var socketPoll = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&socketPoll, 1, 20)
         if ready < 0 && errno != EINTR { throw SMBWorkerFailure.unavailable }
         if ready > 0 {
             var bytes = [UInt8](repeating: 0, count: 16384)

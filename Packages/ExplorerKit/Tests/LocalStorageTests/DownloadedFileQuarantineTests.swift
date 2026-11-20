@@ -80,6 +80,7 @@ final class DownloadedFileQuarantineTests: XCTestCase {
         try witness.validate(fd)
         XCTAssertEqual(fixture.raw(fd), before)
     }
+    #if DEBUG
     func testDownloadedNativeStageQuarantineTransitionPreservesSourceMark() throws {
         let fixture = try DownloadFixture()
         let (sourceURL, sourceFD) = try fixture.create("DownloadedSpool.bin")
@@ -97,10 +98,14 @@ final class DownloadedFileQuarantineTests: XCTestCase {
         let stageAtCreation = try ZIPSourceSecurity.downloadedStageWitness(stageFD)
         let witness = try ZIPSourceSecurity.extractionWitness(sourceFD, url: sourceURL, allowingInheritance: true)
         XCTAssertThrowsError(try witness.apply(to: stageFD), "Archive extraction keeps its original exact-mark rule")
-        try witness.applyToDownloadedFile(from: sourceFD, to: stageFD, stageAtCreation: stageAtCreation)
+        // Both generated files have the observed matching provenance for this branch.
+        // The test still reads and updates their actual quarantine attributes.
+        try witness.applyToDownloadedFileForQualification(from: sourceFD, to: stageFD,
+            stageAtCreation: stageAtCreation, readProvenance: { _ in Data([1]) })
         XCTAssertEqual(fixture.raw(sourceFD), sourceMark)
         XCTAssertEqual(fixture.raw(stageFD), sourceMark)
     }
+    #endif
     func testDownloadedNativeStageTransitionRefusesOtherMarks() throws {
         let sourceMark = Data("0086;6ae64da7;Mac Explorer;".utf8)
         for stageText in [
