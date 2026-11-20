@@ -23,6 +23,7 @@ import LocalStorage
         var browsers = [BrowserViewController](), otherWindows = [BrowserWindowController]()
         var groupIDs = [UUID](), externalCalls = 0
         var observationGuardChecks = 0, pendingDisplays = 0, cleanupTargetDisplays = 0
+        var recordsMotion: Bool { mode.hasPrefix("full-") }
         var browser: BrowserViewController { owner.workspace.activeBrowser }
         var items: URL { root.appendingPathComponent("source/Items") }
         var history: URL { root.appendingPathComponent("state/history") }
@@ -130,7 +131,9 @@ import LocalStorage
         var test: Context?, root: URL?, mode = "", phase = "", failure: String?
         do {
             mode = try argument("--group-mode"); phase = try argument("--group-phase")
-            guard ["full-dark", "reduced-dark", "off-light150"].contains(mode), ["suite", "recover"].contains(phase),
+            guard ["full-dark", "reduced-dark", "off-light150", "full-light150"].contains(mode),
+                  ["suite", "recover", "rename-motion"].contains(phase),
+                  phase == "rename-motion" ? mode.hasPrefix("full-") : mode != "full-light150",
                   let raw = ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"] else { throw Failure(stage: "group-scope-arguments") }
             let area = URL(fileURLWithPath: raw).standardizedFileURL
             let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -147,19 +150,32 @@ import LocalStorage
             root = area
             let settings = BrowserSettings(persist: false)
             settings.autoRefreshFolders = false; settings.folderSummariesEnabled = false; settings.restoresSession = false; settings.reviewsRecoveryAtStartup = false
-            settings.appearance = mode == "off-light150" ? .light : .dark; settings.keyboardProfile = .explorer
-            settings.motion.mode = mode == "full-dark" ? .full : mode == "reduced-dark" ? .reduced : .off
-            settings.interfaceSize = InterfaceSize(mode == "off-light150" ? 150 : 100); InterfacePresentation.shared.bind(settings)
+            let enlarged = mode.hasSuffix("-light150")
+            settings.appearance = enlarged ? .light : .dark; settings.keyboardProfile = .explorer
+            settings.motion.mode = mode.hasPrefix("full-") ? .full : mode == "reduced-dark" ? .reduced : .off
+            settings.interfaceSize = InterfaceSize(enlarged ? 150 : 100); InterfacePresentation.shared.bind(settings)
             let owner = BrowserWindowController(settings: settings), current = Context(root: area, owner: owner, mode: mode, phase: phase); test = current
             try require(owner.isWorkspacePresentation && SelectionGroupFeature.available, "real-group-workspace-feature")
             owner.workspace.sessionReady = true; owner.workspace.willStartBrowserForVerification = { [weak current] in current?.configure($0) }
             current.configure(current.browser)
-            if mode == "off-light150", let frame = owner.window?.screen?.visibleFrame {
-                owner.window?.setContentSize(.init(width: min(1300, frame.width-40), height: min(860, frame.height-100)))
+            if enlarged, let window = owner.window, let screen = window.screen?.visibleFrame {
+                if current.recordsMotion {
+                    let size = NSSize(width: min(1152, screen.width - 40), height: min(800, screen.height - 40))
+                    window.setFrame(.init(origin: window.frame.origin, size: size), display: true)
+                } else {
+                    window.setContentSize(.init(width: min(1300, screen.width - 40), height: min(860, screen.height - 100)))
+                }
             } else { owner.window?.setContentSize(.init(width: 1120, height: 730)) }
             owner.window?.title = title; owner.window?.center(); owner.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
             try await local(current)
             if phase == "recover" { try await coldRecovery(current) }
+            else if phase == "rename-motion" {
+                for view in [BrowserViewMode.details, .list, .icons] {
+                    current.browser.setPaneViewMode(view)
+                    try await wait("ordinary-new-folder-view-mode") { current.browser.presentedFileViewMode == view }
+                    try await ordinaryNewFolderInlineRename(current, clipSuffix: "-" + view.rawValue.lowercased())
+                }
+            }
             else {
                 try await preparation(current); try await naming(current); try await revocation(current)
                 try await groupingAndResults(current); try await ordinaryNewFolderInlineRename(current)
@@ -228,7 +244,7 @@ import LocalStorage
             let menu = BrowserMenus.fileContextMenu(target: browser)
             guard let item = menu.items.first(where: { $0.action == selector }) else { throw Failure(stage: "group-context-menu-missing") }
             try require(browser.validateMenuItem(item), "group-context-action-enabled")
-            if mode == .details && test.mode == "full-dark" {
+            if mode == .details && test.recordsMotion {
                 window.title = title
                 let fieldPresentBeforeAction = isVisible(browser.selectionGroupDraft.field, in: window)
                 let report = try await NativeMotionRecorder.record(window: window, root: test.root, label: "selection-group-draft", sampling: .diagnostic(for: window)) {
@@ -326,7 +342,7 @@ import LocalStorage
         try require(controller.tableForVerification.numberOfRows == 3 && controller.detailForVerification.string.contains("Original:")
             && controller.presentation?.recordID == result.recordID
             && controller.outcomeForVerification.contains("Selected items were grouped in the new folder."), "typed-results-real-member-evidence")
-        if test.mode == "full-dark" {
+        if test.recordsMotion {
             controller.tableForVerification.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
             let otherOriginal = controller.review!.items[2].source.path
             let fieldPresentBeforeAction = isVisible(controller.tableForVerification.enclosingScrollView?.contentView, in: window)
@@ -401,7 +417,7 @@ import LocalStorage
         await closeReview(test)
         test.checks.append("Cancelled actual Command-Z drains and leaves existing Results refreshable; successful fresh Command-Z preserves current edits/children; foreign-child Undo reports membersRestored and explicit partial closure preserves the foreign entry")
     }
-    private static func ordinaryNewFolderInlineRename(_ test: Context) async throws {
+    private static func ordinaryNewFolderInlineRename(_ test: Context, clipSuffix: String = "") async throws {
         try await local(test)
         let browser = test.browser, created = test.items.appendingPathComponent("New Folder", isDirectory: true)
         let renamed = test.items.appendingPathComponent("Canvas Renamed", isDirectory: true)
@@ -425,13 +441,17 @@ import LocalStorage
             try require(browser.commandEnabled(selector) && NSApp.sendAction(selector, to: browser, from: nil),
                 "new-folder-ordinary-browser-command")
         }
-        if test.mode == "full-dark" {
+        func quietSelection() -> Bool {
+            browser.usesFileIcons ? !browser.iconBrowser.emphasizesSelection : browser.table.selectionHighlightStyle == .none
+        }
+        if test.recordsMotion {
             window.title = title
             let visible = isVisible(viewport, in: window)
             try require(visible, "new-folder-visible-browser-viewport")
+            let label = "selection-group-new-folder" + clipSuffix
             let report = try await NativeMotionRecorder.record(window: window, root: test.root,
-                label: "selection-group-new-folder", sampling: .diagnostic(for: window)) { try create() }
-            try recordClip(test, report, label: "selection-group-new-folder", window: window,
+                label: label, sampling: .diagnostic(for: window)) { try create() }
+            try recordClip(test, report, label: label, window: window,
                 field: viewport, fieldPresentBeforeAction: visible)
         } else { try create() }
         try await wait("new-folder-created-inline-editor") {
@@ -439,6 +459,7 @@ import LocalStorage
                 && browser.operationPreparationTask != nil && !browser.isLoading && browser.orderingTask == nil
         }
         guard let field = browser.inlineRename.field, let editor = field.currentEditor() as? NSTextView,
+              let selected = browser.selectedURLs.first, let originalLabel = browser.inlineFilenameAnchor(for: selected)?.label,
               let createID = browser.lastRecoveryRecordID, let result = browser.lastOperationResult else {
             throw Failure(stage: "new-folder-create-editor-and-record")
         }
@@ -447,23 +468,28 @@ import LocalStorage
             && editor.string == "New Folder" && editor.selectedRange() == NSRange(location: 0, length: editor.string.utf16.count)
             && browser.selectedURLs.count == 1 && browser.selectedURLs.first?.path == created.path
             && window.attachedSheet == nil, "new-folder-actual-creation-and-full-name-editor")
+        try require(quietSelection(), "new-folder-inline-handoff-keeps-selection-quiet")
         let originalIdentity = try identity(created)
         let afterCreate = try await history(test).records
         try require(afterCreate.count == previousCount + 1 && afterCreate.first?.id == createID
             && afterCreate.first?.kind == .ordinary && afterCreate.first?.canUndo == true,
             "new-folder-one-ordinary-create-record")
+        type("Canvas Renamed", in: editor)
         func commitName() throws {
-            type("Canvas Renamed", in: editor)
             try require(window.firstResponder === editor, "new-folder-native-Return-editor-focus")
             editor.keyDown(with: try key(window, code: 36, text: "\r"))
+            try require(!originalLabel.isHidden && originalLabel.stringValue == "Canvas Renamed",
+                "new-folder-submission-keeps-the-typed-name-until-results")
+            try require(quietSelection(), "submitted-rename-does-not-emphasize-the-old-position")
         }
-        if test.mode == "full-dark" {
+        if test.recordsMotion {
             window.title = title
             let visible = isVisible(viewport, in: window) && isVisible(field, in: window)
             try require(visible, "new-folder-visible-inline-editor")
+            let label = "selection-group-new-folder-return" + clipSuffix
             let report = try await NativeMotionRecorder.record(window: window, root: test.root,
-                label: "selection-group-new-folder-return", sampling: .diagnostic(for: window)) { try commitName() }
-            try recordClip(test, report, label: "selection-group-new-folder-return", window: window,
+                label: label, sampling: .diagnostic(for: window)) { try commitName() }
+            try recordClip(test, report, label: label, window: window,
                 field: viewport, fieldPresentBeforeAction: visible)
         } else { try commitName() }
         try await wait("new-folder-return-rename-visible") {
@@ -471,6 +497,8 @@ import LocalStorage
                 && !browser.isLoading && browser.orderingTask == nil
                 && browser.rowsByURL.keys.contains(where: { $0.path == renamed.path })
         }
+        try require(!quietSelection() && browser.selectedURLs.first?.path == renamed.path,
+            "confirmed-rename-restores-selection-at-its-new-position")
         guard let renameID = browser.lastRecoveryRecordID, let renameResult = browser.lastOperationResult else {
             throw Failure(stage: "new-folder-rename-record")
         }
@@ -508,7 +536,26 @@ import LocalStorage
             && [renameID, createID].allSatisfy { id in final.contains { $0.id == id && $0.state == "undone" && !$0.canUndo } }
             && test.sources.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
             "new-folder-create-Undo-removed-only-generated-folder")
-        test.checks.append("The ordinary New Folder command creates one selected directory and native inline full-name editor; Return renames the same device/inode, then two actual browser Command-Z operations restore and remove it")
+        let away = test.items.appendingPathComponent("Away", isDirectory: true)
+        let taken = test.items.appendingPathComponent("Taken", isDirectory: true)
+        let heldAway = try identity(away), heldTaken = try identity(taken)
+        try select(test, [away])
+        browser.renameSelection(nil)
+        try await wait("occupied-rename-focuses-the-native-field") { browser.inlineRename.field?.currentEditor() is NSTextView }
+        guard let conflicting = browser.inlineRename.field?.currentEditor() as? NSTextView,
+              let displayedAway = browser.selectedURLs.first,
+              let label = browser.inlineFilenameAnchor(for: displayedAway)?.label else {
+            throw Failure(stage: "occupied-rename-missing-editor")
+        }
+        type("Taken", in: conflicting)
+        conflicting.keyDown(with: try key(window, code: 36, text: "\r"))
+        try require(!label.isHidden && label.stringValue == "Taken", "occupied-rename-in-flight-presentation")
+        try await settled(browser)
+        try require(try identity(away) == heldAway && identity(taken) == heldTaken
+            && browser.inlineFilenameAnchor(for: displayedAway)?.label.stringValue == "Away"
+            && browser.lastOperationResult?.disposition == .failed,
+            "occupied-rename-restores-verified-name-and-original-objects")
+        test.checks.append("Ordinary New Folder keeps the typed name when Return removes the inline editor. Rename keeps the same device and inode, both browser Undos work, and an occupied name restores the verified label without altering either folder.")
     }
     private static func stopThroughProgress(_ test: Context) throws {
         test.browser.showFileOperationDetails(nil)

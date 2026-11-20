@@ -253,6 +253,12 @@ enum ToolWindowVerification {
         delayedRefresh?.reveal()
         let cachedVolumeCrossfade = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             || browser.volumeBrowser.tileCount == 0 || (delayedRefresh?.maximumArrivingForVerification ?? 0) > 0
+        if delayedRefresh?.isRevealing == true && browser.volumeBrowser.tileCount > 0 {
+            // Let the queued reveal take the display clock after native layout.
+            try await UIVerification.waitUntil("Cached cards start the deferred crossfade") {
+                browser.volumeBrowser.visibleTiles.first.flatMap { delayedRefresh?.arrivalStartForVerification($0.view) } != nil
+            }
+        }
         let originalClock = browser.volumeBrowser.visibleTiles.first.flatMap { delayedRefresh?.arrivalStartForVerification($0.view) }
         try await Task.sleep(for: .milliseconds(70))
         browser.renderVolumes(); browser.updateCanvasTransition()

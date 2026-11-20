@@ -174,13 +174,13 @@
                 "clipboardBackend": "injected recording sink; system clipboard not exercised",
                 "viewContentRender": true, "compositorCapture": capture, "physicalInput": false,
                 "personalFiles": 0, "networkRequests": 0, "keychainQueries": 0,
-                "crashNativeProjectionAndColdStorage": true, "crashPendingDiscard": true,
+                "crashNativeProjectionAndColdStorage": true, "crashPendingDiscard": true, "crashCapacityAdmission": true,
                 "crashReviewAndCancelConfirm": true, "crashPrivateClipboardAndURLSink": true,
                 "realCrashHandler": "NOT EXERCISED; live self-report only, no fault or OS crash report",
             ]
         }
 
-        private enum CrashCheckFailure: Error { case liveReport, recovery, privacy, coldRead, refusal, discard, changedLeaf }
+        private enum CrashCheckFailure: Error { case liveReport, recovery, privacy, coldRead, refusal, discard, changedLeaf, capacity }
 
         /// One normal storage journey in the existing support flow. All native
         /// data describes this generated app process; no handler is registered,
@@ -231,6 +231,55 @@
             do {
                 let store = try CrashReportStore(directory: root.appendingPathComponent("successful", isDirectory: true))
                 guard store.reports.isEmpty else { throw CrashCheckFailure.coldRead }
+            }
+
+            func requirePaused(_ store: CrashReportStore) throws {
+                do { try store.requireCaptureSpace(); throw CrashCheckFailure.capacity }
+                catch CrashReportFailure.capacity {}
+            }
+            func fixtureReport() throws -> CrashReport {
+                try CrashReport(capturedAt: nil, version: "0.3.0", build: "99", systemVersion: nil,
+                    systemBuild: nil, architecture: .arm64, signal: .abort, images: [], threads: [])
+            }
+            let countRoot = root.appendingPathComponent("count-capacity", isDirectory: true)
+            do {
+                let store = try CrashReportStore(directory: countRoot)
+                for index in 0..<5 {
+                    try store.requireCaptureSpace()
+                    try store.retain(Data([UInt8(index)]), report: fixtureReport())
+                }
+                try requirePaused(store)
+                let leaf = try engineLeaf(store)
+                try write(nativeData, at: leaf)
+                let capture = try NativeCrashCapture(store: store, applicationIdentifier: identifier)
+                do { _ = try capture.recoverPending(); throw CrashCheckFailure.capacity }
+                catch CrashReportFailure.capacity {}
+                guard try Data(contentsOf: leaf) == nativeData, !capture.hasUnrecoveredPendingDiscardCandidate,
+                      store.reports.count == 5, let oldest = store.reports.last else { throw CrashCheckFailure.capacity }
+                try store.remove(oldest.id)
+            }
+            do {
+                let store = try CrashReportStore(directory: countRoot)
+                let capture = try NativeCrashCapture(store: store, applicationIdentifier: identifier)
+                guard try capture.recoverPending(),
+                      try store.readPending(applicationIdentifier: identifier) == nil,
+                      store.reports.count == 5 else { throw CrashCheckFailure.capacity }
+                try requirePaused(store)
+                guard let oldest = store.reports.last else { throw CrashCheckFailure.capacity }
+                try store.remove(oldest.id)
+                try store.requireCaptureSpace()
+            }
+            do {
+                let store = try CrashReportStore(directory: root.appendingPathComponent("byte-capacity", isDirectory: true))
+                for value in 0..<3 {
+                    try store.requireCaptureSpace()
+                    try store.retain(Data(repeating: UInt8(value), count: 7 * CrashReportStore.maximumNativeBytes / 8),
+                        report: fixtureReport())
+                }
+                try requirePaused(store)
+                guard let oldest = store.reports.last else { throw CrashCheckFailure.capacity }
+                try store.remove(oldest.id)
+                try store.requireCaptureSpace()
             }
 
             for kind in ["empty", "oversized", "symlink", "changed"] {

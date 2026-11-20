@@ -1,6 +1,10 @@
 import ExplorerCore
 import Foundation
 
+/// Source-complete ordinary image Format remains held until its separate
+/// native acceptance. This app-local switch grants no generated QA authority.
+enum NativeAPFSFormatFeature { static let ordinaryEnabled = false }
+
 /// The common presentation policy for both product packages. This is not an
 /// entitlement check: operation owners and signed helpers retain that authority.
 enum AppFeatureAvailability {

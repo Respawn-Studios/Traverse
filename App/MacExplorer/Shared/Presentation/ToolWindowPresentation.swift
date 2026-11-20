@@ -13,11 +13,13 @@ final class ToolWindowChrome: NSViewController {
     private var style = NavigationStyle.glass
     private(set) var motion = BrowserMotionPreferences()
     private var appliedMotion: BrowserMotionPreferences?
+    private var appliedAppearance: BrowserAppearance?
 
     private init(content: NSViewController) {
         let host = NSView(); contentHost = host
         host.wantsLayer = true
-        surface = NavigationGlassSurface(contentView: host, opaqueColor: .windowBackgroundColor)
+        surface = NavigationGlassSurface(contentView: host, embedsContentInGlass: false,
+                                         opaqueColor: .windowBackgroundColor)
         super.init(nibName: nil, bundle: nil)
         addChild(content)
         view = surface
@@ -166,7 +168,13 @@ final class ToolWindowChrome: NSViewController {
             ToolContentMotion.finish(in: toolWindow)
         }
         appliedMotion = motion
-        contentHost.layer?.removeAnimation(forKey: "tool-page-crossfade")
+        if let appearance {
+            if let appliedAppearance, appliedAppearance != appearance, let toolWindow {
+                ToolContentMotion.finishContentMotion(in: toolWindow)
+            }
+            appliedAppearance = appearance
+        }
+        ToolContentMotion.finishCrossfade(in: contentHost, kind: .page)
         let glass = BrowserMaterialPolicy.glassEnabled(style: style, enabled: true,
             reduceTransparency: workspace.accessibilityDisplayShouldReduceTransparency,
             increaseContrast: workspace.accessibilityDisplayShouldIncreaseContrast)
@@ -192,14 +200,21 @@ final class ToolWindowChrome: NSViewController {
     }
 }
 
+@MainActor
 enum ToolPageMotionPolicy {
-    static func initialOpacity(_ mode:BrowserMotionMode)->Double {
+    static var crossfadeTiming: CAMediaTimingFunction { CAMediaTimingFunction(name: .easeInEaseOut) }
+
+    static func crossfadeDuration(_ motion: BrowserMotionPreferences) -> TimeInterval {
+        guard motion.allows(.pages), !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return 0 }
+        return 0.22 * motion.mode.durationScale
+    }
+
+    static func initialOpacity(_ mode: BrowserMotionMode) -> Double {
         mode == .off ? 1 : mode.initialOpacity(0.72)
     }
 }
 
-/// An entrance of the *current* page only. No outgoing tree, bitmap or private
-/// description is retained. A refresh with the same identity does not replay it.
+/// Reveals only the current live detail or form after its identity changes.
 private struct ToolPageEntrance<ID: Equatable & Sendable>: ViewModifier {
     let identity: ID
     let enabled: Bool
@@ -221,8 +236,7 @@ private struct ToolPageEntrance<ID: Equatable & Sendable>: ViewModifier {
                 guard !reduceMotion, enabled, mode != .off else { revealed = true; return }
                 var transaction = Transaction(); transaction.disablesAnimations = true
                 withTransaction(transaction) { revealed = false }
-                // Commit the starting presentation for one display interval;
-                // model changes and native input are never delayed by this.
+                // Allow the first presentation to reach the display.
                 try? await Task.sleep(for: .milliseconds(16))
                 guard !Task.isCancelled else { return }
                 revealed = true
@@ -251,25 +265,28 @@ private struct ToolPageCrossfadeTrigger<ID: Equatable & Sendable>: NSViewReprese
     func updateNSView(_ view: NSView, context: Context) {
         defer { context.coordinator.identity = identity }
         guard let previous = context.coordinator.identity, previous != identity,
-              let chrome = view.window?.contentViewController as? ToolWindowChrome,
-              let layer = chrome.contentHost.layer else { return }
-        guard motion.allows(.pages), !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            layer.removeAnimation(forKey: "tool-page-crossfade"); return
-        }
-        let transition = CATransition()
-        transition.type = .fade
-        transition.duration = 0.24 * motion.mode.durationScale
-        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer.add(transition, forKey: "tool-page-crossfade")
+              let chrome = view.window?.contentViewController as? ToolWindowChrome else { return }
+        ToolContentMotion.crossfadePage(chrome.contentHost, motion: motion)
     }
 }
 
 @MainActor
 enum ToolContentMotion {
+    enum CrossfadeKind: Equatable, Sendable { case content, page }
+    private final class CrossfadeOwner: NSObject, CAAnimationDelegate {
+        let kind: CrossfadeKind
+        init(_ kind: CrossfadeKind) { self.kind = kind }
+    }
     // Weak bookkeeping only: this never keeps a view/private description alive.
     private static let views = NSHashTable<NSView>.weakObjects()
+    private static let pageViewports = NSHashTable<NativeToolPageViewport>.weakObjects()
+    private static let entranceKey = "tool-content-entrance"
     private static let entrances = NSMapTable<NSWindow, DisplayLinkedTransition>(keyOptions: .weakMemory,
                                                                                valueOptions: .strongMemory)
+
+    static func registerPageViewport(_ viewport: NativeToolPageViewport) {
+        pageViewports.add(viewport)
+    }
     /// A retained window can be shown repeatedly. Bringing it forward, or
     /// cancelling an accepted close, must not replay its entrance.
     private static func windowEntranceMotion(_ window: NSWindow) -> BrowserMotionPreferences? {
@@ -321,25 +338,66 @@ enum ToolContentMotion {
                 context.duration = 0; window.animator().alphaValue = 1
             }
         }
-        (window.contentViewController as? ToolWindowChrome)?.contentHost.layer?.removeAnimation(forKey: "tool-page-crossfade")
+        finishContentMotion(in: window)
+    }
+    static func hasCrossfade(in view: NSView, kind: CrossfadeKind? = nil) -> Bool {
+        guard let owner = view.layer?.animation(forKey: kCATransition)?.delegate as? CrossfadeOwner else { return false }
+        return kind == nil || owner.kind == kind
+    }
+    static func finishCrossfade(in view: NSView, kind: CrossfadeKind? = nil) {
+        // Core Animation stores CATransition at kCATransition, regardless of
+        // our requested name. The copied animation retains this private marker;
+        // never cancel an unrelated transition or a property animation.
+        guard hasCrossfade(in: view, kind: kind) else { return }
+        view.layer?.removeAnimation(forKey: kCATransition)
+    }
+    static func finishContentMotion(in window: NSWindow) {
+        for viewport in pageViewports.allObjects where viewport.window === window {
+            viewport.finishPageTransition?()
+        }
+        if let content = (window.contentViewController as? ToolWindowChrome)?.contentHost ?? window.contentView {
+            finishCrossfade(in: content)
+        }
         for view in views.allObjects where view.window === window || view.window == nil {
-            view.layer?.removeAnimation(forKey:"tool-content-entrance")
-            view.layer?.removeAnimation(forKey:"tool-content-crossfade");views.remove(view)
+            finishCrossfade(in: view)
+            view.layer?.removeAnimation(forKey: entranceKey)
+            views.remove(view)
         }
     }
+    #if DEBUG
+    static func hasContentEntrance(in view: NSView) -> Bool {
+        view.layer?.animation(forKey: entranceKey) != nil
+    }
+    #endif
     static func crossfade(_ view: NSView) {
-        view.layer?.removeAnimation(forKey: "tool-content-crossfade")
+        finishCrossfade(in: view)
         let motion = (view.window?.contentViewController as? ToolWindowChrome)?.motion ?? InterfacePresentation.shared.motion
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, motion.allows(.pages),
+        let duration = ToolPageMotionPolicy.crossfadeDuration(motion)
+        guard duration > 0,
               view.window?.isVisible == true, views.allObjects.count < 128 else { return }
         view.wantsLayer = true
-        let transition = CATransition(); transition.type = .fade
-        transition.duration = 0.24 * motion.mode.durationScale
-        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        view.layer?.add(transition, forKey: "tool-content-crossfade"); views.add(view)
+        guard let layer = view.layer else { return }
+        addCrossfade(to: layer, kind: .content, duration: duration)
+        views.add(view)
     }
-    static func reveal(_ view: NSView, effect: BrowserMotionEffect = .pages) {
-        view.layer?.removeAnimation(forKey: "tool-content-entrance")
+    static func crossfadePage(_ view: NSView, motion: BrowserMotionPreferences) {
+        let duration = ToolPageMotionPolicy.crossfadeDuration(motion)
+        guard duration > 0, let layer = view.layer else {
+            finishCrossfade(in: view, kind: .page); return
+        }
+        finishCrossfade(in: view)
+        addCrossfade(to: layer, kind: .page, duration: duration)
+    }
+    private static func addCrossfade(to layer: CALayer, kind: CrossfadeKind, duration: TimeInterval) {
+        let transition = CATransition(); transition.type = .fade
+        transition.delegate = CrossfadeOwner(kind)
+        transition.duration = duration
+        transition.timingFunction = ToolPageMotionPolicy.crossfadeTiming
+        layer.add(transition, forKey: kCATransition)
+    }
+    static func reveal(_ view: NSView, effect: BrowserMotionEffect = .pages, movesContent: Bool = true) {
+        finishCrossfade(in: view)
+        view.layer?.removeAnimation(forKey: entranceKey)
         views.remove(view)
         let motion = (view.window?.contentViewController as? ToolWindowChrome)?.motion ?? InterfacePresentation.shared.motion
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
@@ -348,11 +406,14 @@ enum ToolContentMotion {
         view.wantsLayer = true
         let opacity = CABasicAnimation(keyPath: "opacity")
         opacity.fromValue = ToolPageMotionPolicy.initialOpacity(motion.mode); opacity.toValue = 1
-        let position = CABasicAnimation(keyPath: "transform.translation.y")
-        position.fromValue = -4 * motion.mode.distanceScale; position.toValue = 0
-        let group = CAAnimationGroup(); group.animations = [opacity, position]
+        let group = CAAnimationGroup()
+        if movesContent {
+            let position = CABasicAnimation(keyPath: "transform.translation.y")
+            position.fromValue = -4 * motion.mode.distanceScale; position.toValue = 0
+            group.animations = [opacity, position]
+        } else { group.animations = [opacity] }
         group.duration = motion.mode.toolWindowDuration; group.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        view.layer?.add(group, forKey: "tool-content-entrance")
+        view.layer?.add(group, forKey: entranceKey)
         views.add(view)
     }
 }

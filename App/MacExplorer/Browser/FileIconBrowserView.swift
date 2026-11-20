@@ -15,6 +15,9 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
     private var cut = Set<URL>()
     private var showsExtensions = true
     var showsFullPathsInTooltips = false
+    var emphasizesSelection = true {
+        didSet { if emphasizesSelection != oldValue { refreshVisibleItems() } }
+    }
     var openingAppearanceForEntry: ((FileEntry) -> FileOpeningAppearance)?
     var showsFolderSummaries = true {
         didSet { for item in visibleItems { if let entry = item.entry { configure(item, entry: entry) } } }
@@ -36,6 +39,7 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
     var onSelectionChange: (() -> Void)?
     var onAccessibleActivation: (() -> Bool)?
     var onVisibleEntriesChanged: (() -> Void)?
+    var gitBadgeForEntry: ((FileEntry) -> GitStatusBadge?)?
     var onPasteboardWriter: ((URL) -> (any NSPasteboardWriting)?)?
     var onDragWillBegin: ((NSDraggingSession, [URL]) -> Void)?
     var onDragEnded: ((NSDraggingSession) -> Void)?
@@ -263,7 +267,7 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
     private func configure(_ item: FileIconItem, entry: FileEntry) {
         let opening = openingAppearanceForEntry?(entry) ?? .ordinary
         item.configure(entry, showsExtensions: showsExtensions, cut: cut.contains(entry.url), emphasized: selectionIsEmphasized,
-                       openingAppearance: opening)
+                       openingAppearance: opening, git: gitBadgeForEntry?(entry))
         if showsFullPathsInTooltips {
             item.view.toolTip = entry.url.path + (cut.contains(entry.url) ? " — Cut: ready to move when pasted" : "")
             if let explanation = opening.explanation { item.view.toolTip = (item.view.toolTip ?? entry.url.path) + "\n" + explanation }
@@ -273,13 +277,19 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
         if showsFolderSummaries, entry.kind == .directory, !showsFullPathsInTooltips { item.view.toolTip = nil }
         item.isDropTarget = entry.url == dropTarget
     }
+
+    func refreshGitBadges(at urls: Set<URL>) {
+        for item in visibleItems {
+            if let entry = item.entry, urls.contains(entry.url) { configure(item, entry: entry) }
+        }
+    }
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) { selectionChanged() }
     func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) { selectionChanged() }
     private func selectionChanged() {
         guard !updatingSelection else { return }
         refreshVisibleItems(); onSelectionChange?()
     }
-    private var selectionIsEmphasized: Bool { BrowserSelectionFocus.isEmphasized(in: collectionView) }
+    private var selectionIsEmphasized: Bool { emphasizesSelection && BrowserSelectionFocus.isEmphasized(in: collectionView) }
     private func refreshVisibleItems() { for item in visibleItems { item.emphasized = selectionIsEmphasized } }
 
     private func selectContextItem(_ event: NSEvent) {
@@ -549,6 +559,7 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
     var isDropTarget = false { didSet { refreshAppearance() } }
     private var isCut = false
     private var openingAppearance = FileOpeningAppearance.ordinary
+    private var gitLabel: NSTextField?
     override var isSelected: Bool { didSet { refreshAppearance() } }
     override var highlightState: NSCollectionViewItem.HighlightState { didSet {
         refreshAppearance()
@@ -597,7 +608,7 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
         ])
     }
     func configure(_ entry: FileEntry, showsExtensions: Bool, cut: Bool, emphasized: Bool,
-                   openingAppearance: FileOpeningAppearance = .ordinary) {
+                   openingAppearance: FileOpeningAppearance = .ordinary, git: GitStatusBadge? = nil) {
         _ = view
         self.entry = entry; self.isCut = cut; self.openingAppearance = openingAppearance; self.emphasized = emphasized
         let name = showsExtensions || entry.kind == .directory ? entry.name : (entry.name as NSString).deletingPathExtension
@@ -605,12 +616,33 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
         let icon = FileIconRole.classify(name: entry.name, kind: entry.kind.rawValue)
         fileImage.image = FileOpeningSymbol.image(role: icon, appearance: openingAppearance)
         cutBadge.isHidden = !cut
+        showGitBadge(git)
         view.toolTip = entry.name + (cut ? " — Cut: ready to move when pasted" : "")
         if let explanation = openingAppearance.explanation { view.toolTip = (view.toolTip ?? entry.name) + "\n" + explanation }
+        if let git { view.toolTip = ([view.toolTip ?? entry.name] + git.details).joined(separator: "\n") }
         view.setAccessibilityHelp(openingAppearance.explanation ?? (entry.kind.rawValue + ". Open performs the shared browser command."))
         view.setAccessibilityLabel(entry.name + (cut ? ", cut, ready to move" : "")
-            + (openingAppearance.explanation.map { ", " + $0 } ?? ""))
+            + (openingAppearance.explanation.map { ", " + $0 } ?? "")
+            + (git.map { ", " + $0.details.joined(separator: ", ") } ?? ""))
         refreshAppearance()
+    }
+    private func showGitBadge(_ badge: GitStatusBadge?) {
+        guard let badge else { gitLabel?.isHidden = true; return }
+        if gitLabel == nil {
+            let note = label("", size: 10, color: .secondaryLabelColor)
+            InterfaceMetrics.setFont(note, base: .monospacedSystemFont(ofSize: 10, weight: .semibold))
+            note.translatesAutoresizingMaskIntoConstraints = false
+            note.setAccessibilityHidden(true)
+            view.addSubview(note)
+            NSLayoutConstraint.activate([
+                note.trailingAnchor.constraint(equalTo: fileImage.leadingAnchor, constant: 4),
+                note.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 4),
+                note.topAnchor.constraint(equalTo: fileImage.topAnchor)
+            ])
+            gitLabel = note
+        }
+        gitLabel?.isHidden = false
+        gitLabel?.stringValue = badge.text
     }
     private func refreshAppearance() {
         guard isViewLoaded, let background = view as? FileIconBackground else { return }
@@ -619,6 +651,7 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
         background.setAccessibilitySelected(isSelected)
         let text: NSColor = selected ? (emphasized ? .alternateSelectedControlTextColor : .unemphasizedSelectedTextColor) : .labelColor
         filenameLabel.textColor = text
+        gitLabel?.textColor = selected ? text : .secondaryLabelColor
         fileImage.contentTintColor = selected ? text : FileOpeningSymbol.tint(openingAppearance, directory: entry?.kind == .directory)
         fileImage.alphaValue = isCut ? 0.5 : 1
         filenameLabel.alphaValue = isCut ? 0.65 : 1

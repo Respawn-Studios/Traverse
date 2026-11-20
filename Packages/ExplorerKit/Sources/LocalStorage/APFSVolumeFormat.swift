@@ -27,6 +27,7 @@ public struct APFSVolumeFormatPlan: Sendable, CustomStringConvertible, CustomDeb
     public let selected: ManagedVolume
     public let name: String
     public let caseSensitive: Bool
+    public let containerID: UUID
     public let siblingNames: [String]
     public let capturedAt: Date
     let expiresAt: TimeInterval
@@ -39,6 +40,7 @@ public struct APFSVolumeFormatPlan: Sendable, CustomStringConvertible, CustomDeb
         self.selected = selected
         name = original.info.name
         caseSensitive = original.info.caseSensitive
+        containerID = original.container.uuid
         siblingNames = original.container.volumes.filter { $0.uuid != original.info.uuid }.map(\.name)
         capturedAt = Date()
         expiresAt = ProcessInfo.processInfo.systemUptime + 60
@@ -59,14 +61,19 @@ public struct APFSVolumeFormatResult: Sendable {
     public let failure: APFSVolumeFormatFailure?
     public let toolExitStatus: Int32?
     public let diskutilErrorCode: Int?
+    /// Returned to the caller only after the selected v2 recorder acknowledges
+    /// its terminal write. Provisional or uncertain returns omit this receipt.
+    public let nativeCompletion: APFSVolumeFormatNativeCompletion?
 
     init(submitted: Bool, formatted: FormattedVolume?, failure: APFSVolumeFormatFailure?,
-         toolExitStatus: Int32? = nil, diskutilErrorCode: Int? = nil) {
+         toolExitStatus: Int32? = nil, diskutilErrorCode: Int? = nil,
+         nativeCompletion: APFSVolumeFormatNativeCompletion? = nil) {
         self.submitted = submitted
         self.formatted = formatted
         self.failure = failure
         self.toolExitStatus = toolExitStatus
         self.diskutilErrorCode = diskutilErrorCode
+        self.nativeCompletion = nativeCompletion
     }
 }
 
@@ -84,10 +91,11 @@ public enum APFSVolumeFormatRecoveryInspection: Sendable {
 public final class APFSVolumeFormat: @unchecked Sendable {
     /// The full target seal is the last potentially blocking authority check.
     /// An earlier image inquiry must not make that target observation stale.
-    static func launchPermitted(ownerStillCurrent: () -> Bool, targetStillCurrent: () -> Bool,
+    static func launchPermitted(ownerStillCurrent: () -> Bool, attachmentStillCurrent: () -> Bool = { true },
+                                targetStillCurrent: () -> Bool,
                                 expiresAt: TimeInterval, cancelled: () -> Bool) -> Bool {
         func live() -> Bool { !cancelled() && ProcessInfo.processInfo.systemUptime < expiresAt }
-        guard live(), ownerStillCurrent(), live(), targetStillCurrent() else { return false }
+        guard live(), ownerStillCurrent(), live(), attachmentStillCurrent(), live(), targetStillCurrent() else { return false }
         return live()
     }
     private let lock = NSLock()
@@ -95,8 +103,11 @@ public final class APFSVolumeFormat: @unchecked Sendable {
     private let inspector: any VolumeInspecting
     private let tool: APFSVolumeTool
 
-    public init() { inspector = VolumeLifecycle.shared; tool = APFSVolumeTool() }
-    init(tool: APFSVolumeTool) { inspector = VolumeLifecycle.shared; self.tool = tool }
+    public convenience init() { self.init(inspector: VolumeLifecycle.shared) }
+    init(inspector: any VolumeInspecting) {
+        self.inspector = inspector
+        tool = APFSVolumeTool()
+    }
 
     /// Cold recovery is read-only. The caller must independently bind the
     /// original backing image and attachment both before and after inquiries;
@@ -136,11 +147,14 @@ public final class APFSVolumeFormat: @unchecked Sendable {
     /// `confirmedName` must be independently entered by the person reviewing
     /// the loss of this volume's contents. `permitted` is rechecked on the
     /// worker queue at the launch boundary, not only when the sheet opens.
+    /// `attachmentStillCurrent` is the bounded launch-only inventory read.
     /// Every launch requires an owned durable recorder; a missing store must
     /// refuse before the native request rather than skip intent persistence.
     public func perform(_ plan: APFSVolumeFormatPlan, confirmedName: String,
                         recording: any APFSVolumeFormatRecording,
+                        afterIntentBeforeLaunch: (@Sendable () async throws -> Void)? = nil,
                         permitted: @escaping @Sendable () -> Bool,
+                        attachmentStillCurrent: @escaping @Sendable () -> Bool = { true },
                         submitted: @escaping @Sendable () -> Void = {}) async -> APFSVolumeFormatResult {
         do { try admit() } catch { return .init(submitted: false, formatted: nil, failure: .busy) }
         defer { release() }
@@ -168,11 +182,29 @@ public final class APFSVolumeFormat: @unchecked Sendable {
             guard permitted() else { throw APFSVolumeFormatFailure.unavailable }
             do { try await recovery.begin(APFSVolumeFormatSnapshot(current)); intentRecorded = true }
             catch { throw APFSVolumeFormatFailure.recoveryUnavailable }
+            if let afterIntentBeforeLaunch {
+                // App quiescence must follow the private intent preparation,
+                // which itself uses file-activity admission. The interval may
+                // be long; the complete APFS target/member seal is read again
+                // before the tool's final cheap synchronous launch checks.
+                try await afterIntentBeforeLaunch()
+                try Task.checkCancellation()
+                let afterDrain = try await withTaskCancellationHandler {
+                    try await APFSVolumeObservationReader.observe(plan.selected, inspector: inspector, tool: tool,
+                                                                  cancellation: cancellation, diskImageOnly: true)
+                } onCancel: { cancellation.cancel() }
+                try Self.validateTarget(afterDrain)
+                guard Self.sameTarget(current, afterDrain),
+                      ProcessInfo.processInfo.systemUptime < plan.expiresAt else {
+                    throw APFSVolumeFormatFailure.changed
+                }
+            }
             terminal = try await withTaskCancellationHandler {
                 try await tool.eraseVolume(device: current.info.device, name: plan.name, admission: submission,
                                            permitted: {
                                                Self.launchPermitted(ownerStillCurrent: recovery.ownerStillCurrent,
-                                                   targetStillCurrent: permitted, expiresAt: plan.expiresAt,
+                                                   attachmentStillCurrent: attachmentStillCurrent, targetStillCurrent: permitted,
+                                                   expiresAt: plan.expiresAt,
                                                    cancelled: { cancellation.isCancelled })
                                            }, submitted: {
                                                recovery.didSubmit(); submitted()
@@ -188,6 +220,7 @@ public final class APFSVolumeFormat: @unchecked Sendable {
                 try await tool.inquire(["apfs", "list", "-plist", current.container.device]),
                 selected: current.info.uuid, requireSelected: false)
             guard terminal?.status == 0,
+                  terminal?.errorCode == nil || terminal?.errorCode == 0,
                   let replacement = Self.reconciledReplacement(before: current.container, after: after,
                                                                original: current.info.uuid, name: plan.name) else {
                 throw APFSVolumeFormatFailure.uncertain
@@ -197,9 +230,13 @@ public final class APFSVolumeFormat: @unchecked Sendable {
                   info.container == current.container.device, info.name == plan.name,
                   info.caseSensitive == plan.caseSensitive,
                   recovery.ownerStillCurrent() else { throw APFSVolumeFormatFailure.uncertain }
+            let completion = try APFSVolumeFormatNativeCompletion(intent: .init(current),
+                after: after, info: info, nativeExitStatus: terminal?.status ?? -1,
+                nativeErrorCode: terminal?.errorCode)
             result = .init(submitted: true,
                          formatted: .init(id: replacement.uuid, name: replacement.name, mountPoint: info.mount),
-                         failure: nil, toolExitStatus: terminal?.status, diskutilErrorCode: terminal?.errorCode)
+                         failure: nil, toolExitStatus: terminal?.status, diskutilErrorCode: terminal?.errorCode,
+                         nativeCompletion: completion)
         } catch {
             result = .init(submitted: didSubmit, formatted: nil,
                          failure: didSubmit ? .uncertain : Self.preflightFailure(error),

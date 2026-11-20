@@ -24,6 +24,7 @@ class CollapsingPathControl: NSPathControl {
     var navigationContext: (() -> BreadcrumbNavigationContext?)?
     private var presentation = UUID()
     private var rebuilding = false
+    var trailingEditFraction: CGFloat { 0 }
     #if DEBUG
     var presentAncestorMenuForVerification: ((NSMenu) -> Void)?
     #endif
@@ -134,51 +135,72 @@ class CollapsingPathControl: NSPathControl {
             return
         }
         let last = logicalItems.count - 1
-        let available = max(0, bounds.width - 4)
+        let editSpace = floor(bounds.width * trailingEditFraction)
+        let available = max(0, bounds.width - editSpace - 4)
         let natural = logicalItems.map { width($0.title, image: $0.image) }
         var mapping: [Int?] = logicalItems.indices.map { Optional($0) }
         let menuWidth = width("…")
         let currentMinimum = width("…", image: logicalItems[last].image)
         let rootMinimum = width("", image: logicalItems[0].image)
+        let current = logicalItems[last]
+        let protectedCurrent = min(natural[last], max(currentMinimum, available * 0.32))
+        var nativeGap = CGFloat.zero
         func minimalItems(_ indices: [Int?]) -> [NSPathControlItem] {
             indices.map { index in
                 let item = NSPathControlItem()
                 guard let index else { item.title = "…"; return item }
                 item.image = logicalItems[index].image
-                item.title = index == last ? "…" : (index == 0 ? "" : logicalItems[index].title)
+                item.title = index == last ? shortened(current.title, image: current.image, to: protectedCurrent)
+                    : (index == 0 ? "" : logicalItems[index].title)
                 return item
             }
         }
-        func nativeFits(_ items: [NSPathControlItem]) -> Bool {
+        func nativeFits(_ items: [NSPathControlItem], keepEditSpace: Bool = true) -> Bool {
+            nativeGap = 0
             pathItems = items
             guard let cell = cell as? NSPathCell, cell.pathComponentCells.count == items.count else { return false }
-            return cell.pathComponentCells.allSatisfy { component in
+            var left = bounds.maxX, right = bounds.minX
+            let hitTargetsFit = cell.pathComponentCells.allSatisfy { component in
                 let rect = cell.rect(of: component, withFrame: bounds, in: self).intersection(bounds)
                 let point = NSPoint(x: rect.midX, y: rect.midY)
-                return !rect.isEmpty && !rect.isNull && point.x.isFinite && point.y.isFinite
+                guard !rect.isEmpty && !rect.isNull && point.x.isFinite && point.y.isFinite
                     && bounds.contains(point) && rect.width + 0.5 >= component.cellSize.width
-                    && cell.pathComponentCell(at: point, withFrame: bounds, in: self) === component
+                    && cell.pathComponentCell(at: point, withFrame: bounds, in: self) === component else { return false }
+                left = min(left, rect.minX); right = max(right, rect.maxX)
+                return true
             }
+            guard hitTargetsFit else { return false }
+            nativeGap = userInterfaceLayoutDirection == .rightToLeft ? left - bounds.minX : bounds.maxX - right
+            return !keepEditSpace || editSpace == 0 || nativeGap + 0.5 >= editSpace
         }
         let fullFits = nativeFits(logicalItems)
         if !fullFits && last > 0 {
             let rootAndCurrent: [Int?] = last == 1 ? [0, last] : [0, nil, last]
             // Drive is omitted only after the real native minimum candidate
             // cannot fit, rather than from an estimated separator width.
-            if !nativeFits(minimalItems(rootAndCurrent)) {
+            let minimum = minimalItems(rootAndCurrent)
+            if !nativeFits(minimum) && !nativeFits(minimum, keepEditSpace: false) {
                 mapping = [nil, last]
             } else {
                 mapping = rootAndCurrent
-                if last > 1 {
-                    let withParent: [Int?] = last == 2 ? [0, last - 1, last] : [0, nil, last - 1, last]
-                    if nativeFits(minimalItems(withParent)) { mapping = withParent }
+                if nativeFits(minimalItems(logicalItems.indices.map { Optional($0) })) {
+                    mapping = logicalItems.indices.map { Optional($0) }
+                } else if last > 2 {
+                    // Admit the most useful contiguous suffix. A previously
+                    // fitting parent never yields its place to an older one.
+                    var first = 2, end = last - 1
+                    while first <= end {
+                        let start = first + (end - first) / 2
+                        let candidate: [Int?] = [0, nil] + (start...last).map { Optional($0) }
+                        if nativeFits(minimalItems(candidate)) { mapping = candidate; end = start - 1 }
+                        else { first = start + 1 }
+                    }
                 }
             }
         }
         let visible = Set(mapping.compactMap { $0 })
         hiddenAncestors = logicalItems.indices.filter { $0 != last && !visible.contains($0) }
         if hiddenAncestors.isEmpty { mapping.removeAll { $0 == nil } }
-        displayedLocations = mapping
         let fixed = mapping.reduce(CGFloat(0)) { sum, index in
             guard let index else { return sum + menuWidth }
             return sum + ((index != 0 && index != last) ? natural[index] : 0)
@@ -199,7 +221,34 @@ class CollapsingPathControl: NSPathControl {
         // Estimated label budgets may differ across AppKit versions/fonts.
         // Fall back to the already checked minimum presentation, not hidden
         // middle cells. There is no drawing, filesystem work or timing wait.
-        if !nativeFits(displayed) { pathItems = minimalItems(mapping) }
+        if !nativeFits(displayed) {
+            let minimal = minimalItems(mapping)
+            if !nativeFits(minimal) { _ = nativeFits(minimal, keepEditSpace: false) }
+        }
+        // A single long name should not hide an otherwise useful folder when
+        // its shortened label fits alongside the existing path and edit area.
+        if editSpace > 0, let nearest = hiddenAncestors.last, nearest != 0,
+           let menu = mapping.firstIndex(where: { $0 == nil }) {
+            let replacesMenu = hiddenAncestors.count == 1
+            let original = logicalItems[nearest]
+            let spare = nativeGap - editSpace - 4 + (replacesMenu ? menuWidth : 0)
+            let title = shortened(original.title, image: original.image, to: spare)
+            if title.count >= 5 {
+                let previous = pathItems
+                var candidate = previous
+                let parent = NSPathControlItem()
+                parent.title = title; parent.image = original.image
+                let slot = replacesMenu ? menu : menu + 1
+                if replacesMenu { candidate[slot] = parent }
+                else { candidate.insert(parent, at: slot) }
+                if nativeFits(candidate) {
+                    if replacesMenu { mapping[slot] = nearest }
+                    else { mapping.insert(nearest, at: slot) }
+                    hiddenAncestors.removeLast()
+                } else { pathItems = previous }
+            }
+        }
+        displayedLocations = mapping
         if let pathCell = cell as? NSPathCell {
             for (index, cell) in pathCell.pathComponentCells.enumerated() where mapping.indices.contains(index) {
                 if let original = mapping[index] {

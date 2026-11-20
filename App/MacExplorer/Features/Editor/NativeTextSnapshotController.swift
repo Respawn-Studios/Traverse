@@ -2,32 +2,41 @@ import AppKit
 import Combine
 import FileOperations
 
-/// Immutable text captured by the session owner. No network, file URL, Save,
-/// export or recovery authority is passed to this presentation.
-@MainActor final class RemoteTextSnapshotController {
-    let id = UUID(), connectionID: UUID
+/// Immutable text captured by the session owner. The presentation receives
+/// the bytes and their provenance alongside a native window group.
+@MainActor final class NativeTextSnapshotController {
+    let id = UUID()
     let window: NativeTextEditorWindow
-    let contents: TextDocumentValue
-    private let displayName: String, location: EditorLocationContext?
+    private var contents: TextDocumentValue?
+    private let filename: String, displayName: String, location: EditorLocationContext?
     private let settings: BrowserSettings
-    private let retainedCopy: Bool
-    private let protocolKind: ExplorerConnectionProtocol
+    private let group: NativeTextEditorWindow.Group?
+    private let explanation: String?
     private var observation: AnyCancellable?
     private var closing: Task<Void, Never>?
-    private var languageOverride = false, wrappingOverride = false, disconnected = false, nativeClosed = false
+    private var languageOverride = false, wrappingOverride = false, nativeClosed = false
     private(set) var closed = false
+    var initialLine: Int?
     var didClose: ((UUID) -> Void)?
     lazy var preparation = EditorPreparationOwner { [weak self] input, result in
-        guard let self, !closed, case .presentation(_, let generation, _, _, _, _) = input,
-              case .presentation(let value, let syntax, let lines, _) = result else { return }
-        _ = window.surface.present(value, syntax: syntax, lines: lines, for: generation)
+        guard let self, !closed, case .presentation(let request) = input,
+              case .presentation(let prepared) = result else { return }
+        let generation = request.generation
+        if window.surface.present(prepared, for: generation), let initialLine {
+            self.initialLine = nil
+            window.surface.goToLine(initialLine, generation: generation, remembersLocation: false)
+        }
     }
-    init(contents: TextDocumentValue, name: String, connection: UUID, location: EditorLocationContext?,
-         settings: BrowserSettings, retainedCopy: Bool, protocolKind: ExplorerConnectionProtocol = .sftp) {
-        self.contents = contents; displayName = name; connectionID = connection
-        self.location = location; self.settings = settings; self.retainedCopy = retainedCopy
-        self.protocolKind = protocolKind
-        window = .init(displayName: name, installChrome: { native in
+    init(contents: TextDocumentValue, filename: String, title: String? = nil, location: EditorLocationContext?,
+         status: String, explanation: String? = nil, settings: BrowserSettings, group: NativeTextEditorWindow.Group? = nil) {
+        self.contents = contents
+        self.filename = filename
+        self.displayName = title ?? filename
+        self.location = location
+        self.settings = settings
+        self.group = group
+        self.explanation = explanation
+        window = .init(displayName: title ?? filename, installChrome: { native in
             native.isRestorable = false; ToolWindowChrome.install(in: native, settings: settings)
         })
         window.surface.install(contents); window.configureReadOnlyPresentation()
@@ -47,7 +56,7 @@ import FileOperations
         apply(settings.editorPreferences)
         observation = settings.$editorPreferences.removeDuplicates().sink { [weak self] value in self?.apply(value) }
         InterfacePresentation.shared.register(window.surface)
-        refresh()
+        updateStatus(status)
     }
     private func apply(_ value: EditorPreferences) {
         guard !closed else { return }
@@ -55,25 +64,24 @@ import FileOperations
             applyWrapping: !wrappingOverride)
         InterfaceMetrics.setFont(window.surface.textView,
             base: .monospacedSystemFont(ofSize: CGFloat(value.basePointSize), weight: .regular))
-        if !languageOverride { present(value.language(forFilename: displayName)) }
+        if !languageOverride { present(value.language(forFilename: filename)) }
     }
     private func present(_ language: TextSyntaxLanguage) {
-        guard !closed, closing == nil else { return }
+        guard !closed, closing == nil, let contents else { return }
         window.language.selectItem(at: TextSyntaxLanguage.allCases.firstIndex(of: language) ?? 0)
         try? preparation.submit(.presentation(ticket: nil, surfaceGeneration: window.surface.generation,
             text: contents.text, format: contents.format, language: language))
     }
     func show(visible: Bool = true) {
-        guard !closed, closing == nil else { return }
-        if visible { window.presentEditor(in: .connection(connectionID), arrangement: settings.editorPreferences.windowArrangement) }
+        guard visible, !closed, closing == nil else { return }
+        if let group { window.presentEditor(in: group, arrangement: settings.editorPreferences.windowArrangement) }
+        else { window.showWindow(nil); window.window?.makeKeyAndOrderFront(nil) }
     }
-    func connectionClosed() { disconnected = true; refresh() }
-    private func refresh() {
+    func updateStatus(_ status: String) {
+        guard let contents else { return }
         window.update(displayName: displayName, dirty: false,
-            status: disconnected ? "Read-only snapshot · disconnected" : "Read-only snapshot · " + protocolKind.rawValue,
-            documentFormat: contents.format, canSave: false, working: false, canReload: false,
-            needsRecovery: retainedCopy,
-            explanation: retainedCopy ? "Temporary text data was kept because cleanup could not be confirmed. This window cannot change the server file." : nil,
+            status: status, documentFormat: contents.format, canSave: false, working: false, canReload: false,
+            needsRecovery: explanation != nil, explanation: explanation,
             canReviewVersions: false, location: location)
     }
     func closeAndDrain() async {
@@ -87,7 +95,11 @@ import FileOperations
                 if !faded { window.cancelAcceptedClosePreparation() }
                 if !nativeClosed { window.finishClose() }
             }
-            if nativeClosed { closed = true; observation = nil; didClose?(id) }
+            if nativeClosed {
+                closed = true; observation = nil; contents = nil
+                window.surface.clearPrivatePresentation()
+                didClose?(id)
+            }
         }
         closing = task; await task.value
     }

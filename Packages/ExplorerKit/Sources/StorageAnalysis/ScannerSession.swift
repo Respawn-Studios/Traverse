@@ -154,23 +154,16 @@ public final class StorageScanner: @unchecked Sendable {
         update(.preparing)
         var activity: FileActivityGate.Lease?
         var rootFD: Int32 = -1
-        var stdoutRead: Int32 = -1, stderrRead: Int32 = -1
         var model: StorageAnalysisAccumulator?
         var terminal: ScannerTerminal?
         var failure: StorageScanFailure?
-        var exitStatus: Int32?
-        var decoder: ScannerProtocolDecoder?
-        var buffer = Data()
-        var stderrBytes = 0
-        var lastPublication = began
+        var progressCadence = ProgressCadence(interval: 0.25, startingAt: began)
         let previousPolicy = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
         let policyEstablished = previousPolicy >= 0
             && setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF) == 0
             && getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD) == IOPOL_MATERIALIZE_DATALESS_FILES_OFF
         defer {
             if rootFD >= 0 { close(rootFD) }
-            if stdoutRead >= 0 { close(stdoutRead) }
-            if stderrRead >= 0 { close(stderrRead) }
             if previousPolicy >= 0 {
                 _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previousPolicy)
             }
@@ -183,84 +176,36 @@ public final class StorageScanner: @unchecked Sendable {
             let admitted = try openRoot(root)
             rootFD = admitted.fd
             model = StorageAnalysisAccumulator(rootIdentity: admitted.identity)
-            decoder = ScannerProtocolDecoder(session: id, root: admitted.identity)
+            let decoder = ScannerProtocolDecoder(session: id, root: admitted.identity)
             guard !control.cancelled else { throw CancellationError() }
             let pipes = try launch(rootFD: rootFD, identity: admitted.identity, id: id, control: control)
-            stdoutRead = pipes.stdout; stderrRead = pipes.stderr
             close(rootFD); rootFD = -1
-            var stdoutOpen = true, stderrOpen = true
-            while stdoutOpen || stderrOpen || exitStatus == nil {
-                control.escalateIfNeeded()
-                if exitStatus == nil { exitStatus = control.reapIfExited() }
-                if !stdoutOpen && !stderrOpen && exitStatus != nil { break }
-                var descriptors = [pollfd(fd: stdoutOpen ? stdoutRead : -1, events: Int16(POLLIN), revents: 0),
-                                   pollfd(fd: stderrOpen ? stderrRead : -1, events: Int16(POLLIN), revents: 0)]
-                let ready = poll(&descriptors, nfds_t(descriptors.count), 100)
-                if ready < 0 && errno != EINTR { failure = .workerFailed; control.cancel() }
-                for index in 0..<2 where descriptors[index].revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 {
-                    var bytes = [UInt8](repeating: 0, count: 16 << 10)
-                    let count = read(descriptors[index].fd, &bytes, bytes.count)
-                    if count == 0 {
-                        if index == 0 { stdoutOpen = false } else { stderrOpen = false }
-                        continue
-                    }
-                    if count < 0 {
-                        if errno == EAGAIN || errno == EINTR { continue }
-                        failure = .workerFailed; control.cancel()
-                        if index == 0 { stdoutOpen = false } else { stderrOpen = false }
-                        continue
-                    }
-                    if index == 1 {
-                        stderrBytes += count
-                        if stderrBytes > 64 << 10 { failure = .invalidOutput; control.cancel() }
-                        continue // Never retain or log a worker's stderr payload.
-                    }
-                    guard failure == nil else { continue } // Drain rejected output without decoding it.
-                    do {
-                        try autoreleasepool {
-                            var offset = 0
-                            while offset < count {
-                                let newline = bytes[offset..<count].firstIndex(of: 10)
-                                let end = newline ?? count
-                                guard buffer.count + end - offset < ScannerProtocolDecoder.maximumFrameBytes else { throw ScannerProtocolFailure.bounds }
-                                buffer.append(contentsOf: bytes[offset..<end])
-                                offset = end + (newline == nil ? 0 : 1)
-                                if newline != nil {
-                                    guard let decoder else { throw ScannerProtocolFailure.header }
-                                    switch try decoder.consume(buffer) {
-                                    case .header: break
-                                    case .records(let rows):
-                                        for row in rows {
-                                            switch model?.consume(row) {
-                                            case .accepted: break
-                                            case .resourceLimited: throw StorageScanFailure.resourceLimit
-                                            default: throw StorageScanFailure.invalidOutput
-                                            }
-                                        }
-                                    case .issue(let code, let error):
-                                        coverage.record(code: code, error: error)
-                                        _ = model?.recordCoverageGap(AnalysisScanCoverage.gap(code: code, error: error))
-                                    case .terminal(let value):
-                                        terminal = value
-                                        coverage.finish(reason: value.reason, errors: value.errors)
-                                    }
-                                    buffer.removeAll(keepingCapacity: true)
-                                }
-                            }
-                        }
-                    } catch {
-                        failure = error as? StorageScanFailure ?? .invalidOutput
-                        control.cancel()
-                    }
-                }
-                let now = ProcessInfo.processInfo.systemUptime
-                if now - lastPublication >= 0.25 {
+            let exitStatus = try ScannerWorkerProcess.drain(pipes: pipes, control: control, onPoll: {
+                if progressCadence.shouldPublish(at: ProcessInfo.processInfo.systemUptime) {
                     update(.scanning, progress: model?.progress)
-                    lastPublication = now
+                }
+            }, onRejected: { error in
+                failure = error as? StorageScanFailure ?? .invalidOutput
+            }) { data in
+                switch try decoder.consume(data) {
+                case .header: break
+                case .records(let rows):
+                    for row in rows {
+                        switch model?.consume(row) {
+                        case .accepted: break
+                        case .resourceLimited: throw StorageScanFailure.resourceLimit
+                        default: throw StorageScanFailure.invalidOutput
+                        }
+                    }
+                case .issue(let code, let error):
+                    coverage.record(code: code, error: error)
+                    _ = model?.recordCoverageGap(AnalysisScanCoverage.gap(code: code, error: error))
+                case .terminal(let value):
+                    terminal = value
+                    coverage.finish(reason: value.reason, errors: value.errors)
                 }
             }
-            guard buffer.isEmpty, stderrBytes == 0, let exitStatus else { throw StorageScanFailure.invalidOutput }
-            try decoder?.finish()
+            try decoder.finish()
             guard let terminal, (terminal.complete && exitStatus == 0) || (!terminal.complete && exitStatus != 0) else {
                 throw StorageScanFailure.invalidOutput
             }
@@ -271,10 +216,7 @@ public final class StorageScanner: @unchecked Sendable {
                 else { failure = .invalidOutput }
             }
         }
-        // launch failures have no child; the main loop otherwise reaps it. Never
-        // equate a terminal frame, cancellation or pipe closure with child exit.
-        if stdoutRead >= 0 { close(stdoutRead); stdoutRead = -1 }
-        if stderrRead >= 0 { close(stderrRead); stderrRead = -1 }
+        // The shared worker pump owns reaping and both pipe ends after launch.
         if rootFD >= 0 { close(rootFD); rootFD = -1 }
         if previousPolicy >= 0,
            setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previousPolicy) != 0

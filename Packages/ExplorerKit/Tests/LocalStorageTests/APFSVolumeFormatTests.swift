@@ -3,17 +3,42 @@ import Foundation
 import Testing
 
 struct APFSVolumeFormatTests {
+    private actor TerminalGate {
+        private var arrived = false
+        private var released = false
+        private var arrival: CheckedContinuation<Void, Never>?
+        private var release: CheckedContinuation<Void, Never>?
+        func pause() async {
+            arrived = true; arrival?.resume(); arrival = nil
+            if !released { await withCheckedContinuation { release = $0 } }
+        }
+        func waitUntilEntered() async {
+            if !arrived { await withCheckedContinuation { arrival = $0 } }
+        }
+        func resume() {
+            released = true; release?.resume(); release = nil
+        }
+    }
     private actor RecordingProbe: APFSVolumeFormatRecording {
         enum Failure: Error { case injected }
         var events: [String] = []
         let failIntent: Bool
         let failSubmission: Bool
         let failTerminal: Bool
-        init(failIntent: Bool = false, failSubmission: Bool = false, failTerminal: Bool = false) {
+        nonisolated let completionPolicy: APFSVolumeFormatCompletionPolicy
+        var terminals: [APFSVolumeFormatRecoveryTerminal] = []
+        nonisolated let currentOwner: @Sendable () -> Bool
+        let terminalGate: TerminalGate?
+        init(failIntent: Bool = false, failSubmission: Bool = false, failTerminal: Bool = false,
+             completionPolicy: APFSVolumeFormatCompletionPolicy = .provisional,
+             currentOwner: @escaping @Sendable () -> Bool = { true }, terminalGate: TerminalGate? = nil) {
             self.failIntent = failIntent
             self.failSubmission = failSubmission; self.failTerminal = failTerminal
+            self.completionPolicy = completionPolicy
+            self.currentOwner = currentOwner
+            self.terminalGate = terminalGate
         }
-        nonisolated func ownerStillCurrent() -> Bool { true }
+        nonisolated func ownerStillCurrent() -> Bool { currentOwner() }
         func recordIntent(_ snapshot: APFSVolumeFormatSnapshot) throws {
             guard snapshot.validate() else { throw Failure.injected }
             events.append("intent")
@@ -23,11 +48,15 @@ struct APFSVolumeFormatTests {
             events.append("submitted")
             if failSubmission { throw Failure.injected }
         }
-        func recordTerminal(_ terminal: APFSVolumeFormatRecoveryTerminal) throws {
+        func recordTerminal(_ terminal: APFSVolumeFormatRecoveryTerminal) async throws {
+            terminals.append(terminal)
             events.append("terminal:\(terminal)")
+            if let terminalGate { await terminalGate.pause() }
+            if case .observedNativeCompletion = terminal, !currentOwner() { throw Failure.injected }
             if failTerminal { throw Failure.injected }
         }
         func trace() -> [String] { events }
+        func lastTerminal() -> APFSVolumeFormatRecoveryTerminal? { terminals.last }
     }
     private let containerID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
     private let storeID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
@@ -41,6 +70,12 @@ struct APFSVolumeFormatTests {
             imagePath: "/tmp/traverse/.build/fixtures/drive-lifecycle-\(id.uuidString)/fixture.dmg",
             rootDevice: 11, rootInode: 12, imageDevice: 11, imageInode: 13,
             ownerUID: 501, outerMediaID: 14)
+    }
+
+    private func ordinaryOwner() -> APFSVolumeFormatImageOwner {
+        .init(imagePath: "/tmp/TraverseGenerated.dmg", parentDevice: 11, parentInode: 12,
+              imageDevice: 11, imageInode: 13, imageBytes: 1 << 30,
+              ownerUID: 501, outerDevice: "disk29", outerMediaID: 44)
     }
 
     private func volume(_ id: UUID, device: String, name: String, quota: UInt64 = 0) -> APFSContainerObservation.Volume {
@@ -63,10 +98,188 @@ struct APFSVolumeFormatTests {
                           mount: mount, caseSensitive: false),
               container: container(target: target, sibling: sibling))
     }
-    private func selection() -> ManagedVolume {
+    private func selection(kind: VolumeDeviceKind = .diskImage) -> ManagedVolume {
         .init(id: UUID(), name: "Erase Me", url: URL(fileURLWithPath: "/Volumes/Generated"),
               isInternal: false, canMount: false, canUnmount: true, canEject: true,
-              fileSystemID: 31, group: 32, deviceKind: .diskImage, mediaID: 33, volumeUUID: targetID)
+              fileSystemID: 31, group: 32, deviceKind: kind, mediaID: 33, volumeUUID: targetID)
+    }
+
+    private func nativeCompletion() throws -> APFSVolumeFormatNativeCompletion {
+        try .init(intent: APFSVolumeFormatSnapshot(observed()),
+            after: container(target: volume(replacementID, device: "disk30s3", name: "Erase Me")),
+            info: .init(uuid: replacementID, device: "disk30s3", container: "disk30", name: "Erase Me",
+                        mount: nil, caseSensitive: false), nativeExitStatus: 0)
+    }
+
+    private func completedResult(_ proof: APFSVolumeFormatNativeCompletion?) -> APFSVolumeFormatResult {
+        .init(submitted: true, formatted: .init(id: replacementID, name: "Erase Me", mountPoint: nil),
+              failure: nil, toolExitStatus: 0, nativeCompletion: proof)
+    }
+
+    @Test func nativeCompletionRequiresSuccessfulExactPostflight() throws {
+        let before = APFSVolumeFormatSnapshot(observed())
+        let after = container(target: volume(replacementID, device: "disk30s3", name: "Erase Me"))
+        let info = APFSVolumeObservation(uuid: replacementID, device: "disk30s3", container: "disk30",
+                                         name: "Erase Me", mount: nil, caseSensitive: false)
+        #expect(try nativeCompletion().validates(before))
+        #expect(throws: APFSVolumeFormatFailure.uncertain) {
+            try APFSVolumeFormatNativeCompletion(intent: before, after: after, info: info, nativeExitStatus: 1)
+        }
+        #expect(throws: APFSVolumeFormatFailure.uncertain) {
+            try APFSVolumeFormatNativeCompletion(intent: before, after: after, info: info,
+                                                 nativeExitStatus: 0, nativeErrorCode: -69888)
+        }
+        #expect(throws: APFSVolumeFormatFailure.uncertain) {
+            try APFSVolumeFormatNativeCompletion(intent: before,
+                after: container(target: volume(replacementID, device: "disk30s3", name: "Erase Me"),
+                                 sibling: volume(siblingID, device: "disk30s2", name: "Changed")),
+                info: info, nativeExitStatus: 0)
+        }
+        #expect(throws: APFSVolumeFormatFailure.uncertain) {
+            try APFSVolumeFormatNativeCompletion(intent: before, after: after,
+                info: .init(uuid: replacementID, device: "disk30s9", container: "disk30", name: "Erase Me",
+                            mount: nil, caseSensitive: false), nativeExitStatus: 0)
+        }
+    }
+
+    @Test func onlyVersionTwoWithMatchingWarmProofCanCloseTheRecord() throws {
+        let proof = try nativeCompletion(), snapshot = APFSVolumeFormatSnapshot(observed())
+        let record = APFSVolumeFormatJobRecord(id: UUID(), owner: generatedOwner(), snapshot: snapshot,
+            phase: .observedNativeCompletion, replacementID: replacementID, version: 2, nativeCompletion: proof)
+        let cold = try JSONDecoder().decode(APFSVolumeFormatJobRecord.self, from: JSONEncoder().encode(record))
+        #expect(cold == record && cold.validate() && !cold.isUnresolved)
+        let generated = try #require(record.owner)
+        for bad in [
+            APFSVolumeFormatJobRecord(id: record.id, owner: generated, snapshot: snapshot,
+                phase: .observedNativeCompletion, replacementID: replacementID, nativeCompletion: proof),
+            APFSVolumeFormatJobRecord(id: record.id, owner: generated, snapshot: snapshot,
+                phase: .observedNativeCompletion, replacementID: replacementID, version: 2),
+            APFSVolumeFormatJobRecord(id: record.id, owner: generated,
+                snapshot: APFSVolumeFormatSnapshot(observed(sibling: volume(siblingID, device: "disk30s2", name: "Other"))),
+                phase: .observedNativeCompletion, replacementID: replacementID, version: 2, nativeCompletion: proof)
+        ] {
+            #expect(!bad.validate() && bad.isUnresolved)
+        }
+        #expect(APFSVolumeFormatJobRecord(id: record.id, owner: generated, snapshot: snapshot,
+            phase: .compatibleReplacement, replacementID: replacementID).isUnresolved)
+    }
+
+    @Test func ordinaryVersionThreeKeepsLegacyWireFieldsAndColdStateDistinct() throws {
+        let snapshot = APFSVolumeFormatSnapshot(observed()), id = UUID()
+        let legacy = APFSVolumeFormatJobRecord(id: id, owner: generatedOwner(), snapshot: snapshot, phase: .intent)
+        let legacyBytes = try JSONEncoder().encode(legacy)
+        let legacyFields = try #require(JSONSerialization.jsonObject(with: legacyBytes) as? [String: Any])
+        #expect(legacyFields["owner"] != nil && legacyFields["ordinaryImageOwner"] == nil)
+        #expect(try JSONDecoder().decode(APFSVolumeFormatJobRecord.self, from: legacyBytes).validate())
+
+        let owner = ordinaryOwner()
+        let intent = APFSVolumeFormatJobRecord(id: id, ordinaryImageOwner: owner, snapshot: snapshot, phase: .intent)
+        let cold = try JSONDecoder().decode(APFSVolumeFormatJobRecord.self, from: JSONEncoder().encode(intent))
+        #expect(cold.validate() && cold.version == 3 && cold.owner == nil && cold.isUnresolved)
+        var submitted = cold; submitted.phase = .submitted
+        #expect(submitted.validate() && submitted.isUnresolved)
+        var uncertain = cold; uncertain.phase = .uncertain
+        #expect(uncertain.validate() && uncertain.isUnresolved)
+        var noLaunch = cold; noLaunch.phase = .notSubmitted
+        #expect(noLaunch.validate() && !noLaunch.isUnresolved)
+        var completed = cold
+        completed.phase = .observedNativeCompletion
+        completed.nativeCompletion = try nativeCompletion()
+        completed.replacementID = replacementID
+        #expect(completed.validate() && !completed.isUnresolved)
+        var provisional = cold; provisional.phase = .compatibleReplacement; provisional.replacementID = replacementID
+        #expect(!provisional.validate() && provisional.isUnresolved)
+        let ordinaryBytes = try JSONEncoder().encode(completed)
+        var fields = try #require(JSONSerialization.jsonObject(with: ordinaryBytes) as? [String: Any])
+        #expect(fields["owner"] == nil && fields["ordinaryImageOwner"] != nil)
+        fields["owner"] = legacyFields["owner"]
+        let ambiguous = try JSONDecoder().decode(APFSVolumeFormatJobRecord.self,
+            from: JSONSerialization.data(withJSONObject: fields))
+        #expect(!ambiguous.validate() && ambiguous.isUnresolved)
+    }
+
+    @Test func decodedCompletionCannotNameAnotherContainerOrExistingSibling() throws {
+        let proof = try nativeCompletion(), snapshot = APFSVolumeFormatSnapshot(observed())
+        let data = try JSONEncoder().encode(proof)
+        let original = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for (field, value) in [("replacementDevice", "disk99s1"), ("replacementDevice", "disk30s2"),
+                               ("replacementID", siblingID.uuidString)] {
+            var changed = original; changed[field] = value
+            let decoded = try JSONDecoder().decode(APFSVolumeFormatNativeCompletion.self,
+                from: JSONSerialization.data(withJSONObject: changed))
+            #expect(!decoded.validates(snapshot))
+        }
+    }
+
+    @Test func qualifiedWarmCompletionWaitsForSubmissionAndTerminalAcknowledgement() async throws {
+        let proof = try nativeCompletion()
+        let recorder = RecordingProbe(completionPolicy: .sourceQualification)
+        let session = APFSVolumeFormatRecoverySession(recorder)
+        try await session.begin(APFSVolumeFormatSnapshot(observed())); session.didSubmit()
+        let result = await session.finish(completedResult(proof))
+        #expect(result.failure == nil && result.nativeCompletion == proof && result.formatted?.id == replacementID)
+        #expect(await recorder.lastTerminal() == .observedNativeCompletion(proof))
+    }
+
+    @Test func qualifiedCompletionCannotPromoteMissingProofOrMissingSubmission() async throws {
+        for hasSubmission in [false, true] {
+            let recorder = RecordingProbe(completionPolicy: .sourceQualification)
+            let session = APFSVolumeFormatRecoverySession(recorder)
+            try await session.begin(APFSVolumeFormatSnapshot(observed()))
+            if hasSubmission { session.didSubmit() }
+            let result = await session.finish(completedResult(hasSubmission ? nil : try nativeCompletion()))
+            #expect(result.submitted && result.failure == .uncertain && result.formatted == nil && result.nativeCompletion == nil)
+            #expect(await recorder.lastTerminal() == .uncertain)
+        }
+    }
+
+    @Test func failedNativeCompletionAcknowledgementRemainsUncertain() async throws {
+        let recorder = RecordingProbe(failTerminal: true, completionPolicy: .sourceQualification)
+        let session = APFSVolumeFormatRecoverySession(recorder)
+        try await session.begin(APFSVolumeFormatSnapshot(observed())); session.didSubmit()
+        let result = await session.finish(completedResult(try nativeCompletion()))
+        #expect(result.failure == .uncertain && result.formatted == nil && result.nativeCompletion == nil)
+    }
+
+    @Test func ownerLostWhileTerminalAcknowledgementWaitsCannotReturnSuccess() async throws {
+        let owner = APFSVolumeTool.Cancellation(), gate = TerminalGate()
+        let recorder = RecordingProbe(completionPolicy: .sourceQualification,
+            currentOwner: { !owner.isCancelled }, terminalGate: gate)
+        let session = APFSVolumeFormatRecoverySession(recorder)
+        try await session.begin(APFSVolumeFormatSnapshot(observed())); session.didSubmit()
+        let candidate = completedResult(try nativeCompletion())
+        let finishing = Task { await session.finish(candidate) }
+        await gate.waitUntilEntered()
+        owner.cancel(); await gate.resume()
+        let result = await finishing.value
+        #expect(result.submitted && result.failure == .uncertain && result.formatted == nil && result.nativeCompletion == nil)
+    }
+
+    @Test func contradictoryNativeStatusOrLostOwnerCannotPromoteReceipt() async throws {
+        let proof = try nativeCompletion()
+        for cause in ["nativeStatus", "nativeError", "ownerLost"] {
+            let owner = APFSVolumeTool.Cancellation()
+            let recorder = RecordingProbe(completionPolicy: .sourceQualification,
+                                           currentOwner: { !owner.isCancelled })
+            let session = APFSVolumeFormatRecoverySession(recorder)
+            try await session.begin(APFSVolumeFormatSnapshot(observed())); session.didSubmit()
+            if cause == "ownerLost" { owner.cancel() }
+            let candidate = APFSVolumeFormatResult(submitted: true,
+                formatted: .init(id: replacementID, name: "Erase Me", mountPoint: nil), failure: nil,
+                toolExitStatus: cause == "nativeStatus" ? 1 : 0,
+                diskutilErrorCode: cause == "nativeError" ? -69888 : nil, nativeCompletion: proof)
+            let result = await session.finish(candidate)
+            #expect(result.failure == .uncertain && result.nativeCompletion == nil && result.formatted == nil)
+            #expect(await recorder.lastTerminal() == .uncertain)
+        }
+    }
+
+    @Test func provisionalRecorderCannotPromoteEvenAnObservedWarmResult() async throws {
+        let recorder = RecordingProbe(), session = APFSVolumeFormatRecoverySession(recorder)
+        try await session.begin(APFSVolumeFormatSnapshot(observed())); session.didSubmit()
+        let result = await session.finish(completedResult(try nativeCompletion()))
+        #expect(result.nativeCompletion == nil)
+        #expect(await recorder.lastTerminal() == .compatibleReplacement(replacementID))
     }
 
     @Test func onlyMountedUniqueZeroAllocationTargetCanBeReviewed() throws {
@@ -96,9 +309,35 @@ struct APFSVolumeFormatTests {
         #expect(!String(reflecting: plan).contains("Generated"))
     }
 
+    private actor FormatInspectorSpy: VolumeInspecting {
+        private(set) var calls = 0
+        func inspect(_ target: ManagedVolume) async throws -> VolumeInspection {
+            calls += 1
+            throw VolumeLifecycleFailure.denied
+        }
+    }
+
+    @Test func physicalExternalMediaNeverReachesFormatInspection() async {
+        let selected = selection(kind: .externalDisk)
+        let inspector = FormatInspectorSpy()
+        let backend = APFSVolumeFormat(inspector: inspector)
+        await #expect(throws: APFSVolumeFormatFailure.unsupported) {
+            try await backend.prepare(selected)
+        }
+        let recorder = RecordingProbe()
+        let result = await backend.perform(.init(selected: selected, original: observed()),
+            confirmedName: selected.name, recording: recorder, permitted: { true })
+        #expect(!result.submitted && result.failure == .unsupported && result.toolExitStatus == nil)
+        #expect(await recorder.trace().isEmpty)
+        #expect(await inspector.calls == 0)
+    }
+
     @Test func launchChecksTheTargetAfterThePotentiallySlowImageInquiry() {
         var targetCurrent = true, calls: [String] = []
         let allowed = APFSVolumeFormat.launchPermitted(ownerStillCurrent: {
+            calls.append("owner")
+            return true
+        }, attachmentStillCurrent: {
             calls.append("image")
             targetCurrent = false
             return true
@@ -106,19 +345,20 @@ struct APFSVolumeFormatTests {
             calls.append("target")
             return targetCurrent
         }, expiresAt: ProcessInfo.processInfo.systemUptime + 60, cancelled: { false })
-        #expect(!allowed && calls == ["image", "target"])
+        #expect(!allowed && calls == ["owner", "image", "target"])
     }
 
     @Test func expiredOrCancelledLaunchChecksDoNotQueryMoreAuthority() {
         var queries = 0, cancelled = false
         #expect(!APFSVolumeFormat.launchPermitted(ownerStillCurrent: { queries += 1; return true },
+            attachmentStillCurrent: { queries += 1; return true },
             targetStillCurrent: { queries += 1; return true }, expiresAt: 0, cancelled: { false }))
         #expect(queries == 0)
-        #expect(!APFSVolumeFormat.launchPermitted(ownerStillCurrent: {
+        #expect(!APFSVolumeFormat.launchPermitted(ownerStillCurrent: { queries += 1; return true }, attachmentStillCurrent: {
             queries += 1; cancelled = true; return true
         }, targetStillCurrent: { queries += 1; return true },
             expiresAt: ProcessInfo.processInfo.systemUptime + 60, cancelled: { cancelled }))
-        #expect(queries == 1)
+        #expect(queries == 2)
     }
 
     @Test func onlyOneReplacementWithUnchangedSiblingCanReconcile() {

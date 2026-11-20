@@ -330,14 +330,18 @@ private func relocated(_ original: URL, through steps: ArraySlice<JournalStep>,
     return url
 }
 
+func recoveryAreaID(for name: String) -> UUID? {
+    let prefix = ".mac-explorer-recovery-"
+    guard name.hasPrefix(prefix) else { return nil }
+    return UUID(uuidString: String(name.dropFirst(prefix.count)))
+}
+
 private func retainedAreas(_ record: JournalRecord, cancellation: OperationCancellation) throws -> [RetainedArea] {
     var paths = Set<String>()
     return try record.areas.map { area in
         try cancellation.check()
         let url = try relocated(area.url, through: record.steps[...], cancellation: cancellation)
-        guard paths.insert(url.path).inserted,
-              url.lastPathComponent.hasPrefix(".mac-explorer-recovery-"),
-              UUID(uuidString: String(url.lastPathComponent.dropFirst(".mac-explorer-recovery-".count))) != nil else {
+        guard paths.insert(url.path).inserted, recoveryAreaID(for: url.lastPathComponent) != nil else {
             throw FileOperationFailure.recoveryUncertain
         }
         return RetainedArea(url: url, identity: area.identity, stagingProof: area.stagingProof,

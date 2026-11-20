@@ -30,6 +30,15 @@ enum EditorIndentationPlan: Equatable, Sendable {
 /// Pure editing proposal only. The caller retains native input, admission,
 /// Undo and generation delivery. No plan installs attributes or changes text.
 enum EditorIndentation {
+    private static let braceLanguages: Set<TextSyntaxLanguage> = [
+        .swift, .rust, .javascript, .typescript, .c, .cpp, .objectiveC, .objectiveCPP, .css, .go
+    ]
+    static let lexicalInputLimit = 65_536
+
+    static func supportsCodeStructure(_ language: TextSyntaxLanguage) -> Bool {
+        language == .python || braceLanguages.contains(language)
+    }
+
     /// A bounded leading-space lookbehind, independent of asynchronous syntax
     /// and line indexing. Mixed whitespace and ordinary content stay native.
     static func backspaceRange(in input: NSString, selection: NSRange,
@@ -53,7 +62,7 @@ enum EditorIndentation {
     static func plan(_ command: EditorIndentationCommand, text: String,
                      selection: NSRange, preferences: EditorIndentationPreferences,
                      maximumBytes: Int, language: TextSyntaxLanguage = .plain,
-                     indentsJSONBlocks: Bool = true) -> EditorIndentationPlan {
+                     indentsJSONBlocks: Bool = true, indentsCodeBlocks: Bool = true) -> EditorIndentationPlan {
         guard preferences.isValid else { return .refused(.invalidPreferences) }
         let currentBytes = text.utf8.count
         guard maximumBytes >= 0, currentBytes <= maximumBytes else { return .refused(.tooLarge) }
@@ -87,36 +96,24 @@ enum EditorIndentation {
         if case .newline = command {
             guard selection.length == 0 else { return .native }
             let start = lineStart(selection.location)
-            var end = start
-            while end < selection.location {
-                let unit = input.character(at: end)
-                guard unit == 32 || unit == 9 else { break }
-                end += 1
-            }
-            if indentsJSONBlocks && (language == .json || language == .jsonc) {
-                var before = selection.location
-                while before > start && [9, 32].contains(input.character(at: before - 1)) { before -= 1 }
-                if before > start {
-                    let opener = input.character(at: before - 1)
-                    if (opener == 123 || opener == 91), jsonCode(at: before - 1, in: input) {
-                        let prefix = input.substring(with: .init(location: start, length: end - start))
-                        let unit = preferences.insertion == .tabs ? "\t" : String(repeating: " ", count: width)
-                        let inner = "\n" + prefix + unit
-                        var after = selection.location
-                        while after < input.length && [9, 32].contains(input.character(at: after)) { after += 1 }
-                        let paired = after < input.length && input.character(at: after) == (opener == 123 ? 125 : 93)
-                        let inserted = inner + (paired ? "\n" + prefix : "")
-                        // Only whitespace before the matching close is replaced;
-                        // its delimiter and all other user characters stay native.
-                        let range = NSRange(location: selection.location, length: paired ? after - selection.location : 0)
-                        let added = inserted.utf8.count
-                        guard added <= maximumBytes, currentBytes - range.length <= maximumBytes - added else {
-                            return .refused(.tooLarge)
-                        }
-                        return .replace(.init(range: range, text: inserted,
-                            selection: .init(location: selection.location + inner.utf16.count, length: 0)))
-                    }
+            let end = pastIndentation(in: input, from: start, to: selection.location)
+            if let block = blockOpening(in: input, lineStart: start, caret: selection.location,
+                    language: language, allowsJSON: indentsJSONBlocks, allowsCode: indentsCodeBlocks) {
+                let baseEnd = pastIndentation(in: input, from: block.lineStart, to: selection.location)
+                let prefix = input.substring(with: .init(location: block.lineStart, length: baseEnd - block.lineStart))
+                let unit = preferences.insertion == .tabs ? "\t" : String(repeating: " ", count: width)
+                let inner = "\n" + prefix + unit
+                let after = pastIndentation(in: input, from: selection.location, to: input.length)
+                let paired = after < input.length && block.closer == input.character(at: after)
+                let inserted = inner + (paired ? "\n" + prefix : "")
+                // Only whitespace before the closing delimiter is replaced.
+                let range = NSRange(location: selection.location, length: paired ? after - selection.location : 0)
+                let added = inserted.utf8.count
+                guard added <= maximumBytes, currentBytes - range.length <= maximumBytes - added else {
+                    return .refused(.tooLarge)
                 }
+                return .replace(.init(range: range, text: inserted,
+                    selection: .init(location: selection.location + inner.utf16.count, length: 0)))
             }
             guard preferences.continuesIndentation, end > start else { return .native }
             // Leading spaces/tabs are ASCII, so their byte and UTF-16 counts
@@ -202,11 +199,121 @@ enum EditorIndentation {
         return .replace(.init(range: span, text: replacement, selection: resultSelection))
     }
 
+    private static func pastIndentation(in input: NSString, from start: Int, to limit: Int) -> Int {
+        var end = start
+        while end < limit, isIndentation(input.character(at: end)) { end += 1 }
+        return end
+    }
+
+    private static func isIndentation(_ unit: UInt16) -> Bool { unit == 9 || unit == 32 }
+
+    private struct BlockOpening {
+        let lineStart: Int
+        let closer: UInt16?
+    }
+
+    private static func blockOpening(in input: NSString, lineStart: Int, caret: Int,
+                                     language: TextSyntaxLanguage, allowsJSON: Bool, allowsCode: Bool) -> BlockOpening? {
+        let isJSON = allowsJSON && (language == .json || language == .jsonc)
+        let isCode = allowsCode && supportsCodeStructure(language)
+        guard isJSON || isCode else { return nil }
+        var before = caret
+        while before > lineStart, isIndentation(input.character(at: before - 1)) { before -= 1 }
+        guard before > lineStart else { return nil }
+        let marker = before - 1
+        let opener = input.character(at: marker)
+        if isJSON {
+            guard (opener == 123 || opener == 91), jsonCode(at: marker, in: input) else { return nil }
+            return .init(lineStart: lineStart, closer: opener == 123 ? 125 : 93)
+        }
+        guard opener == (language == .python ? 58 : 123),
+              let opaque = codeRanges(at: marker, lineStart: lineStart, in: input, language: language) else { return nil }
+        if language == .python {
+            guard let header = pythonHeaderStart(in: input, endingAt: marker, skipping: opaque) else { return nil }
+            return .init(lineStart: header, closer: nil)
+        }
+        return .init(lineStart: lineStart, closer: 125)
+    }
+
+    /// Input may arrive before the debounced syntax presentation. Lex the
+    /// exact bounded prefix when a structural keystroke needs context.
+    static func codeRanges(at marker: Int, lineStart: Int, in input: NSString, language: TextSyntaxLanguage,
+                           checkingRustCharacter: Bool = false) -> [NSRange]? {
+        guard marker >= lineStart, marker < input.length, marker < lexicalInputLimit,
+              case .tokens(let tokens) = TextSyntax.contextTokens(input.substring(to: marker + 1), language: language) else { return nil }
+        let opaque = tokens.compactMap { token in token.kind == .string || token.kind == .comment ? token.range : nil }
+        guard !opaque.contains(where: { NSLocationInRange(marker, $0) }) else { return nil }
+        if [.css, .c, .cpp, .objectiveC, .objectiveCPP].contains(language),
+           !tokens.contains(where: { $0.kind == .punctuation && $0.range.location == marker }) { return nil }
+
+        let script = language == .javascript || language == .typescript
+        let checksSlash = language == .swift || script
+        let checksQuote = language == .rust && checkingRustCharacter
+        if checksSlash || checksQuote {
+            // The highlighting lexer cannot identify every bare regex or an
+            // incomplete Rust character literal. Leave those keystrokes native.
+            var skip = 0
+            for offset in lineStart..<marker {
+                let unit = input.character(at: offset)
+                guard checksSlash && unit == 47 || checksQuote && unit == 39 else { continue }
+                while skip < opaque.count, NSMaxRange(opaque[skip]) <= offset { skip += 1 }
+                if skip < opaque.count, NSLocationInRange(offset, opaque[skip]) { continue }
+                if unit == 39 || script || !isIndentation(input.character(at: offset + 1)) { return nil }
+            }
+        }
+        return opaque
+    }
+
+    private static func pythonHeaderStart(in input: NSString, endingAt colon: Int, skipping opaque: [NSRange]) -> Int? {
+        var start = 0, offset = 0, skip = 0, lastCodeOffset = -2
+        var closes: [UInt16] = []
+        while offset < colon {
+            if skip < opaque.count, offset == opaque[skip].location {
+                offset = NSMaxRange(opaque[skip])
+                skip += 1
+                continue
+            }
+            switch input.character(at: offset) {
+            case 40: closes.append(41)
+            case 91: closes.append(93)
+            case 123: closes.append(125)
+            case 41, 93, 125:
+                guard closes.popLast() == input.character(at: offset) else { return nil }
+            case 10 where closes.isEmpty:
+                let continued = lastCodeOffset == offset - 1 && input.character(at: lastCodeOffset) == 92
+                if !continued { start = offset + 1 }
+            default: break
+            }
+            guard closes.count <= 128 else { return nil }
+            lastCodeOffset = offset
+            offset += 1
+        }
+        guard closes.isEmpty else { return nil }
+        let first = pastIndentation(in: input, from: start, to: colon)
+        var header = input.substring(with: .init(location: first, length: colon - first))[...]
+        func nextWord() -> Substring {
+            header = header.drop(while: { $0 == " " || $0 == "\t" })
+            let word = header.prefix(while: { $0.isLetter || $0.isNumber || $0 == "_" })
+            header = header.dropFirst(word.count)
+            return word
+        }
+        let keyword = nextWord()
+        if keyword == "async", !["def", "for", "with"].contains(nextWord()) { return nil }
+        let remainder = header.drop(while: { $0 == " " || $0 == "\t" })
+        switch keyword {
+        case "try", "else", "finally": return remainder.isEmpty ? start : nil
+        case "except": return start
+        case "class", "def", "async", "if", "elif", "for", "while", "with", "match", "case":
+            return remainder.isEmpty ? nil : start
+        default: return nil
+        }
+    }
+
     /// Return must retain native typing order. Bound the synchronous lexical
     /// lookbehind rather than trusting asynchronous, potentially stale syntax.
     /// Beyond this prefix budget Return still continues existing indentation.
     static func jsonCode(at target: Int, in input: NSString) -> Bool {
-        guard target < 65_536 else { return false }
+        guard target < lexicalInputLimit else { return false }
         enum State { case code, string, lineComment, blockComment }
         var state = State.code, position = 0
         while position < target {

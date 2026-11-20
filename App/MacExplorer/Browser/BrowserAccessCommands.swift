@@ -30,6 +30,23 @@ final class RememberedFolderSidebar {
 
 struct FileAccessLifetimes: Sendable {
     let leases: [FolderAccessLease]
+
+    func covers(_ url: URL) -> Bool {
+        leases.contains { url.standardizedFileURL.pathComponents.starts(with: $0.url.standardizedFileURL.pathComponents) }
+    }
+}
+
+@MainActor extension FolderAccessController {
+    func retainAccess(for urls: [URL]) async -> FileAccessLifetimes {
+        var leases: [FolderAccessLease] = []
+        for url in urls {
+            guard !Task.isCancelled else { break }
+            if !FileAccessLifetimes(leases: leases).covers(url), let lease = await acquireAccess(to: url) {
+                leases.append(lease)
+            }
+        }
+        return .init(leases: leases)
+    }
 }
 
 @MainActor
@@ -115,16 +132,7 @@ extension BrowserViewController {
     }
 
     func accessLifetime(for urls: [URL]) async -> FileAccessLifetimes {
-        var leases: [FolderAccessLease] = []
-        for url in urls {
-            guard !Task.isCancelled else { break }
-            // Reuse a retained root for selections containing many siblings.
-            if leases.contains(where: {
-                url.path == $0.url.path || url.path.hasPrefix($0.url.path == "/" ? "/" : $0.url.path + "/")
-            }) { continue }
-            if let lease = await folderAccess.acquireAccess(to: url) { leases.append(lease) }
-        }
-        return FileAccessLifetimes(leases: leases)
+        await folderAccess.retainAccess(for: urls)
     }
 
     func presentFolderChooser(remember: Bool, replacingReference: UUID? = nil) {

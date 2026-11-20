@@ -6,39 +6,73 @@ import FileOperations
 @MainActor
 final class EditorCodeTextView: NSTextView {
     var comparisonHighlights: [NSRange] = [] { didSet { needsDisplay = true } }
-    var comparisonTint = NSColor.systemBlue { didSet { needsDisplay = true } }
+    var comparisonDetails: [NSRange] = [] { didSet { needsDisplay = true } }
+    var comparisonAccent: EditorComparisonBackground.Accent? { didSet { needsDisplay = true } }
     var findHighlights: [NSRange] = [] { didSet { needsDisplay = true } }
     var currentFindHighlight: NSRange? { didSet { if oldValue != currentFindHighlight { needsDisplay = true } } }
     var findHighlightColor = NSColor.systemBlue { didSet { needsDisplay = true } }
+    var bracketHighlights: [NSRange] = [] { didSet { if oldValue != bracketHighlights { needsDisplay = true } } }
     #if DEBUG
     private(set) var findBackgroundDrawsForVerification = 0
     #endif
     var onFindAction: ((NSTextFinder.Action) -> Void)?
+    var onCompleteLocalName: (() -> Void)?
+    override func complete(_ sender: Any?) { onCompleteLocalName?() }
     override func performTextFinderAction(_ sender: Any?) {
         guard let item = sender as? NSMenuItem, let action = NSTextFinder.Action(rawValue: item.tag) else { return }
         onFindAction?(action)
     }
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
-        EditorComparisonBackground.draw(comparisonHighlights, color: comparisonTint, text: self, dirtyRect: rect)
+        EditorComparisonBackground.draw(comparisonHighlights, details: comparisonDetails, accent: comparisonAccent,
+            text: self, dirtyRect: rect)
+        EditorIndentGuides.draw(in: self, dirtyRect: rect)
         #if DEBUG
         if !findHighlights.isEmpty { findBackgroundDrawsForVerification += 1 }
         #endif
         EditorFindHighlights.draw(findHighlights, current: currentFindHighlight, color: findHighlightColor,
                                   text: self, dirtyRect: rect)
+        drawMatchingBrackets(in: rect)
+        EditorWhitespaceMarks.draw(in: self, dirtyRect: rect)
+    }
+
+    private func drawMatchingBrackets(in rect: NSRect) {
+        guard !bracketHighlights.isEmpty, window?.isKeyWindow == true, window?.firstResponder === self,
+              !hasMarkedText(), let viewport = EditorTextViewport(self, drawing: rect) else { return }
+        let highContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let color = NSColor.labelColor
+        for range in bracketHighlights {
+            viewport.forEachVisibleBox(in: range) { bounds in
+                let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: -0.5, dy: 0.5), xRadius: 2, yRadius: 2)
+                color.withAlphaComponent(0.09).setFill()
+                shape.fill()
+                color.withAlphaComponent(highContrast ? 0.9 : 0.53).setStroke()
+                shape.lineWidth = highContrast ? 1.5 : 1
+                shape.stroke()
+            }
+        }
     }
     var indentationPreferences = EditorIndentationPreferences.fresh {
-        didSet { if oldValue != indentationPreferences { clearBracketPairs() } }
+        didSet { if oldValue != indentationPreferences { clearBracketPairs(); needsDisplay = true } }
     }
     var indentationLanguage = TextSyntaxLanguage.plain {
-        didSet { if oldValue != indentationLanguage { clearBracketPairs() } }
+        didSet { if oldValue != indentationLanguage { clearBracketPairs(); needsDisplay = true } }
     }
+    var showsIndentGuides = true { didSet { if oldValue != showsIndentGuides { needsDisplay = true } } }
+    var showsWhitespaceMarks = false { didSet { if oldValue != showsWhitespaceMarks { needsDisplay = true } } }
     var completesJSONBrackets = true {
         didSet { if oldValue != completesJSONBrackets { clearBracketPairs() } }
+    }
+    var completesCodeBrackets = false {
+        didSet { if oldValue != completesCodeBrackets { clearBracketPairs() } }
+    }
+    private var bracketPairingEnabled: Bool {
+        EditorBracketPairing.isEnabled(in: indentationLanguage, json: completesJSONBrackets, code: completesCodeBrackets)
     }
     var indentsJSONBlocks = true {
         didSet { if oldValue != indentsJSONBlocks { clearBracketPairs() } }
     }
+    var indentsCodeBlocks = true
     var backspaceUnindents = true
     private var bracketCloses: [Int: UInt16] = [:]
     private var bracketSelection: NSRange?
@@ -49,9 +83,18 @@ final class EditorCodeTextView: NSTextView {
     var onInputSettled: (() -> Void)?
     var onMarkedText: (() -> Void)?
     var onInputFocusLost: (() -> Void)?
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted && !bracketHighlights.isEmpty { needsDisplay = true }
+        return accepted
+    }
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
-        if resigned { clearBracketPairs(); onInputFocusLost?() }
+        if resigned {
+            clearBracketPairs()
+            onInputFocusLost?()
+            if !bracketHighlights.isEmpty { needsDisplay = true }
+        }
         return resigned
     }
     /// Native insertion still owns selection, replacement, IME and text Undo.
@@ -92,17 +135,12 @@ final class EditorCodeTextView: NSTextView {
         }
         var plan = EditorBracketPairing.Plan.native
         var closingOffset = range.location
-        if completesJSONBrackets, indentationLanguage == .json || indentationLanguage == .jsonc,
+        if bracketPairingEnabled, normalized.utf16.count == 1, let unit = normalized.utf16.first,
            range == selected, range.length == 0, scalarBoundary(range.location) {
-            let unit = normalized.utf16.count == 1 ? normalized.utf16.first : nil
-            // Only bracket keys need a bounded lexical prefix. In particular,
-            // a close typed inside a newly opened string must stay literal.
-            let prefix = (unit == 123 || unit == 91 || unit == 125 || unit == 93) && range.location < 65_536
-                ? source.substring(to: range.location) : nil
             // Smart Return leaves an empty inner line before the owned close.
             // A closing key may cross only a small whitespace-only gap, never
             // user content or an unowned delimiter.
-            if unit == 125 || unit == 93,
+            if EditorBracketPairing.isClosing(unit),
                let offset = bracketCloses.keys.filter({ $0 >= range.location }).min(),
                offset < length, offset - range.location <= 4096,
                source.substring(with: .init(location: range.location, length: offset - range.location))
@@ -110,9 +148,12 @@ final class EditorCodeTextView: NSTextView {
                 closingOffset = offset
             }
             let next = closingOffset < length ? source.character(at: closingOffset) : nil
-            plan = EditorBracketPairing.plan(normalized, prefix: prefix, next: next,
-                ownsNextClose: bracketCloses[closingOffset] == next && next != nil,
-                language: indentationLanguage, enabled: completesJSONBrackets)
+            let owned = next != nil && bracketCloses[closingOffset] == next
+            if range.location < EditorIndentation.lexicalInputLimit,
+               EditorBracketPairing.needsContext(unit, next: next, ownsNextClose: owned, language: indentationLanguage) {
+                plan = EditorBracketPairing.plan(normalized, prefix: source.substring(to: range.location),
+                    next: next, ownsNextClose: owned, language: indentationLanguage, enabled: true)
+            }
             if case .insert = plan, bracketCloses.count >= 64 { clearBracketPairs(); plan = .native }
         }
         if case .skip = plan {
@@ -194,13 +235,11 @@ final class EditorCodeTextView: NSTextView {
     override func insertNewline(_ sender: Any?) { if !performIndentation(.newline) { super.insertNewline(sender) } }
     override func deleteBackward(_ sender: Any?) {
         let caret = selectedRange()
-        guard completesJSONBrackets, indentationLanguage == .json || indentationLanguage == .jsonc,
-              isEditable, !hasMarkedText(), selectedRanges.count == 1, caret.length == 0,
+        guard bracketPairingEnabled, isEditable, !hasMarkedText(), selectedRanges.count == 1, caret.length == 0,
               let storage = textStorage, caret.location > 0, caret.location < storage.length,
               let close = bracketCloses[caret.location],
               storage.mutableString.character(at: caret.location) == close,
-              (storage.mutableString.character(at: caret.location - 1) == 123 && close == 125
-                || storage.mutableString.character(at: caret.location - 1) == 91 && close == 93) else {
+              EditorBracketPairing.close(forOpening: storage.mutableString.character(at: caret.location - 1)) == close else {
             clearBracketPairs()
             if backspaceUnindents, indentationLanguage != .plain, isEditable,
                !hasMarkedText(), selectedRanges.count == 1, let storage = textStorage,
@@ -225,7 +264,8 @@ final class EditorCodeTextView: NSTextView {
         let original = string
         switch EditorIndentation.plan(command, text: original, selection: selectedRange(),
                                       preferences: indentationPreferences, maximumBytes: TextDocumentValue.maximumBytes,
-                                      language: indentationLanguage, indentsJSONBlocks: indentsJSONBlocks) {
+                                      language: indentationLanguage, indentsJSONBlocks: indentsJSONBlocks,
+                                      indentsCodeBlocks: indentsCodeBlocks) {
         case .native: return false
         case .unchanged: return true
         case .refused(let reason):
@@ -255,32 +295,77 @@ final class EditorCodeTextView: NSTextView {
 /// A native editing surface only. Reads, Save/Undo, access and durable recovery
 /// belong to the separate document owner and FileOperations, never callbacks here.
 @MainActor
-final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
+final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency NSTextStorageDelegate {
+    static let whitespaceMarksTitle = "Show Whitespace Marks"
+
+    struct OutlinePresentation {
+        let value: EditorDocumentOutline
+        let generation: UUID
+        let language: TextSyntaxLanguage
+    }
+    struct ScrollContext: Equatable {
+        let generation: UUID
+        let scopes: [EditorDocumentOutline.Entry]
+    }
+    struct NameCompletion {
+        let prefix: String
+        let range: NSRange
+        let entries: [EditorDocumentOutline.Entry]
+        let generation: UUID
+    }
+
     let scrollView = NSScrollView()
     let textView = EditorCodeTextView(frame: .zero)
     lazy var find = EditorFindController(surface: self)
     lazy var lineCommands = EditorLineCommandController(surface: self)
+    private var jumps = EditorJumpTrail<EditorNavigationPosition>()
     private(set) var documentFormat = TextDocumentFormat(bom: false, lineEnding: .lf)
     private(set) var generation = UUID()
     private(set) var lineIndex: EditorLineIndex?
     private(set) var presentedGeneration: UUID?
+    private(set) var outlinePresentation: OutlinePresentation?
     private(set) var styleRangeCount = 0
     private(set) var visibleStyleRangeCount = 0
     var onEdit: ((String, UUID) -> Void)?
     var onRejectedEdit: ((TextDocumentFailure) -> Void)?
     var onCaret: (((line: Int, column: Int)?) -> Void)?
+    var onOutlineChanged: (() -> Void)?
+    var onNavigationJump: ((EditorNavigationPosition) -> Void)?
+    var onScrollContextChanged: ((ScrollContext?) -> Void)?
+    var onReviewUnsavedLine: ((Int) -> Bool)?
+    var onUnsavedLineBaselineChanged: (() -> Void)?
+    var onWindowAttachment: (() -> Void)?
+    private(set) var scrollContext: ScrollContext?
+    private var contextLine: Int?
+    private var showsScrollContext = true
     private var installing = false
+    private var lastEditOffset: Int?
+    private var lineBookmarks = EditorLineBookmarks()
     private var gutter: EditorLineRuler!
     private var syntaxTokens: [TextSyntaxToken] = []
     private var styledRange = NSRange(location: 0, length: 0)
     private var refreshingViewport = false
     private var tabPresentationPending = true
     private var pointSizePending: CGFloat?
+    private var defaultWhitespaceMarks = false
+    private var whitespaceMarksOverride: Bool?
     private var requestedPointSize: CGFloat = 13
     private var applyingPendingPresentation = false
     private(set) var wrapsLines = true
     private(set) var syntaxPalette = EditorSyntaxPalette.adaptive
     private(set) var showsLineNumbers = true
+    private var showsUnsavedLineChanges = true
+    private var showsMatchingBrackets = true
+    private var bracketMatches: EditorDelimiterWalk.MatchIndex?
+    private var lineChangeBaselineID: UUID?
+    private(set) var unsavedLineChanges: EditorUnsavedLineChanges? {
+        didSet {
+            if oldValue?.baselineID != unsavedLineChanges?.baselineID { onUnsavedLineBaselineChanged?() }
+            gutter?.needsDisplay = true
+            updateChangeMarkerCursor()
+        }
+    }
+    private(set) var conflictMarkers: EditorConflictMarkers?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -326,6 +411,8 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         // otherwise loop while filling layout holes in a multiline document.
         textView.layoutManager?.allowsNonContiguousLayout = false
         textView.delegate = self
+        // The callbacks belong to this main-actor text view's storage.
+        textView.textStorage?.delegate = self
         textView.setAccessibilityLabel("Document text")
         textView.setAccessibilityElement(true)
         textView.setAccessibilityRole(.textArea)
@@ -350,12 +437,14 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         textView.onIndentationRefusal = { [weak self] value in self?.onRejectedEdit?(value) }
         textView.onInputSettled = { [weak self] in
             self?.applyPendingPresentation(); self?.find.inputSettled()
+            self?.updateBracketHighlights()
         }
         textView.onFindAction = { [weak self] action in self?.find.perform(action) }
         textView.onMarkedText = { [weak self] in
             self?.lineCommands.inputDidChange(); self?.find.documentDidChange()
+            self?.updateBracketHighlights()
         }
-        textView.onInputFocusLost = { [weak self] in self?.lineCommands.inputDidChange() }
+        textView.onInputFocusLost = { [weak self] in self?.lineCommands.inputDidChange(preservingExpansion: true) }
         applyPendingPresentation()
     }
     required init?(coder: NSCoder) { nil }
@@ -368,6 +457,15 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         installing = true
         defer { installing = false; tabPresentationPending = true; applyPendingPresentation() }
         generation = UUID()
+        jumps = .init()
+        lastEditOffset = nil
+        lineBookmarks = .init()
+        lineChangeBaselineID = nil
+        unsavedLineChanges = nil
+        conflictMarkers = nil
+        outlinePresentation = nil
+        invalidateScrollContext()
+        onOutlineChanged?()
         documentFormat = value.format
         textView.string = value.text
         textView.undoManager?.removeAllActions()
@@ -387,6 +485,11 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         lineCommands.inputDidChange()
         let historyChange = textView.undoManager.map { $0.isUndoing || $0.isRedoing } ?? false
         generation = UUID(); presentedGeneration = nil; lineIndex = nil
+        jumps = .init()
+        unsavedLineChanges = nil
+        conflictMarkers = nil
+        invalidateScrollContext()
+        if outlinePresentation != nil { onOutlineChanged?() }
         clearStyling()
         gutter.needsDisplay = true
         if historyChange && !applyingPendingPresentation {
@@ -399,9 +502,19 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         onEdit?(textView.string, generation)
         publishCaret()
     }
+
+    func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
+                     range editedRange: NSRange, changeInLength delta: Int) {
+        guard !installing, textView.isEditable, editedMask.contains(.editedCharacters),
+              editedRange.location != NSNotFound else { return }
+        lastEditOffset = min(editedRange.location, textStorage.length)
+        lineBookmarks.followEdit(in: editedRange, delta: delta, length: textStorage.length)
+    }
+
     func textViewDidChangeSelection(_ notification: Notification) {
         textView.nativeSelectionDidChange()
         lineCommands.selectionDidChange(); find.selectionDidChange(); publishCaret()
+        updateBracketHighlights()
     }
     func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
                   replacementString: String?) -> Bool {
@@ -416,6 +529,34 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
             onRejectedEdit?(.tooLarge); return false
         }
         return true
+    }
+
+    @discardableResult func present(_ prepared: EditorPreparedPresentation, for expected: UUID) -> Bool {
+        guard present(prepared.value, syntax: prepared.syntax, lines: prepared.lines, for: expected) else { return false }
+        conflictMarkers = prepared.conflicts.blocks.isEmpty ? nil : prepared.conflicts
+        if let marks = prepared.unsavedLines, marks.baselineID == lineChangeBaselineID, showsUnsavedLineChanges {
+            unsavedLineChanges = marks
+        }
+        outlinePresentation = .init(value: prepared.outline, generation: expected, language: prepared.syntaxLanguage)
+        bracketMatches = prepared.bracketMatches
+        updateBracketHighlights()
+        onOutlineChanged?()
+        contextLine = nil
+        refreshScrollContext()
+        return true
+    }
+
+    func prepareLineChangeBaseline(_ baseline: EditorSavedTextBaseline?) -> EditorSavedTextBaseline? {
+        let selected = showsUnsavedLineChanges ? baseline : nil
+        if lineChangeBaselineID != selected?.id {
+            lineChangeBaselineID = selected?.id
+            unsavedLineChanges = nil
+        }
+        return selected
+    }
+
+    func needsLineChangePreparation(for baseline: EditorSavedTextBaseline?) -> Bool {
+        lineChangeBaselineID != (showsUnsavedLineChanges ? baseline?.id : nil)
     }
 
     @discardableResult
@@ -441,6 +582,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         // the main actor on each edit or carry them through a distant scroll.
         syntaxTokens = tokens
         lineIndex = lines; styleRangeCount = tokens.count; presentedGeneration = expected
+        lineBookmarks.align(to: lines)
         refreshVisibleStyling()
         updateGutterWidth()
         gutter.needsDisplay = true
@@ -469,16 +611,39 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         applyPendingPresentation()
     }
 
+    var showsWhitespaceMarks: Bool { whitespaceMarksOverride ?? defaultWhitespaceMarks }
+
+    func setWhitespaceMarks(_ visible: Bool) {
+        whitespaceMarksOverride = visible
+        textView.showsWhitespaceMarks = visible
+    }
+
     /// Shared presentation for editable, read-only and comparison text. None of
     /// these choices changes characters, document format, generation or Undo.
     func applyEditorPreferences(_ value: EditorPreferences, pointSize: CGFloat, applyWrapping: Bool = true) {
+        if showsScrollContext != value.showsScrollContext {
+            showsScrollContext = value.showsScrollContext
+            contextLine = nil
+            refreshScrollContext()
+        }
         if applyWrapping { setWrapping(value.wrapsLines) }
         setLineNumbers(value.showsLineNumbers)
+        textView.showsIndentGuides = value.showsIndentGuides
+        showsMatchingBrackets = value.showsMatchingBrackets
+        updateBracketHighlights()
+        defaultWhitespaceMarks = value.showsWhitespaceMarks
+        textView.showsWhitespaceMarks = showsWhitespaceMarks
+        if showsUnsavedLineChanges != value.showsUnsavedLineChanges {
+            showsUnsavedLineChanges = value.showsUnsavedLineChanges
+            if !showsUnsavedLineChanges { _ = prepareLineChangeBaseline(nil) }
+        }
         setPointSize(pointSize)
         find.applyInterfaceScale(pointSize / CGFloat(value.basePointSize))
         setIndentation(value.indentation)
         textView.indentsJSONBlocks = value.indentsJSONBlocks
+        textView.indentsCodeBlocks = value.indentsCodeBlocks
         textView.completesJSONBrackets = value.completesJSONBrackets
+        textView.completesCodeBrackets = value.completesCodeBrackets
         textView.backspaceUnindents = value.backspaceUnindents
         setSyntaxPalette(value.palette)
         textView.findHighlightColor = value.findHighlightColor.nativeColor
@@ -535,6 +700,12 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         visibleStyleRangeCount = 0
         refreshVisibleStyling()
     }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, onWindowAttachment != nil else { return }
+        Task { @MainActor [weak self] in self?.onWindowAttachment?() }
+    }
+
     override func layout() {
         super.layout()
         updateGutterWidth()
@@ -553,42 +724,304 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
     }
     func showFind() { find.perform(.showFindInterface) }
     var canGoToLine: Bool { lineIndex != nil && !textView.hasMarkedText() }
-    @discardableResult
-    func goToLine(_ line: Int, generation expected: UUID) -> Bool {
-        guard generation == expected, !textView.hasMarkedText(), let lineIndex,
-              lineIndex.matches(textView.string), let start = lineIndex.start(ofLine: line) else { return false }
-        textView.setSelectedRange(.init(location: start, length: 0))
-        textView.scrollRangeToVisible(textView.selectedRange())
-        _ = window?.makeFirstResponder(textView)
-        publishCaret()
+    var canGoToLastEdit: Bool { canGoToLine && textView.isEditable && lastEditOffset != nil }
+
+    var bookmarkCaretLine: Int? {
+        guard canGoToLine, textView.isEditable, textView.selectedRanges.count == 1 else { return nil }
+        return lineIndex?.location(at: textView.selectedRange().location)?.line
+    }
+
+    var bookmarkedLines: [Int] {
+        guard let lineIndex, canGoToLine, textView.isEditable else { return [] }
+        return lineBookmarks.lines(in: lineIndex)
+    }
+
+    func hasBookmark(on line: Int) -> Bool {
+        lineIndex?.start(ofLine: line).map(lineBookmarks.contains) == true
+    }
+
+    func toggleBookmarkAtCaret() -> Bool {
+        guard let line = bookmarkCaretLine, let offset = lineIndex?.start(ofLine: line), lineBookmarks.toggle(offset) else { return false }
+        gutter.needsDisplay = true
         return true
     }
+
+    func bookmarkLine(toward direction: EditorJumpDirection) -> Int? {
+        guard let current = bookmarkCaretLine else { return nil }
+        let lines = bookmarkedLines
+        let target = direction == .next ? lines.first { $0 > current } ?? lines.first : lines.last { $0 < current } ?? lines.last
+        return target == current ? nil : target
+    }
+
+    func selectionStructure() -> EditorSelectionStructure {
+        let selection = textView.selectedRange()
+        let word = selection.length == 0 ? rangeOfWord(at: selection) : nil
+        let current = outlinePresentation?.generation == generation
+            && outlinePresentation?.language == textView.indentationLanguage && presentedGeneration == generation
+        return .init(word: word, tokens: current ? syntaxTokens : [], scopes: current ? outlinePresentation?.value.scopes ?? [] : [])
+    }
+
+    private func rangeOfWord(at selection: NSRange) -> NSRange {
+        textView.selectionRange(forProposedRange: selection, granularity: .selectByWord)
+    }
+
+    func occurrenceSeed() -> (query: String, wholeWord: Bool)? {
+        guard textView.isEditable, !textView.hasMarkedText(), textView.selectedRanges.count == 1 else { return nil }
+        let selection = textView.selectedRange()
+        guard selection.length <= 256 else { return nil }
+        let word = rangeOfWord(at: .init(location: selection.location, length: 0))
+        let chosen = selection.length == 0 ? word : selection
+        let text = textView.string
+        guard chosen.length > 0, chosen.length <= 256, let range = Range(chosen, in: text) else { return nil }
+        let query = String(text[range])
+        guard query.rangeOfCharacter(from: .newlines) == nil,
+              query.rangeOfCharacter(from: CharacterSet.whitespaces.inverted) != nil else { return nil }
+        return (query, chosen == word)
+    }
+
+    var currentOutlineForSymbols: OutlinePresentation? {
+        guard let outlinePresentation, outlinePresentation.generation == generation,
+              outlinePresentation.language == textView.indentationLanguage, outlinePresentation.value.availability == .ready,
+              presentedGeneration == generation, !textView.hasMarkedText() else { return nil }
+        return outlinePresentation
+    }
+
+    private var outlineSelection: (outline: EditorDocumentOutline, range: NSRange)? {
+        guard let outline = currentOutlineForSymbols, let length = lineIndex?.length,
+              textView.selectedRanges.count == 1 else { return nil }
+        let selection = textView.selectedRange()
+        guard selection.location >= 0, selection.location <= length,
+              selection.length <= length - selection.location else { return nil }
+        return (outline.value, selection)
+    }
+
+    var currentSearchScope: (name: String, range: NSRange)? {
+        guard let selection = outlineSelection, let length = lineIndex?.length,
+              let scope = selection.outline.scope(containing: selection.range) else { return nil }
+        let start = scope.entry.offset, end = min(length, scope.end)
+        guard start >= 0, end > start else { return nil }
+        return (scope.entry.title, .init(location: start, length: end - start))
+    }
+
+    var enclosingOutlineEntry: EditorDocumentOutline.Entry? {
+        guard let selection = outlineSelection else { return nil }
+        return selection.outline.scope(containing: selection.range, includesStart: false)?.entry
+    }
+
+    func adjacentOutlineEntry(toward direction: EditorJumpDirection) -> EditorDocumentOutline.Entry? {
+        guard let selection = outlineSelection else { return nil }
+        switch direction {
+        case .previous:
+            return selection.outline.entries.last { $0.offset < selection.range.location }
+        case .next:
+            let minimum = selection.range.location + max(1, selection.range.length)
+            return selection.outline.entries.first { $0.offset >= minimum }
+        }
+    }
+
+    var canFindDeclaration: Bool {
+        guard let outlinePresentation = currentOutlineForSymbols,
+              textView.selectedRanges.count == 1, canGoToLine else { return false }
+        return outlinePresentation.value.entries.contains { $0.kind.isDeclaration }
+    }
+
+    func matchingDeclarations() -> [EditorDocumentOutline.Match] {
+        guard canFindDeclaration, let outline = outlinePresentation?.value, let lines = lineIndex else { return [] }
+        let selection = textView.selectedRange(), source = textView.string as NSString
+        let range = selection.length == 0 ? rangeOfWord(at: selection) : selection
+        guard (1...180).contains(range.length), range.location >= 0, range.location <= source.length - range.length,
+              isCode(range) else { return [] }
+        let name = source.substring(with: range)
+        return outline.entries.compactMap { entry in
+            guard entry.kind.isDeclaration, entry.title.utf16.elementsEqual(name.utf16) else { return nil }
+            let end = lines.start(ofLine: entry.line + 1) ?? lines.length
+            let preview = source.substring(with: .init(location: entry.offset, length: min(180, end - entry.offset)))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return .init(entry: entry, preview: preview)
+        }
+    }
+
+    var canCompleteLocalName: Bool {
+        canFindDeclaration && textView.isEditable && textView.selectedRange().length == 0
+    }
+
+    func nameCompletion() -> NameCompletion? {
+        guard canCompleteLocalName, let outline = outlinePresentation else { return nil }
+        let range = textView.rangeForUserCompletion, source = textView.string as NSString
+        guard (1...180).contains(range.length), range.location >= 0, range.location <= source.length - range.length,
+              NSMaxRange(range) == textView.selectedRange().location, isCode(range) else { return nil }
+        let end = NSMaxRange(range)
+        if end < source.length, let following = source.substring(with: source.rangeOfComposedCharacterSequence(at: end)).unicodeScalars.first,
+           EditorDocumentOutline.isIdentifierContinuation(following, language: outline.language) { return nil }
+        let prefix = source.substring(with: range)
+        let entries = outline.value.completions(startingWith: prefix, language: outline.language)
+        return entries.isEmpty ? nil : .init(prefix: prefix, range: range, entries: entries, generation: generation)
+    }
+
+    func completeLocalName(_ entry: EditorDocumentOutline.Entry, with request: NameCompletion) -> Bool {
+        guard generation == request.generation, canCompleteLocalName, textView.rangeForUserCompletion == request.range,
+              textView.selectedRange().location == NSMaxRange(request.range), request.entries.contains(entry),
+              (textView.string as NSString).substring(with: request.range).utf16.elementsEqual(request.prefix.utf16) else { return false }
+        textView.breakUndoCoalescing()
+        textView.insertText(entry.title, replacementRange: request.range)
+        textView.breakUndoCoalescing()
+        guard generation != request.generation else { return false }
+        textView.undoManager?.setActionName("Complete Local Name")
+        return true
+    }
+
+    private func isCode(_ range: NSRange) -> Bool {
+        var index = firstSyntaxToken(endingAfter: range.location)
+        while index < syntaxTokens.count, syntaxTokens[index].range.location < NSMaxRange(range) {
+            let kind = syntaxTokens[index].kind
+            if kind == .string || kind == .comment { return false }
+            index += 1
+        }
+        return true
+    }
+    @discardableResult
+    func goToLine(_ line: Int, generation expected: UUID, remembersLocation: Bool = true) -> Bool {
+        guard let start = lineIndex?.start(ofLine: line) else { return false }
+        return goToTextOffset(start, generation: expected, remembersLocation: remembersLocation)
+    }
+
+    @discardableResult
+    func goTo(_ address: EditorLineAddress, generation expected: UUID, remembersLocation: Bool = true) -> Bool {
+        guard let offset = lineIndex?.offset(at: address) else { return false }
+        return goToTextOffset(offset, generation: expected, remembersLocation: remembersLocation)
+    }
+
+    func goToLastEdit() {
+        guard canGoToLastEdit, let offset = lastEditOffset else { return }
+        _ = goToTextOffset(offset, generation: generation)
+    }
+
+    func unsavedChangeLine(toward direction: EditorJumpDirection) -> Int? {
+        guard canGoToLine, textView.selectedRanges.count == 1,
+              let line = lineIndex?.location(at: textView.selectedRange().location)?.line,
+              let target = unsavedLineChanges?.line(from: line - 1, toward: direction) else { return nil }
+        return target + 1
+    }
+
+    var selectedUnsavedLine: Int? {
+        guard canGoToLine, textView.selectedRanges.count == 1,
+              let line = lineIndex?.location(at: textView.selectedRange().location)?.line,
+              unsavedLineChanges?.mark(at: line - 1) != nil else { return nil }
+        return line
+    }
+
+    func unsavedLineAnchor(_ line: Int) -> (NSView, NSRect) {
+        if !gutter.isHiddenOrHasHiddenAncestor, let rect = gutter.changeRect(at: line) { return (gutter, rect) }
+        return (scrollView, .init(x: 0, y: scrollView.isFlipped ? 10 : scrollView.bounds.maxY - 10, width: 1, height: 1))
+    }
+
+    @discardableResult func goToTextOffset(_ offset: Int, generation expected: UUID, remembersLocation: Bool = true) -> Bool {
+        guard generation == expected, !textView.hasMarkedText(), let lineIndex,
+              lineIndex.matches(textView.string), (0...lineIndex.length).contains(offset) else { return false }
+        revealNavigationSelection(.init(location: offset, length: 0), remembersLocation: remembersLocation)
+        return true
+    }
+
+    @discardableResult func goToVisibleScope() -> Bool {
+        guard let context = scrollContext, let entry = context.scopes.last,
+              window?.attachedSheet == nil, !textView.hasMarkedText() else { return false }
+        return goToTextOffset(entry.offset, generation: context.generation)
+    }
+
+    func setEditingLanguage(_ language: TextSyntaxLanguage) {
+        guard textView.indentationLanguage != language else { return }
+        lineCommands.inputDidChange()
+        textView.indentationLanguage = language
+        find.outlineLanguageDidChange()
+        updateBracketHighlights()
+        contextLine = nil
+        refreshScrollContext()
+    }
+
+    func revealNavigationSelection(_ range: NSRange, remembersLocation: Bool = true) {
+        let origin = remembersLocation ? navigationPosition() : nil
+        let expected = generation
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
+        _ = window?.makeFirstResponder(textView)
+        publishCaret()
+        if let origin, generation == expected, navigationPosition() != origin {
+            if let onNavigationJump { onNavigationJump(origin) }
+            else { jumps.record(origin) }
+        }
+    }
+
+    func canVisitTextLocation(_ direction: EditorJumpDirection) -> Bool {
+        guard let window, window.isKeyWindow, window.attachedSheet == nil, canGoToLine,
+              (window.firstResponder as? NSTextView)?.hasMarkedText() != true,
+              textView.selectedRanges.count == 1 else { return false }
+        return jumps.hasLocation(direction)
+    }
+
+    func visitTextLocation(_ direction: EditorJumpDirection) {
+        guard canVisitTextLocation(direction), let position = navigationPosition(),
+              let destination = jumps.visit(direction, leaving: position) else { return }
+        restoreNavigationPosition(destination)
+    }
+
+    func canRestoreNavigationPosition(_ position: EditorNavigationPosition) -> Bool {
+        guard let lineIndex, !textView.hasMarkedText() else { return false }
+        let range = position.selection
+        return range.location >= 0 && range.location <= lineIndex.length
+            && range.length >= 0 && range.length <= lineIndex.length - range.location
+    }
+
+    func restoreNavigationPosition(_ destination: EditorNavigationPosition) {
+        guard canRestoreNavigationPosition(destination) else { return }
+        _ = window?.makeFirstResponder(textView)
+        textView.setSelectedRange(destination.selection)
+        textView.scrollRangeToVisible(destination.selection)
+        if let anchor = destination.anchor { scroll(to: anchor, horizontalOffset: destination.origin.x) }
+        else { restoreViewportOrigin(destination.origin) }
+        publishCaret()
+    }
+
+    func navigationPosition() -> EditorNavigationPosition? {
+        guard canGoToLine, textView.selectedRanges.count == 1 else { return nil }
+        return .init(selection: textView.selectedRange(), anchor: scrollAnchor(), origin: scrollView.contentView.bounds.origin)
+    }
+
     func hideFind() { find.perform(.hideFindInterface) }
     @discardableResult
     func applyFindReplacement(_ plan: EditorFindReplacement, generation expected: UUID) -> Bool {
         guard generation == expected, textView.isEditable, !textView.hasMarkedText(),
-              textView.string.utf16.elementsEqual(plan.original.utf16),
-              plan.selection.location >= 0, plan.selection.length >= 0,
-              plan.selection.location <= plan.value.utf16Count,
-              plan.selection.length <= plan.value.utf16Count - plan.selection.location else { return false }
+              textView.string.utf16.elementsEqual(plan.original.utf16) else { return false }
+        return applyTextReplacement(plan.edit, expecting: plan.value, action: plan.count > 1 ? "Replace All" : "Replace")
+    }
+
+    func applyTextReplacement(_ edit: EditorIndentationReplacement, expecting value: TextDocumentValue, action: String) -> Bool {
+        let selection = edit.selection
+        guard selection.location >= 0, selection.length >= 0, selection.location <= value.utf16Count,
+              selection.length <= value.utf16Count - selection.location else { return false }
         textView.breakUndoCoalescing()
-        textView.insertText(plan.value.text, replacementRange: .init(location: 0, length: plan.original.utf16.count))
+        textView.insertText(edit.text, replacementRange: edit.range)
         textView.breakUndoCoalescing()
-        guard textView.string.utf16.elementsEqual(plan.value.text.utf16) else { return false }
-        textView.undoManager?.setActionName(plan.count > 1 ? "Replace All" : "Replace")
-        textView.setSelectedRange(plan.selection); textView.scrollRangeToVisible(plan.selection)
+        guard textView.string.utf16.elementsEqual(value.text.utf16) else { return false }
+        textView.undoManager?.setActionName(action)
+        textView.setSelectedRange(selection); textView.scrollRangeToVisible(selection)
         return true
     }
     func clearPrivatePresentation() {
         lineCommands.close()
-        find.clear(); textView.comparisonHighlights = []
-        textView.onFindAction = nil; textView.onMarkedText = nil; textView.onInputFocusLost = nil
-        onEdit = nil; onCaret = nil; onRejectedEdit = nil
+        find.clear(); textView.comparisonHighlights = []; textView.comparisonDetails = []
+        textView.onFindAction = nil; textView.onMarkedText = nil; textView.onInputFocusLost = nil; textView.onCompleteLocalName = nil
+        onEdit = nil; onCaret = nil; onRejectedEdit = nil; onNavigationJump = nil
+        outlinePresentation = nil; onOutlineChanged?(); onOutlineChanged = nil
+        invalidateScrollContext(); onScrollContextChanged = nil
         clearStyling()
         installing = true
         textView.string = ""; textView.undoManager?.removeAllActions()
         installing = false
         lineIndex = nil; presentedGeneration = nil; generation = UUID(); styleRangeCount = 0
+        jumps = .init()
+        lineChangeBaselineID = nil; unsavedLineChanges = nil
+        onReviewUnsavedLine = nil; onUnsavedLineBaselineChanged = nil
+        conflictMarkers = nil
         gutter.needsDisplay = true
     }
     private func clearStyling() {
@@ -596,8 +1029,54 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
             forCharacterRange: .init(location: 0, length: textView.string.utf16.count))
         styleRangeCount = 0
         visibleStyleRangeCount = 0; syntaxTokens = []; styledRange = .init(location: 0, length: 0)
+        bracketMatches = nil
+        textView.bracketHighlights = []
     }
-    @objc private func viewportChanged() { refreshVisibleStyling() }
+
+    private func updateBracketHighlights() {
+        guard showsMatchingBrackets, presentedGeneration == generation, outlinePresentation?.generation == generation,
+              outlinePresentation?.language == textView.indentationLanguage, !textView.hasMarkedText(), textView.selectedRanges.count == 1,
+              let offsets = bracketMatches?.matchingOffsets(at: textView.selectedRange()) else {
+            textView.bracketHighlights = []
+            return
+        }
+        textView.bracketHighlights = [.init(location: offsets.0, length: 1), .init(location: offsets.1, length: 1)]
+    }
+    @objc private func viewportChanged() {
+        refreshVisibleStyling()
+        refreshScrollContext()
+        if unsavedLineChanges?.marks.isEmpty == false { updateChangeMarkerCursor() }
+    }
+
+    private func updateChangeMarkerCursor() {
+        guard let gutter, onReviewUnsavedLine != nil else { return }
+        window?.invalidateCursorRects(for: gutter)
+    }
+
+    private func invalidateScrollContext() {
+        contextLine = nil
+        installScrollContext(nil)
+    }
+
+    private func refreshScrollContext() {
+        guard showsScrollContext, onScrollContextChanged != nil, let prepared = outlinePresentation,
+              prepared.generation == generation, prepared.language == textView.indentationLanguage,
+              !prepared.value.scopes.isEmpty, !textView.hasMarkedText(),
+              let anchor = scrollAnchor(), let start = lineIndex?.start(ofLine: anchor.line + 1) else {
+            invalidateScrollContext(); return
+        }
+        let line = anchor.line + 1
+        guard contextLine != line else { return }
+        contextLine = line
+        let entries = prepared.value.scrolledScopes(at: start, onLine: line)
+        installScrollContext(entries.isEmpty ? nil : .init(generation: generation, scopes: entries))
+    }
+
+    private func installScrollContext(_ value: ScrollContext?) {
+        guard scrollContext != value else { return }
+        scrollContext = value
+        onScrollContextChanged?(value)
+    }
     private func refreshVisibleStyling() {
         guard !refreshingViewport, presentedGeneration == generation,
               !textView.hasMarkedText(), let lineIndex,
@@ -615,12 +1094,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
         }
         styledRange = range; visibleStyleRangeCount = 0
         guard range.length > 0 else { return }
-        var lower = 0, upper = syntaxTokens.count
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2
-            if NSMaxRange(syntaxTokens[middle].range) <= range.location { lower = middle + 1 }
-            else { upper = middle }
-        }
+        var lower = firstSyntaxToken(endingAfter: range.location)
         while lower < syntaxTokens.count && syntaxTokens[lower].range.location < NSMaxRange(range)
                 && visibleStyleRangeCount < 2_048 {
             let token = syntaxTokens[lower]
@@ -633,6 +1107,16 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
             lower += 1
         }
     }
+
+    private func firstSyntaxToken(endingAfter offset: Int) -> Int {
+        var lower = 0, upper = syntaxTokens.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if NSMaxRange(syntaxTokens[middle].range) <= offset { lower = middle + 1 }
+            else { upper = middle }
+        }
+        return lower
+    }
     private func publishCaret() {
         onCaret?(lineIndex?.location(at: textView.selectedRange().location))
     }
@@ -641,6 +1125,8 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate {
 @MainActor
 private final class EditorLineRuler: NSRulerView {
     private weak var surface: NativeTextEditorSurface?
+    private let bookmarkSymbol = NSImage(systemSymbolName: "bookmark.fill", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(paletteColors: [.controlAccentColor]))
     init(surface: NativeTextEditorSurface) {
         self.surface = surface
         super.init(scrollView: surface.scrollView, orientation: .verticalRuler)
@@ -650,29 +1136,79 @@ private final class EditorLineRuler: NSRulerView {
     }
     required init(coder: NSCoder) { fatalError("Not a serialized view") }
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        guard let surface, let index = surface.lineIndex,
-              let layout = surface.textView.layoutManager,
-              let container = surface.textView.textContainer else { return }
+        guard let surface else { return }
         let text = surface.textView
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: max(10, (text.font?.pointSize ?? 13) - 2), weight: .regular),
             .foregroundColor: NSColor.secondaryLabelColor
         ]
-        func label(_ number: Int, at point: NSPoint) {
+        let inset = ceil(max(8, ((text.font?.pointSize ?? 13) - 2) * 0.65))
+        let flagWidth = min(8, inset - 2), flagHeight = flagWidth * 1.5
+        forEachVisibleLine { [self] number, line in
             let string = String(number) as NSString
             let size = string.size(withAttributes: attributes)
-            let converted = convert(point, from: text)
-            string.draw(at: .init(x: ruleThickness - size.width - ceil(max(8, ((text.font?.pointSize ?? 13) - 2) * 0.65)), y: converted.y), withAttributes: attributes)
+            string.draw(at: .init(x: ruleThickness - size.width - inset, y: line.minY), withAttributes: attributes)
+            if surface.hasBookmark(on: number) {
+                let marker = NSRect(x: (inset - flagWidth) / 2, y: line.midY - flagHeight / 2, width: flagWidth, height: flagHeight)
+                bookmarkSymbol?.draw(in: marker, from: .zero,
+                    operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
+            guard let mark = surface.unsavedLineChanges?.kind(at: number - 1) else { return }
+            let color: NSColor = switch mark { case .added: .systemGreen; case .changed: .controlAccentColor; case .removed: .systemOrange }
+            let height: CGFloat = mark == .removed ? 3 : min(14, line.height - 2)
+            let width: CGFloat = mark == .removed ? 5 : 2
+            let stroke = NSRect(x: ruleThickness - width - 1, y: line.minY + (line.height - height) / 2, width: width, height: height)
+            color.setFill()
+            NSBezierPath(roundedRect: stroke, xRadius: 1, yRadius: 1).fill()
+        }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard surface?.onReviewUnsavedLine != nil, surface?.unsavedLineChanges?.marks.isEmpty == false else { return }
+        forEachVisibleChange { _, rect in self.addCursorRect(rect, cursor: .pointingHand) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        var clickedLine: Int?
+        forEachVisibleChange { number, rect in if rect.contains(point) { clickedLine = number } }
+        if let clickedLine, surface?.onReviewUnsavedLine?(clickedLine) == true { return }
+        super.mouseDown(with: event)
+    }
+
+    func changeRect(at line: Int) -> NSRect? {
+        var rectangle: NSRect?
+        forEachVisibleChange { number, rect in if number == line { rectangle = rect } }
+        return rectangle
+    }
+
+    private func forEachVisibleChange(_ body: @escaping (Int, NSRect) -> Void) {
+        guard let marks = surface?.unsavedLineChanges, !marks.marks.isEmpty else { return }
+        forEachVisibleLine { number, line in
+            guard marks.kind(at: number - 1) != nil else { return }
+            let hit = NSRect(x: self.ruleThickness - 9, y: line.minY, width: 9, height: line.height).intersection(self.bounds)
+            if !hit.isEmpty { body(number, hit) }
+        }
+    }
+
+    private func forEachVisibleLine(_ body: @escaping (Int, NSRect) -> Void) {
+        guard let surface, let index = surface.lineIndex, let layout = surface.textView.layoutManager,
+              let container = surface.textView.textContainer else { return }
+        let text = surface.textView
+        func visit(_ number: Int, _ line: NSRect) {
+            let y = convert(NSPoint(x: 0, y: line.minY + text.textContainerInset.height), from: text).y
+            body(number, NSRect(x: 0, y: y, width: ruleThickness, height: line.height))
         }
         let glyphs = layout.glyphRange(forBoundingRect: text.visibleRect, in: container)
         layout.enumerateLineFragments(forGlyphRange: glyphs) { line, _, _, range, _ in
             let offset = layout.characterIndexForGlyph(at: range.location)
             guard let location = index.location(at: offset), location.column == 1 else { return }
-            label(location.line, at: .init(x: 0, y: line.minY + text.textContainerInset.height))
+            visit(location.line, line)
         }
         if layout.extraLineFragmentTextContainer === container,
            index.starts.last == index.length {
-            label(index.starts.count, at: .init(x: 0, y: layout.extraLineFragmentRect.minY + text.textContainerInset.height))
+            visit(index.starts.count, layout.extraLineFragmentRect)
         }
     }
 }

@@ -7,16 +7,29 @@ enum EditorLineCommand: Equatable, Sendable {
     case sortSelectedLines(descending: Bool)
     case trimTrailingWhitespace
     case surroundSelection(EditorSurroundingPair)
+    case navigateBrackets(EditorBracketNavigation, TextSyntaxLanguage)
+    case expandSelection
+    case resolveConflict(EditorConflictMarkers.Resolution)
+    case applyComparedChange(EditorComparisonApplication)
+
+    var changesText: Bool {
+        switch self {
+        case .navigateBrackets, .expandSelection: false
+        default: true
+        }
+    }
 }
 
 enum EditorLineCommentStyle: String, Sendable {
-    case slash = "//", hash = "#", dash = "--"
+    case slash = "//", hash = "#", dash = "--", semicolon = ";"
 }
 
 /// Uses the existing Foundation-only range/text/selection proposal. The caller
 /// retains the exact original snapshot, generation, native admission and Undo.
 enum EditorLineCommandPlan: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    enum Refusal: Equatable, Sendable { case invalidSelection, nonCanonicalText, tooLarge, cannotFormatJSON }
+    enum Refusal: Equatable, Sendable {
+        case invalidSelection, nonCanonicalText, tooLarge, cannotFormatJSON, noMatchingBracket, noEnclosingBrackets, noCompleteConflict
+    }
     case unchanged
     case select(NSRange)
     case refused(Refusal)
@@ -29,7 +42,7 @@ enum EditorLineCommandPlan: Equatable, Sendable, CustomStringConvertible, Custom
 /// document format mutation or secondary Undo implementation.
 enum EditorLineCommands {
     static func plan(_ command: EditorLineCommand, text: String, selection: NSRange,
-                     maximumBytes: Int) -> EditorLineCommandPlan {
+                     maximumBytes: Int, structure: EditorSelectionStructure? = nil) -> EditorLineCommandPlan {
         let currentBytes = text.utf8.count
         guard maximumBytes >= 0, currentBytes <= maximumBytes else { return .refused(.tooLarge) }
         let input = text as NSString
@@ -53,6 +66,9 @@ enum EditorLineCommands {
             case 0, 13, 0x85, 0x2028, 0x2029: return .refused(.nonCanonicalText)
             default: break
             }
+        }
+        if case .navigateBrackets(let operation, let language) = command {
+            return operation.plan(text: text, selection: selection, language: language)
         }
 
         let index = EditorLineIndex(text)
@@ -110,6 +126,22 @@ enum EditorLineCommands {
         }
 
         switch command {
+        case .navigateBrackets: return .unchanged
+        case .expandSelection:
+            let fullLines = NSRange(location: blockStart, length: blockEnd - blockStart)
+            return structure?.expanded(in: input, from: selection, lines: [bodyRange, fullLines]).map(EditorLineCommandPlan.select) ?? .unchanged
+        case .applyComparedChange(let edit):
+            guard text.utf16.elementsEqual(edit.expectedTarget.utf16),
+                  Range(edit.targetRange, in: text) != nil, let donor = Range(edit.sourceRange, in: edit.source) else {
+                return .refused(.invalidSelection)
+            }
+            return propose(range: edit.targetRange, replacement: String(edit.source[donor]),
+                resultSelection: .init(location: edit.targetRange.location, length: 0))
+        case .resolveConflict(let choice):
+            guard let conflict = EditorConflictMarkers.scan(text, index: index).block(containing: selection),
+                  let replacement = conflict.replacement(choice, in: input) else { return .refused(.noCompleteConflict) }
+            return propose(range: conflict.range, replacement: replacement,
+                resultSelection: .init(location: conflict.range.location, length: 0))
         case .surroundSelection(let pair):
             guard selection.length > 0 else { return .unchanged }
             let selected = input.substring(with: selection)
@@ -243,5 +275,89 @@ enum EditorLineCommands {
             return propose(range: .init(location: blockStart, length: fullEnd(following) - blockStart),
                 replacement: replacement, resultSelection: movedSelection(start: newStart, trailingLF: terminated))
         }
+    }
+}
+
+/// The current syntax preparation supplies tokens and known scope ends. The
+/// native word range and logical line remain available in ordinary text.
+struct EditorSelectionStructure: Sendable {
+    let word: NSRange?
+    let tokens: [TextSyntaxToken]
+    let scopes: [EditorDocumentOutline.Scope]
+
+    func expanded(in source: NSString, from current: NSRange, lines: [NSRange]) -> NSRange? {
+        let end = NSMaxRange(current)
+        var closest: NSRange?
+        func consider(_ candidate: NSRange) {
+            guard candidate.length > current.length, candidate.location <= current.location,
+                  NSMaxRange(candidate) >= end, NSMaxRange(candidate) <= source.length,
+                  closest.map({ candidate.length < $0.length }) ?? true,
+                  source.rangeOfComposedCharacterSequences(for: candidate) == candidate else { return }
+            closest = candidate
+        }
+        if let word { consider(word) }
+        for token in tokens {
+            if token.range.location > current.location { break }
+            if token.kind == .string || token.kind == .comment { consider(token.range) }
+        }
+        let beforePairs = closest
+        let completion = EditorDelimiterWalk.pairs(in: source, tokens: tokens, cancelled: { Task.isCancelled }) { pair in
+            consider(.init(location: pair.opening + 1, length: pair.closing - pair.opening - 1))
+            consider(.init(location: pair.opening, length: pair.closing - pair.opening + 1))
+            return true
+        }
+        switch completion {
+        case .complete: break
+        case .stopped, .cancelled, .depthLimit: closest = beforePairs
+        }
+        for scope in scopes where scope.entry.offset <= current.location {
+            consider(.init(location: scope.entry.offset, length: min(source.length, scope.end) - scope.entry.offset))
+        }
+        lines.forEach(consider)
+        consider(.init(location: 0, length: source.length))
+        return Task.isCancelled ? nil : closest
+    }
+}
+
+enum EditorBracketNavigation: Equatable, Sendable {
+    case matching, enclosing
+
+    static func supports(_ language: TextSyntaxLanguage) -> Bool {
+        switch language {
+        case .swift, .python, .rust, .json, .jsonc, .c, .cpp, .objectiveC, .objectiveCPP, .go: true
+        default: false
+        }
+    }
+
+    func plan(text: String, selection: NSRange, language: TextSyntaxLanguage) -> EditorLineCommandPlan {
+        let refusal: EditorLineCommandPlan = .refused(self == .matching ? .noMatchingBracket : .noEnclosingBrackets)
+        guard Self.supports(language), self != .matching || selection.length <= 1,
+              case .tokens(let tokens) = TextSyntax.color(text, language: language, cancelled: { Task.isCancelled }) else { return refusal }
+        var enclosing: NSRange?
+        var exact: Int?
+        var preceding: Int?
+        let completion = EditorDelimiterWalk.pairs(in: text as NSString, tokens: tokens, cancelled: { Task.isCancelled }) { pair in
+            if self == .matching {
+                if selection.location == pair.opening { exact = pair.closing; return false }
+                if selection.location == pair.closing { exact = pair.opening; return false }
+                if selection.length == 0, selection.location == pair.opening + 1 { preceding = pair.closing }
+                if selection.length == 0, selection.location == pair.closing + 1 { preceding = pair.opening }
+            } else {
+                let interior = NSRange(location: pair.opening + 1, length: pair.closing - pair.opening - 1)
+                let atOpeningBracket = selection.length == 0 && selection.location == pair.opening
+                if interior.length > 0, interior != selection,
+                   atOpeningBracket || (selection.location >= interior.location && NSMaxRange(selection) <= pair.closing),
+                   enclosing.map({ interior.length < $0.length }) ?? true { enclosing = interior }
+            }
+            return true
+        }
+        switch completion {
+        case .cancelled: return .unchanged
+        case .depthLimit: return refusal
+        case .complete, .stopped: break
+        }
+        if let enclosing { return .select(enclosing) }
+        if let offset = exact ?? preceding { return .select(.init(location: offset, length: 0)) }
+        return refusal
     }
 }

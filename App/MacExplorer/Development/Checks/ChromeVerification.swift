@@ -152,8 +152,8 @@ extension UIVerification {
             || !roundtrip.glassFileContent || !roundtrip.restoresSession || roundtrip.autoRefreshFolders {
             failures.append("New area/session/refresh preferences did not round-trip")
         }
-        if (try JSONSerialization.jsonObject(with: encoded) as? [String: Any])?["version"] as? Int != 15 {
-            failures.append("Current preference schema is not version 15")
+        if (try JSONSerialization.jsonObject(with: encoded) as? [String: Any])?["version"] as? Int != BrowserSettings.preferencesVersion {
+            failures.append("Saved preferences did not use the current schema")
         }
         let activePaint = try chromePaint(active) { active.draw(active.bounds) }
         let addressPaint = try chromePaint(address) { address.draw(address.bounds) }
@@ -388,7 +388,7 @@ extension UIVerification {
             if let originalKey, originalKey.isVisible { originalKey.makeKeyAndOrderFront(nil) }
         }
         window.center(); window.makeKeyAndOrderFront(nil)
-        let titles = ["General", "Appearance", "Keyboard", "Operations", "Privacy"]
+        let pages: [BrowserSettingsView.Page] = [.general, .appearance]
         var traversalExceeded = false
         func views(_ root: NSView) -> [NSView] {
             var pending = [root], found: [NSView] = []
@@ -398,16 +398,14 @@ extension UIVerification {
             }
             return found
         }
-        func tabs() -> NSSegmentedControl? {
-            guard let root = window.contentView?.superview else { return nil }
-            let matches = views(root).compactMap { $0 as? NSSegmentedControl }.filter { control in
-                control.segmentCount == titles.count && titles.indices.allSatisfy { control.label(forSegment: $0) == titles[$0] }
-            }
-            return matches.count == 1 ? matches.first : nil
+        func selectedPage() -> BrowserSettingsView.Page? {
+            guard let row = SettingsNavigationVerification.table(in: window)?.selectedRow,
+                  BrowserSettingsView.Page.ordered.indices.contains(row) else { return nil }
+            return BrowserSettingsView.Page.ordered[row]
         }
         func pageReady(_ index: Int) -> Bool {
             lifecycle.window === window && !lifecycle.exceeded && window.isVisible && window.isKeyWindow
-                && NSApp.isActive && tabs()?.selectedSegment == index
+                && NSApp.isActive && selectedPage() == pages[index]
                 && lifecycle.visible[index] && !lifecycle.visible[1 - index]
                 && lifecycle.appeared[index] > 0
         }
@@ -422,11 +420,8 @@ extension UIVerification {
             let geometry = frames.allSatisfy { view in
                 [view.frame.width, view.frame.height, view.bounds.width, view.bounds.height].allSatisfy { $0.isFinite && $0 >= 0 }
             }
-            let allocation = window.contentView.map {
-                abs($0.bounds.width - BrowserSettingsWindow.contentSize.width) <= 0.5
-                    && abs($0.bounds.height - BrowserSettingsWindow.contentSize.height) <= 0.5
-            } ?? false
-            observations.append(["phase": phase, "expectedPage": expected, "selectedSegment": tabs()?.selectedSegment ?? -1,
+            let allocation = settingsViewportMatches(window)
+            observations.append(["phase": phase, "expectedPage": pages[expected].title, "selectedPage": selectedPage()?.title ?? "Unavailable",
                 "actionDelivered": actionDelivered, "formLifecycleReady": ready,
                 "generalFormVisible": lifecycle.visible[0], "appearanceFormVisible": lifecycle.visible[1],
                 "generalAppearCount": lifecycle.appeared[0], "generalDisappearCount": lifecycle.disappeared[0],
@@ -435,6 +430,7 @@ extension UIVerification {
                 "traversalLimitExceeded": traversalExceeded, "settledGeometryFiniteNonnegative": geometry,
                 "fixedAllocation": allocation,
                 "contentBounds": window.contentView.map { NSStringFromRect($0.bounds) } ?? "unavailable",
+                "safeLayout": NSStringFromRect(window.contentLayoutRect),
                 "visible": window.isVisible, "key": window.isKeyWindow, "active": NSApp.isActive])
             try JSONSerialization.data(withJSONObject: ["phases": observations,
                 "preTransitionSizeThatFits": false, "preTransitionCacheDisplay": false,
@@ -455,17 +451,13 @@ extension UIVerification {
             let priorAppeared = lifecycle.appeared[index]
             let priorOppositeDisappeared = lifecycle.disappeared[1 - index]
             try FileHandle.standardOutput.write(contentsOf: Data("MacExplorerSettingsCold begin phase=\(phase) page=\(index)\n".utf8))
-            guard let control = tabs(), let action = control.action, control.isEnabled, control.isEnabled(forSegment: index) else {
-                throw Failure(message: "Cold Settings has no enabled native tab action")
-            }
-            control.selectedSegment = index
-            let delivered = control.sendAction(action, to: control.target)
+            try await SettingsNavigationVerification.select(pages[index], window: window)
             let ready = try await awaitPage(index)
                 && lifecycle.appeared[index] > priorAppeared
                 && lifecycle.disappeared[1 - index] > priorOppositeDisappeared
-            let geometry = try retain(phase, expected: index, actionDelivered: delivered, ready: ready)
+            let geometry = try retain(phase, expected: index, actionDelivered: true, ready: ready)
             try FileHandle.standardOutput.write(contentsOf: Data("MacExplorerSettingsCold end phase=\(phase) page=\(index) ready=\(ready ? 1 : 0)\n".utf8))
-            try require(delivered && ready && geometry, "Cold Settings selection did not complete the expected Form lifecycle and allocation")
+            try require(ready && geometry, "Cold Settings selection did not complete the expected Form lifecycle and allocation")
         }
         // Capture only after all unprimed transitions and their observations.
         try await snapshot(window, to: output.appendingPathComponent("settings-cold-final-general.png"))
@@ -475,7 +467,13 @@ extension UIVerification {
             "preTransitionCacheDisplay": false, "runtimeDiagnosticsRequired": true, "physicalPointerExercised": false]
     }
 
-    /// Exercise the exact fixed Settings factory and actual native tabs. The
+    private static func settingsViewportMatches(_ window: NSWindow) -> Bool {
+        let usable = window.contentLayoutRect.size
+        let expected = BrowserSettingsWindow.contentSize
+        return abs(usable.width - expected.width) <= 0.5 && abs(usable.height - expected.height) <= 0.5
+    }
+
+    /// Exercise the exact fixed Settings factory and its native source list. The
     /// parent must also retain/reject startup console diagnostics: settled frames
     /// cannot prove that AppKit never received a transient negative allocation.
     private static func verifySettingsWindowStartup(_ browser: BrowserViewController,
@@ -485,7 +483,7 @@ extension UIVerification {
               !interactive || !browser.isControlledVerification else {
             throw Failure(message: "Settings startup requires the owned Chrome session")
         }
-        let pages: [BrowserSettingsView.Page] = [.general, .appearance, .keyboard, .operations, .privacy, .permissions]
+        let pages = BrowserSettingsView.Page.ordered
         let originalKey = NSApp.keyWindow
         var windows: [NSWindow] = []
         defer {
@@ -497,23 +495,11 @@ extension UIVerification {
         }
         func validGeometry(_ window: NSWindow) -> Bool {
             guard let content = window.contentView else { return false }
-            let expected = BrowserSettingsWindow.contentSize
-            return abs(content.bounds.width - expected.width) <= 0.5
-                && abs(content.bounds.height - expected.height) <= 0.5
+            return settingsViewportMatches(window)
                 && descendants(content.superview ?? content).allSatisfy { view in
                     [view.frame.width, view.frame.height, view.bounds.width, view.bounds.height]
                         .allSatisfy { $0.isFinite && $0 >= 0 }
                 }
-        }
-        let pageTitles = ["General", "Appearance", "Keyboard", "Operations", "Privacy"]
-        func nativeTabs(_ window: NSWindow) -> NSSegmentedControl? {
-            (window.contentView?.superview ?? window.contentView).flatMap {
-                let matches = descendants($0).compactMap { $0 as? NSSegmentedControl }.filter { control in
-                    control.segmentCount == pageTitles.count
-                        && pageTitles.indices.allSatisfy { control.label(forSegment: $0) == pageTitles[$0] }
-                }
-                return matches.count == 1 ? matches.first : nil
-            }
         }
         var selections = 0
         for workspaceView in [false, true] {
@@ -543,39 +529,18 @@ extension UIVerification {
                 try await snapshot(window, to: output.appendingPathComponent(
                     "settings-startup-\(workspaceView ? 1 : 0)-\(initialIndex).png"))
                 window.contentView?.layoutSubtreeIfNeeded()
-                let deadline = Date().addingTimeInterval(8)
-                while nativeTabs(window) == nil, Date() < deadline {
-                    try await Task.sleep(for: .milliseconds(30))
-                    window.contentView?.layoutSubtreeIfNeeded()
-                }
-                if nativeTabs(window) == nil {
-                    let root = window.contentView?.superview ?? host.view
-                    let counts = descendants(root).compactMap { $0 as? NSTabView }.map(\.numberOfTabViewItems)
-                    let segments = descendants(root).compactMap { $0 as? NSSegmentedControl }.map(\.segmentCount)
-                    try FileHandle.standardOutput.write(contentsOf: Data(
-                        "MacExplorerSettingsProbe missing nativeTabs=\(counts) nativeSegments=\(segments) hostSubviews=\(host.view.subviews.count)\n".utf8))
-                    throw Failure(message: "Settings native tabs did not materialize")
-                }
-                guard let initialTabs = nativeTabs(window) else {
-                    throw Failure(message: "Settings native tabs unavailable")
-                }
-                var tabs = initialTabs
-                try require(tabs.selectedSegment == initialIndex && validGeometry(window),
+                try await waitUntil("Native Settings navigation is mounted") { SettingsNavigationVerification.table(in: window) != nil }
+                try require(SettingsNavigationVerification.table(in: window)?.selectedRow == initialIndex && validGeometry(window),
                     "Settings initial page or native allocation differs")
-                for index in pages.indices {
-                    guard let action = tabs.action, tabs.window === window,
-                          tabs.isEnabled, tabs.isEnabled(forSegment: index) else {
-                        throw Failure(message: "Settings tab control has no enabled native action")
-                    }
-                    tabs.selectedSegment = index
-                    try require(tabs.sendAction(action, to: tabs.target), "Settings native tab action was not delivered")
+                for (index, next) in pages.enumerated() {
+                    try await SettingsNavigationVerification.select(next, window: window, interactive: interactive)
                     await Task.yield()
                     window.contentView?.layoutSubtreeIfNeeded()
-                    guard let currentTabs = nativeTabs(window) else { throw Failure(message: "Settings detached its native tabs") }
-                    try require(currentTabs.window === window
-                        && currentTabs.selectedSegment == index
-                        && validGeometry(window), "Settings native tab selection changed geometry")
-                    tabs = currentTabs
+                    guard let navigation = SettingsNavigationVerification.table(in: window) else {
+                        throw Failure(message: "Settings detached its native navigation")
+                    }
+                    try require(navigation.window === window && navigation.selectedRow == index
+                        && validGeometry(window), "Settings native page selection changed geometry")
                     if !workspaceView, initialIndex == 0 {
                         try await snapshot(window, to: output.appendingPathComponent("settings-selection-\(index).png"))
                     }
@@ -585,8 +550,10 @@ extension UIVerification {
                 if interactive { window.makeKeyAndOrderFront(nil) }
                 window.contentView?.layoutSubtreeIfNeeded()
                 await Task.yield()
-                guard let reopenedTabs = nativeTabs(window) else { throw Failure(message: "Settings reopen lost native tabs") }
-                try require(validGeometry(window) && reopenedTabs.selectedSegment == 3,
+                guard let reopened = SettingsNavigationVerification.table(in: window) else {
+                    throw Failure(message: "Settings reopen lost its native navigation")
+                }
+                try require(validGeometry(window) && reopened.selectedRow == pages.count - 1,
                     "Settings close/reopen lost its allocation or selected page")
                 if !interactive { try require(!window.isVisible, "Controlled Settings reopen became visible") }
                 window.close()
@@ -595,12 +562,13 @@ extension UIVerification {
             }
         }
         return ["check": interactive
-                ? "Settings fixed host startup, four initial pages, native tab selection and close/reopen"
-                : "Settings fixed host startup, four initial pages, native tab selection and post-close retention",
+                ? "Settings fixed host startup, each initial page, native selection and close/reopen"
+                : "Settings fixed host startup, each initial page, native selection and post-close retention",
             "windowCycles": windows.count, "nativeSelections": selections, "foregroundWindows": interactive,
             "postCloseRetentionChecks": windows.count, "foregroundReopenCycles": interactive ? windows.count : 0,
-            "selectionRoute": "NSSegmentedControl selectedSegment and native sendAction", "physicalKeyboardExercised": false,
-            "pageContentEvidence": "Retained initial-page and four action-selected page renders require visual review",
+            "selectionRoute": interactive ? "Native source-list row click" : "Source-list selection update in a hidden window",
+            "physicalKeyboardExercised": false,
+            "pageContentEvidence": "Retained initial and selected page renders require visual review",
             "transientGeometryAndCoreUI": "Require the separately retained startup console to contain neither diagnostic"]
     }
 
@@ -920,8 +888,24 @@ extension UIVerification {
                 "Literal ellipsis folder has no native hit target")
             chromeClick(control, window: window, at: control.convert(local, to: nil), count: 1)
             try require(chosen == locations[1], "Literal ellipsis folder was mistaken for the ancestor-menu token")
+            control.setFrameSize(NSSize(width: 405, height: 26))
+            let visible = control.displayedLocations.compactMap { $0 }
+            try require(visible.first == 0 && visible.suffix(3) == [labels.count - 3, labels.count - 2, labels.count - 1],
+                "A moderate width did not spend the available space on multiple nearby parents")
+            if let address = control as? ExplorerPathControl, let pathCell = address.cell as? NSPathCell {
+                let slack = floor(address.bounds.width * 0.1)
+                let point = NSPoint(x: address.bounds.maxX - slack / 2, y: address.bounds.midY)
+                try require(pathCell.pathComponentCell(at: point, withFrame: address.bounds, in: address) == nil,
+                    "The address lacks its blank edit surface")
+                var edited = false
+                address.onEdit = { edited = true }
+                chromeClick(address, window: window, at: address.convert(point, to: nil), count: 1)
+                address.onEdit = nil
+                try require(edited && chosen == locations[1], "Blank address space did not open editing")
+            }
             control.setFrameSize(NSSize(width: 280, height: 26))
-            try require(control.displayedLocations == [0, nil, labels.count - 2, labels.count - 1],
+            try require(control.displayedLocations.first == 0 && control.displayedLocations.contains(nil)
+                && control.displayedLocations.suffix(2) == [labels.count - 2, labels.count - 1],
                 "Narrow breadcrumb did not retain its immediate parent when space permits")
             guard let narrow = control.cell as? NSPathCell,
                   let parentIndex = control.displayedLocations.firstIndex(where: { $0 == labels.count - 2 }) else {
@@ -974,12 +958,50 @@ extension UIVerification {
             let grown = (control.cell as? NSPathCell)?.pathComponentCells[1]
             try require(grown?.accessibilityLabel() == "…" && (grown?.accessibilityCustomActions()?.isEmpty ?? true),
                 "A recycled native cell kept the menu command on a literal ellipsis folder")
+            if let address = control as? ExplorerPathControl {
+                let long = NSPathControlItem()
+                long.title = "Projects " + String(repeating: "and reference material ", count: 7) + "Archive"
+                let path = [items[0], items[2], long, items[5], items[6]]
+                var folder = fixture
+                let targets = path.map { item -> BrowserLocation in
+                    folder.appendPathComponent(item.title, isDirectory: true)
+                    return .directory(folder)
+                }
+                address.setBreadcrumbs(items: path, locations: targets)
+                address.setFrameSize(NSSize(width: 405, height: 26))
+                guard let index = address.displayedLocations.firstIndex(of: 2),
+                      let native = address.cell as? NSPathCell, native.pathComponentCells.indices.contains(index) else {
+                    throw Failure(message: "An oversized nearby parent wasted the available address width")
+                }
+                let parent = address.pathItems[index]
+                let cell = native.pathComponentCells[index]
+                let rect = native.rect(of: cell, withFrame: address.bounds, in: address)
+                let blank = NSPoint(x: address.bounds.maxX - 20, y: address.bounds.midY)
+                try require(parent.title.count < long.title.count && parent.title != "…" && parent.title.contains("…")
+                    && cell.accessibilityLabel() == long.title && address.hiddenAncestors == [1]
+                    && native.pathComponentCell(at: blank, withFrame: address.bounds, in: address) == nil,
+                    "Shortening a nearby parent lost its accessible label, older ancestor or blank edit space")
+                chromeClick(address, window: window, at: address.convert(.init(x: rect.midX, y: rect.midY), to: nil), count: 1)
+                try require(chosen == targets[2], "The shortened address parent did not navigate to its exact folder")
+            }
         }
     }
 
     /// Real native hit + command checks, never dispatching a zero/other cell.
     /// Menu presentation is captured only in this guarded DEBUG fixture, while
     /// NSMenu's actual target/action path performs each exact lexical choice.
+    private static func requireRetiredBreadcrumbMenu(_ menu: NSMenu, from control: CollapsingPathControl,
+                                                     _ message: String) throws {
+        let navigate = control.onNavigate
+        var activated = false
+        // A failed stale-menu assertion must never open an ancestor
+        // above the generated folder.
+        control.onNavigate = { _ in activated = true }
+        defer { control.onNavigate = navigate }
+        menu.performActionForItem(at: 0)
+        try require(!activated, message)
+    }
+
     private static func verifyCollapsedBreadcrumbs(_ browser: BrowserViewController,
         window: NSWindow, expected: URL, ownedRoot: URL) async throws {
         let expectedLocation = BrowserLocation.directory(expected)
@@ -1074,26 +1096,22 @@ extension UIVerification {
             let size = window.contentView!.bounds.size
             window.setContentSize(NSSize(width: size.width + 20, height: size.height))
             window.contentView?.layoutSubtreeIfNeeded()
-            staleResize.performActionForItem(at: 0)
-            try require(browser.location == expectedLocation, "A resized presentation retained stale menu authority")
+            try requireRetiredBreadcrumbMenu(staleResize, from: control, "A resized presentation retained stale menu authority")
             window.setContentSize(size); window.contentView?.layoutSubtreeIfNeeded()
             let staleVisit = try presented(control)
             let parent = BrowserLocation.directory(expected.deletingLastPathComponent())
             browser.navigate(to: parent); try await settled(browser)
-            staleVisit.performActionForItem(at: 0)
-            try require(browser.location == parent, "An older visit's ancestor menu navigated a new visit")
+            try requireRetiredBreadcrumbMenu(staleVisit, from: control, "An older visit's ancestor menu navigated a new visit")
             browser.navigate(to: expectedLocation); try await settled(browser)
             let staleRetired = try presented(control)
             browser.isBrowserSuspended = true
-            staleRetired.performActionForItem(at: 0)
+            try requireRetiredBreadcrumbMenu(staleRetired, from: control, "A retired pane retained ancestor menu authority")
             browser.isBrowserSuspended = false
-            try require(browser.location == expectedLocation, "A retired pane retained ancestor menu authority")
-            if control === browser.pathControl {
+            if control === browser.pathControl, window.isVisible {
                 let staleEditing = try presented(control)
                 browser.focusLocation(nil)
-                staleEditing.performActionForItem(at: 0)
-                try require(browser.location == expectedLocation && !browser.pathField.isHidden,
-                    "Hidden breadcrumb menu interrupted manual path editing")
+                try require(!browser.pathField.isHidden, "The visible manual path editor did not open")
+                try requireRetiredBreadcrumbMenu(staleEditing, from: control, "Hidden breadcrumb menu interrupted manual path editing")
                 browser.cancelLocationEditing()
             }
             // Immediate parent, when retained, is still one native click.
@@ -1113,11 +1131,17 @@ extension UIVerification {
         let secondPoint = try point(browser.pathControl, browser.pathControl.displayedLocations.count - 1)
         try require(abs(firstPoint.x - secondPoint.x) < 1 && abs(firstPoint.y - secondPoint.y) < 1,
             "Current breadcrumb moved between first and second click")
-        chromeClick(browser.pathControl, window: window, at: firstPoint, count: 2)
-        try require(browser.pathField.currentEditor() is NSTextView && browser.pathControl.isHidden
-            && browser.pathField.stringValue == expected.path && browser.location == expectedLocation,
-            "Collapsed current double-click lost canonical native editing")
-        browser.cancelLocationEditing()
+        let dispatched = chromeClick(browser.pathControl, window: window, at: firstPoint, count: 2)
+        if window.isVisible {
+            try require(dispatched, "Collapsed current double-click could not run because foreground focus changed")
+            try require(browser.pathField.currentEditor() is NSTextView && browser.pathControl.isHidden
+                && browser.pathField.stringValue == expected.path && browser.location == expectedLocation,
+                "Collapsed current double-click lost canonical native editing")
+            browser.cancelLocationEditing()
+        } else {
+            try require(browser.pathField.isHidden && browser.location == expectedLocation,
+                        "A hidden browser accepted address editing or navigated")
+        }
         // Bottom Copy Path must refer to full location, never shortened text.
         let bottom = browser.pathControl
         let savedCopy = bottom.onCopyPath
@@ -1129,9 +1153,11 @@ extension UIVerification {
             action: NSSelectorFromString("copyComponent:")) else { throw Failure(message: "Bottom Copy Path menu unavailable") }
         menu.performActionForItem(at: 0)
         try require(copied == expected, "Bottom Copy Path used a shortened displayed name")
-        let typing = try verifyFilledAddressTyping(browser.workspace!, browser: browser, window: window,
-            expected: expected, width: window.contentView!.bounds.width, caseLabel: "Collapsed deep path")
-        try require(typing.failures.isEmpty, typing.failures.joined(separator: "; "))
+        if window.isVisible {
+            let typing = try verifyFilledAddressTyping(browser.workspace!, browser: browser, window: window,
+                expected: expected, width: window.contentView!.bounds.width, caseLabel: "Collapsed deep path")
+            try require(typing.failures.isEmpty, typing.failures.joined(separator: "; "))
+        }
     }
 
     /// Existing substantial harness supplies its real four-pane composition.
@@ -1200,7 +1226,10 @@ extension UIVerification {
                         workspace.activate(peer, focus: false)
                         browser.navigate(to: .directory(owned)); try await settled(browser)
                         staleCopy.performActionForItem(at: 0)
-                        staleAncestors?.performActionForItem(at: 0)
+                        if let staleAncestors {
+                            try requireRetiredBreadcrumbMenu(staleAncestors, from: bottom,
+                                "An older pane visit retained ancestor menu authority")
+                        }
                         try require(copied == nil && browser.location == .directory(owned),
                             "An older pane visit retained copy/navigation menu authority")
                         browser.navigate(to: .directory(deep)); try await settled(browser)
@@ -1229,7 +1258,7 @@ extension UIVerification {
         let initialPreview = workspace.preview.isEnabled
         var sidebarObservations: [[String: Any]] = []
         func observeSidebar(_ stage: String) {
-            let split = workspace.sidebarHost.superview as? WorkspaceSidebarSplitView
+            let split = workspace.sidebarHost.superview as? NativeSidebarSplitView
             sidebarObservations.append(["stage": stage,
                 "frameWidth": Double(workspace.sidebarHost.frame.width),
                 "boundsWidth": Double(workspace.sidebarHost.bounds.width),

@@ -251,6 +251,16 @@ public final class VolumeLifecycle: VolumeLifecycleManaging, VolumeInspecting, D
         }
     }
 
+    /// Called from the APFS image and launch queues. Reuse this owner's
+    /// scheduled session without opening a second discovery or action owner.
+    internal func validateStartupStorage(outside group: UInt64) throws {
+        try queue.sync {
+            guard let session, !activeRequest else { throw VolumeLifecycleFailure.protectionUncertain }
+            let reader = MountScopeReader(session: session)
+            try MountScopeResolver(observe: reader.observe).validateStartupStorage(outside: group)
+        }
+    }
+
     public func inspect(_ target: ManagedVolume) async throws -> VolumeInspection {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in

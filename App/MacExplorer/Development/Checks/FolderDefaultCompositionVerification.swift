@@ -18,7 +18,7 @@ import SwiftUI
         guard String(cString: encoding).hasPrefix("@") else { return nil }
         return object.perform(selector)?.takeUnretainedValue()
     }
-    private static func buttons(_ window: NSWindow) -> [NSObject] {
+    private static func elements(_ window: NSWindow) -> [NSObject] {
         var visited = Set<ObjectIdentifier>(), count = 0
         func walk(_ raw: Any, depth: Int) -> [NSObject] {
             guard depth < 24, count < 2_048, let object = raw as? NSObject,
@@ -28,18 +28,22 @@ import SwiftUI
                 + (value(object, "accessibilityContents") as? [Any] ?? [])
             if let view = object as? NSView { children += view.subviews }
             if let window = object as? NSWindow, let view = window.contentView { children.append(view) }
-            let own = value(object, "accessibilityRole") as? String == NSAccessibility.Role.button.rawValue ? [object] : []
-            return own + children.flatMap { walk($0, depth: depth + 1) }
+            return [object] + children.flatMap { walk($0, depth: depth + 1) }
         }
         return walk(window, depth: 0)
     }
-    private static func named(_ title: String, in window: NSWindow) -> NSObject? {
-        buttons(window).first {
-            (value($0, "accessibilityLabel") as? String ?? value($0, "accessibilityTitle") as? String) == title
+    private static func named(_ title: String, in window: NSWindow, actionable: Bool = true) -> NSObject? {
+        elements(window).first { element in
+            if actionable {
+                let role = value(element, "accessibilityRole") as? String
+                guard role == NSAccessibility.Role.button.rawValue || role == NSAccessibility.Role.checkBox.rawValue else { return false }
+            }
+            return ["accessibilityLabel", "accessibilityTitle"].contains { value(element, $0) as? String == title }
+                || (!actionable && value(element, "accessibilityValue") as? String == title)
         }
     }
-    static func frame(_ title: String, in window: NSWindow) -> NSRect {
-        guard let object = named(title, in: window) else { return .zero }
+    static func frame(_ title: String, in window: NSWindow, actionable: Bool = true) -> NSRect {
+        guard let object = named(title, in: window, actionable: actionable) else { return .zero }
         let selector = NSSelectorFromString("accessibilityFrame")
         guard let method = class_getInstanceMethod(type(of: object), selector), method_getNumberOfArguments(method) == 2 else { return .zero }
         let encoding = method_copyReturnType(method)

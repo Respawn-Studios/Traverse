@@ -147,6 +147,10 @@ public final class LocalFileOperations: @unchecked Sendable {
                 switch plan.kind {
                 case .create, .copy:
                     guard let destination = plan.destinationParent else { throw FileOperationFailure.invalidRequest }
+                    if plan.kind == .copy {
+                        try CopyDestinationFilesystem.requireVerifiedStagingDestination(in: destination,
+                            forceFATRefusal: hooks.forceFATCopyDestinationRefusal)
+                    }
                     try requireAbsent(plan.name, in: destination.fd)
                     let stage = try Stage(in: destination) { recovery = [$0] }
                     staging = stage
@@ -295,6 +299,10 @@ public final class LocalFileOperations: @unchecked Sendable {
         case .copy(let urls, let directory), .move(let urls, let directory):
             let sources = try validatedSources(urls, cancellation: cancellation)
             let destination = try DirectoryAnchor(directory)
+            if case .copy = request {
+                try CopyDestinationFilesystem.requireVerifiedStagingDestination(in: destination,
+                    forceFATRefusal: hooks.forceFATCopyDestinationRefusal)
+            }
             // Query the anchored destination itself, not a path that may have been replaced.
             // Unknown case rules use conservative folding; exclusive rename is authoritative.
             let caseSensitive = fpathconf(destination.fd, _PC_CASE_SENSITIVE) == 1
@@ -325,6 +333,8 @@ public final class LocalFileOperations: @unchecked Sendable {
 }
 
 internal struct OperationHooks: Sendable {
+    /// Test-only additional refusal; it cannot override native FAT detection.
+    var forceFATCopyDestinationRefusal: (@Sendable () -> Bool)?
     var afterPreflight: (@Sendable () -> Void)?
     var beforeCommit: (@Sendable (URL?) -> Void)?
     var afterItem: (@Sendable () -> Void)?
@@ -390,12 +400,23 @@ internal func observeObject(_ input: URL, resolve: Bool = true) throws -> (url: 
     return (parent.url.appendingPathComponent(name), try EntrySnapshot(parent: parent.fd, name: name))
 }
 
-internal final class DirectoryAnchor {
-    let url: URL
-    let fd: Int32
-    let identity: EntrySnapshot
+package final class DirectoryAnchor {
+    package let url: URL
+    package let fd: Int32
+    package let identity: EntrySnapshot
+    package var device: dev_t { identity.device }
 
-    init(_ input: URL, resolve: Bool = true) throws {
+    package var isOnLocalVolume: Bool {
+        var volume = statfs()
+        return fstatfs(fd, &volume) == 0 && volume.f_flags & UInt32(MNT_LOCAL) != 0
+    }
+
+    package func contains(_ folder: DirectoryAnchor) -> Bool {
+        device == folder.device && folder.url.pathComponents.map { Data($0.utf8) }
+            .starts(with: url.pathComponents.map { Data($0.utf8) })
+    }
+
+    package init(_ input: URL, resolve: Bool = true) throws {
         guard input.isFileURL, input.path.hasPrefix("/"), input.host == nil || input.host == "" || input.host == "localhost" else {
             throw FileOperationFailure.invalidRequest
         }
@@ -435,7 +456,7 @@ internal final class DirectoryAnchor {
         } catch { close(current); throw error }
     }
 
-    func validate() throws {
+    package func validate() throws {
         let current = try DirectoryAnchor(url, resolve: false)
         guard current.identity.sameObject(as: identity) else { throw FileOperationFailure.destinationChanged }
     }
@@ -549,7 +570,7 @@ internal func directoryURL(for fd: Int32, matching identity: EntrySnapshot) -> U
     return url
 }
 
-internal struct EntrySnapshot: Equatable, Sendable, Codable {
+package struct EntrySnapshot: Equatable, Sendable, Codable {
     let device: dev_t
     let inode: ino_t
     let mode: mode_t
@@ -563,7 +584,7 @@ internal struct EntrySnapshot: Equatable, Sendable, Codable {
     var type: mode_t { mode & S_IFMT }
     var isDirectory: Bool { type == S_IFDIR }
 
-    init(fd: Int32) throws {
+    package init(fd: Int32) throws {
         var value = stat()
         guard fstat(fd, &value) == 0 else { throw posixFailure() }
         self.init(value)
@@ -573,13 +594,13 @@ internal struct EntrySnapshot: Equatable, Sendable, Codable {
         guard fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0 else { throw posixFailure() }
         self.init(value)
     }
-    private init(_ value: stat) {
+    package init(_ value: stat) {
         device = value.st_dev; inode = value.st_ino; mode = value.st_mode; size = value.st_size
         modifiedSeconds = value.st_mtimespec.tv_sec; modifiedNanos = value.st_mtimespec.tv_nsec
         changedSeconds = value.st_ctimespec.tv_sec; changedNanos = value.st_ctimespec.tv_nsec
         birthSeconds = value.st_birthtimespec.tv_sec; birthNanos = value.st_birthtimespec.tv_nsec
     }
-    func sameObject(as other: Self) -> Bool {
+    package func sameObject(as other: Self) -> Bool {
         device == other.device && inode == other.inode && type == other.type &&
             birthSeconds == other.birthSeconds && birthNanos == other.birthNanos
     }

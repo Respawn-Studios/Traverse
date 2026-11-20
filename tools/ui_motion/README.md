@@ -32,10 +32,22 @@ the original movie and capture metadata. It synthesizes no frames and does not
 request screen access or start a live capture. Use a new short review ID to
 preserve an earlier review's evidence.
 
+The same decoder accepts `storage-chart-integration --motion` for Analyzer
+grouping, drill-down and Back. It also accepts `window-lifecycle` for native
+Settings, What's New and Analyzer opening/closing. Both use the exact clip
+list from their passing generated check.
+
 For an existing failed Settings, analysis or Help capture, `--forensic` decodes
 only its retained declared clips. It never marks native acceptance, repairs a
 failure receipt or starts another app/capture. Inspect useful frames before
 deciding whether another native run is needed.
+
+For a successful Settings capture, `--diagnostic-region X Y WIDTH HEIGHT`
+can isolate a content viewport from immediate native sidebar feedback. Choose
+and record the crop from layout evidence before computing its measurements;
+coordinates use the movie's top-left origin. This separate review is always
+diagnostic, keeps `passed` false and leaves the original whole-window result
+unchanged. An inferred crop is not proof of an exact native viewport.
 
 ## Files and boundaries
 

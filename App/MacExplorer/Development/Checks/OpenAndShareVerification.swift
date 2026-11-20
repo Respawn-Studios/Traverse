@@ -62,7 +62,7 @@ private final class OpenShareTrackingPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Tracks the persistent parent hierarchy and requests its child with one local
+/// Tracks the current row's context menu and requests its child with one local
 /// Right Arrow event. Physical hover transitions remain owner qualification.
 @MainActor
 private final class OpenShareParentMenuProbe: NSObject, NSMenuDelegate {
@@ -296,17 +296,27 @@ extension UIVerification {
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(browser.table)
             select([])
-            let context = BrowserMenus.fileContextMenu(target: browser)
-            guard let trackingMenu = context.items.first(where: { $0.title == "Open With" })?.submenu else {
-                throw Failure(message: "Context Open With submenu is missing")
+            let emptyContext = BrowserMenus.fileContextMenu(target: browser)
+            try require(emptyContext.item(withTitle: "Open With") == nil,
+                        "A file-only command appeared in the empty folder context menu")
+            let fileMenu = BrowserMenus.menu(.file, target: browser)
+            guard let emptyOpenWith = fileMenu.item(withTitle: "Open With")?.submenu else {
+                throw Failure(message: "File menu Open With submenu is missing")
             }
-            coordinator.menuNeedsUpdate(trackingMenu)
-            try require(trackingMenu.items.first?.title == "Select up to 64 accessible files or folders",
+            coordinator.menuNeedsUpdate(emptyOpenWith)
+            try require(emptyOpenWith.items.first?.title == "Select up to 64 accessible files or folders",
                         "Empty-selection Open With did not expose its unavailable state")
             select([first])
-            let probe = OpenShareMenuTrackingProbe(menu: trackingMenu, browser: browser)
             let row = try requireIndex(browser.rowsByURL[first])
             browser.table.scrollRowToVisible(row)
+            let rowPoint = browser.table.convert(NSPoint(x: 80, y: browser.table.rect(ofRow: row).midY), to: nil)
+            guard let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: rowPoint,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1),
+                  let trackingMenu = browser.table.menu(for: rightClick)?.item(withTitle: "Open With")?.submenu else {
+                throw Failure(message: "The selected row has no native Open With submenu")
+            }
+            let probe = OpenShareMenuTrackingProbe(menu: trackingMenu, browser: browser)
             probe.run(at: browser.table.rect(ofRow: row).origin, in: browser.table)
             try JSONSerialization.data(withJSONObject: ["samples": probe.samples], options: [.prettyPrinted, .sortedKeys])
                 .write(to: output.appendingPathComponent("open-with-native-tracking.json"), options: .atomic)
@@ -317,17 +327,6 @@ extension UIVerification {
             }
             select([])
             browser.focusLocation(nil)
-            guard let persistentContext = browser.table.menu,
-                  let persistentChild = persistentContext.items.first(where: { $0.title == "Open With" })?.submenu else {
-                throw Failure(message: "Persistent context Open With hierarchy is missing")
-            }
-            coordinator.menuNeedsUpdate(persistentChild)
-            let rowPoint = browser.table.convert(NSPoint(x: 80, y: browser.table.rect(ofRow: row).midY), to: nil)
-            guard let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: rowPoint,
-                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
-                throw Failure(message: "Generated native context event is unavailable")
-            }
             do {
                 let alternate = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
                                          styleMask: [.titled], backing: .buffered, defer: false)
@@ -335,7 +334,7 @@ extension UIVerification {
                 defer { alternate.orderOut(nil); window.makeKeyAndOrderFront(nil) }
                 alternate.makeKeyAndOrderFront(nil)
                 try require(NSApplication.shared.keyWindow === alternate, "Owned background-context window did not become key")
-                _ = browser.table.menu(for: rightClick)
+                let context = browser.table.menu(for: rightClick)
                 let focused = NSApplication.shared.keyWindow === window
                 try JSONSerialization.data(withJSONObject: ["browserKeyAfterContext": focused,
                     "canOpenAfterContext": browser.canOpenWithSelection,
@@ -343,13 +342,11 @@ extension UIVerification {
                     "selectedCountAfterContext": browser.orderedSelectedURLs.count,
                     "backgroundBypass": browser.permitsBackgroundVerification], options: [.prettyPrinted, .sortedKeys])
                     .write(to: output.appendingPathComponent("open-with-background-context.json"), options: .atomic)
-                try require(focused && browser.canOpenWithSelection,
+                try require(focused && browser.canOpenWithSelection && context?.item(withTitle: "Open With")?.submenu != nil,
                             "Explicit context request in the background browser did not acquire file-command focus")
             }
-            guard let hoverContext = browser.table.menu(for: rightClick), hoverContext === persistentContext else {
-                throw Failure(message: "Native context preparation did not retain the table's existing menu")
-            }
-            guard let hoverItem = hoverContext.items.first(where: { $0.title == "Open With" }),
+            guard let hoverContext = browser.table.menu(for: rightClick),
+                  let hoverItem = hoverContext.item(withTitle: "Open With"),
                   let hoverChild = hoverItem.submenu else {
                 throw Failure(message: "Parent Open With hierarchy is missing")
             }
@@ -358,7 +355,7 @@ extension UIVerification {
             try JSONSerialization.data(withJSONObject: ["samples": hover.samples,
                 "physicalCursorMovement": false, "parentActionChosen": false,
                 "localMenuMouseMove": false, "localRightArrow": true,
-                "persistentTableContext": true], options: [.prettyPrinted, .sortedKeys])
+                "nativeRowContext": true], options: [.prettyPrinted, .sortedKeys])
                 .write(to: output.appendingPathComponent("open-with-parent-navigation.json"), options: .atomic)
             try require(hover.samples.contains { $0["openWithHighlighted"] as? Bool == true },
                         "Native parent navigation did not highlight Open With")

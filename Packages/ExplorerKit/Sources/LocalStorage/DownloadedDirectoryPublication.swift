@@ -144,7 +144,8 @@ extension RemoteDownloadedTree {
     }
 }
 
-@_spi(Qualification) public final class SFTPReceivedFolderDownload: Sendable {
+/// Both server protocols use this same sealed local publication owner.
+@_spi(Qualification) public final class RemoteReceivedFolderDownload: Sendable {
     private let tree: RemoteDownloadedTree
     public var id: UUID { tree.id }
     public var logicalBytes: UInt64 { tree.manifest.logicalBytes }
@@ -163,3 +164,6 @@ extension RemoteDownloadedTree {
     }
     public func retainForReview() async { await tree.abandon() }
 }
+
+@_spi(Qualification) public typealias SFTPReceivedFolderDownload = RemoteReceivedFolderDownload
+@_spi(Qualification) public typealias SMBReceivedFolderDownload = RemoteReceivedFolderDownload

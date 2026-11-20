@@ -32,6 +32,7 @@ struct CompressedArchivePreparationView: View {
 private struct TARBrowserView:View {
     @ObservedObject var model:TARBrowserModel
     @ObservedObject var settings:BrowserSettings
+    let clipboard: ArchiveWindowClipboard
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
             HStack(spacing:10) {
@@ -56,14 +57,16 @@ private struct TARBrowserView:View {
                     Button(crumb.name){model.visit(crumb.folder)}.buttonStyle(.plain).lineLimit(1).disabled(model.busy)
                 }
                 Spacer(minLength:8)
-                TextField("Find names",text:$model.query).textFieldStyle(ToolTextEntryStyle()).frame(minWidth:160,maxWidth:260)
-                    .accessibilityIdentifier("tar-name-query").help("Search recorded names. File contents are not searched.")
+                ArchiveNameQueryField(text: $model.query, global: model.scope == .archive, onSubmit: model.applyQuery,
+                    fieldID: "tar-name-query", placeholder: "Find names")
+                    .modifier(ToolTextEntrySurface()).frame(minWidth:160,maxWidth:260)
+                    .help("Search recorded names. File contents are not searched.")
                 Picker("Find in",selection:$model.scope){ForEach(ArchiveNameScope.allCases){Text($0.title).tag($0)}}.labelsHidden().frame(width:135)
             }
             if model.showsCompressedPreparation {
                 CompressedArchivePreparationView(model:model).frame(minHeight:200)
             } else {
-                TARBrowserRows(model:model,settings:settings).frame(minHeight:200)
+                TARBrowserRows(model:model,settings:settings,clipboard:clipboard).frame(minHeight:200)
             }
             HStack {
                 Text(model.current ? "\(model.total==0 ? 0:model.offset+1)–\(model.offset+model.items.count) of \(model.total.formatted()) items":" ")
@@ -81,7 +84,10 @@ private struct TARBrowserView:View {
 @MainActor private struct TARBrowserRows:NSViewRepresentable {
     @ObservedObject var model:TARBrowserModel
     @ObservedObject var settings:BrowserSettings
-    func makeNSView(context:Context)->TARMetadataRows { .init(model:model) }
+    let clipboard: ArchiveWindowClipboard
+    func makeNSView(context:Context)->TARMetadataRows {
+        let rows = TARMetadataRows(model:model); clipboard.bind(rows); return rows
+    }
     func updateNSView(_ rows:TARMetadataRows,context:Context){rows.update(model,settings:settings)}
     static func dismantleNSView(_ rows:TARMetadataRows,coordinator:()){rows.retire()}
 }
@@ -109,6 +115,8 @@ private struct TARBrowserView:View {
     init(model:TARBrowserModel) {
         self.model=model;super.init(frame:.zero)
         table.keyboardContextSettings = model.settings
+        table.allowsNameSelection = { [weak model] in model?.allowsVisibleNameSelection == true }
+        table.reportNameSelection = { [weak model] in model?.reportNameSelection($0) }
         memberDragSource = .init(tar: model, table: table); table.memberDragSource = memberDragSource
         table.usesAutomaticRowHeights=false;InterfaceMetrics.setRowHeight(table,base:26)
         for(key,title,width)in[("name","Name",310.0),("size","Size",100.0),("modified","Date Modified",172.0),
@@ -129,22 +137,15 @@ private struct TARBrowserView:View {
         table.onBack={[weak self]in self?.model?.back()};table.commandValidation={_ in false}
         table.onPreview = { [weak self] in self?.model?.previewSelected() }
         table.onUp = { [weak self] in self?.model?.up() }
-        table.onShortcut={[weak self]event in
-            if self?.embeddedShortcut?(event)==true{return true}
-            let flags=event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if [36,76].contains(event.keyCode) && flags.intersection([.command,.option,.control]).isEmpty {self?.model?.openSelection();return true}
-            if event.keyCode==49 && flags.intersection([.command,.option,.control]).isEmpty {self?.model?.previewSelected();return true}
-            if event.keyCode==126 && flags.contains(.command){self?.model?.up();return true}
-            if event.keyCode==125 && flags.contains(.command){self?.model?.openSelection();return true}
-            if event.keyCode==123 && flags.contains(.option){self?.model?.back();return true}
-            if event.keyCode==124 && flags.contains(.option){self?.model?.forward();return true};return false
-        }
+        table.onForward = { [weak self] in self?.model?.forward() }
+        table.onRefresh = { [weak self] in self?.model?.refresh() }
         table.setAccessibilityLabel("TAR archive members. Open folders or preview selected files.")
         let menu=NSMenu();menu.addItem(withTitle:"Open",action:#selector(openSelected(_:)),keyEquivalent:"").target=self
         if TARArchiveEditingFeature.available {
             menu.addItem(withTitle: "Edit in Traverse", action: #selector(editText(_:)), keyEquivalent: "").target = self
         }
         menu.addItem(withTitle:"Preview Text",action:#selector(previewText(_:)),keyEquivalent:"").target=self
+        menu.addItem(withTitle: "Compare Text Files…", action: #selector(compareText(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle:"Preview as Hex",action:#selector(previewHex(_:)),keyEquivalent:"").target=self
         if TARArchiveEditingFeature.available { menu.addItem(withTitle: "Cut", action: #selector(cutMembers(_:)), keyEquivalent: "").target = self }
         menu.addItem(withTitle: "Copy", action: #selector(copyMembers(_:)), keyEquivalent: "").target = self
@@ -160,10 +161,17 @@ private struct TARBrowserView:View {
         menu.addItem(withTitle:"Extract Selected…",action:#selector(extractSelected(_:)),keyEquivalent:"").target=self
         menu.addItem(withTitle:"Properties…",action:#selector(showMemberProperties(_:)),keyEquivalent:"").target=self
         table.menu=menu
+        table.memberCommandTarget = self
+        table.memberCommands = [
+            .newFolder: #selector(createFolder(_:)), .newTextFile: #selector(createMember(_:)),
+            .newFolderWithSelection: #selector(groupMembers(_:)), .duplicate: #selector(duplicateMember(_:)),
+            .rename: #selector(renameMember(_:)), .trash: #selector(removeMember(_:)),
+            .properties: #selector(showMemberProperties(_:)), .editText: #selector(editText(_:)),
+            .compareTextFiles: #selector(compareText(_:))]
         table.contextMenuProvider = { [weak self] in
             guard let self else { return nil }
             return NativeContextMenu.arrange(table.menu,
-                groups: [[#selector(openSelected(_:)), #selector(editText(_:)), #selector(previewText(_:)), #selector(previewHex(_:))],
+                groups: [[#selector(openSelected(_:)), #selector(editText(_:)), #selector(compareText(_:)), #selector(previewText(_:)), #selector(previewHex(_:))],
                          [#selector(cutMembers(_:)), #selector(copyMembers(_:)), #selector(pasteMembers(_:)), #selector(duplicateMember(_:)), #selector(renameMember(_:)), #selector(removeMember(_:))],
                          [#selector(groupMembers(_:)), #selector(createMember(_:)), #selector(createFolder(_:)), #selector(addMembers(_:))],
                          [#selector(extractSelected(_:)), #selector(showMemberProperties(_:))]],
@@ -177,7 +185,17 @@ private struct TARBrowserView:View {
     }
     required init?(coder:NSCoder){nil}
     override func layout() { super.layout(); table.columnSizing.fit(table) }
-    func retire(){memberDragSource?.retire();memberDragSource=nil;table.memberDragSource=nil;table.marquee?.cancel(restore:false);table.marquee=nil;table.onOpen=nil;table.onBack=nil;table.onUp=nil;table.onPreview=nil;table.onRename=nil;table.nameClickRenameEnabled=nil;table.onShortcut=nil;table.onCopy=nil;table.onCut=nil;table.onPaste=nil;table.contextMenuProvider=nil;onCut=nil;onCopyMembers=nil;canCaptureClipboard=nil;isCut=nil;onPaste=nil;canPaste=nil;model=nil}
+    func retire() {
+        table.retireNameSelection()
+        memberDragSource?.retire(); memberDragSource = nil; table.memberDragSource = nil
+        table.marquee?.cancel(restore: false); table.marquee = nil
+        table.onOpen = nil; table.onBack = nil; table.onUp = nil; table.onPreview = nil
+        table.onRename = nil; table.nameClickRenameEnabled = nil; table.onShortcut = nil
+        table.onCopy = nil; table.onCut = nil; table.onPaste = nil; table.contextMenuProvider = nil
+        table.memberCommandTarget = nil; table.memberCommands = [:]
+        onCut = nil; onCopyMembers = nil; canCaptureClipboard = nil; isCut = nil; onPaste = nil; canPaste = nil
+        model = nil
+    }
     func update(_ model:TARBrowserModel,settings:BrowserSettings,glassOverride:Bool?=nil,showsOnlyCurrent:Bool=false) {
         updating=true;defer{updating=false}
         table.behavior = settings.behavior
@@ -190,7 +208,7 @@ private struct TARBrowserView:View {
         let pageItems=showsOnlyCurrent && !model.current ? []:model.items
         if items.map(\.id) != pageItems.map(\.id) || shownLocation != model.archiveSearch {
             shownLocation=model.archiveSearch;table.tableColumns.first{$0.identifier.rawValue=="location"}?.isHidden = !shownLocation
-            items=pageItems;table.reloadData();table.layoutSubtreeIfNeeded()
+            items=pageItems;table.installNameSelectionPage(pageItems.map(\.name));table.reloadData();table.layoutSubtreeIfNeeded()
             let visible=table.rows(in:table.visibleRect)
             if animatesNewRows, visible.location != NSNotFound{for row in visible.location..<min(visible.upperBound,items.count){if let view=table.rowView(atRow:row,makeIfNecessary:false){ToolContentMotion.reveal(view)}}}
         }
@@ -290,6 +308,7 @@ private struct TARBrowserView:View {
     @objc private func openSelected(_ sender:Any?){model?.openSelection()}
     @objc private func previewText(_ sender:Any?){model?.previewSelected()}
     @objc private func editText(_ sender: Any?) { model?.editSelectedText() }
+    @objc private func compareText(_ sender: Any?) { model?.compareSelectedText(relativeTo: window) }
     @objc private func duplicateMember(_ sender: Any?) { model?.reviewMutation(.duplicate) }
     @objc private func renameMember(_ sender: Any?) { model?.reviewMutation(.rename) }
     @objc private func removeMember(_ sender: Any?) { model?.reviewMutation(.remove) }
@@ -308,6 +327,7 @@ private struct TARBrowserView:View {
         if item.action == #selector(openSelected(_:)){return model.current && !model.busy && !model.isPreparingPreview && model.selection.count==1 && (items.contains{model.selection.contains($0.id) && $0.folder != nil} || model.canPreviewSelected)}
         if item.action == #selector(previewText(_:)) { item.title = model.preferredPreview.commandTitle; return model.canPreviewSelected }
         if item.action == #selector(editText(_:)) { return model.canEditSelectedText }
+        if item.action == #selector(compareText(_:)) { return model.canCompareSelectedText }
         if item.action == #selector(renameMember(_:)) { return model.canModifySelectedMembers }
         if item.action == #selector(duplicateMember(_:)) || item.action == #selector(removeMember(_:)) { return model.canModifySelectedMembers }
         if item.action == #selector(groupMembers(_:)) { return model.canGroupMembers }
@@ -322,31 +342,21 @@ private struct TARBrowserView:View {
 }
 @MainActor final class TARBrowserWindowController:NSWindowController,NSWindowDelegate {
     let model:TARBrowserModel
+    let clipboard: ArchiveWindowClipboard
     var onClose:(()->Void)?
     init(model:TARBrowserModel) {
         self.model=model
-        let window=TARBrowserWindow(contentViewController:InterfaceHostingController(rootView:TARBrowserView(model:model,settings:model.settings)))
+        clipboard = ArchiveWindowClipboard(tar: model)
+        let window=ArchiveKeyboardWindow(contentViewController:InterfaceHostingController(rootView:TARBrowserView(model:model,settings:model.settings,clipboard:clipboard)))
+        window.shortcutSettings = model.settings
+        window.focusArchiveSearch = { [weak window] in window?.focusArchiveSearchField(identifier: "tar-name-query") }
         window.title="TAR Archive";window.styleMask=[.titled,.closable,.resizable,.miniaturizable];window.isReleasedWhenClosed=false;window.tabbingMode = .disallowed
         window.setContentSize(.init(width:980,height:650));window.contentMinSize = .init(width:820,height:560)
         super.init(window:window);window.delegate=self;model.window=window;ToolWindowChrome.install(in:window,settings:model.settings)
+        clipboard.window = window
     }
     required init?(coder:NSCoder){nil}
-    func windowWillClose(_ notification:Notification){onClose?()}
-}
-@MainActor private final class TARBrowserWindow:ArchiveKeyboardWindow {
-    override func performKeyEquivalent(with event:NSEvent)->Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,event.charactersIgnoringModifiers?.lowercased()=="f",let content=contentView {
-            var pending=[content],count=0
-            while let view=pending.popLast(),count<4096 {
-                count+=1
-                if let field=view as? NSTextField,field.placeholderString=="Find names",field.isEnabled {
-                    if makeFirstResponder(field){field.selectText(nil);return true}
-                }
-                pending+=view.subviews
-            }
-        }
-        return super.performKeyEquivalent(with:event)
-    }
+    func windowWillClose(_ notification:Notification){clipboard.retire();onClose?()}
 }
 @MainActor final class ApplicationTARBrowser {
     static let shared=ApplicationTARBrowser()
@@ -366,6 +376,7 @@ private struct TARBrowserView:View {
                 guard let self,let model else{return};model.stop();retirement=Task{[self]in await model.closeAndDrain();controller=nil;retirement=nil}
             };controller=created
         }
+        controller?.clipboard.attach(to: browser)
         controller?.model.open(url,from:browser,reviewExtraction:reviewExtraction)
         if controller?.window?.isVisible != true {
             if browser.isControlledVerification{controller?.window?.setFrameOrigin(.init(x:-12000,y:-12000))}

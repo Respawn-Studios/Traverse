@@ -1,4 +1,5 @@
 import Darwin
+import ExplorerCore
 import Foundation
 
 public enum DriveBenchmarkSize: String, CaseIterable, Sendable {
@@ -233,7 +234,8 @@ public final class DriveFileBenchmark: @unchecked Sendable {
         var result = DriveBenchmarkResult()
         result.workload = workload; result.blockBytes = chunk; result.cacheMode = cacheMode
         var writeLatencies: [Double] = [], readLatencies: [Double] = []
-        var previousProgress = started, previousBytes: Int64 = 0
+        var progressCadence = ProgressCadence(interval: 0.05, startingAt: 0)
+        var previousBytes: Int64 = 0
         var parent: Int32 = -1, scratch: Int32 = -1, file: Int32 = -1
         var parentWitness: Witness?, scratchWitness: Witness?, fileWitness: Witness?
         var createdDirectory = false
@@ -247,26 +249,28 @@ public final class DriveFileBenchmark: @unchecked Sendable {
                 Int64(observed.st_dev) == selection.fileSystemID
         }
         func report(_ phase: DriveBenchmarkProgress.Phase, _ completed: Int64 = 0) {
-            let now = DispatchTime.now().uptimeNanoseconds
-            if completed == 0 { previousProgress = now; previousBytes = 0 }
-            // Preserve phase boundaries and the first block; random workloads
-            // coalesce ordinary UI updates rather than dispatching 262k events.
-            if workload == .random4K, completed > Int64(chunk), completed != bytes,
-               now - previousProgress < 50_000_000 { return }
-            let interval = Double(now - previousProgress) / 1_000_000_000
+            let now = elapsed(started)
+            let previousProgress = progressCadence.lastPublication ?? 0
+            if completed == 0 { previousBytes = 0 }
+            // Keep phase boundaries and first/final blocks immediate. Coalesce
+            // intermediate UI updates for every workload; I/O latency capture
+            // still records every operation before reaching this callback.
+            let boundary = completed <= Int64(chunk) || completed == bytes
+            guard progressCadence.shouldPublish(at: now, immediately: boundary) else { return }
+            let interval = now - previousProgress
             let rate = completed > previousBytes && interval > 0
                 ? Double(completed - previousBytes) / 1_000_000 / interval : nil
             progress(.init(phase: phase, completedBytes: completed, totalBytes: bytes,
-                elapsedSeconds: elapsed(started), megabytesPerSecond: rate))
+                elapsedSeconds: now, megabytesPerSecond: rate))
             if let rate, phase == .writing || phase == .reading {
                 // At most 600 points. Coarsen older history without discarding
                 // its early part when a slow external device needs longer.
                 if result.samples.count == 600 {
                     result.samples = result.samples.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
                 }
-                result.samples.append(.init(phase: phase, elapsedSeconds: elapsed(started), megabytesPerSecond: rate))
+                result.samples.append(.init(phase: phase, elapsedSeconds: now, megabytesPerSecond: rate))
             }
-            previousProgress = now; previousBytes = completed
+            previousBytes = completed
         }
         func selectedDirectoryUnchanged() -> Bool {
             let check = open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY)

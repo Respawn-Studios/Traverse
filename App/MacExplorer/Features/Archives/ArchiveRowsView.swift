@@ -1,4 +1,5 @@
 import AppKit
+import ExplorerCore
 import LocalStorage
 import SwiftUI
 
@@ -7,10 +8,12 @@ import SwiftUI
 @MainActor struct ArchiveRowsView: NSViewRepresentable {
     @ObservedObject var model: ArchiveBrowserModel
     @ObservedObject var settings: BrowserSettings
+    var clipboard: ArchiveWindowClipboard? = nil
 
     func makeNSView(context: Context) -> ArchiveMetadataRows {
         let rows = ArchiveMetadataRows()
         rows.bindActions(to: model)
+        clipboard?.bind(rows)
         rows.memberDragSource = ArchiveMemberDragSource(model: model,table: rows.table)
         rows.table.memberDragSource = rows.memberDragSource
         #if DEBUG || TRAVERSE_SFTP_EDITOR_QA
@@ -43,8 +46,15 @@ import SwiftUI
         rows.onNewFolder = nil; rows.canNewFolder = nil
         rows.onGroup = nil; rows.canGroup = nil
         rows.onNewFile = nil
+        rows.onCut = nil; rows.onCopyMembers = nil; rows.canCaptureClipboard = nil; rows.isCut = nil
+        rows.onPaste = nil; rows.canPaste = nil
+        rows.table.onCut = nil; rows.table.onCopy = nil; rows.table.onPaste = nil; rows.table.commandValidation = nil
+        rows.table.memberCommandTarget = nil; rows.table.memberCommands = [:]
         rows.table.onRename = nil; rows.table.nameClickRenameEnabled = nil
+        rows.table.retireNameSelection()
         rows.table.keyboardContextSettings = nil
+        rows.table.onForward = nil; rows.table.onRefresh = nil
+        rows.embeddedShortcut = nil
         rows.onAddFiles = nil; rows.canAddFiles = nil
         rows.canPreview = nil
         rows.canExtract = nil
@@ -82,6 +92,8 @@ import SwiftUI
     var onPreviewBytes: ((Set<ZIPItemID>) -> Void)?
     var onProperties: ((Set<ZIPItemID>) -> Void)?
     var canShowProperties: ((Set<ZIPItemID>) -> Bool)?
+    var onCompareText: (() -> Void)?
+    var canCompareText: (() -> Bool)?
     var onExtract: ((Set<ZIPItemID>) -> Void)?
     var onRenameCopy: ((Set<ZIPItemID>) -> Void)?
     var onRemoveCopy: ((Set<ZIPItemID>) -> Void)?
@@ -125,6 +137,8 @@ import SwiftUI
     /// Row views do not infer filesystem authority.
     func bindActions(to model: ArchiveBrowserModel) {
         table.keyboardContextSettings = model.settings
+        table.allowsNameSelection = { [weak model] in model?.allowsVisibleNameSelection == true }
+        table.reportNameSelection = { [weak model] in model?.reportNameSelection($0) }
         table.nameClickRenameEnabled = { [weak model] in
             guard let model else { return false }
             return model.settings.renamesSelectedNameOnClick && model.selection.count == 1
@@ -140,6 +154,8 @@ import SwiftUI
         self.onOpen = { [weak model] in model?.openSelection($0) }
         self.onPreview = { [weak model] in model?.previewSelection($0) }
         self.onEditText = { [weak model] in model?.editTextSelection($0) }
+        self.onCompareText = { [weak model, weak self] in model?.compareSelectedText(relativeTo: self?.window) }
+        self.canCompareText = { [weak model] in model?.canCompareSelectedText == true }
         self.onPreviewBytes = { [weak model] in model?.previewSelection($0, mode: .hexadecimal) }
         self.onProperties = { [weak model, weak self] in model?.showMemberProperties($0, relativeTo: self?.window) }
         self.canShowProperties = { [weak model] in model?.observedMember($0) != nil }
@@ -173,6 +189,8 @@ import SwiftUI
         self.canOrder = { [weak model] in model?.canOrder == true }
         self.onBack = { [weak model] in model?.back() }
         self.onUp = { [weak model] in model?.up() }
+        table.onForward = { [weak model] in model?.forward() }
+        table.onRefresh = { [weak model] in model?.refresh() }
     }
 
     override init(frame frameRect: NSRect) {
@@ -218,6 +236,7 @@ import SwiftUI
         if ZIPTextEditorFeature.available {
             menu.addItem(withTitle: "Edit in Traverse", action: #selector(editTextSelected(_:)), keyEquivalent: "").target = self
         }
+        menu.addItem(withTitle: "Compare Text Files…", action: #selector(compareTextSelected(_:)), keyEquivalent: "").target = self
         if ZIPTextPreviewFeature.available {
             menu.addItem(withTitle: "Preview Text", action: #selector(previewSelected(_:)), keyEquivalent: "").target =
                 self
@@ -268,6 +287,13 @@ import SwiftUI
             (table.headerView as? FileTableHeaderView)?.columnMenu = sorts
         }
         table.menu = menu
+        table.memberCommandTarget = self
+        table.memberCommands = [
+            .newFolder: #selector(createZIPFolder(_:)), .newTextFile: #selector(createZIPFile(_:)),
+            .newFolderWithSelection: #selector(groupZIPSelection(_:)), .duplicate: #selector(duplicateMembers(_:)),
+            .rename: move ? #selector(renameOriginal(_:)) : #selector(renameCopy(_:)),
+            .trash: #selector(removeOriginal(_:)), .properties: #selector(showMemberProperties(_:)),
+            .editText: #selector(editTextSelected(_:)), .compareTextFiles: #selector(compareTextSelected(_:))]
         table.contextMenuProvider = { [weak self] in self?.contextMenu() }
         scroll.documentView = table
         scroll.hasVerticalScroller = true
@@ -348,6 +374,7 @@ import SwiftUI
             self.showsLocation = showsLocation
             table.tableColumns.first { $0.identifier.rawValue == "location" }?.isHidden = !showsLocation
             items = page
+            table.installNameSelectionPage(page.map(\.name))
             table.reloadData()
             revealGeneration = UUID()
             let token = revealGeneration
@@ -485,6 +512,9 @@ import SwiftUI
     @objc private func editTextSelected(_ sender: Any?) {
         if canEditText?(selectedIDs) == true { onEditText?(selectedIDs) }
     }
+    @objc private func compareTextSelected(_ sender: Any?) {
+        if canCompareText?() == true { onCompareText?() }
+    }
     @objc private func previewBytesSelected(_ sender: Any?) {
         if ZIPBytePreviewFeature.available, canPreview?(selectedIDs) == true { onPreviewBytes?(selectedIDs) }
     }
@@ -529,7 +559,8 @@ import SwiftUI
     private func contextMenu() -> NSMenu {
         let selected = !selectedIDs.isEmpty
         let groups: [[Selector]] = selected ? [
-            [#selector(openFolder(_:)), #selector(editTextSelected(_:)), #selector(previewSelected(_:)), #selector(previewBytesSelected(_:))],
+            [#selector(openFolder(_:)), #selector(editTextSelected(_:)), #selector(compareTextSelected(_:)),
+             #selector(previewSelected(_:)), #selector(previewBytesSelected(_:))],
             [#selector(extractSelected(_:)), #selector(showMemberProperties(_:))],
             [#selector(groupZIPSelection(_:))],
             [#selector(cutMembers(_:)), #selector(copyMembers(_:)), #selector(duplicateMembers(_:)), #selector(renameOriginal(_:)), #selector(removeOriginal(_:))],
@@ -563,6 +594,7 @@ import SwiftUI
             menuItem.title = ArchivePreviewMode.preferred(for: items.first { ids.contains($0.id) }?.name).commandTitle
             return canPreview?(ids) == true
         case #selector(editTextSelected(_:)): return canEditText?(selectedIDs) == true
+        case #selector(compareTextSelected(_:)): return canCompareText?() == true
         case #selector(previewBytesSelected(_:)): return ZIPBytePreviewFeature.available && canPreview?(selectedIDs) == true
         case #selector(extractSelected(_:)): return canExtract?(selectedIDs) == true
         case #selector(showMemberProperties(_:)): return onProperties != nil && canShowProperties?(selectedIDs) == true
@@ -628,6 +660,21 @@ import SwiftUI
 /// Both standalone archive windows update menu ownership after native focus
 /// changes. Embedded tabs keep their browser's existing command route.
 @MainActor class ArchiveKeyboardWindow: ToolMotionWindow {
+    weak var shortcutSettings: BrowserSettings?
+    var focusArchiveSearch: (() -> Void)?
+    func focusArchiveSearchField(identifier: String) {
+        guard let contentView else { return }
+        var pending = [contentView], count = 0
+        while let view = pending.popLast(), count < 4096 {
+            count += 1
+            if let field = view as? NSTextField, field.isEnabled,
+               field.identifier?.rawValue == identifier || field.accessibilityIdentifier() == identifier {
+                if makeFirstResponder(field) { field.selectText(nil) }
+                return
+            }
+            pending.append(contentsOf: view.subviews)
+        }
+    }
     override func becomeKey() {
         super.becomeKey()
         BrowserShortcutMenus.refreshMainMenuForCurrentFocus()
@@ -639,6 +686,16 @@ import SwiftUI
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         BrowserShortcutMenus.refreshMainMenuForCurrentFocus()
+        if let table = firstResponder as? ArchiveMetadataTable,
+           table.routeStandaloneKeyEquivalent(event) { return true }
+        if (firstResponder as? NSTextView)?.hasMarkedText() != true,
+           let settings = shortcutSettings, let shortcut = BrowserShortcut(event),
+           settings.shortcutMap.resolve(shortcut, fileSurface: false) == .filter,
+           !SystemShortcutSnapshot.shared.conflicts(event),
+           !BrowserShortcutMenus.hasUserOverride(.filter, in: NSApp.mainMenu) {
+            if !event.isARepeat { focusArchiveSearch?() }
+            return true
+        }
         if event.isARepeat, let table = firstResponder as? ArchiveMetadataTable,
            let settings = table.keyboardContextSettings, KeyboardContextMenu.matches(event, settings: settings) { return true }
         return super.performKeyEquivalent(with: event)
@@ -646,8 +703,125 @@ import SwiftUI
 }
 
 @MainActor final class ArchiveMetadataTable: FileTableView {
+    private struct NameRow: Sendable { let row: Int; let name: String }
+    private let nameSelection = NameSelectionRequest()
+    private var nameRows: [NameRow] = []
+    private var namePage = UUID()
+    var allowsNameSelection: (() -> Bool)?
+    var reportNameSelection: ((String) -> Void)?
     weak var memberDragSource: ArchiveMemberDragSource?
     weak var keyboardContextSettings: BrowserSettings?
+    var onForward: (() -> Void)?, onRefresh: (() -> Void)?
+    weak var memberCommandTarget: NSView?
+    var memberCommands: [BrowserCommand: Selector] = [:]
+
+    func installNameSelectionPage(_ names: [String]) {
+        nameSelection.cancel()
+        namePage = UUID()
+        nameRows = names.enumerated().map { .init(row: $0.offset, name: $0.element) }
+    }
+
+    func retireNameSelection() {
+        installNameSelectionPage([])
+        allowsNameSelection = nil
+        reportNameSelection = nil
+    }
+
+    func cancelNameSelection() { nameSelection.cancel() }
+
+    var canSelectByName: Bool {
+        nameSelection.isIdle && !nameRows.isEmpty && allowsNameSelection?() == true
+            && window?.isKeyWindow == true && window?.attachedSheet == nil && window?.firstResponder === self
+    }
+
+    @objc func selectByName(_ sender: Any?) {
+        guard canSelectByName, let parent = window else { return }
+        let revision = namePage
+        let selection = selectedRowIndexes
+        nameSelection.present(in: parent, scope: "Select from the names on this archive page.",
+            entries: nameRows, selected: Set(selection), name: { $0.name }, id: { $0.row },
+            isCurrent: { [weak self, weak parent] in
+                guard let self, let parent else { return false }
+                return window === parent && parent.isKeyWindow && parent.firstResponder === self
+                    && allowsNameSelection?() == true && namePage == revision && selectedRowIndexes == selection
+            }) { [weak self] next in
+                guard let self else { return }
+                if let next { selectRowIndexes(IndexSet(next), byExtendingSelection: false) }
+                else { reportNameSelection?("No names match on this archive page.") }
+            }
+    }
+
+    private func memberCommandItem(_ command: BrowserCommand) -> NSMenuItem? {
+        guard let action = memberCommands[command], let target = memberCommandTarget else { return nil }
+        return menu?.items.first { $0.action == action && ($0.target as AnyObject?) === target }
+    }
+    func memberCommandEnabled(_ action: Selector?) -> Bool {
+        guard let action, let command = memberCommands.keys.first(where: { $0.selector == action }),
+              let item = memberCommandItem(command), let owner = memberCommandTarget as? NSMenuItemValidation else { return false }
+        return owner.validateMenuItem(item)
+    }
+    private func performMemberCommand(_ command: BrowserCommand) -> Bool {
+        guard memberCommands[command] != nil else { return false }
+        if let item = memberCommandItem(command), let owner = memberCommandTarget as? NSMenuItemValidation,
+           owner.validateMenuItem(item), let action = item.action {
+            NSApp.sendAction(action, to: memberCommandTarget, from: item)
+        }
+        // A disabled archive action must not fall through to the browser.
+        return true
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect); installShortcutRouting()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder); installShortcutRouting()
+    }
+    private func installShortcutRouting() {
+        // An unbound key goes straight to NSTableView. It must not revive
+        // FileTableView's preset fallback after a custom binding was cleared.
+        onShortcut = { [weak self] event in
+            guard let self else { return false }
+            if let embeddedShortcut { return embeddedShortcut(event) }
+            return routeStandaloneShortcut(event)
+        }
+    }
+    private func routeStandaloneShortcut(_ event: NSEvent) -> Bool {
+        guard window is ArchiveKeyboardWindow, window?.isKeyWindow == true, window?.firstResponder === self,
+              let settings = keyboardContextSettings, let shortcut = BrowserShortcut(event),
+              !SystemShortcutSnapshot.shared.conflicts(event),
+              let action = settings.shortcutMap.resolve(shortcut, fileSurface: true),
+              !BrowserShortcutMenus.hasUserOverride(action, in: NSApp.mainMenu) else { return false }
+        if !event.isARepeat || action.allowsRepeat {
+            switch action {
+            case .copy: if commandValidation?(#selector(BrowserViewController.copyFileURLs(_:))) == true { onCopy?() }
+            case .cut: if commandValidation?(#selector(BrowserViewController.cutFileURLs(_:))) == true { onCut?() }
+            case .paste: if commandValidation?(#selector(BrowserViewController.pasteFileURLs(_:))) == true { onPaste?() }
+            case .open: onOpen?()
+            case .rename: onRename?()
+            case .quickLook: onPreview?()
+            case .back: onBack?()
+            case .forward: onForward?()
+            case .up: onUp?()
+            case .refresh: onRefresh?()
+            case .filter: (window as? ArchiveKeyboardWindow)?.focusArchiveSearch?()
+            case .selectAll: selectAll(nil)
+            case .selectByName: selectByName(nil)
+            case .selectionMenu: showKeyboardContextMenu(nil)
+            default: return performMemberCommand(action)
+            }
+        }
+        return true
+    }
+
+    /// The main menu belongs to the browser window. Handle supported archive
+    /// equivalents before AppKit can send them to that browser owner.
+    func routeStandaloneKeyEquivalent(_ event: NSEvent) -> Bool {
+        guard let settings = keyboardContextSettings, let key = BrowserShortcut(event),
+              let action = settings.shortcutMap.resolve(key, fileSurface: true),
+              [.copy, .cut, .paste, .open, .rename, .quickLook, .back, .forward, .up, .refresh,
+               .selectAll, .selectByName, .selectionMenu].contains(action) || memberCommands[action] != nil else { return false }
+        return routeStandaloneShortcut(event)
+    }
 
     private var canShowKeyboardContextMenu: Bool {
         window is ArchiveKeyboardWindow && embeddedShortcut == nil && keyboardContextSettings != nil
@@ -660,6 +834,7 @@ import SwiftUI
     }
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(selectByName(_:)) { return canSelectByName }
         if item.action == #selector(showKeyboardContextMenu(_:)) {
             return canShowKeyboardContextMenu && (contextMenuProvider != nil || menu != nil)
         }
@@ -690,36 +865,6 @@ import SwiftUI
     var onUp: (() -> Void)?
     var embeddedShortcut: ((NSEvent) -> Bool)?
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func keyDown(with event: NSEvent) {
-        if embeddedShortcut?(event) == true { return }
-        if window is ArchiveKeyboardWindow, embeddedShortcut == nil, window?.firstResponder === self, let settings = keyboardContextSettings,
-           KeyboardContextMenu.matches(event, settings: settings) {
-            if !event.isARepeat { showKeyboardContextMenu(nil) }
-            return
-        }
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if [36, 76].contains(event.keyCode), modifiers.intersection([.command, .control, .option]).isEmpty {
-            onOpen?()
-            return
-        }
-        if event.keyCode == 49, modifiers.intersection([.command, .control, .option]).isEmpty {
-            onPreview?()
-            return
-        }
-        if event.keyCode == 125, modifiers.contains(.command) {
-            onOpen?()
-            return
-        }
-        if event.keyCode == 126, modifiers.contains(.command) {
-            onUp?()
-            return
-        }
-        if event.keyCode == 123, modifiers.contains(.option) {
-            onBack?()
-            return
-        }
-        super.keyDown(with: event)
-    }
     override func menu(for event: NSEvent) -> NSMenu? {
         if BrowserPointerSelection.isSelectionAlias(event, in: self, behavior: behavior,
             isEditingText: currentEditor() != nil) { return nil }

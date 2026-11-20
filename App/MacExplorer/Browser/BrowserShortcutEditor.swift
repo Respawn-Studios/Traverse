@@ -4,6 +4,7 @@ import SwiftUI
 
 struct BrowserShortcutEditor: View {
     @ObservedObject var settings: BrowserSettings
+    var revealed: (action: BrowserCommand, request: UUID)?
     @ObservedObject private var system = SystemShortcutSnapshot.shared
     @State private var query = ""
     @State private var error = ""
@@ -30,11 +31,18 @@ struct BrowserShortcutEditor: View {
                     .transaction { $0.disablesAnimations = true }
             }
             if !error.isEmpty { Text(error).interfaceFont(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(visibleActions) { action in row(action) }
-                }.padding(.vertical, 4)
-            }.frame(height: 260)
+            let actions = visibleActions
+            if actions.isEmpty {
+                Text("No matching shortcuts").interfaceFont(.caption).foregroundStyle(.secondary)
+            } else if actions.count == 1, let action = actions.first {
+                row(action).padding(.vertical, 4)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(actions) { action in row(action) }
+                    }.padding(.vertical, 4)
+                }.frame(height: 260)
+            }
             Button("Reset Shortcut Bindings to These Behavior Choices") {
                 prepareCustom(); settings.shortcutPreferences = .init(); error = ""; recording = nil
             }
@@ -43,6 +51,9 @@ struct BrowserShortcutEditor: View {
                 .interfaceFont(.caption).foregroundStyle(.secondary)
         }
         .onAppear { refreshSystemState() }
+        .onChange(of: revealed?.request, initial: true) { _, _ in
+            if let revealed { query = revealed.action.title }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refreshSystemState() }
     }
     private var visibleActions: [BrowserCommand] {
@@ -79,6 +90,12 @@ struct BrowserShortcutEditor: View {
                 _ = apply(changed)
             }.accessibilityIdentifier("shortcut-reset-" + action.rawValue)
         }.disabled(systemOverrides.contains(action))
+            .background {
+                if revealed?.action == action && query == action.title {
+                    RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.18)).padding(-3)
+                        .accessibilityHidden(true).allowsHitTesting(false)
+                }
+            }
     }
     private func keyDescription(_ action: BrowserCommand) -> String {
         let keys = settings.shortcutMap.shortcuts(for: action)

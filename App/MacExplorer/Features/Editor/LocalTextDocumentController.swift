@@ -1,5 +1,6 @@
 import AppKit
 import FileOperations
+import LocalStorage
 
 /// A chosen *directory* grant is held for the real Save As worker, including
 /// private staging and any interrupted outcome. It is not inferred from a URL.
@@ -63,6 +64,7 @@ final class LocalTextDocumentController {
     private let interactions: EditorDocumentInteractions
     private var state: TextDocumentState?
     private var pendingEdit: TextEditTicket?
+    private var pendingFileJump: (jump: EditorFileJump, generation: UUID, selection: NSRange, viewport: NSPoint)?
     private var language = TextSyntaxLanguage.plain
     private var editorPreferences = EditorPreferences()
     private var languageWasOverridden = false
@@ -100,7 +102,7 @@ final class LocalTextDocumentController {
     init(url: URL, files: LocalEditorFileSession, interactions: EditorDocumentInteractions,
          installChrome: (NSWindow) -> Void) {
         initialURL = url; self.files = files; self.interactions = interactions
-        window = NativeTextEditorWindow(displayName: url.lastPathComponent, installChrome: installChrome)
+        window = NativeTextEditorWindow(displayName: url.lastPathComponent, supportsFileSidebar: true, installChrome: installChrome)
         window.onSave = { [weak self] in self?.save() }
         window.onSaveAs = { [weak self] in self?.chooseSaveAs() }
         window.onTextCopy = { [weak self] in self?.chooseTextCopy() }
@@ -109,11 +111,12 @@ final class LocalTextDocumentController {
         window.onStop = { [weak self] in self?.stop() }
         window.onRecovery = { [weak self] in self?.reviewVersions() }
         window.captureComparison = { [weak self] in
-            guard let self, !closed, !closing, !hasPendingFileWork, !hasPendingSave,
+            guard let self, canCaptureComparison,
                   let state, let baseline = state.comparisonBaseline else { return nil }
             return .init(baseline: baseline, current: window.surface.textView.string,
-                format: state.value.format, language: language)
+                format: state.value.format, language: language, currentEditor: window.editableBufferIdentity)
         }
+        window.diskComparisonSource = { [weak self] in self?.diskComparison() }
         window.onLanguage = { [weak self] value in
             self?.languageWasOverridden = true; self?.changeLanguage(value)
         }
@@ -141,7 +144,10 @@ final class LocalTextDocumentController {
         if !languageWasOverridden {
             language = value.language(forFilename: currentURL.lastPathComponent)
             window.selectLanguage(language)
-            if language != oldLanguage || detectionChanged { submitPresentation(ticket: pendingEdit) }
+        }
+        if language != oldLanguage || (detectionChanged && !languageWasOverridden)
+            || window.surface.needsLineChangePreparation(for: state?.savedTextBaseline) {
+            submitPresentation(ticket: pendingEdit)
         }
     }
 
@@ -150,9 +156,64 @@ final class LocalTextDocumentController {
     var isClosed: Bool { closed }
     var hasPendingFileWork: Bool { fileTask != nil || files.isWorking || choosing }
     var hasPendingSave: Bool { state?.activeCapture != nil || state?.activeSave != nil || pendingTextCopy != nil }
+    private var canCaptureComparison: Bool {
+        !closed && !closing && !hasPendingFileWork && !hasPendingSave && !window.surface.textView.hasMarkedText()
+    }
+    var canCaptureDraft: Bool { isDirty && canCaptureComparison }
+    var canCaptureCurrentText: Bool { canCaptureComparison && state != nil }
+
+    func editGitIndex(_ action: GitIndexEditAction, fileSystem: LocalFileSystem, access: FolderAccessController,
+                      settings: BrowserSettings) {
+        guard canCaptureCurrentText, !needsTextRecovery, let url = files.currentURL, let binding = files.binding else { return }
+        let token = action == .stageSavedFile ? files.savedTextToken : nil
+        if action == .stageSavedFile && token == nil {
+            window.reportNavigation("Reload the saved file before staging it.")
+            return
+        }
+        window.editGitIndex(action, for: url, fileSystem: fileSystem, access: access, settings: settings,
+            matchingSavedText: token, hasUnsavedEdits: { [weak self] in self?.isDirty == true }) { [weak self] in
+                guard let self else { return false }
+                return canCaptureCurrentText && !needsTextRecovery && files.binding == binding && files.currentURL == url
+            }
+    }
+
+    func captureDraft() -> EditorComparisonCapture.Side? {
+        guard isDirty else { return nil }
+        return captureCurrentText()
+    }
+
+    func captureCurrentText() -> EditorComparisonCapture.Side? {
+        guard canCaptureComparison, let state else { return nil }
+        return .init(text: window.surface.textView.string, format: state.value.format, language: language,
+            editor: window.editableBufferIdentity)
+    }
+
+    private func diskComparison() -> EditorDiskComparisonSource? {
+        guard canCaptureComparison, state != nil, let source = files.currentURL else { return nil }
+        return .init(url: source) { [weak self] in
+            guard let self, files.currentURL == source, let draft = captureCurrentText() else {
+                throw EditorComparisonLoadFailure.unavailable("The editor moved to another file or is busy.")
+            }
+            let generation = window.surface.generation
+            let disk: TextDocumentValue
+            do {
+                let inspection = try interactions.acquireInspection()
+                defer { interactions.finishInspection(inspection) }
+                disk = try await files.diskSnapshot(at: source)
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                throw EditorComparisonLoadFailure.unavailable("The file on disk could not be read. Your editor text is still here.")
+            }
+            guard canCaptureComparison, generation == window.surface.generation, files.currentURL == source else {
+                throw EditorComparisonLoadFailure.unavailable("The editor changed during the read. Refresh to compare the current text.")
+            }
+            return .init(left: .init(text: disk.text, format: disk.format, language: draft.language), right: draft)
+        }
+    }
+
     private var needsTextRecovery: Bool { state?.unresolvedSave != nil || unresolvedPublication != nil }
 
-    func showAndOpen() {
+    func showAndOpen(jump: EditorFileJump? = nil, matching selection: LocalTextOpenSelection? = nil) {
         guard !closed else { return }
         guard fileTask == nil, state == nil else { window.showWindow(nil); return }
         window.presentEditor(in: .local, arrangement: editorPreferences.windowArrangement)
@@ -164,12 +225,15 @@ final class LocalTextDocumentController {
             defer { if let inspection { self.interactions.finishInspection(inspection) } }
             do {
                 inspection = try self.interactions.acquireInspection()
-                let opened = try await self.files.open(self.initialURL)
+                let opened = try await self.files.open(self.initialURL, matching: selection)
                 self.install(opened)
+                if let jump { self.deferFileJump(jump) }
                 self.observedFileEvent?(.opened, nil, nil, .succeeded)
             } catch is CancellationError { self.message = "Opening cancelled" }
             catch let failure as FileOperationFailure {
-                self.message = "This file could not be opened in the editor. Use Open in Default App or choose another text file."
+                self.message = selection != nil && (failure == .sourceChanged || failure == .notFound)
+                    ? "This file changed after it was selected. Return to the review or picker and choose it again."
+                    : "This file could not be opened in the editor. Use Open in Default App or choose another text file."
                 self.observedFileEvent?(.openFailed, nil, nil, .failed(failure))
             } catch {
                 self.message = "This file could not be opened in the editor. Use Open in Default App or choose another text file."
@@ -182,6 +246,7 @@ final class LocalTextDocumentController {
     private func install(_ opened: EditorOpenedDocument) {
         state = TextDocumentState(value: opened.contents, binding: opened.binding)
         pendingEdit = nil
+        pendingFileJump = nil
         window.surface.install(opened.contents)
         if !languageWasOverridden { language = editorPreferences.language(forFilename: opened.url.lastPathComponent) }
         window.selectLanguage(language)
@@ -191,13 +256,61 @@ final class LocalTextDocumentController {
         submitPresentation(ticket: nil)
     }
 
+    private func deferFileJump(_ jump: EditorFileJump) {
+        let surface = window.surface
+        pendingFileJump = (jump, surface.generation, surface.textView.selectedRange(), surface.scrollView.contentView.bounds.origin)
+    }
+
+    func revealFileJump(_ jump: EditorFileJump) {
+        let surface = window.surface
+        guard state != nil, !closed, !closing, window.window?.isKeyWindow == true, !surface.textView.hasMarkedText() else { return }
+        guard surface.canGoToLine else { deferFileJump(jump); return }
+        switch jump.destination {
+        case .line(let address):
+            if !surface.goTo(address, generation: surface.generation, remembersLocation: false) {
+                message = "Opened the file. The requested line or column is outside it."
+                refresh()
+            }
+        case .match(let match):
+            if let range = match.verifiedRange(in: surface.textView.string) {
+                surface.revealNavigationSelection(range, remembersLocation: false)
+            } else {
+                message = "The matching text has changed. The editor kept its current position."
+                refresh()
+            }
+        case .declaration(let entry, let language):
+            guard surface.presentedGeneration == surface.generation else { deferFileJump(jump); return }
+            if let outline = surface.currentOutlineForSymbols, outline.language == language,
+               outline.value.entries.contains(where: { $0 == entry && $0.title.utf16.elementsEqual(entry.title.utf16) }) {
+                surface.revealNavigationSelection(.init(location: entry.offset, length: 0), remembersLocation: false)
+            } else {
+                message = "The declaration could not be verified in this editor. Your current position is unchanged."
+                refresh()
+            }
+        case nil: break
+        }
+        let navigation = EditorDocumentNavigation.shared
+        if let origin = jump.origin, navigation.location(in: window) != origin { navigation.record(origin) }
+    }
+
+    private func resolveFileJump(for generation: UUID) {
+        guard let request = pendingFileJump else { return }
+        pendingFileJump = nil
+        let surface = window.surface
+        guard request.generation == generation, request.selection == surface.textView.selectedRange(),
+              request.viewport == surface.scrollView.contentView.bounds.origin else { return }
+        revealFileJump(request.jump)
+    }
+
     private func edited(_ text: String, generation: UUID) {
+        pendingFileJump = nil
         guard let state, !closed, !choosing, !closing else { return }
         do {
             let ticket = try state.beginEdit(); pendingEdit = ticket
             try preparation.submit(.presentation(ticket: ticket, surfaceGeneration: generation,
                 text: text, format: state.value.format, language: language,
-                detectsLanguage: shouldDetectLanguage))
+                detectsLanguage: shouldDetectLanguage,
+                baseline: window.surface.prepareLineChangeBaseline(state.savedTextBaseline)))
             message = "Edited"; refresh()
         } catch { message = "The edit could not be prepared. Your visible text is still here."; refresh() }
     }
@@ -205,7 +318,8 @@ final class LocalTextDocumentController {
         guard let state, !closed else { return }
         try? preparation.submit(.presentation(ticket: ticket, surfaceGeneration: window.surface.generation,
             text: window.surface.textView.string, format: state.value.format, language: language,
-            detectsLanguage: shouldDetectLanguage))
+            detectsLanguage: shouldDetectLanguage,
+            baseline: window.surface.prepareLineChangeBaseline(state.savedTextBaseline)))
     }
     private var shouldDetectLanguage: Bool {
         !languageWasOverridden && language == .plain
@@ -217,16 +331,19 @@ final class LocalTextDocumentController {
     private func prepared(_ input: EditorPreparationInput, _ result: EditorPreparationResult) {
         guard let state, !closed else { return }
         switch input {
-        case .presentation(let ticket, let surfaceGeneration, _, _, _, _):
+        case .presentation(let request):
+            let ticket = request.ticket, surfaceGeneration = request.generation
             switch result {
-            case .presentation(let value, let syntax, let lines, let detected):
+            case .presentation(let prepared):
                 if let ticket, ticket == pendingEdit {
-                    do { try state.acceptEdit(ticket, value: value); pendingEdit = nil }
+                    do { try state.acceptEdit(ticket, value: prepared.value); pendingEdit = nil }
                     catch { return }
                 }
-                if window.surface.present(value, syntax: syntax, lines: lines, for: surfaceGeneration),
-                   let detected, shouldDetectLanguage {
-                    language = detected; window.selectLanguage(detected)
+                if window.surface.present(prepared, for: surfaceGeneration) {
+                    if let detected = prepared.detectedLanguage, shouldDetectLanguage {
+                        language = detected; window.selectLanguage(detected)
+                    }
+                    resolveFileJump(for: surfaceGeneration)
                 }
             case .invalid(let failure):
                 if let ticket, ticket == pendingEdit {
@@ -756,6 +873,9 @@ final class LocalTextDocumentController {
     }
 
     private func refresh() {
+        if !closed, !closing, window.surface.needsLineChangePreparation(for: state?.savedTextBaseline) {
+            submitPresentation(ticket: pendingEdit)
+        }
         let working = hasPendingFileWork || hasPendingSave || closing
         let detail = [explanation, textCopyNotice].compactMap { $0 }.joined(separator: "\n")
         window.update(displayName: currentURL.lastPathComponent, dirty: state?.isDirty ?? false,

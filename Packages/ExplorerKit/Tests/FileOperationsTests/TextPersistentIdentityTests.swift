@@ -633,6 +633,13 @@ private struct TextIdentityFixture {
     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
     let plan = try await engine.prepareLocalTextRecoveryCopies(recordID: id, destinationDirectory: destination,
         beforeName: "before.txt", submittedName: "submitted.txt")
+    let cold = fixture.engine()
+    let pair = try await cold.readLocalTextRevisionComparison(recordID: id, attemptID: plan.attemptID)
+    #expect(pair.left.encoded == fixture.original && pair.right.encoded == edited)
+    #expect(try await cold.inspectLocalTextRecoveryExports(recordID: id).isEmpty)
+    await #expect(throws: FileOperationFailure.recoveryUncertain) {
+        try await cold.readLocalTextRevisionComparison(recordID: id, attemptID: UUID())
+    }
     let result = await engine.performLocalTextRecoveryCopies(plan)
     #expect(result.status == .succeeded)
     #expect(result.outcomes.map(\.state) == [.verified, .verified])
@@ -645,6 +652,11 @@ private struct TextIdentityFixture {
     let later = try await engine.prepareLocalTextRecoveryCopies(recordID: id, destinationDirectory: destination,
         beforeName: "later-before.txt", submittedName: "later-submitted.txt")
     try Data("Changed generated retained source\n".utf8).write(to: later.sources[0], options: .atomic)
+    await #expect(throws: FileOperationFailure.recoveryUncertain) {
+        try await cold.readLocalTextRevisionComparison(recordID: id, attemptID: later.attemptID)
+    }
+    #expect(try await cold.readLocalTextRevisionVersion(recordID: id, attemptID: later.attemptID, version: .submitted).encoded == edited)
+    #expect(try Data(contentsOf: fixture.file) == edited)
     let refused = await engine.performLocalTextRecoveryCopies(later)
     #expect(refused.status != .succeeded)
     #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("later-before.txt").path))

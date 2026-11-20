@@ -54,14 +54,42 @@ final class ApplicationOperationCoordinator: ObservableObject {
     private let browsers = NSHashTable<BrowserViewController>.weakObjects()
     func register(_ browser: BrowserViewController) { browsers.add(browser) }
     var liveBrowsers: [BrowserViewController] { browsers.allObjects }
+    /// A journal change refreshes one reader per workspace. Result cards and
+    /// paging remain window-owned; unrelated engines are never inspected.
+    func refreshRecoveryHistory(for engine: RecoverableFileOperations, including origin: BrowserViewController) {
+        var seen = Set<ObjectIdentifier>()
+        for browser in [origin] + liveBrowsers {
+            guard !browser.isBrowserSuspended, !browser.isReadOnlyFileSession,
+                  browser.recoverableFileOperations === engine else { continue }
+            if browser !== origin {
+                guard browser.isViewLoaded, browser.viewIfLoaded?.window != nil else { continue }
+            }
+            guard seen.insert(ObjectIdentifier(browser.operationHistory)).inserted else { continue }
+            browser.readOperationRecovery()
+        }
+    }
+
     /// Folder URL formatting is not a reason to leave a completed transfer
     /// invisible. This refresh is presentation only; it grants no file access.
     func reloadLocalDirectory(_ directory: URL) {
-        guard directory.isFileURL else { return }
-        for browser in liveBrowsers where browser.isViewLoaded && !browser.isBrowserSuspended {
+        reloadLocalDirectories([directory], excluding: nil)
+    }
+
+    func reloadLocalDirectories(affectedBy result: FileOperationResult, includingSources: Bool = true,
+                                excluding refreshed: BrowserViewController?) {
+        let folders = result.items.filter { $0.status == .succeeded || $0.hasRecordedUnconfirmedDestination }.flatMap { item in
+            [includingSources ? item.source : nil, item.destination].compactMap { $0?.deletingLastPathComponent() }
+        }
+        reloadLocalDirectories(folders, excluding: refreshed)
+    }
+
+    private func reloadLocalDirectories(_ directories: [URL], excluding refreshed: BrowserViewController?) {
+        let paths = Set(directories.lazy.filter(\.isFileURL).map { Data($0.path.utf8) })
+        guard !paths.isEmpty else { return }
+        for browser in liveBrowsers where browser !== refreshed && browser.isViewLoaded && !browser.isBrowserSuspended {
             guard let current = browser.location.directoryURL, current.isFileURL,
-                  current.path.utf8.elementsEqual(directory.path.utf8) else { continue }
-            browser.loadLocation()
+                  paths.contains(Data(current.path.utf8)) else { continue }
+            browser.refreshAfterDirectoryOperation()
         }
     }
     var protectedStorageLocations: [URL] {
@@ -175,11 +203,12 @@ final class ApplicationOperationCoordinator: ObservableObject {
         // Undo committed updates. The fixture phase still rejects forward work.
         let tarOriginalUpdate: AuthoredTAROriginalUpdatePolicy = archiveQA || TARArchiveEditingFeature.available
             ? .developmentNativeStage : .held
-        let tarGzipUpdate: AuthoredTARGzipOriginalUpdatePolicy = archiveQA || TARGzipEditingFeature.available
+        let compressedTARWritable = CompressedTARFeature.writable
+        let tarGzipUpdate: AuthoredTARGzipOriginalUpdatePolicy = archiveQA || compressedTARWritable
             ? .developmentNativeStage : .held
         let tarGzipCreate: TARGzipCreationPolicy = TARGzipCreationFeature.available ? .developmentNativeCreate : .held
-        let tarBzip2Create: TARBzip2CreationPolicy = TARBzip2Feature.available ? .developmentNativeCreate : .held
-        let tarBzip2Update: AuthoredTARBzip2OriginalUpdatePolicy = archiveQA || TARBzip2Feature.available
+        let tarBzip2Create: TARBzip2CreationPolicy = compressedTARWritable ? .developmentNativeCreate : .held
+        let tarBzip2Update: AuthoredTARBzip2OriginalUpdatePolicy = archiveQA || compressedTARWritable
             ? .developmentNativeStage : .held
         let protectedNames = [directory.deletingLastPathComponent(),
                               directory.deletingLastPathComponent().appendingPathComponent("private-names", isDirectory: true),

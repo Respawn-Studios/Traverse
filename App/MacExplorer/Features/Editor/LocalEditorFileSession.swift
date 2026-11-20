@@ -61,6 +61,7 @@ final class LocalEditorFileSession {
     var isWorking: Bool { work != nil }
     var currentURL: URL? { source?.url }
     var binding: TextDocumentBinding? { source?.binding }
+    var savedTextToken: LocalTextReadToken? { closed || work != nil || sourceNeedsReload ? nil : source?.token }
     var requiresUnchangedCheckpoint: Bool { explicitReloadPending }
     var mustReloadBeforeOriginalSave: Bool { sourceNeedsReload }
 
@@ -71,18 +72,31 @@ final class LocalEditorFileSession {
     }
 
     /// Reading and explicit Reload never initialize or upgrade operation history.
-    func open(_ url: URL) async throws -> EditorOpenedDocument {
+    func open(_ url: URL, matching selection: LocalTextOpenSelection? = nil) async throws -> EditorOpenedDocument {
         guard source == nil, selectedHistoricalRecordID == nil else { throw EditorFileSessionFailure.staleBinding }
-        return try await read(url, isReload: false)
+        return try await read(url, isReload: false, matching: selection)
     }
     func reload() async throws -> EditorOpenedDocument {
         guard let source else { throw EditorFileSessionFailure.noDocument }
         return try await read(source.url, isReload: true)
     }
-    private func read(_ url: URL, isReload: Bool) async throws -> EditorOpenedDocument {
+
+    /// A comparison owns its read and joins it at close. Keep the original
+    /// access alive through the read without adopting the new Save token.
+    func diskSnapshot(at url: URL) async throws -> TextDocumentValue {
+        guard !closed, work == nil, let source, source.url == url else { throw EditorFileSessionFailure.staleBinding }
+        let retainedAccess = lifetimes
+        defer { withExtendedLifetime(retainedAccess) {} }
+        let read = try await engine.readLocalTextDocument(at: url)
+        try Task.checkCancellation()
+        guard !closed, work == nil, self.source?.binding == source.binding else { throw EditorFileSessionFailure.staleBinding }
+        return read.contents
+    }
+
+    private func read(_ url: URL, isReload: Bool, matching selection: LocalTextOpenSelection? = nil) async throws -> EditorOpenedDocument {
         let ticket = try begin()
         defer { finish(ticket) }
-        let read = try await engine.readLocalTextDocument(at: url)
+        let read = try await engine.readLocalTextDocument(at: url, matching: selection)
         // The window owner deliberately keeps the old buffer until this real
         // read succeeds. It cannot acknowledge a task cancellation as Reload.
         try Task.checkCancellation()
@@ -110,6 +124,16 @@ final class LocalEditorFileSession {
         try requireSelectedRecord(id)
         let ticket = try begin(); defer { finish(ticket) }
         return try await engine.inspectLocalTextRevision(recordID: id)
+    }
+    func compareRevision(_ id: UUID, attempt: UUID) async throws -> TextComparisonDocuments {
+        try requireSelectedRecord(id)
+        let ticket = try begin(); defer { finish(ticket) }
+        return try await engine.readLocalTextRevisionComparison(recordID: id, attemptID: attempt)
+    }
+    func readRevision(_ id: UUID, attempt: UUID, version: LocalTextRecoveryVersion) async throws -> TextDocumentValue {
+        try requireSelectedRecord(id)
+        let ticket = try begin(); defer { finish(ticket) }
+        return try await engine.readLocalTextRevisionVersion(recordID: id, attemptID: attempt, version: version)
     }
     func inspectExports(_ id: UUID) async throws -> [LocalTextRecoveryExportInspection] {
         try requireSelectedRecord(id)

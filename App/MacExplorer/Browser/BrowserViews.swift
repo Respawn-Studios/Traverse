@@ -45,6 +45,9 @@ func pin(_ child: NSView, inside parent: NSView, inset: CGFloat = 0, belowTitleb
 final class FileNameCellView: NSTableCellView {
     let cutMarker = NSImageView()
     var nameTrailing: NSLayoutConstraint?
+    private var gitLabel: NSTextField?
+    private var gitTrailing: NSLayoutConstraint?
+    private var nameToGit: NSLayoutConstraint?
     #if DEBUG
     private(set) static var createdCells = 0
     private(set) static var createdCutMarkers = 0
@@ -72,7 +75,41 @@ final class FileNameCellView: NSTableCellView {
 
     func showCutMarker(_ visible: Bool) {
         cutMarker.isHidden = !visible
-        nameTrailing?.constant = visible ? -23 : -6
+        updateTrailingAccessories()
+    }
+
+    func showGitBadge(_ badge: GitStatusBadge?) {
+        guard let badge else {
+            if let gitLabel, !gitLabel.isHidden {
+                gitLabel.isHidden = true
+                nameToGit?.isActive = false
+                nameTrailing?.isActive = true
+            }
+            return
+        }
+        if gitLabel == nil, let textField {
+            let note = label("", size: 10, color: .secondaryLabelColor)
+            InterfaceMetrics.setFont(note, base: .monospacedSystemFont(ofSize: 10, weight: .semibold))
+            note.translatesAutoresizingMaskIntoConstraints = false
+            note.setAccessibilityHidden(true)
+            note.setContentCompressionResistancePriority(.required, for: .horizontal)
+            addSubview(note)
+            let trailing = note.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)
+            NSLayoutConstraint.activate([trailing, note.centerYAnchor.constraint(equalTo: centerYAnchor)])
+            gitLabel = note; gitTrailing = trailing
+            nameToGit = textField.trailingAnchor.constraint(equalTo: note.leadingAnchor, constant: -6)
+        }
+        gitLabel?.stringValue = badge.text
+        gitLabel?.isHidden = false
+        nameTrailing?.isActive = false
+        nameToGit?.isActive = true
+        updateTrailingAccessories()
+    }
+
+    private func updateTrailingAccessories() {
+        let offset: CGFloat = cutMarker.isHidden ? -6 : -23
+        nameTrailing?.constant = offset
+        gitTrailing?.constant = offset
     }
 }
 
@@ -115,7 +152,9 @@ final class FileNameCellView: NSTableCellView {
         cell.textField?.alignment = column == "size" ? .right : .left
         cell.imageView?.image = role.flatMap { FileOpeningSymbol.image(role: $0, appearance: opening) }
         cell.imageView?.contentTintColor = FileOpeningSymbol.tint(opening, directory: role == .directory)
-        (cell as? FileNameCellView)?.showCutMarker(cut)
+        if let name = cell as? FileNameCellView {
+            name.showCutMarker(cut); name.showGitBadge(nil)
+        }
         cell.alphaValue = 1; cell.toolTip = opening.explanation; cell.setAccessibilityLabel(text)
         cell.setAccessibilityHelp(cut ? "Cut: ready to move when pasted in this connection." : opening.explanation)
         return cell
@@ -295,6 +334,7 @@ class ActionButton: NSButton {
 @MainActor
 final class ExplorerPathControl: CollapsingPathControl {
     var onEdit: (() -> Void)?
+    override var trailingEditFraction: CGFloat { 0.10 }
     private var firstClickWasCurrentComponent = false
 
     override func mouseDown(with event: NSEvent) {

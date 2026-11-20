@@ -69,10 +69,8 @@ def main():
                     copied[str(relative)] = d.digest(destination)
         d.put(root / 'evidence/registry-seed.json', {'files': copied, 'bytes': total, 'previousRegistryUnmodified': True})
     elif args.action == 'resolve':
-        # crypto-bigint's fixed release itself requires ctutils >= 0.4.5.
-        # Freeze that compatible fixed pair rather than force the advisory's
-        # older minimum into an unsatisfiable dependency graph.
-        for package, version in [('crypto-bigint', '0.7.6'), ('ctutils', '0.4.5')]:
+        # Keep the audited pair compatible with the pinned stable RSA crate.
+        for package, version in [('crypto-bigint', '0.7.11'), ('ctutils', '0.4.8')]:
             result, _, _ = run([str(TOOLCHAIN / 'bin/cargo'), 'update', '--manifest-path', str(PROJECT / 'Cargo.toml'),
                                 '-p', package, '--precise', version], root, 'update-' + package,
                                timeout=120, cwd=PROJECT, rust=True)

@@ -29,6 +29,8 @@ final class CrashReportStore {
         var records: [Record] = []
     }
     static let maximumNativeBytes = 1 << 20
+    private static let maximumRetainedBytes = 4 << 20
+    private static let maximumReports = 5
     private static let pendingName = "live_report.plcrash"
     private static let cacheName = "com.plausiblelabs.crashreporter.data"
     private let file: BrowserSnapshotFile
@@ -39,7 +41,7 @@ final class CrashReportStore {
 
     init(directory: URL) throws {
         self.directory = directory
-        file = BrowserSnapshotFile(directory: directory, name: "reports-v1.json", maximumBytes: 4 << 20,
+        file = BrowserSnapshotFile(directory: directory, name: "reports-v1.json", maximumBytes: Self.maximumRetainedBytes,
             requiresPrivateDurability: true)
         guard let lease = try file.acquireMutationLease(create: true) else { throw CrashReportFailure.busy }
         self.lease = lease
@@ -50,13 +52,22 @@ final class CrashReportStore {
 
     var reports: [CrashReport] { catalog.records.map(\.report) }
 
+    func requireCaptureSpace() throws {
+        try lease.validate()
+        guard try file.read() == original else { throw CrashReportFailure.changed }
+        guard catalog.records.count < Self.maximumReports,
+              (original?.count ?? 0) <= Self.maximumRetainedBytes - Self.maximumNativeBytes else {
+            throw CrashReportFailure.capacity
+        }
+    }
+
     /// Acknowledges an existing capture only after its complete bytes and safe
     /// projection have been durably retained. Full/invalid stores stay intact.
     func retain(_ nativeData: Data, report: CrashReport) throws {
         guard !nativeData.isEmpty, nativeData.count <= Self.maximumNativeBytes else { throw CrashReportFailure.capacity }
         let digest = Self.digest(nativeData)
         if catalog.records.contains(where: { $0.digest == digest }) { return }
-        guard catalog.records.count < 5 else { throw CrashReportFailure.capacity }
+        guard catalog.records.count < Self.maximumReports else { throw CrashReportFailure.capacity }
         var next = catalog
         next.records.insert(.init(report: report, nativeData: nativeData, digest: digest, retainedAt: Date()), at: 0)
         try publish(next)
@@ -313,7 +324,7 @@ final class CrashReportStore {
 
     private static func decode(_ bytes: Data) throws -> Catalog {
         let value = try JSONDecoder().decode(Catalog.self, from: bytes)
-        guard value.schema == 1, value.records.count <= 5,
+        guard value.schema == 1, value.records.count <= maximumReports,
               Set(value.records.map { $0.report.id }).count == value.records.count,
               Set(value.records.map(\.digest)).count == value.records.count else { throw CrashReportFailure.invalid }
         for record in value.records {

@@ -31,6 +31,49 @@ import Testing
     #expect(throws: PaneLayout.Failure.self) { try layout.setFraction(.nan, for: layout.rootID) }
 }
 
+@Test func swappingOneDividerKeepsTheDividerAndEachNestedSideIntact() throws {
+    let a = UUID(), b = UUID(), c = UUID(), d = UUID()
+    var layout = PaneLayout(paneID: a)
+    try layout.split(a, inserting: b, at: .trailing)
+    try layout.split(a, inserting: c, at: .bottom)
+    try layout.split(b, inserting: d, at: .bottom)
+    let root = layout.rootID
+    try layout.setFraction(0.58, for: root)
+    let original = layout
+    let first = try #require(layout.parent(of: a))
+    let second = try #require(layout.parent(of: b))
+    try layout.swapSides(of: root)
+    #expect(layout.node(root)?.content == .split(axis: .columns, fraction: 0.58, first: second.id, second: first.id))
+    #expect(layout.nodes.filter { $0.id != root } == original.nodes.filter { $0.id != root })
+    #expect(layout.paneIDs == [b, d, a, c])
+    #expect(layout.paneIDs(in: first.id) == [a, c])
+    try layout.validate()
+    try layout.swapSides(of: root)
+    #expect(layout == original)
+    #expect(throws: PaneLayout.Failure.self) { try layout.swapSides(of: a) }
+    #expect(layout == original)
+}
+
+@Test func rotatingOneDividerKeepsItsRatioAndBothNestedSides() throws {
+    let a = UUID(), b = UUID(), c = UUID()
+    var layout = PaneLayout(paneID: a)
+    try layout.split(a, inserting: b, at: .trailing)
+    try layout.split(b, inserting: c, at: .bottom)
+    let root = layout.rootID
+    let nested = try #require(layout.parent(of: c))
+    try layout.setFraction(0.38, for: root)
+    let original = layout
+    try layout.rotateSplit(root)
+    #expect(layout.node(root)?.content == .split(axis: .rows, fraction: 0.38, first: a, second: nested.id))
+    #expect(layout.nodes.filter { $0.id != root } == original.nodes.filter { $0.id != root })
+    #expect(layout.paneIDs == [a, b, c])
+    #expect(try JSONDecoder().decode(PaneLayout.self, from: JSONEncoder().encode(layout)) == layout)
+    try layout.rotateSplit(root)
+    #expect(layout == original)
+    #expect(throws: PaneLayout.Failure.self) { try layout.rotateSplit(a) }
+    #expect(layout == original)
+}
+
 @Test func paneLayoutRejectsDisconnectedDuplicateAndCyclicEncodedGraphs() throws {
     let a = UUID(), b = UUID()
     let valid = PaneLayout(paneID: a)

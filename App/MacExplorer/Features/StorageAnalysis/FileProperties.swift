@@ -1092,6 +1092,59 @@ struct StorageAttributionView: View {
         Picker("Size", selection: $allocated) { Text("File size").tag(false); Text("On disk").tag(true) }.frame(maxWidth: 210)
             .help("File size counts file data. On disk shows reported allocation, including resource forks. Shared blocks, hard links and snapshots mean neither is space guaranteed to be freed by deletion.")
     }
+    /// Navigation controls and query details live beside the chart, so revealing
+    /// a breadcrumb cannot move the chart under the pointer.
+    @ViewBuilder private func breakdownContext(chartReady: Bool) -> some View {
+        if !report.isProvisional, displayGroup == .projects {
+            Text(drill.levels.isEmpty ? "Recognized project roots" : drill.current?.composition != nil ? "Project composition" : "Recorded folders within this project")
+                .interfaceFont(.callout.weight(.medium))
+            Text("Select a project to see what’s inside.").interfaceFont(.caption).foregroundStyle(.secondary)
+                .help("Projects are recognized from marker names. Nested projects keep their own totals. Folder browsing is available separately.")
+            if drill.current?.composition != nil {
+                HStack {
+                    Picker("Within project", selection: $projectFacet) {
+                        Text("Purpose").tag(StoredAnalysisFacet.storageRoles)
+                        Text("File Types").tag(StoredAnalysisFacet.fileTypes)
+                    }.pickerStyle(.menu).fixedSize()
+                    Spacer(minLength: 8)
+                    Button("Browse Recorded Folders…") { onNavigation?(); drill.browseRecordedProjectFolders() }.disabled(drill.loading)
+                }
+            }
+        }
+        if drill.current?.purposeProjects != nil {
+            Text("Inside project").interfaceFont(.callout.weight(.medium))
+                .help("These are the selected purpose’s files inside recognized project folders. Shared and outside-project locations stay separate. This does not establish ownership or active use.")
+        } else if drill.current?.purposeLocations != nil {
+            Text("Matching locations").interfaceFont(.callout.weight(.medium))
+            Text("Choose one location to inspect. Folder browsing stays separate.").interfaceFont(.caption).foregroundStyle(.secondary)
+        }
+        if !report.isProvisional, let level = drill.current {
+            HStack(spacing: 8) {
+                Button { onNavigation?(); drill.back() } label: { Image(systemName: "chevron.left") }.disabled(!backEnabled).help("Previous breakdown")
+                nativeBreadcrumbs
+                Spacer()
+                Text(storageMetricText(level.value.value.bytes[metric], files: level.value.value.counts.regularFiles))
+                    .interfaceFont(.caption).monospacedDigit()
+            }
+        }
+        if !drill.message.isEmpty && chartReady { Text(drill.message).interfaceFont(.caption).foregroundStyle(.secondary) }
+        if drill.canExplainOther {
+            Button("Why are these files Other?") { showsOtherExplanation = true; drill.explainOther() }
+                .disabled(drill.loading).help("Explain filename patterns and storage roles using this scan; no rescan or file-content reads.")
+                .accessibilityIdentifier("storage-explain-other")
+                .popover(isPresented: $showsOtherExplanation, arrowEdge: .top) {
+                    if let explanation = drill.current?.otherExplanation {
+                        StorageOtherExplanationView(value: explanation, metric: metric).padding(10).frame(width: compact ? 360 : 420)
+                    } else {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if drill.loading { ProgressView("Reading stored explanation…").controlSize(.small) }
+                            else { Text(drill.message.isEmpty ? "This explanation is unavailable. Select Other again." : drill.message).interfaceFont(.callout) }
+                            Text("No new scan or file-content reads.").interfaceFont(.caption).foregroundStyle(.secondary)
+                        }.padding(18).frame(width: 300, alignment: .leading)
+                    }
+                }
+        }
+    }
     var body: some View {
         let frames = dimensionalFrames
         let missingLayout = !report.hasLayoutAttribution && (displayGroup == .roles || displayGroup == .projects)
@@ -1113,60 +1166,11 @@ struct StorageAttributionView: View {
                   sizePicker
               }
             }
-            if !report.isProvisional, displayGroup == .projects {
-                Text(drill.levels.isEmpty ? "Recognized project roots" : drill.current?.composition != nil ? "Project composition" : "Recorded folders within this project")
-                    .interfaceFont(.callout.weight(.medium))
-                Text("Select a project to see what’s inside.").interfaceFont(.caption).foregroundStyle(.secondary)
-                    .help("Projects are recognized from marker names. Nested projects keep their own totals. Folder browsing is available separately.")
-                if drill.current?.composition != nil {
-                    HStack {
-                        Picker("Within project", selection: $projectFacet) {
-                            Text("Purpose").tag(StoredAnalysisFacet.storageRoles)
-                            Text("File Types").tag(StoredAnalysisFacet.fileTypes)
-                        }.pickerStyle(.menu).fixedSize()
-                        Spacer(minLength: 8)
-                        Button("Browse Recorded Folders…") { onNavigation?(); drill.browseRecordedProjectFolders() }.disabled(drill.loading)
-                    }
-                }
-            }
             if !overview { HStack {
                 sizePicker
                 Spacer()
                 if drill.loading && chartReady { ProgressView().controlSize(.small).help("Loading stored totals") }
             } }
-            if drill.current?.purposeProjects != nil {
-                Text("Inside project").interfaceFont(.callout.weight(.medium))
-                    .help("These are the selected purpose’s files inside recognized project folders. Shared and outside-project locations stay separate. This does not establish ownership or active use.")
-            } else if drill.current?.purposeLocations != nil {
-                Text("Matching locations").interfaceFont(.callout.weight(.medium))
-                Text("Choose one location to inspect. Folder browsing stays separate.").interfaceFont(.caption).foregroundStyle(.secondary)
-            }
-            if !report.isProvisional, let level = drill.current {
-                HStack(spacing: 8) {
-                    Button { onNavigation?(); drill.back() } label: { Image(systemName: "chevron.left") }.disabled(!backEnabled).help("Previous breakdown")
-                    nativeBreadcrumbs
-                    Spacer()
-                    Text(storageMetricText(level.value.value.bytes[metric], files: level.value.value.counts.regularFiles))
-                        .interfaceFont(.caption).monospacedDigit()
-                }
-            }
-            if !drill.message.isEmpty && chartReady { Text(drill.message).interfaceFont(.caption).foregroundStyle(.secondary) }
-            if drill.canExplainOther {
-                Button("Why are these files Other?") { showsOtherExplanation = true; drill.explainOther() }
-                    .disabled(drill.loading).help("Explain filename patterns and storage roles using this scan; no rescan or file-content reads.")
-                    .accessibilityIdentifier("storage-explain-other")
-                    .popover(isPresented: $showsOtherExplanation, arrowEdge: .top) {
-                        if let explanation = drill.current?.otherExplanation {
-                            StorageOtherExplanationView(value: explanation, metric: metric).padding(10).frame(width: compact ? 360 : 420)
-                        } else {
-                            VStack(alignment: .leading, spacing: 10) {
-                                if drill.loading { ProgressView("Reading stored explanation…").controlSize(.small) }
-                                else { Text(drill.message.isEmpty ? "This explanation is unavailable. Select Other again." : drill.message).interfaceFont(.callout) }
-                                Text("No new scan or file-content reads.").interfaceFont(.caption).foregroundStyle(.secondary)
-                            }.padding(18).frame(width: 300, alignment: .leading)
-                        }
-                    }
-            }
             HStack(alignment: .top, spacing: 18) {
                     ZStack {
                         StorageDimensionalChart(frames: presentedFrames, scopeIdentity: drill.scopeIdentity, style: chartAppearance.style,
@@ -1185,6 +1189,7 @@ struct StorageAttributionView: View {
                         }
                     }.frame(width: compact ? 200 : overview ? 250 : 300, height: chartHeight)
                     VStack(alignment: .leading, spacing: 5) {
+                      breakdownContext(chartReady: chartReady)
                       if chartReady, let frame = frames.last {
                         ForEach(Array(frame.slices.prefix(compact ? 5 : 15).enumerated()), id: \.element.id) { index, slice in
                             if slice.canOpen {
@@ -1200,8 +1205,6 @@ struct StorageAttributionView: View {
                                 }
                             }.fixedSize(horizontal: true, vertical: false).disabled(drill.loading)
                         }
-                      } else {
-                          Text(emptyChartMessage).interfaceFont(.caption).foregroundStyle(.secondary)
                       }
                       if let selection = drill.selectedPurposeLocation {
                           purposeLocationDetails(selection)
@@ -1247,7 +1250,7 @@ struct StorageAttributionView: View {
         #if DEBUG
         return content.onReceive(StorageChartIntegration.groupSelectionForQualification) { selection in
             let (scope, name) = selection
-            if compact && drill.scopeIdentity == scope, let value = Group(rawValue: name) { selectGroup(value) }
+            if (compact || overview) && drill.scopeIdentity == scope, let value = Group(rawValue: name) { selectGroup(value) }
         }
         #else
         return content

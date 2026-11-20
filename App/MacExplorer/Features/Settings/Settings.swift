@@ -151,6 +151,8 @@ final class BrowserSettings: ObservableObject {
     @Published var showsCommandRow = true { didSet { save() } }
     @Published var showsPathBar = false { didSet { save() } }
     @Published var showsTerminalButton = true { didSet { save() } }
+    @Published var showsGitControls = true { didSet { save() } }
+    @Published var showsGitFileBadges = false { didSet { save() } }
     @Published var externalComparisonTool = ExternalComparisonTool.automatic { didSet { save() } }
     @Published var showsHiddenFiles = false { didSet { save() } }
     @Published var keyboardProfile = KeyboardProfile.explorer { didSet { save() } }
@@ -303,6 +305,8 @@ final class BrowserSettings: ObservableObject {
         var showsCommandRow = true
         var showsPathBar = false
         var showsTerminalButton = true
+        var showsGitControls = true
+        var showsGitFileBadges = false
         var externalComparisonTool = ExternalComparisonTool.automatic
         var showsHiddenFiles = false
         var keyboardProfile = KeyboardProfile.explorer
@@ -356,7 +360,7 @@ final class BrowserSettings: ObservableObject {
             case driveHealthLiveUpdates, driveHealthPrivateBetaLiveOptIn, driveHealthIntervalSeconds
             case addressPresentation, addressSuggestionLimit, ranksAddressVisits, addressVisitEntryLimit, addressVisitDays
             case version, showsCommandRow, showsPathBar, showsHiddenFiles, keyboardProfile, customBehavior, appearance, navigationStyle
-            case showsTerminalButton, externalComparisonTool
+            case showsTerminalButton, showsGitControls, showsGitFileBadges, externalComparisonTool
             case diagnosticHistoryEnabled, crashCaptureEnabled
             case automaticUpdateChecks, publicAutomaticUpdateChecks, updateInvitationSaved, pendingUpdateBuild
             case publicLastUpdateCheck
@@ -438,6 +442,8 @@ final class BrowserSettings: ObservableObject {
             showsCommandRow = try values.decodeIfPresent(Bool.self, forKey: .showsCommandRow) ?? true
             showsPathBar = try values.decodeIfPresent(Bool.self, forKey: .showsPathBar) ?? false
             showsTerminalButton = try values.decodeIfPresent(Bool.self, forKey: .showsTerminalButton) ?? true
+            showsGitControls = try values.decodeIfPresent(Bool.self, forKey: .showsGitControls) ?? true
+            showsGitFileBadges = try values.decodeIfPresent(Bool.self, forKey: .showsGitFileBadges) ?? false
             externalComparisonTool = try values.decodeIfPresent(ExternalComparisonTool.self, forKey: .externalComparisonTool) ?? .automatic
             showsHiddenFiles = try values.decodeIfPresent(Bool.self, forKey: .showsHiddenFiles) ?? false
             keyboardProfile = try values.decodeIfPresent(KeyboardProfile.self, forKey: .keyboardProfile) ?? .explorer
@@ -539,6 +545,8 @@ final class BrowserSettings: ObservableObject {
             showsCommandRow = settings.showsCommandRow
             showsPathBar = settings.showsPathBar
             showsTerminalButton = settings.showsTerminalButton
+            showsGitControls = settings.showsGitControls
+            showsGitFileBadges = settings.showsGitFileBadges
             externalComparisonTool = settings.externalComparisonTool
             showsHiddenFiles = settings.showsHiddenFiles
             keyboardProfile = settings.keyboardProfile
@@ -639,6 +647,8 @@ final class BrowserSettings: ObservableObject {
             showsCommandRow = value.showsCommandRow
             showsPathBar = value.showsPathBar
             showsTerminalButton = value.showsTerminalButton
+            showsGitControls = value.showsGitControls
+            showsGitFileBadges = value.showsGitFileBadges
             externalComparisonTool = value.externalComparisonTool
             showsHiddenFiles = value.showsHiddenFiles
             keyboardProfile = value.keyboardProfile
@@ -833,12 +843,19 @@ enum BrowserSettingsWindow {
 }
 
 struct BrowserSettingsView: View {
+    private struct SearchReveal {
+        let id = UUID()
+        let entry: SettingsSearchCatalog.Entry
+    }
     @Environment(\.interfaceScale) private var interfaceScale
     @State private var reviewsPrivateFollowing = false
     enum Page: Sendable { case general, appearance, tools, keyboard, operations, privacy, permissions }
     @ObservedObject var settings: BrowserSettings
     @State private var page: Page
     @State private var settingsSearch = ""
+    @State private var restoresNavigationFocus = false
+    @State private var searchSelection: SettingsSearchCatalog.Anchor?
+    @State private var searchReveal: SearchReveal?
     @State private var analysisMaintenanceRunning = false
     @State private var analysisMaintenanceMessage = ""
     @StateObject private var folderDefaultPresentation: FolderDefaultSettingsPresentation
@@ -908,6 +925,61 @@ struct BrowserSettingsView: View {
     }
     private var selectedPage: Binding<Page> { Binding(get: { page }, set: { selectPage($0) }) }
 
+    private func reveal(_ entry: SettingsSearchCatalog.Entry) {
+        searchSelection = entry.id
+        selectPage(entry.page)
+        searchReveal = .init(entry: entry)
+    }
+
+    private func isRevealing(_ key: String) -> Bool {
+        searchReveal?.entry.id == .init(page: page, key: key)
+    }
+
+    private func dismissSearch() {
+        settingsSearch = ""
+        searchSelection = nil
+        searchReveal = nil
+        restoresNavigationFocus = true
+    }
+
+    private var showsQuickCompressFormat: Bool {
+        AppFeatureAvailability.policy.edition == .development || settings.quickCompressionFormat != .zip
+    }
+
+    private var searchMatches: [SettingsSearchCatalog.Entry] {
+        let types = EditorOpeningSupport.additionalTypes(in: settings.editorPreferences)
+        let controls = SettingsSearchCatalog.matches(settingsSearch, additionalTypes: types).filter { entry in
+            switch (entry.page, entry.id.key) {
+            case (.general, "Default Folder App"): folderDefaultPresentation.owner.isVisible
+            case (.keyboard, "Customize These Choices"): settings.keyboardProfile != .custom
+            case (.keyboard, "Reset All Custom Choices to Explorer"): settings.keyboardProfile == .custom
+            case (.operations, "Quick Compress format"): showsQuickCompressFormat
+            case (.permissions, "Additional access"): folderAccess != nil
+            default: true
+            }
+        }
+        return controls + SettingsSearchCatalog.shortcutMatches(settingsSearch)
+    }
+
+    private var revealedShortcut: (action: BrowserCommand, request: UUID)? {
+        guard let searchReveal, let shortcut = searchReveal.entry.shortcut else { return nil }
+        return (shortcut, searchReveal.id)
+    }
+
+    private func searchCommand(_ command: NativeQueryField.Key) -> Bool {
+        if command == .cancel { dismissSearch(); return true }
+        let results = searchMatches
+        guard !results.isEmpty else { return false }
+        let current = results.firstIndex { $0.id == searchSelection }
+        switch command {
+        case .submit: reveal(results[current ?? 0])
+        case .up: searchSelection = results[max(0, (current ?? 0) - 1)].id
+        case .down: searchSelection = results[min(results.count - 1, (current ?? -1) + 1)].id
+        case .cancel: break
+        }
+        return true
+    }
+
     @ViewBuilder
     private func observedPage<Content: View>(_ content: Content, page: Page) -> some View {
 #if DEBUG
@@ -923,109 +995,167 @@ struct BrowserSettingsView: View {
     }
 
     var body: some View {
+        let active = !SettingsSearchCatalog.normalizedWords(settingsSearch).isEmpty
+        let results = searchMatches
+        let marks = SettingsSearchPresentation(matches: Set(results.map(\.id)), revealed: searchReveal?.entry)
         HStack(spacing: 0) {
             ToolNavigationSidebar(scale: interfaceScale) {
                 Text("Settings").interfaceFont(.headline)
             } content: {
                 VStack(alignment: .leading, spacing: 8) {
-                TextField("Search Settings", text: $settingsSearch)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Search Settings")
-                    .accessibilityIdentifier("settings-search")
-                    .padding(.horizontal, 6)
-                if !settingsSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Results").interfaceFont(.caption).foregroundStyle(.secondary)
-                        let results = SettingsSearchCatalog.pages(matching: settingsSearch)
-                        if results.isEmpty {
-                            Text("No matching settings").interfaceFont(.caption).foregroundStyle(.secondary)
-                        } else {
-                            ForEach(results, id: \.self) { result in
-                                Button { selectPage(result) } label: {
-                                    Label(result.title, systemImage: result.symbolName)
-                                        .frame(maxWidth: .infinity, minHeight: 25 * interfaceScale, alignment: .leading)
-                                        .contentShape(Rectangle())
-                                }.buttonStyle(.plain).accessibilityLabel("Show " + result.title + " settings")
-                            }
+                    HStack(spacing: 4) {
+                        NativeQueryField(text: $settingsSearch, identifier: "settings-search", placeholder: "Search Settings",
+                            style: .search, onCommand: searchCommand)
+                            .frame(height: 27 * interfaceScale).help("Search Settings (⌘F)")
+                        if !settingsSearch.isEmpty {
+                            Button("Dismiss Settings Search", systemImage: "xmark", action: dismissSearch)
+                                .labelStyle(.iconOnly).help("Clear search (Escape)")
+                                .accessibilityIdentifier("settings-dismiss-search")
                         }
-                    }.padding(.horizontal, 9)
-                    Divider()
-                }
-                BrowserSettingsNavigation(selection: selectedPage, scale: interfaceScale)
+                    }.padding(.horizontal, 6)
+                    if active { settingsResults(results) }
+                    else { BrowserSettingsNavigation(selection: selectedPage, focusRequest: $restoresNavigationFocus, scale: interfaceScale) }
                 }
             } footer: { EmptyView() }
             Divider()
-            NativeSettingsPageHost(page: page, content: AnyView(
+            NativeSettingsPageHost(page: page, content: AnyView(ScrollViewReader { reader in
                 VStack(alignment: .leading, spacing: 0) {
                     Text(page.title).interfaceFont(.title2.bold())
                         .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 4)
                     pageContent.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            ), motion: settings.motion)
+                .environment(\.settingsSearchPage, page)
+                .environment(\.settingsSearchPresentation, marks)
+                .task(id: searchReveal?.id) {
+                    guard let searchReveal, searchReveal.entry.page == page else { return }
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    reader.scrollTo(searchReveal.entry.revealAnchor, anchor: .center)
+                }
+            }), motion: settings.motion)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 720, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
+        .onChange(of: settingsSearch) { _, query in
+            if query.count > 160 { settingsSearch = String(query.prefix(160)) }
+            if !query.isEmpty { restoresNavigationFocus = false }
+            searchSelection = nil
+            searchReveal = nil
+        }
         .background(FolderDefaultSettingsWindowReader { [weak folderDefaultPresentation] in
             folderDefaultPresentation?.bind($0)
         }.frame(width: 0, height: 0))
     }
 
+    @ViewBuilder private func settingsResults(_ results: [SettingsSearchCatalog.Entry]) -> some View {
+        if results.isEmpty {
+            Text("No matching settings").interfaceFont(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
+        } else {
+            ScrollViewReader { reader in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(results) { result in
+                            Button { reveal(result) } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(matchingTitle(result.title)).interfaceFont(.callout).lineLimit(2)
+                                    Text(result.page.title + " › " + result.section)
+                                        .interfaceFont(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 6).padding(.vertical, 4)
+                                .background(searchSelection == result.id ? Color.accentColor.opacity(0.16) : .clear,
+                                            in: RoundedRectangle(cornerRadius: 5))
+                                .contentShape(Rectangle())
+                            }.buttonStyle(.plain).accessibilityLabel("Show " + result.title)
+                                .accessibilityHint(result.page.title + " settings")
+                                .id(result.id)
+                        }
+                    }
+                }
+                .onChange(of: searchSelection) { _, result in if let result { reader.scrollTo(result) } }
+            }
+        }
+    }
+
+    private func matchingTitle(_ title: String) -> AttributedString {
+        var result = AttributedString(title)
+        for word in SettingsSearchCatalog.normalizedWords(settingsSearch) {
+            if let match = title.range(of: word, options: [.caseInsensitive, .diacriticInsensitive]),
+               let range = Range(match, in: result) {
+                result[range].inlinePresentationIntent = .stronglyEmphasized
+            }
+        }
+        return result
+    }
+
     @ViewBuilder private var pageContent: some View {
         switch page {
         case .tools:
-            observedPage(EditorSettingsTools(settings: settings, searchQuery: settingsSearch), page: .tools)
+            observedPage(EditorSettingsTools(settings: settings), page: .tools)
         case .general:
             observedPage(Form {
                 if let coordinator = folderDefaultPresentation.owner.coordinator {
-                    Section { FolderDefaultSettingsCard(owner: coordinator, presentation: folderDefaultPresentation) }
+                    Section {
+                        FolderDefaultSettingsCard(owner: coordinator, presentation: folderDefaultPresentation)
+                            .settingsSearchAnchor("Default Folder App")
+                    }
                 }
                 Section("Setup") {
-                    Button("Personalize Traverse…", action: onShowSetup)
-                    Button("Manage Permissions & Folder Access…") { selectPage(.permissions) }
+                    settingButton("Personalize Traverse…", action: onShowSetup)
+                    settingButton("Manage Permissions & Folder Access…") { selectPage(.permissions) }
                     Text("Revisit your look, navigation, search and update choices. Permissions has your remembered folders, drives and optional access.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Crash reports") {
-                    Toggle("Capture crashes locally on next launch", isOn: $settings.crashCaptureEnabled)
+                    settingToggle("Capture crashes locally on next launch", isOn: $settings.crashCaptureEnabled)
                     Text("Applies when Traverse next starts. Native capture may contain private paths and is kept only on this Mac, up to five reports within 4 MiB. Nothing is uploaded automatically. Review, redact, export or remove copies in Help → Crash Reports & Feedback.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Button("Crash Reports & Feedback…") { ApplicationCrashReports.shared.show(settings: settings) }
+                    settingButton("Crash Reports & Feedback…") { ApplicationCrashReports.shared.show(settings: settings) }
                 }
                 Section("Community") {
-                    Toggle("Show support message after updates", isOn: $settings.supportReminders.enabled)
+                    settingToggle("Show support message after updates", isOn: $settings.supportReminders.enabled)
                     Text("One optional message per released update. Support Traverse is always available in Help; no features require payment.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Window") {
-                    Toggle("Open supported archives in Traverse", isOn: $settings.opensArchivesInTraverse)
+                    settingToggle("Open supported archives in Traverse", isOn: $settings.opensArchivesInTraverse)
                         .help("Open ZIP and supported TAR archives for browsing. Other file types keep their usual app. Browse Archive remains available in the file menu.")
-                    Picker("New tabs open", selection: $settings.newTabDestination) {
+                    settingPicker("New tabs open", selection: $settings.newTabDestination) {
                         ForEach(BrowserNewTabDestination.allCases) { Text($0.title).tag($0) }
                     }
                     Text("Duplicate Tab keeps the selected tab’s folder and view. A new server tab needs a separate connection.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Toggle("Click a selected filename to rename", isOn: $settings.renamesSelectedNameOnClick)
+                    settingToggle("Click a selected filename to rename", isOn: $settings.renamesSelectedNameOnClick)
                         .help("Click the selected name, pause briefly, then type. Double-click still opens the item; dragging and selection modifiers keep their usual behavior.")
-                    Toggle("Show menus in the window title bar", isOn: $settings.showsCommandRow)
-                    Toggle("Finder-style bottom address", isOn: $settings.showsPathBar)
-                    Toggle("Show Open Terminal in the navigation bar", isOn: $settings.showsTerminalButton)
-                        .help("Open Terminal at the current local folder. Server and archive locations keep their own commands.")
-                    Picker("Compare selected files with", selection: $settings.externalComparisonTool) {
+                    settingToggle("Show menus in the window title bar", isOn: $settings.showsCommandRow)
+                    settingToggle("Finder-style bottom address", isOn: $settings.showsPathBar)
+                    settingToggle("Show Open Terminal in the navigation bar", isOn: $settings.showsTerminalButton)
+                        .help("Open Terminal at the current local folder.")
+                    settingToggle("Show Git tools in local repositories", isOn: $settings.showsGitControls)
+                    settingToggle("Show Git badges in file lists and icons", isOn: $settings.showsGitFileBadges)
+                        .help("Mark visible staged, untracked and conflicted files in the browser. Traverse reads local Git metadata for this.")
+                        .disabled(!settings.showsGitControls)
+                    settingPicker("Compare selected files with", selection: $settings.externalComparisonTool) {
                         ForEach(ExternalComparisonTool.allCases) { Text($0.title).tag($0) }
                     }
                     Text("Select two local files, then choose Compare Files. Automatic uses an installed supported app; the displayed file order sets left and right. Traverse does not upload or merge them.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Toggle("Show Eject buttons beside external drives", isOn: $settings.showsSidebarEject)
-                    Toggle("Show quick drive controls in the status bar", isOn: $settings.showsDriveStatus)
-                    if settings.showsSidebarEject {
-                        Button("Show Eject Buttons on All Drives") { settings.hiddenEjectVolumes = []; settings.hiddenEjectSessions = [] }
-                        Text("Control-click a drive to hide its button. Choices stay on this Mac. Some drives can remember this choice only until you quit.")
+                    settingToggle("Show Eject buttons beside external drives", isOn: $settings.showsSidebarEject)
+                    settingToggle("Show quick drive controls in the status bar", isOn: $settings.showsDriveStatus)
+                    let restoreEject = "Show Eject Buttons on All Drives"
+                    if settings.showsSidebarEject || isRevealing(restoreEject) {
+                        settingButton(restoreEject) {
+                            settings.hiddenEjectVolumes = []; settings.hiddenEjectSessions = []
+                        }.disabled(!settings.showsSidebarEject)
+                        Text(settings.showsSidebarEject
+                             ? "Control-click a drive to hide its button. Choices stay on this Mac. Some drives can remember this choice only until you quit."
+                             : "Enable Eject buttons beside external drives first.")
                             .interfaceFont(.caption).foregroundStyle(.secondary)
                     }
                     Text("Moves the address and its suggestions to the bottom of each pane, and combines navigation and Search with the tabs. Click an ancestor to navigate or control-click for folder actions. Option-Command-P switches layouts.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Picker("Start with", selection: Binding(get: { settings.startupMode }, set: { mode in
+                    settingPicker("Start with", selection: Binding(get: { settings.startupMode }, set: { mode in
                         Task {
                             do { try await settings.chooseStartup(mode, profile: settings.startupProfileID); startupNotice = "" }
                             catch { startupNotice = "The startup choice could not be confirmed. Review it before quitting." }
@@ -1035,7 +1165,7 @@ struct BrowserSettingsView: View {
                         Text("Last session").tag(BrowserStartupMode.lastSession)
                         if settings.startupProfileID != nil { Text("Saved profile").tag(BrowserStartupMode.profile) }
                     }.disabled(settings.changingStartup)
-                    Button("Launch Profiles…", action: onManageLaunchProfiles)
+                    settingButton("Launch Profiles…", action: onManageLaunchProfiles)
                     Text("Last session remembers current tabs and folders; switching it off removes that snapshot. Saved profiles change only when you explicitly save a layout. All locations stay on this Mac and grant no access.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     if !startupNotice.isEmpty { Text(startupNotice).interfaceFont(.caption).foregroundStyle(.secondary) }
@@ -1043,14 +1173,16 @@ struct BrowserSettingsView: View {
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Search") {
-                    Picker("Default search sources", selection: $settings.privateNamesSources) {
+                    settingPicker("Default search sources", selection: $settings.privateNamesSources) {
                         ForEach(PrivateNameSources.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
-                    Toggle("Suggest saved folder names in the address bar", isOn: $settings.privateNamesAddressSuggestions)
+                    settingToggle("Suggest saved folder names in the address bar", isOn: $settings.privateNamesAddressSuggestions)
                     if settings.privateNamesAllowFollowing {
                         Toggle("Allow document following when remembering", isOn: $settings.privateNamesAllowFollowing)
+                            .settingsSearchAnchor("Document following")
                     } else {
                         Button("Review document following…") { reviewsPrivateFollowing = true }
+                            .settingsSearchAnchor("Document following")
                             .alert("Follow moves and saves", isPresented: $reviewsPrivateFollowing) {
                                 Button("Allow for Remember") { Task { try? await settings.acceptPrivateNamesFollowing() } }
                                 Button("Cancel", role: .cancel) {}
@@ -1061,10 +1193,10 @@ struct BrowserSettingsView: View {
                     Text("Only explicit Remember can enable the native metadata flag. File contents are not read. Turning this off does not undo existing native flags or saved links. Names are stored locally; older backups or exports may retain them.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     if !settings.privateNamesFollowingStatus.isEmpty { Text(settings.privateNamesFollowingStatus).interfaceFont(.caption).foregroundStyle(.secondary) }
-                    Toggle("Treat spaces, hyphens and underscores as equivalent", isOn: $settings.symbolTolerantNames)
+                    settingToggle("Treat spaces, hyphens and underscores as equivalent", isOn: $settings.symbolTolerantNames)
                     Text("Applies to filename search and folder-name suggestions. Complete-filename matching keeps symbols literal. Search uses filenames and allowed metadata; macOS owns the Spotlight index.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Button("Open System Settings…") {
+                    settingButton("Open System Settings…") {
                         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.systempreferences") {
                             NSWorkspace.shared.open(url)
                         }
@@ -1072,33 +1204,36 @@ struct BrowserSettingsView: View {
                     Text("In System Settings, choose Spotlight → Search Privacy to manage macOS indexing. Traverse does not rebuild or change that index.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
 
-                    Picker("Default folder scope", selection: $settings.defaultSearchScope) {
+                    settingPicker("Default folder scope", selection: $settings.defaultSearchScope) {
                         ForEach(BrowserDefaultSearchScope.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
                     Text("Applies when opening a folder or tab. This Mac always starts with indexed search. Search runs only after Return; changing this preference keeps existing drafts and results.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Address suggestions") {
-                    Picker("Show suggestions", selection: $settings.addressPresentation) {
+                    settingPicker("Show suggestions", selection: $settings.addressPresentation) {
                         ForEach(AddressSuggestionPresentation.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
                     Stepper("Dropdown limit: \(settings.addressSuggestionLimit)", value: $settings.addressSuggestionLimit, in: 3...12)
+                        .settingsSearchAnchor("Dropdown limit")
                     Text("Tab fills a suggestion; Return opens the address. Paths check one folder level; bare names also use familiar locations and Spotlight's filename index. No content search or recursive scan runs while typing.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Toggle("Improve suggestions using folder visits", isOn: $settings.ranksAddressVisits)
+                    settingToggle("Improve suggestions using folder visits", isOn: $settings.ranksAddressVisits)
                     Stepper("Keep up to \(settings.addressVisitEntryLimit) folders", value: $settings.addressVisitEntryLimit, in: 10...1_000, step: 10)
+                        .settingsSearchAnchor("Visit history size")
                     Stepper("Forget visits after \(settings.addressVisitDays) days", value: $settings.addressVisitDays, in: 1...365)
-                    Button("Clear Visit History") { settings.directoryVisits.clear() }
+                        .settingsSearchAnchor("Visit history retention")
+                    settingButton("Clear Visit History") { settings.directoryVisits.clear() }
                     Text("Visit history is off by default and stored only on this Mac. It contains directory paths and visit counts, never file contents. Turning it off clears saved visits; saved paths do not grant access.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     DirectoryVisitStatus(visits: settings.directoryVisits)
                 }
                 Section("Folder summaries and storage") {
-                    Toggle("Keep recent analyses on this Mac", isOn: $settings.analysisKeepsResults)
+                    settingToggle("Keep recent analyses on this Mac", isOn: $settings.analysisKeepsResults)
                     HStack {
-                        Button("Forget Saved Analyses") { maintainAnalyses(forget: true) }
+                        settingButton("Forget Saved Analyses") { maintainAnalyses(forget: true) }
                             .accessibilityIdentifier("settings-forget-analyses")
-                        Button("Repair Saved Analyses") { maintainAnalyses(forget: false) }
+                        settingButton("Repair Saved Analyses") { maintainAnalyses(forget: false) }
                             .accessibilityIdentifier("settings-repair-analyses")
                     }
                     .disabled(analysisMaintenanceRunning)
@@ -1107,117 +1242,124 @@ struct BrowserSettingsView: View {
                     }
                     Text("Keep the two most recent analyses and reopen their charts without scanning again. Results include names, sizes and dates, never file contents. Switch off to stop keeping new results; Forget removes saved analyses. Your files are untouched.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Toggle("Refresh changed folders when possible", isOn: $settings.analysisRefreshesChangedFolders)
+                    settingToggle("Refresh changed folders when possible", isOn: $settings.analysisRefreshesChangedFolders)
                         .accessibilityIdentifier("settings-analysis-refresh-changes")
                     Text("Refresh checks for changes using a saved analysis when available. A full scan runs when needed. Choose Scan Every Folder in Scan options to check everything, or switch this off to always run full scans.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Picker("Storage chart style", selection: $settings.analysisChartStyle) {
+                    settingPicker("Storage chart style", selection: $settings.analysisChartStyle) {
                         ForEach(StorageChartStyle.allCases, id: \.self) { style in Text(style.title).tag(style) }
                     }
                     .accessibilityIdentifier("storage-chart-style")
                     Text("Applies to Properties and Storage Analysis. Right-click or hold a chart to choose the same styles. This choice stays on this Mac and changes presentation without rescanning. Reduce Motion and Reduce Transparency are respected.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Toggle("Include application data by default in explicit scans", isOn: $settings.analysisIncludesApplicationDataByDefault)
+                    settingToggle("Include application data by default in explicit scans", isOn: $settings.analysisIncludesApplicationDataByDefault)
                     HStack {
                         Text("\(settings.analysisLocationChoices.count) remembered analysis locations")
-                        Button("Clear Location Choices") { settings.clearAnalysisLocationChoices() }.disabled(settings.analysisLocationChoices.isEmpty)
+                        settingButton("Clear Location Choices") { settings.clearAnalysisLocationChoices() }.disabled(settings.analysisLocationChoices.isEmpty)
                     }
                     Text("Local only. An optional folder/drive choice overrides this default at that exact path, without applying to subfolders. Saved choices contain paths, never file contents or access grants. A replacement at the same path uses that location's choice. Automatic hover summaries always use Standard. macOS access limits and private exclusions still apply.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Picker("Analysis folder picker", selection: $settings.analysisFolderPicker) {
+                    settingPicker("Analysis folder picker", selection: $settings.analysisFolderPicker) {
                         ForEach(AnalysisFolderPickerStyle.allCases) { style in Text(style.rawValue).tag(style) }
                     }
                     Text("Choose System, Explorer details or Columns for Storage Analysis. Native macOS selection remains available for granting or remembering access. Custom browsing does not grant access.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Toggle("Show folder summaries on hover", isOn: $settings.folderSummariesEnabled)
+                    settingToggle("Show folder summaries on hover", isOn: $settings.folderSummariesEnabled)
                     HStack {
                         Text("Hover delay")
                         Slider(value: $settings.folderSummaryDelay, in: 0.3...5, step: 0.1)
                         Text(settings.folderSummaryDelay.formatted(.number.precision(.fractionLength(1))) + " s")
                             .monospacedDigit().frame(width: 42, alignment: .trailing)
                     }
-                    .disabled(!settings.folderSummariesEnabled)
-                    Button("Clear Cached Folder Summaries") { ApplicationStorageAnalysis.shared.clearCachedSummaries() }
+                    .disabled(!settings.folderSummariesEnabled).settingsSearchAnchor("Hover delay")
+                    settingButton("Clear Cached Folder Summaries") { ApplicationStorageAnalysis.shared.clearCachedSummaries() }
                     Text("Eligible local folders calculate automatically while you hover. A saved analysis of that exact folder can be shown with its date; it may have changed. Otherwise, recent hover results may be reused for up to 30 seconds. Summaries use names and metadata only, never file contents or cloud downloads. Protected, provider and unavailable folders can remain incomplete.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     Text("Downloads, Desktop, Documents and private/system locations currently require explicit Analyze Storage while their automatic-access support is qualified.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Button("Inspect Traverse Storage…") { ApplicationStorageAnalysis.shared.showAppStorage(settings: settings) }
+                    settingButton("Inspect Traverse Storage…") { ApplicationStorageAnalysis.shared.showAppStorage(settings: settings) }
                         .disabled(settings.storageStateDirectory == nil)
                     Text("Shows local app state separately from macOS Spotlight, developer fixtures and recovery files stored elsewhere. This is read-only; no persistent content index is created.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Files and folders") {
-                    Toggle("Refresh open folders when their contents change", isOn: $settings.autoRefreshFolders)
-                    Toggle("Show hidden files and folders", isOn: $settings.showsHiddenFiles)
-                    Toggle("Show filename extensions", isOn: $settings.showsFileExtensions)
-                    Toggle("Folders first by default", isOn: $settings.foldersFirst)
+                    settingToggle("Refresh open folders when their contents change", isOn: $settings.autoRefreshFolders)
+                    settingToggle("Show hidden files and folders", isOn: $settings.showsHiddenFiles)
+                    settingToggle("Show filename extensions", isOn: $settings.showsFileExtensions)
+                    settingToggle("Folders first by default", isOn: $settings.foldersFirst)
                     Text("Properties and rename always show the complete filename.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped), page: .general)
         case .appearance:
-
+            let customOutline = settings.paneFocus.style == .custom
+            let revealsOutline = isRevealing("Outline color")
             observedPage(Form {
                 Section("Appearance") {
-                    Picker("Theme", selection: $settings.appearance) {
+                    settingPicker("Theme", selection: $settings.appearance) {
                         ForEach(BrowserAppearance.allCases, id: \.self) { value in
                             Text(value.displayName).tag(value)
                         }
                     }
-                    Picker("Surface style", selection: $settings.navigationStyle) {
+                    settingPicker("Surface style", selection: $settings.navigationStyle) {
                         ForEach(NavigationStyle.allCases) { Text($0.rawValue).tag($0) }
                     }
                     Group {
-                        Toggle("Glass navigation", isOn: $settings.glassNavigation)
-                        Toggle("Glass sidebar", isOn: $settings.glassSidebar)
-                        Toggle("Glass status bar", isOn: $settings.glassStatusBar)
-                        Toggle("Translucent file content (Experimental)", isOn: $settings.glassFileContent)
+                        settingToggle("Glass navigation", isOn: $settings.glassNavigation)
+                        settingToggle("Glass sidebar", isOn: $settings.glassSidebar)
+                        settingToggle("Glass status bar", isOn: $settings.glassStatusBar)
+                        settingToggle("Translucent file content (Experimental)", isOn: $settings.glassFileContent)
                     }
                     .disabled(settings.navigationStyle == .solid)
                     Text("Solid, Reduce Transparency and Increase Contrast take priority. File content stays opaque unless its experimental option is enabled.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
-                Section("Interface size") { InterfaceSizePicker(settings: settings) }
+                Section("Interface size") { InterfaceSizePicker(settings: settings).settingsSearchAnchor("Interface size") }
                 Section("File list") {
-                    Picker("Default view", selection: $settings.viewMode) {
+                    settingPicker("Default view", selection: $settings.viewMode) {
                         ForEach(BrowserViewMode.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    Picker("Details/List row spacing", selection: $settings.rowDensity) {
+                    settingPicker("Details/List row spacing", selection: $settings.rowDensity) {
                         ForEach(BrowserRowDensity.allCases) { Text($0.rawValue).tag($0) }
                     }
                     Text("Right-click a Details column heading to choose columns. The View menu offers the same choices.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Motion") {
-                    Picker("Animations", selection: $settings.motion.mode) {
+                    settingPicker("Animations", selection: $settings.motion.mode) {
                         ForEach(BrowserMotionMode.allCases) { mode in Text(mode.title).tag(mode) }
                     }.pickerStyle(.segmented)
                     ForEach(BrowserMotionEffect.allCases) { effect in
                         Toggle(effect.rawValue, isOn: Binding(get: { settings.motion.selected(effect) }, set: {
                             var value = settings.motion; value.set($0, for: effect); settings.motion = value
-                        })).disabled(settings.motion.mode == .off)
+                        })).disabled(settings.motion.mode == .off).settingsSearchAnchor(effect.rawValue)
                     }
                     Text("Reduced uses shorter fades and gentler movement. System Reduce Motion always takes priority. Off keeps actions and progress feedback.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Active pane") {
-                    Picker("Focus indication", selection: $settings.paneFocus.style) {
+                    settingPicker("Focus indication", selection: $settings.paneFocus.style) {
                         ForEach(PaneFocusPreferences.Style.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
-                    Picker("Outline thickness", selection: $settings.paneFocus.thickness) {
+                    settingPicker("Outline thickness", selection: $settings.paneFocus.thickness) {
                         ForEach(1...3, id: \.self) { Text("\($0) pt").tag($0) }
                     }
-                    if settings.paneFocus.style == .custom {
-                        ColorPicker("Outline color", selection: Binding(get: { Color(nsColor: settings.paneFocus.color) }, set: { value in
-                            guard let color = NSColor(value).usingColorSpace(.sRGB) else { return }
-                            var focus = settings.paneFocus
-                            focus.red = color.redComponent; focus.green = color.greenComponent; focus.blue = color.blueComponent
-                            settings.paneFocus = focus
-                        }), supportsOpacity: false)
+                    if customOutline || revealsOutline {
+                        VStack(alignment: .leading, spacing: 5) {
+                            ColorPicker("Outline color", selection: Binding(get: { Color(nsColor: settings.paneFocus.color) }, set: { value in
+                                guard settings.paneFocus.style == .custom, let color = NSColor(value).usingColorSpace(.sRGB) else { return }
+                                var focus = settings.paneFocus
+                                focus.red = color.redComponent; focus.green = color.greenComponent; focus.blue = color.blueComponent
+                                settings.paneFocus = focus
+                            }), supportsOpacity: false).disabled(!customOutline)
+                            if !customOutline {
+                                Text("Choose Custom color under Focus indication.")
+                                    .interfaceFont(.caption).foregroundStyle(.secondary)
+                            }
+                        }.settingsSearchAnchor("Outline color")
                     }
-                    Toggle("Show Active pane caption", isOn: $settings.paneFocus.caption)
+                    settingToggle("Show Active pane caption", isOn: $settings.paneFocus.caption)
                     Text("Shown only with multiple panes. Increase Contrast enforces a stronger outline and caption. Keyboard focus remains native.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
@@ -1227,21 +1369,21 @@ struct BrowserSettingsView: View {
 
             observedPage(Form {
                 Section("File-browser keyboard") {
-                    Picker("Preset", selection: $settings.keyboardProfile) {
+                    settingPicker("Preset", selection: $settings.keyboardProfile) {
                         ForEach(KeyboardProfile.allCases) { Text($0.rawValue).tag($0) }
                     }
                     if settings.keyboardProfile != .custom {
-                        Button("Customize These Choices") { settings.customizeBehavior() }
+                        settingButton("Customize These Choices") { settings.customizeBehavior() }
                     }
-                    Picker("Return", selection: Binding(get: { settings.behavior.returnAction }, set: { value in settings.updateCustomBehavior { $0.returnAction = value } })) {
+                    settingPicker("Return", selection: Binding(get: { settings.behavior.returnAction }, set: { value in settings.updateCustomBehavior { $0.returnAction = value } })) {
                         ForEach(BrowserReturnAction.allCases) { Text($0.rawValue).tag($0) }
                     }.disabled(settings.keyboardProfile != .custom)
-                    Toggle("Backspace goes back", isOn: Binding(get: { settings.behavior.backspaceGoesBack }, set: { value in settings.updateCustomBehavior { $0.backspaceGoesBack = value } }))
+                    settingToggle("Backspace goes back", isOn: Binding(get: { settings.behavior.backspaceGoesBack }, set: { value in settings.updateCustomBehavior { $0.backspaceGoesBack = value } }))
                         .disabled(settings.keyboardProfile != .custom)
-                    Toggle("Control shortcut aliases", isOn: Binding(get: { settings.behavior.controlAliasesEnabled }, set: { value in settings.updateCustomBehavior { $0.controlAliasesEnabled = value } }))
+                    settingToggle("Control shortcut aliases", isOn: Binding(get: { settings.behavior.controlAliasesEnabled }, set: { value in settings.updateCustomBehavior { $0.controlAliasesEnabled = value } }))
                         .help("Use Control shortcuts, Control-click to add to a selection and Control-drag to copy in file listings. Text fields keep their usual editing behavior.")
                         .disabled(settings.keyboardProfile != .custom)
-                    Toggle("Explorer function keys and Delete", isOn: Binding(get: { settings.behavior.explorerFunctionKeysEnabled }, set: { value in settings.updateCustomBehavior { $0.explorerFunctionKeysEnabled = value } }))
+                    settingToggle("Explorer function keys and Delete", isOn: Binding(get: { settings.behavior.explorerFunctionKeysEnabled }, set: { value in settings.updateCustomBehavior { $0.explorerFunctionKeysEnabled = value } }))
                         .disabled(settings.keyboardProfile != .custom)
                     if settings.keyboardProfile == .custom {
                         Menu("Reset an Action to Explorer") {
@@ -1250,7 +1392,7 @@ struct BrowserSettingsView: View {
                             Button("Control aliases") { settings.updateCustomBehavior { $0.controlAliasesEnabled = true } }
                             Button("Function keys and Delete") { settings.updateCustomBehavior { $0.explorerFunctionKeysEnabled = true } }
                         }
-                        Button("Reset All Custom Choices to Explorer") { settings.resetCustomBehavior() }
+                        settingButton("Reset All Custom Choices to Explorer") { settings.resetCustomBehavior() }
                     }
                     Text("Effective Return: " + settings.behavior.returnAction.rawValue + ". Backspace: " + (settings.behavior.backspaceGoesBack ? "Back." : "native behavior."))
                         .interfaceFont(.caption).foregroundStyle(.secondary)
@@ -1266,7 +1408,8 @@ struct BrowserSettingsView: View {
                     }
                 }
                 Section("Custom shortcuts") {
-                    BrowserShortcutEditor(settings: settings)
+                    BrowserShortcutEditor(settings: settings, revealed: revealedShortcut)
+                        .settingsSearchAnchor(SettingsSearchCatalog.shortcutEditorKey)
                 }
             }
             .formStyle(.grouped), page: .keyboard)
@@ -1274,12 +1417,12 @@ struct BrowserSettingsView: View {
 
             observedPage(Form {
                 Section("Trash") {
-                    Toggle("Ask before moving items to Trash", isOn: $settings.asksBeforeMovingToTrash)
+                    settingToggle("Ask before moving items to Trash", isOn: $settings.asksBeforeMovingToTrash)
                     Text("When off, selected local items move to Trash immediately. Supported moves can be undone.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Copy and cross-volume Move") {
-                    Toggle("Preview faster Copy", isOn: Binding(get: { settings.groupedCopyPreview }, set: { onCopyPreviewChange($0) }))
+                    settingToggle("Preview faster Copy", isOn: Binding(get: { settings.groupedCopyPreview }, set: { onCopyPreviewChange($0) }))
                         .disabled(!canSelectCopyPreview || !settings.canPersistCopyPreview
                             || operationCoordinator.copyPreviewOwner != nil || operationCoordinator.copyPreviewTask != nil)
                         .accessibilityIdentifier("copy-execution-preview")
@@ -1304,7 +1447,7 @@ struct BrowserSettingsView: View {
                         Text("Preview eligibility: 16–1,024 regular files with unused names on the two qualified local APFS volumes, up to 64 MiB per file and 128 MiB per job. Other jobs use standard Copy.")
                             .interfaceFont(.caption).foregroundStyle(.secondary)
                     }
-                    Picker("Metadata", selection: $settings.transferMetadata) {
+                    settingPicker("Metadata", selection: $settings.transferMetadata) {
                         ForEach(TransferMetadataPreference.allCases) { Text($0.rawValue).tag($0) }
                     }
                     Text("Strict preservation is the default. Native owner/group allows macOS ownership differences; file data, permissions, ACLs and other supported metadata must still match. Both verify recorded native security metadata. Same-volume moves keep the original object.")
@@ -1315,8 +1458,8 @@ struct BrowserSettingsView: View {
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Archives") {
-                    if AppFeatureAvailability.policy.edition == .development || settings.quickCompressionFormat != .zip {
-                        Picker("Quick Compress format", selection: $settings.quickCompressionFormat) {
+                    if showsQuickCompressFormat {
+                        settingPicker("Quick Compress format", selection: $settings.quickCompressionFormat) {
                             ForEach(ArchiveCreationFormat.allCases, id: \.self) { format in
                                 Text(format.displayName).tag(format).disabled(!format.availableForQuickAction)
                             }
@@ -1328,49 +1471,49 @@ struct BrowserSettingsView: View {
                                 .interfaceFont(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    Toggle("Always review archive copies", isOn: $settings.alwaysReviewArchiveCopies)
+                    settingToggle("Always review archive copies", isOn: $settings.alwaysReviewArchiveCopies)
                     Text("Paste or drag one file or folder directly into its destination. Existing names and selections that need a new containing folder still open a review. Extract… always opens a review.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Existing names") {
-                    Picker("Files", selection: $settings.conflictPreferences.files) {
+                    settingPicker("Files", selection: $settings.conflictPreferences.files) {
                         ForEach(TransferConflictDefault.allCases) { Text($0.title).tag($0) }
                     }
-                    Picker("Folders", selection: $settings.conflictPreferences.folders) {
+                    settingPicker("Folders", selection: $settings.conflictPreferences.folders) {
                         ForEach(TransferConflictDefault.allCases) { Text($0.title).tag($0) }
                     }
                     Text("Skip and Keep Both apply automatically to matching ordinary items. Packages, links and type differences still ask. Replace and Merge always need an explicit choice. Each queued job keeps the settings captured when added.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Drives") {
-                    Picker("While eject is waiting", selection: $settings.ejectNewWorkPolicy) {
+                    settingPicker("While eject is waiting", selection: $settings.ejectNewWorkPolicy) {
                         ForEach(EjectNewWorkPolicy.allCases) { Text($0.title).tag($0) }
                     }
                     Text("Applies to each new eject request. Already accepted transfers finish first. New work can never cancel a request already submitted to macOS.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Progress") {
-                    Picker("Progress indicator", selection: $settings.operationIndicatorPosition) {
+                    settingPicker("Progress indicator", selection: $settings.operationIndicatorPosition) {
                         ForEach(OperationIndicatorPosition.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    Toggle("Show phase progress in the Dock", isOn: $settings.showsDockProgress)
+                    settingToggle("Show phase progress in the Dock", isOn: $settings.showsDockProgress)
                     Text("Percentages describe the named phase. Hover for a summary or click the ring to keep details and Stop inside the window. Copy speed measures logical bytes transferred.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 Section("Recovery and retention") {
-                    Toggle("Show in-window recovery attention", isOn: $settings.reviewsRecoveryAtStartup)
+                    settingToggle("Show in-window recovery attention", isOn: $settings.reviewsRecoveryAtStartup)
                     Text("Interrupted work stays available in Operation Recovery. Startup never opens a review dialog or resumes operations automatically.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     Text("Development default: keep all recovery backups. Automatic expiry is off. Interrupted operations never resume automatically.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Button("Review Recovery Backups…", action: onReviewRecovery)
-                    Button("Prepare History for Review…", action: onPrepareHistory)
+                    settingButton("Review Recovery Backups…", action: onReviewRecovery)
+                    settingButton("Prepare History for Review…", action: onPrepareHistory)
                         .disabled(operationCoordinator.copyPreviewOwner != nil)
                     Text(OrdinaryNativeTrashFeature.available
                          ? "Review an operation before moving verified recovery copies to Trash. Cleanup ends Undo and rollback for the entire operation. Changed or unproven staging remains protected."
                          : "Recovery cleanup is paused for this beta to keep macOS file protection intact. Your recovery copies and history remain available for review.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Button("Compact Journal Metadata", action: onCompactJournal)
+                    settingButton("Compact Journal Metadata", action: onCompactJournal)
                     Text("Compaction reduces old progress history without removing recovery backups or their current records.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     if !settings.recoveryMaintenanceStatus.isEmpty {
@@ -1388,13 +1531,16 @@ struct BrowserSettingsView: View {
                 if let folderAccess {
                     Section("Folders and drives") {
                         FolderAccessManagementView(access: folderAccess, drives: accessDrives, changed: onAccessChanged)
+                            .settingsSearchAnchor("Folders and drives")
                     }
                     Section("Additional access") {
                         TraversePermissionChecklist(access: folderAccess, showConnections: onShowConnections, motion: settings.motion)
+                            .settingsSearchAnchor("Additional access")
                     }
                 } else {
                     Section("Folders and drives") {
                         Text("Open Permissions from an Explorer window to choose the folders and drives you want to use.")
+                            .settingsSearchAnchor("Folders and drives")
                     }
                 }
             }.formStyle(.grouped), page: .permissions)

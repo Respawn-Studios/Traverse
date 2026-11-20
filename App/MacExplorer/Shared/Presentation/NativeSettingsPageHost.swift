@@ -8,6 +8,16 @@ import SwiftUI
 /// There are no captured bitmaps, persisted fields or delayed model commands.
 typealias NativeSettingsPageHost = NativeToolPageHost<BrowserSettingsView.Page>
 
+@MainActor
+final class NativeToolPageViewport: NSView {
+    var finishPageTransition: (() -> Void)?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { finishPageTransition?() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+}
+
 struct NativeToolPageHost<ID: Hashable>: NSViewControllerRepresentable {
     let page: ID
     // Capture identity-specific display values when building content. An
@@ -27,13 +37,8 @@ struct NativeToolPageHost<ID: Hashable>: NSViewControllerRepresentable {
     @MainActor final class Controller: NSViewController {
         private final class PageContainer: NSView {
             var acceptsInput = true
-            var onDetach: (() -> Void)?
             override func hitTest(_ point: NSPoint) -> NSView? {
                 acceptsInput ? super.hitTest(point) : nil
-            }
-            override func viewWillMove(toWindow newWindow: NSWindow?) {
-                if newWindow == nil { onDetach?() }
-                super.viewWillMove(toWindow: newWindow)
             }
         }
         private struct Entry {
@@ -50,19 +55,22 @@ struct NativeToolPageHost<ID: Hashable>: NSViewControllerRepresentable {
         private var transition: Transition?
 
         override func loadView() {
-            let root = PageContainer()
-            root.onDetach = { [weak self] in self?.finishTransition() }
+            let root = NativeToolPageViewport()
+            root.finishPageTransition = { [weak self] in self?.finishTransition() }
             root.wantsLayer = true
             // NSView no longer clips by default on macOS14+. A native form
             // must stay within its fixed viewport while its layout settles.
             root.clipsToBounds = true; root.layer?.masksToBounds = true
             root.identifier = .init("tool-page-viewport")
             view = root
+            ToolContentMotion.registerPageViewport(root)
         }
         func show(_ page: ID, content: AnyView, motion: BrowserMotionPreferences) {
             loadViewIfNeeded()
+            let duration = ToolPageMotionPolicy.crossfadeDuration(motion)
             if let transition, transition.incoming.page == page {
                 transition.incoming.host.content = content
+                if duration == 0 { finishTransition() }
                 return
             }
             // An explicit newer click takes precedence. End only this owner's
@@ -72,7 +80,8 @@ struct NativeToolPageHost<ID: Hashable>: NSViewControllerRepresentable {
                 current.host.content = content
                 return
             }
-            if let editor = view.window?.firstResponder as? NSTextView, editor.isFieldEditor {
+            if let editor = view.window?.firstResponder as? NSTextView, editor.isFieldEditor,
+               let container = current?.container, editor.isDescendant(of: container) {
                 _ = view.window?.makeFirstResponder(nil)
             }
             let host = InterfaceHostingController(rootView: content)
@@ -90,9 +99,7 @@ struct NativeToolPageHost<ID: Hashable>: NSViewControllerRepresentable {
             let incoming = Entry(page: page, host: host, container: container)
             view.addSubview(container)
             guard let outgoing = current else { current = incoming; return }
-            let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-                || !motion.allows(.pages) || motion.mode == .off ? 0 : 0.22 * motion.mode.durationScale
-            guard duration > 0 else {
+            guard duration > 0, view.window?.isVisible == true else {
                 remove(outgoing); current = incoming; return
             }
             outgoing.container.acceptsInput = false
@@ -102,7 +109,7 @@ struct NativeToolPageHost<ID: Hashable>: NSViewControllerRepresentable {
             transition = .init(id: id, outgoing: outgoing, incoming: incoming)
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = duration
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.timingFunction = ToolPageMotionPolicy.crossfadeTiming
                 context.allowsImplicitAnimation = true
                 outgoing.container.animator().alphaValue = 0
                 container.animator().alphaValue = 1
@@ -116,9 +123,11 @@ struct NativeToolPageHost<ID: Hashable>: NSViewControllerRepresentable {
         func finishTransition() {
             guard let transition else { return }
             self.transition = nil
-            transition.outgoing.container.layer?.removeAllAnimations()
-            transition.incoming.container.layer?.removeAllAnimations()
-            transition.incoming.container.alphaValue = 1
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                transition.incoming.container.animator().alphaValue = 1
+                transition.outgoing.container.animator().alphaValue = 0
+            }
             transition.incoming.container.acceptsInput = true
             transition.incoming.container.setAccessibilityHidden(false)
             remove(transition.outgoing)

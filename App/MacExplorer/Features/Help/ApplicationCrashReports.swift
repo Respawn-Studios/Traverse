@@ -51,6 +51,8 @@ private final class CrashReportWorker: @unchecked Sendable {
                         message = capture?.hasUnrecoveredPendingDiscardCandidate == true
                             ? "An unreadable crash capture is kept. You can discard that capture after confirmation; earlier reports stay available."
                             : "The pending capture could not be retained or confirmed. Remove an older report if storage is full, then restart Traverse. Existing data is kept."
+                    case .crashCapture where error as? CrashReportFailure == .capacity:
+                        message = "Crash capture is paused because storage has no room for another report. Remove an older report, then restart Traverse."
                     default:
                         message = "Crash capture could not start on this Mac. Retained reports stay available; App Logs has the technical checkpoint."
                     }

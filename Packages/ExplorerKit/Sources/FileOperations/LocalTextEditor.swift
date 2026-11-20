@@ -1,10 +1,43 @@
 import Darwin
 import Foundation
 
+/// An earlier view's local item observation. The text reader still qualifies
+/// the volume, access, file contents and Save token at the time of Open.
+public struct LocalTextOpenSelection: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    public let url: URL
+    let parent: EntrySnapshot
+    let file: EntrySnapshot
+
+    package init(url: URL, parent: EntrySnapshot, file: EntrySnapshot) {
+        self.url = url; self.parent = parent; self.file = file
+    }
+
+    /// Retain the same metadata observed by a native picker, without
+    /// reopening the path or granting Save access.
+    @_spi(ApplicationOwnership)
+    public init?(observedURL: URL, parent: stat, file: stat) {
+        guard parent.st_mode & S_IFMT == S_IFDIR, file.st_mode & S_IFMT == S_IFREG else { return nil }
+        self.init(url: observedURL, parent: EntrySnapshot(parent), file: EntrySnapshot(file))
+    }
+
+    public var description: String { "<selected local text file>" }
+    public var debugDescription: String { description }
+}
+
 public struct LocalTextReadToken: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     internal let engine: UUID, url: URL, parent: EntrySnapshot, witness: RevisionWitness
     public var description: String { "Local text read token (private evidence omitted)" }
     public var debugDescription: String { description }
+
+    /// Verify a saved-text observation for another local reader without
+    /// transferring the editor's Save authority.
+    package func matchesSavedFile(_ bytes: Data, at candidate: URL, parent observedParent: EntrySnapshot,
+                                  entry: EntrySnapshot) -> Bool {
+        url.path.utf8.elementsEqual(candidate.path.utf8) && parent.sameObject(as: observedParent)
+            && witness.device == UInt64(UInt32(bitPattern: entry.device)) && witness.inode == entry.inode
+            && witness.birth.seconds == Int64(entry.birthSeconds) && witness.birth.nanos == entry.birthNanos
+            && witness.bytes == UInt64(bytes.count) && witness.body == .bytes(bytes)
+    }
 }
 public struct LocalTextDocumentRead: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let contents: TextDocumentValue
@@ -137,13 +170,15 @@ internal struct TextEditorHooksV2: Sendable {
 }
 
 extension RecoverableFileOperations {
-    public func readLocalTextDocument(at url: URL) async throws -> LocalTextDocumentRead {
+    public func readLocalTextDocument(at url: URL, matching selection: LocalTextOpenSelection? = nil) async throws -> LocalTextDocumentRead {
         try await worker { cancellation in
             try withoutMaterialization {
+                if let selection, !url.path.utf8.elementsEqual(selection.url.path.utf8) { throw FileOperationFailure.invalidRequest }
                 try self.textRequireSource(url, cancellation: cancellation)
-                let file = try TextPinnedFileV2(url, cancellation: cancellation)
+                let file = try TextPinnedFileV2(url, cancellation: cancellation, matching: selection)
                 let contents = try TextDocumentValue.original(file.bytes)
                 try file.validate(cancellation: cancellation)
+                if let selection { try file.validateOpeningSelection(selection) }
                 return LocalTextDocumentRead(contents: contents, token: self.textToken(file))
             }
         }
@@ -282,6 +317,47 @@ extension RecoverableFileOperations {
         try await worker { cancellation in
             guard let value = try OperationHistoryInspector.textInspectionV2(self.directory, id: recordID, cancellation: cancellation) else { throw FileOperationFailure.notFound }
             return try withoutMaterialization { self.textInspection(value.record, state: try value.record.project().state, journal: nil, resolvedHead: value.head,resolvedUndo:value.undo) }
+        }
+    }
+
+    /// Inspect one exact attempt's checked copies. This is independent of the
+    /// current working file and never creates or advances an Undo record.
+    public func readLocalTextRevisionComparison(recordID: UUID, attemptID: UUID) async throws -> TextComparisonDocuments {
+        let values = try await readLocalTextRevisionVersions(recordID: recordID, attemptID: attemptID, versions: [.before, .submitted])
+        return .init(left: values[0], right: values[1])
+    }
+
+    public func readLocalTextRevisionVersion(recordID: UUID, attemptID: UUID,
+                                             version: LocalTextRecoveryVersion) async throws -> TextDocumentValue {
+        let values = try await readLocalTextRevisionVersions(recordID: recordID, attemptID: attemptID, versions: [version])
+        return values[0]
+    }
+
+    private func readLocalTextRevisionVersions(recordID: UUID, attemptID: UUID,
+                                               versions: [LocalTextRecoveryVersion]) async throws -> [TextDocumentValue] {
+        try await worker { cancellation in
+            try withoutMaterialization {
+                guard let record = try OperationHistoryInspector.textInspectionV2(self.directory, id: recordID,
+                    cancellation: cancellation)?.record else { throw FileOperationFailure.notFound }
+                let projection = try record.project()
+                guard projection.retirement == nil, !projection.retirementConfirmed,
+                      let attempt = projection.attempts.first(where: { $0.preparation.id == attemptID }),
+                      let custody = attempt.custody else { throw FileOperationFailure.recoveryUncertain }
+                let area = try self.textAttemptArea(record, attempt: attempt)
+                let pins = try versions.map { version in
+                    let witness = version == .before ? custody.before.copy : custody.submitted.edited
+                    let copy = try TextPinnedFileV2(area.url.appendingPathComponent(version.rawValue), cancellation: cancellation)
+                    guard copy.parent.identity.sameObject(as: area.identity), record.manifest.matchesPersisted(witness, file: copy) else {
+                        throw FileOperationFailure.recoveryUncertain
+                    }
+                    return copy
+                }
+                let result = try pins.map { try TextDocumentValue.original($0.bytes) }
+                for pin in pins { try pin.validate(cancellation: cancellation) }
+                try area.validate()
+                try cancellation.check()
+                return result
+            }
         }
     }
 

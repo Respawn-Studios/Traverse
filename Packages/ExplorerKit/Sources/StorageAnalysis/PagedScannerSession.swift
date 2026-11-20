@@ -1,4 +1,5 @@
 import Darwin
+import ExplorerCore
 import Foundation
 
 public final class PagedStorageScanSession: Sendable {
@@ -219,15 +220,6 @@ extension StorageScanner {
             var actualIncremental = false
             var refreshCapable = false
             if metadataPolicy != .standard { arguments += ["--metadata-policy", metadataPolicy.rawValue] }
-            // An observed bundle-file identity only. The path-based launcher
-            // cannot attest the exact executable bytes under path replacement.
-            let helperBefore = retainedCapture == nil ? nil : (try? RetainedHelperObservation.read(workerURL, session: id))
-            let pipes = try ScannerWorkerProcess.launch(workerURL: workerURL,
-                descriptors: descriptors + files.descriptors, arguments: arguments, control: control)
-            #if DEBUG
-            notePagedDiagnostic("phase", "pumping")
-            #endif
-            if transitionRead >= 0 { close(transitionRead); transitionRead = -1 }
             let locationSources: AnalysisLocationSourceScope
             if let startup {
                 locationSources = try .init(roots: [
@@ -243,7 +235,16 @@ extension StorageScanner {
             var transitions = 0
             var checkpointTransitionPending = false
             let checkpoint = try AnalysisCheckpointContract(rows: checkpointRows, classification: classificationRevision)
-            var lastPublication = began
+            var progressCadence = ProgressCadence(interval: 0.25, startingAt: began)
+            // An observed bundle-file identity only. The path-based launcher
+            // cannot attest the exact executable bytes under path replacement.
+            let helperBefore = retainedCapture == nil ? nil : (try? RetainedHelperObservation.read(workerURL, session: id))
+            let pipes = try ScannerWorkerProcess.launch(workerURL: workerURL,
+                descriptors: descriptors + files.descriptors, arguments: arguments, control: control)
+            #if DEBUG
+            notePagedDiagnostic("phase", "pumping")
+            #endif
+            if transitionRead >= 0 { close(transitionRead); transitionRead = -1 }
             let status = try ScannerWorkerProcess.drain(pipes: pipes, control: control) { data in
                 guard let frame = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let schema = frame["schema"] as? Int, frame["session"] as? String == id.uuidString,
@@ -311,9 +312,8 @@ extension StorageScanner {
                     checkpointTransitionPending = false
                     let first = committed == 0
                     committed = count
-                    let now = ProcessInfo.processInfo.systemUptime
-                    if first || now - lastPublication >= 0.25 {
-                        update(control.cancelled ? .cancelled : .scanning); lastPublication = now
+                    if progressCadence.shouldPublish(at: ProcessInfo.processInfo.systemUptime, immediately: first) {
+                        update(control.cancelled ? .cancelled : .scanning)
                     }
                 case "issue":
                     guard notices < 100, let code = frame["code"] as? String, code.utf8.count <= 64,

@@ -40,11 +40,12 @@ final class InterfacePresentation: ObservableObject {
         }
         observation = settings.$interfaceSize.removeDuplicates().sink { [weak self] value in
             guard let self, self.size != value else { return }
-            // Crossfade the real layout once per window. Fonts keep their exact
-            // requested size; no bitmap zoom or replacement view steals focus.
+            // Reveal the current layout once per window without retaining an
+            // outgoing layout picture. Fonts keep their exact requested size.
             for window in self.registeredWindows where window.isVisible {
+                ToolContentMotion.finishContentMotion(in: window)
                 if let content = (window.contentViewController as? ToolWindowChrome)?.contentHost ?? window.contentView {
-                    ToolContentMotion.crossfade(content)
+                    ToolContentMotion.reveal(content, movesContent: false)
                 }
             }
             self.size = value
@@ -133,6 +134,10 @@ enum InterfaceMetrics {
     static func points(_ base: CGFloat) -> CGFloat { base * scale }
     static func font(_ base: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
         .systemFont(ofSize: points(base), weight: weight)
+    }
+    /// The inset SwiftUI Table adds native column gaps and trailing padding.
+    static func insetTableColumnBudget(in width: CGFloat, scale: CGFloat) -> CGFloat {
+        max(0, width - (50 * scale + 12))
     }
     static func setFont(_ control: NSControl, base: NSFont) {
         objc_setAssociatedObject(control, &InterfaceAssociation.font, base, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)

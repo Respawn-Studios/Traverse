@@ -15,15 +15,20 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
     @Published private(set) var selectedNodeID: UInt64?
     @Published private(set) var isReading = false
     @Published private(set) var notice = ""
+    @Published private(set) var recentAnalyses: RecentAnalysisInventory = .loading
     @Published var showsVolumeCreation = false
+    @Published var showsVolumeFormat = false
     private let reader: any DriveTopologyReading
     let health: ApplicationDriveDetails
     let benchmark: ApplicationDriveBenchmark
     let volumeCreation = ApplicationAPFSVolumeCreation()
+    let volumeFormat = ApplicationAPFSVolumeFormat()
     private let detailsHandler: @MainActor (ManagedVolume, BrowserSettings) -> Void
     private var controller: NSWindowController?
     private var generation = UUID(), pending = false
     private var work: Task<Void, Never>?
+    private var recentGeneration = UUID(), recentPending = false
+    private var recentWork: Task<Void, Never>?
     private var subscriptions: [AnyCancellable] = []
     private var drives: ApplicationVolumeCoordinator?
     private var protectedLocations: [URL] = []
@@ -35,6 +40,10 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
     private(set) var refreshCount = 0
     private(set) var selectionCount = 0
     var window: NSWindow? { controller?.window }
+    func copyHealthReading() {
+        guard let window, health.window === window else { return }
+        health.copyHealthReading(from: sourceBrowser)
+    }
     var selectedRoot: DriveTopologyNode? { selectedRootID.flatMap { snapshot?.node($0) } }
     var selectedNode: DriveTopologyNode? { selectedNodeID.flatMap { snapshot?.node($0) } }
     var deviceRoots: [DriveTopologyNode] {
@@ -73,6 +82,10 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
             window.makeKeyAndOrderFront(nil); ToolContentMotion.reveal(window.contentView!, effect: .windows)
         } else if let window { ToolWindowCloseMotion.cancel(window); window.makeKeyAndOrderFront(nil) }
         subscriptions.removeAll()
+        subscriptions.append(NotificationCenter.default.publisher(for: .recentAnalysesDidChange)
+            .sink { [weak self] _ in self?.refreshRecentAnalyses() })
+        subscriptions.append(settings.$analysisKeepsResults.dropFirst()
+            .sink { [weak self] keeping in self?.refreshRecentAnalyses(keepingResults: keeping) })
         if let drives {
             // Share the app's broadcast publisher, never consume its single
             // AsyncStream a second time and steal discovery events.
@@ -115,9 +128,11 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
             }
         }
     }
+    func canSelectRoot(_ id: UInt64) -> Bool {
+        snapshot?.roots.contains(where: { $0.id == id }) == true && permitsSelectionChange
+    }
     func selectRoot(_ id: UInt64) {
-        guard snapshot?.roots.contains(where: { $0.id == id }) == true else { return }
-        guard permitsSelectionChange else { return }
+        guard canSelectRoot(id) else { return }
         selectedRootID = id; selectedNodeID = id; selectionCount += 1; prepareSelectedPage()
     }
     func selectVolume(_ volume: ManagedVolume) {
@@ -138,6 +153,7 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
     }
     private var permitsSelectionChange: Bool {
         guard !volumeCreation.isWorking else { notice = "Finish the volume check or creation before switching drives."; return false }
+        guard !volumeFormat.isWorking else { notice = "Finish the volume check or Format request before switching drives."; return false }
         guard let window, benchmark.isEmbedded(in: window),
               benchmark.hasPendingWork else { return true }
         notice = "Stop the current benchmark before switching drives."
@@ -159,9 +175,26 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
     var hasBrowser: Bool { sourceBrowser != nil }
     var operationCoordinator: ApplicationOperationCoordinator? { sourceBrowser?.operationCoordinator }
     func showVolumeCreation() {
-        guard let target = volumeCreationTarget, !benchmark.hasPendingWork, !isReading, !volumeCreation.isWorking else { return }
+        guard let target = volumeCreationTarget, !benchmark.hasPendingWork, !isReading,
+              !volumeCreation.isWorking, !volumeFormat.isWorking else { return }
         volumeCreation.configure(target: target, operations: operationCoordinator, changed: { [weak self] in self?.refresh() })
         showsVolumeCreation = true
+    }
+    var volumeFormatTarget: ManagedVolume? {
+        guard let selected = selectedNode, selected.kind == .volume,
+              selected.fields.fileSystem?.lowercased() == "apfs",
+              selected.volume.deviceKind == .diskImage,
+              selected.volume.isInternal == false, selected.volume.url != nil else { return nil }
+        return selected.volume
+    }
+    func showVolumeFormat() {
+        guard NativeAPFSFormatFeature.ordinaryEnabled, let target = volumeFormatTarget,
+              !benchmark.hasPendingWork, !isReading,
+              !volumeCreation.isWorking, !volumeFormat.isWorking else { return }
+        volumeFormat.configure(target: target, operations: operationCoordinator,
+                               changed: { [weak self] in self?.refresh() })
+        showsVolumeFormat = true
+        if volumeFormat.canReview { volumeFormat.review() }
     }
     /// A container/device selection can choose its sole observed APFS
     /// container. Multiple containers require an explicit volume selection.
@@ -178,6 +211,11 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
     func selectPage(_ selected: DriveWorkspacePage) { page = selected; prepareSelectedPage() }
     func prepareSelectedPage() {
         guard let window else { return }
+        if page == .analysis { refreshRecentAnalyses() }
+        else {
+            recentGeneration = UUID(); recentPending = false
+            recentWork?.cancel()
+        }
         if let selected = selectedMountedVolume ?? selectedNode?.volume {
             if health.target != selected || health.window !== window {
                 health.attach(selected, to: window, settings: settings)
@@ -192,6 +230,36 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
         }
     }
     func inspectQueue() { sourceBrowser?.showTransferQueue(nil) }
+    func refreshRecentAnalyses() {
+        refreshRecentAnalyses(keepingResults: settings?.analysisKeepsResults ?? true)
+    }
+    private func refreshRecentAnalyses(keepingResults: Bool) {
+        guard controller != nil, page == .analysis else { return }
+        recentGeneration = UUID(); recentPending = true; recentAnalyses = .loading
+        // @Published sends before storage changes. Its subscriber supplies the
+        // new value; manual/notification refreshes use the stored preference.
+        startRecentAnalyses(keepingResults: keepingResults)
+    }
+    private func startRecentAnalyses(keepingResults: Bool? = nil) {
+        guard recentWork == nil, recentPending, controller != nil, page == .analysis else { return }
+        recentPending = false
+        let ticket = recentGeneration
+        let keeping = keepingResults ?? settings?.analysisKeepsResults ?? true
+        recentWork = Task { [weak self] in
+            guard let self else { return }
+            defer { recentWork = nil; startRecentAnalyses() }
+            let inventory = await ApplicationStorageAnalysis.shared.recentSavedAnalyses(keepingResults: keeping)
+            guard !Task.isCancelled, controller != nil, page == .analysis,
+                  recentGeneration == ticket else { return }
+            recentAnalyses = inventory
+        }
+    }
+    func openRecentAnalysis(_ id: UUID) {
+        guard page == .analysis, let browser = sourceBrowser,
+              case .ready(let records) = recentAnalyses,
+              let row = records.first(where: { $0.id == id }) else { return }
+        ApplicationStorageAnalysis.shared.showSavedFromDriveWorkspace(from: browser, row: row)
+    }
     func analyzeSelectedVolume() {
         guard let browser = sourceBrowser, let root = selectedMountedVolume?.url else { return }
         ApplicationStorageAnalysis.shared.show(from: browser, root: root)
@@ -235,6 +303,7 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard sender === window else { return true }
+        guard !volumeFormat.isWorking else { return false }
         if benchmark.isEmbedded(in: sender) {
             guard benchmark.windowShouldClose(sender) else { return false }
         }
@@ -245,14 +314,19 @@ enum DriveManagementFeature { static let ordinaryEnabled = true }
         health.detach(from: window)
         showsVolumeCreation = false
         volumeCreation.dismiss()
+        showsVolumeFormat = false
+        volumeFormat.dismiss()
         drainingEmbeddedBenchmark = benchmark.isEmbedded(in: window) && benchmark.hasPendingWork
         benchmark.detach(from: window)
         generation = UUID(); pending = false; subscriptions.removeAll(); drives = nil; protectedLocations = []; sourceBrowser = nil
+        recentGeneration = UUID(); recentPending = false; recentWork?.cancel(); recentAnalyses = .loading
         settings = nil
         snapshot = nil; selectedRootID = nil; selectedNodeID = nil; requestedVolume = nil; work?.cancel(); benchmarkHandler = nil; controller = nil
     }
     func drain() async {
         while let work { await work.value }
+        while let recentWork { await recentWork.value }
+        await volumeFormat.drain()
         if drainingEmbeddedBenchmark { await benchmark.drain(); drainingEmbeddedBenchmark = false }
         await volumeCreation.drain()
     }

@@ -35,6 +35,15 @@ public struct DriveBenchmarkLatency: Sendable {
         public let buckets: [Bucket]
     }
 
+    /// The histogram range containing a nearest-rank observed percentile.
+    /// This is a range label for already measured calls, not another timing.
+    public struct PercentileBand: Sendable {
+        public let percentile: Int
+        public let bucketIndex: Int
+        public let lowerBoundMilliseconds: Double
+        public let upperBoundMilliseconds: Double?
+    }
+
     private static let bucketUpperBoundsMilliseconds: [Double] = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16]
     public let operations: Int
     public let medianMilliseconds: Double
@@ -75,6 +84,54 @@ public struct DriveBenchmarkLatency: Sendable {
                 count: counts[index])
         })
     }
+
+    var validatedDistributionBuckets: [Distribution.Bucket]? {
+        guard let buckets = distribution?.buckets, buckets.count == 9 else { return nil }
+        var total = 0
+        var previousUpper: Double?
+        for (index, bucket) in buckets.enumerated() {
+            guard bucket.count >= 0, bucket.lowerBoundMilliseconds.isFinite,
+                  bucket.lowerBoundMilliseconds >= 0 else { return nil }
+            if index == 0 {
+                guard bucket.lowerBoundMilliseconds == 0 else { return nil }
+            } else {
+                guard bucket.lowerBoundMilliseconds == previousUpper else { return nil }
+            }
+            if let upper = bucket.upperBoundMilliseconds {
+                guard index < buckets.count - 1, upper.isFinite,
+                      upper > bucket.lowerBoundMilliseconds else { return nil }
+            } else {
+                guard index == buckets.count - 1 else { return nil }
+            }
+            let (next, overflow) = total.addingReportingOverflow(bucket.count)
+            guard !overflow else { return nil }
+            total = next
+            previousUpper = bucket.upperBoundMilliseconds
+        }
+        return total == operations ? buckets : nil
+    }
+
+    public var percentileBands: [PercentileBand]? {
+        guard operations > 0, let buckets = validatedDistributionBuckets else { return nil }
+        var bands: [PercentileBand] = []
+        for (percentile, fraction) in [(50, 0.5), (95, 0.95), (99, 0.99)] {
+            let rank = Int(ceil(Double(operations) * fraction))
+            var cumulative = 0
+            var match: PercentileBand?
+            for (index, bucket) in buckets.enumerated() {
+                cumulative += bucket.count
+                if cumulative >= rank {
+                    match = PercentileBand(percentile: percentile, bucketIndex: index,
+                        lowerBoundMilliseconds: bucket.lowerBoundMilliseconds,
+                        upperBoundMilliseconds: bucket.upperBoundMilliseconds)
+                    break
+                }
+            }
+            guard let match else { return nil }
+            bands.append(match)
+        }
+        return bands
+    }
 }
 
 public struct DriveBenchmarkSample: Sendable {
@@ -112,6 +169,12 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
         public let medianMilliseconds, p95Milliseconds, p99Milliseconds: Double
         /// Completed block calls in the fixed, half-open millisecond ranges.
         public let distribution: [Bucket]?
+        /// Text-only projection; the v3 JSON already has every bucket/count.
+        public let percentileBands: [DriveBenchmarkLatency.PercentileBand]?
+
+        private enum CodingKeys: String, CodingKey {
+            case medianMilliseconds, p95Milliseconds, p99Milliseconds, distribution
+        }
     }
     public struct Phase: Sendable, Encodable {
         public let completedBytes: Int64
@@ -193,6 +256,10 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
                         }
                         lines.append("\(title) I/O latency distribution (ms, completed block calls): \(ranges.joined(separator: "; "))")
                     }
+                    if let bands = latency.percentileBands {
+                        let labels = bands.map { "P\($0.percentile) \(Self.bandRange($0))" }
+                        lines.append("\(title) I/O latency histogram bands (ms, nearest-rank completed calls): \(labels.joined(separator: " · "))")
+                    }
                 }
             }
         } else { lines.append("Partial/failed observations do not report aggregate speed or latency results.") }
@@ -216,36 +283,17 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
         let values = [latency.medianMilliseconds, latency.p95Milliseconds, latency.p99Milliseconds]
         let ioLatency = completed && latency.operations > 0 && values.allSatisfy({ $0.isFinite && $0 >= 0 })
             ? Latency(medianMilliseconds: values[0], p95Milliseconds: values[1], p99Milliseconds: values[2],
-                distribution: validatedDistribution(latency)) : nil
+                distribution: validatedDistribution(latency), percentileBands: latency.percentileBands) : nil
         return Phase(completedBytes: bytes, elapsedSeconds: seconds, completedOperations: latency.operations,
             megabytesPerSecond: rate(Double(bytes) / 1_000_000), operationsPerSecond: rate(Double(latency.operations)), ioLatency: ioLatency)
     }
     private static func validatedDistribution(_ latency: DriveBenchmarkLatency) -> [Latency.Bucket]? {
-        guard let buckets = latency.distribution?.buckets, buckets.count == 9 else { return nil }
-        var total = 0
-        var previousUpper: Double?
-        for (index, bucket) in buckets.enumerated() {
-            guard bucket.count >= 0, bucket.lowerBoundMilliseconds.isFinite,
-                  bucket.lowerBoundMilliseconds >= 0 else { return nil }
-            if index == 0 {
-                guard bucket.lowerBoundMilliseconds == 0 else { return nil }
-            } else {
-                guard bucket.lowerBoundMilliseconds == previousUpper else { return nil }
-            }
-            if let upper = bucket.upperBoundMilliseconds {
-                guard index < buckets.count - 1, upper.isFinite,
-                      upper > bucket.lowerBoundMilliseconds else { return nil }
-            } else {
-                guard index == buckets.count - 1 else { return nil }
-            }
-            let (next, overflow) = total.addingReportingOverflow(bucket.count)
-            guard !overflow else { return nil }
-            total = next
-            previousUpper = bucket.upperBoundMilliseconds
-        }
-        guard total == latency.operations else { return nil }
-        return buckets.map { Latency.Bucket(lowerBoundMilliseconds: $0.lowerBoundMilliseconds,
+        latency.validatedDistributionBuckets?.map { Latency.Bucket(lowerBoundMilliseconds: $0.lowerBoundMilliseconds,
             upperBoundMilliseconds: $0.upperBoundMilliseconds, count: $0.count) }
+    }
+    private static func bandRange(_ band: DriveBenchmarkLatency.PercentileBand) -> String {
+        let lower = number(band.lowerBoundMilliseconds)
+        return band.upperBoundMilliseconds.map { "[\(lower),\(number($0)))" } ?? "≥\(lower)"
     }
     private static func number(_ value: Double?) -> String {
         value.map { String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), $0) } ?? "Unavailable"

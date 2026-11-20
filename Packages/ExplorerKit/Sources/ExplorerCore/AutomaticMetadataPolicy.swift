@@ -13,4 +13,10 @@ public enum AutomaticMetadataPolicy {
     public static func excludesComponent(_ component: String) -> Bool {
         credentialComponents.contains(component.lowercased(with: Locale(identifier: "en_US_POSIX")))
     }
+
+    public static func excludesProjectText(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased(with: Locale(identifier: "en_US_POSIX"))
+        return excludes(url) || name == ".env" || name.hasPrefix(".env.") || name == ".gitconfig"
+            || url.pathComponents.contains { $0.caseInsensitiveCompare(".git") == .orderedSame }
+    }
 }

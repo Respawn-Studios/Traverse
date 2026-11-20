@@ -37,6 +37,18 @@ have explicit verification rules. Strict preservation and native owner/group
 copying are separate choices; neither silently changes ACL policy or downgrades
 a failed validation. Same-volume rename retains the original object.
 
+The local Copy owners read the mounted filesystem from an opened destination
+parent. They refuse macOS `msdos`/FAT destinations during preparation and again
+before staged Copy or cross-volume Move work, because that driver's metadata and
+exclusive publication behavior has not passed this contract. An item refused
+before staging receives a specific unsupported-destination result; batch
+outcomes remain per item. Same-volume Move remains a separate rename route.
+The gate passed focused generated-fixture tests and native early-refusal checks.
+Native comparisons also show why ordinary byte-copy success is insufficient:
+permissions and timestamps can change, and a metadata-rich copy can leave
+partial output after an error. FAT Copy remains unsupported until its metadata,
+collision, publication and recovery rules are qualified together.
+
 When App Logs are enabled, copy verification can identify three failure
 boundaries without recording paths, attribute names, values or fingerprints:
 

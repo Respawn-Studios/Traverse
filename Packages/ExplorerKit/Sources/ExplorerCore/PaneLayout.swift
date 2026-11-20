@@ -41,7 +41,9 @@ public struct PaneLayout: Codable, Equatable, Sendable {
     }
 
     public func node(_ id: UUID) -> Node? { nodes.first { $0.id == id } }
-    public var paneIDs: [UUID] {
+    public var paneIDs: [UUID] { paneIDs(in: rootID) }
+
+    public func paneIDs(in branch: UUID) -> [UUID] {
         var result: [UUID] = [], seen = Set<UUID>()
         func visit(_ id: UUID) {
             guard seen.count < 7, seen.insert(id).inserted, let node = node(id) else { return }
@@ -50,8 +52,15 @@ public struct PaneLayout: Codable, Equatable, Sendable {
             case .split(_, _, let first, let second): visit(first); visit(second)
             }
         }
-        visit(rootID)
+        visit(branch)
         return result
+    }
+
+    public func parent(of child: UUID) -> Node? {
+        nodes.first {
+            if case .split(_, _, let first, let second) = $0.content { return first == child || second == child }
+            return false
+        }
     }
 
     public func validate() throws {
@@ -90,10 +99,8 @@ public struct PaneLayout: Codable, Equatable, Sendable {
         try validate()
         guard paneIDs.contains(pane) else { throw Failure.missingPane }
         guard paneIDs.count > 1 else { throw Failure.lastPane }
-        guard let parent = nodes.first(where: {
-            if case .split(_, _, let first, let second) = $0.content { return first == pane || second == pane }
-            return false
-        }), case .split(_, _, let first, let second) = parent.content else { throw Failure.invalidLayout }
+        guard let parent = parent(of: pane),
+              case .split(_, _, let first, let second) = parent.content else { throw Failure.invalidLayout }
         let sibling = first == pane ? second : first
         replaceReference(parent.id, with: sibling)
         nodes.removeAll { $0.id == pane || $0.id == parent.id }
@@ -113,6 +120,21 @@ public struct PaneLayout: Codable, Equatable, Sendable {
         guard let index = nodes.firstIndex(where: { $0.id == split }),
               case .split(let axis, _, let first, let second) = nodes[index].content else { throw Failure.missingPane }
         nodes[index].content = .split(axis: axis, fraction: value, first: first, second: second)
+    }
+
+    /// Swap the sides of one divider. Sizing belongs to the divider, while
+    /// identities and nested arrangements travel with their respective side.
+    public mutating func swapSides(of split: UUID) throws {
+        guard let index = nodes.firstIndex(where: { $0.id == split }),
+              case .split(let axis, let fraction, let first, let second) = nodes[index].content else { throw Failure.missingPane }
+        nodes[index].content = .split(axis: axis, fraction: fraction, first: second, second: first)
+    }
+
+    public mutating func rotateSplit(_ split: UUID) throws {
+        guard let index = nodes.firstIndex(where: { $0.id == split }),
+              case .split(let axis, let fraction, let first, let second) = nodes[index].content else { throw Failure.missingPane }
+        nodes[index].content = .split(axis: axis == .columns ? .rows : .columns,
+                                      fraction: fraction, first: first, second: second)
     }
 
     private mutating func replaceReference(_ old: UUID, with replacement: UUID) {

@@ -18,11 +18,11 @@ private final class SegmentStop: @unchecked Sendable {
     @Test func b074cStopRetiresOnlyVerifiedUntouchedIntentAndContinues() async throws {
         let f = try MoveFixture(), first = try f.file("First.txt"), second = try f.file("Second.txt")
         let initial = try await PersistentNameStore.createRemembering(directory: f.catalog,
-            first: AuthoredNames(nickname: "First"), source: first, allowDocumentFollowing: true)
+            first: AuthoredNames(nickname: "First"), source: first, allowDocumentFollowing: true, locationPolicy: .localPermissions)
         let firstID = try await initial.firstItemID(); await initial.close()
         let store = try await PersistentNameStore.open(directory: f.catalog, action: .upgradeMoveContinuity)
         let secondID = try await store.apply(store.prepareRemembering(AuthoredNames(nickname: "Second"),
-            source: second, allowDocumentFollowing: true))
+            source: second, allowDocumentFollowing: true, locationPolicy: .localPermissions))
         let stop = SegmentStop()
         let engine = RecoverableFileOperations(journalDirectory: f.history, hooks: RecoveryHooks(afterRename: { stop.holdOnce() }))
         let plan = try await engine.prepareTransfer(sources: [first, second], destinationDirectory: f.destination, move: true)
@@ -52,7 +52,7 @@ private final class SegmentStop: @unchecked Sendable {
         let existing = f.destination.appendingPathComponent(source.lastPathComponent)
         try Data("Existing destination".utf8).write(to: existing, options: .withoutOverwriting)
         let first = try await PersistentNameStore.createRemembering(directory: f.catalog,
-            first: AuthoredNames(nickname: "Orion"), source: source, allowDocumentFollowing: true)
+            first: AuthoredNames(nickname: "Orion"), source: source, allowDocumentFollowing: true, locationPolicy: .localPermissions)
         let id = try await first.firstItemID(); await first.close()
         let store = try await PersistentNameStore.open(directory: f.catalog, action: .upgradeMoveContinuity)
         let engine = RecoverableFileOperations(journalDirectory: f.history)

@@ -4,6 +4,10 @@ import ExplorerCore
 import LocalStorage
 @_spi(ApplicationOwnership) import StorageAnalysis
 
+extension Notification.Name {
+    static let recentAnalysesDidChange = Notification.Name("TraverseRecentAnalysesDidChange")
+}
+
 extension AnalysisMetadataPolicy {
     static let applicationDataHelp = "Uses local names and sizes in application Containers and Group Containers, never file contents. macOS may deny access. Credentials, cloud-only locations and excluded private apps stay excluded. Defaults and remembered locations are managed in Settings."
 }
@@ -95,6 +99,13 @@ final class ApplicationStorageAnalysis {
     func enableRecordedAnalysesForQualification() { recordedAnalysesForQualification = true }
     var recordedMetadataForVerification: RecordedAnalysisMetadata? { recordedAnalyses.current?.metadata }
     var recordedOpenIssueForVerification: RecordedAnalysisIssue? { recordedAnalyses.lastOpenIssue }
+    func recentOwnerStateForVerification() async -> String {
+        await recordedAnalyses.recentOwnerStateForVerification()
+    }
+    func beginSavedForVerification(_ row: RecentAnalysis) -> Bool {
+        beginExplicit(root: row.root, appState: false, metadataPolicy: row.policy,
+            access: { FileAccessLifetimes(leases: []) }, cacheOnly: true, expectedCatalogID: row.id)
+    }
     var beforeFinalDrainForVerification: (@MainActor () async -> Void)?
     var repairPendingForVerification: Bool { repairSavedOnDrain }
     func enablePagedForQualification(storage: AnalysisResultStorage, workerURL: URL? = nil,
@@ -143,12 +154,15 @@ final class ApplicationStorageAnalysis {
         let access: @MainActor () async -> any Sendable
         let allowReuse: Bool
         let cacheOnly: Bool
+        let expectedCatalogID: UUID?
         let updatingChanges: Bool
         init(token: UUID, root: URL, entry: FileEntry?, metadataPolicy: AnalysisMetadataPolicy,
-             allowReuse: Bool = true, cacheOnly: Bool = false, updatingChanges: Bool = false,
+             allowReuse: Bool = true, cacheOnly: Bool = false, expectedCatalogID: UUID? = nil,
+             updatingChanges: Bool = false,
              access: @escaping @MainActor () async -> any Sendable) {
             self.token = token; self.root = root; self.entry = entry; self.metadataPolicy = metadataPolicy
-            self.access = access; self.allowReuse = allowReuse; self.cacheOnly = cacheOnly; self.updatingChanges = updatingChanges
+            self.access = access; self.allowReuse = allowReuse; self.cacheOnly = cacheOnly
+            self.expectedCatalogID = expectedCatalogID; self.updatingChanges = updatingChanges
         }
     }
     private struct ExplicitScanAccess: Sendable {
@@ -294,6 +308,32 @@ final class ApplicationStorageAnalysis {
         chooseFolder()
     }
 
+    /// The Drives page reads only the existing saved index. It does not
+    /// acquire a folder grant or prepare the scanner's result pool.
+    func recentSavedAnalyses(keepingResults: Bool) async -> RecentAnalysisInventory {
+        guard keepingResults else { return .disabled }
+        guard !isShuttingDown else { return .busy }
+        do { try configureRecordedAnalyses() }
+        catch { return .unavailable }
+        return await recordedAnalyses.inspectRecent()
+    }
+
+    /// A dated row selects one catalog generation, not a scan request. The
+    /// normal preparation pump obtains fresh selected access before reopening.
+    func showSavedFromDriveWorkspace(from browser: BrowserViewController, row: RecentAnalysis) {
+        guard acceptsAnalysisDemand else { return }
+        configurePicker(from: browser)
+        let window = ensureWindow(appearance: browser.view.window?.effectiveAppearance)
+        window.showWindow(nil)
+        guard beginExplicit(root: row.root, appState: false, metadataPolicy: row.policy,
+            access: { [weak browser] in
+                await browser?.accessLifetime(for: [row.root]) ?? FileAccessLifetimes(leases: [])
+            }, cacheOnly: true, expectedCatalogID: row.id) else {
+            window.showUnavailable("This saved analysis cannot be opened in the current state. Review its scope or finish the active analysis action.")
+            return
+        }
+    }
+
     func showAppStorage(settings: BrowserSettings) {
         guard acceptsAnalysisDemand else { return }
         configureScopePreferences(settings)
@@ -342,12 +382,20 @@ final class ApplicationStorageAnalysis {
             guard let self else { return }
             self.cancelChooser()
             if self.explicitOwner == nil {
+                let hadRecorded = self.recordedAnalyses.currentCatalogID != nil
                 self.recordedAnalyses.revokeCurrent(); self.recordedObservation = nil
                 self.displayedObservation = nil; self.refreshPreviousObservation = nil
                 self.currentAccess = nil
                 if self.explicitDemand { self.invalidateDemand() }
                 else { self.cancelPagedPresentation(); self.retirePagedResult() }
                 self.lastUpdate = nil
+                if hadRecorded {
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.recordedAnalyses.drainReleasedCatalogs()
+                        NotificationCenter.default.post(name: .recentAnalysesDidChange, object: nil)
+                    }
+                }
             }
         }
         toolWindow = window
@@ -495,12 +543,15 @@ final class ApplicationStorageAnalysis {
     @discardableResult
     private func beginExplicit(root: URL, appState: Bool, metadataPolicy: AnalysisMetadataPolicy = .standard,
                                access: @escaping @MainActor () async -> any Sendable,
-                               owner: UUID? = nil, forceRefresh: Bool = false, cacheOnly: Bool = false, updatingChanges: Bool = false,
+                               owner: UUID? = nil, forceRefresh: Bool = false, cacheOnly: Bool = false,
+                               expectedCatalogID: UUID? = nil, updatingChanges: Bool = false,
                                drainQueries: (@MainActor () async -> Void)? = nil,
                                onChange: ((FolderSummaryValue, AnalysisAttributionReport?) -> Void)? = nil) -> Bool {
         // The existing preparation pump retains the latest explicit request
         // while previous Properties readers close. Admitting it now exposes
         // Preparing/Stop instead of dropping an enabled Analyze gesture.
+        // A catalog selection is never authority to fall through to a scan.
+        guard expectedCatalogID == nil || cacheOnly else { return false }
         guard acceptsAnalysisDemand else { return false }
         guard selectedOperationOwner == nil else {
             onChange?(.waiting("Finish the selected-item review before starting another analysis."), nil)
@@ -566,7 +617,8 @@ final class ApplicationStorageAnalysis {
         }
         configureNextScope(policy, available: applicationDataControlsQualified && !appState)
         enqueue(.init(token: token, root: root, entry: nil, metadataPolicy: policy,
-            allowReuse: !forceRefresh, cacheOnly: cacheOnly, updatingChanges: updatingChanges, access: access))
+            allowReuse: !forceRefresh && expectedCatalogID == nil, cacheOnly: cacheOnly,
+            expectedCatalogID: expectedCatalogID, updatingChanges: updatingChanges, access: access))
         return true
     }
 
@@ -1023,12 +1075,14 @@ final class ApplicationStorageAnalysis {
         savedAnalysesMaintenanceMessage = recordedAnalyses.forgetCompleted
             ? "Saved analyses were removed. Your files are untouched."
             : "Saved analyses are unavailable or still need attention. Your files are untouched."
+        NotificationCenter.default.post(name: .recentAnalysesDidChange, object: nil)
         if !isShuttingDown { toolWindow?.showUnavailable(savedAnalysesMaintenanceMessage) }
     }
 
     func repairRecordedAnalyses() async {
         try? configureRecordedAnalyses()
         await stopAndDrain(repairingSaved: true)
+        NotificationCenter.default.post(name: .recentAnalysesDidChange, object: nil)
         if !isShuttingDown { toolWindow?.showUnavailable(savedAnalysesMaintenanceMessage) }
     }
 
@@ -1127,7 +1181,8 @@ final class ApplicationStorageAnalysis {
                 #else
                 let needsSelection = FolderAccessController.requiresAnalysisSelection
                 #endif
-                if request.cacheOnly && needsSelection && !scanAccess.hasSelectedAccess(to: request.root) {
+                if request.cacheOnly && request.expectedCatalogID == nil && needsSelection
+                    && !scanAccess.hasSelectedAccess(to: request.root) {
                     await self.sessionReuse.remove(root: request.root)
                     self.reportReuseMiss(); continue
                 }
@@ -1135,7 +1190,9 @@ final class ApplicationStorageAnalysis {
                     && !scanAccess.hasSelectedAccess(to: request.root) {
                     let host = NSApplication.shared.keyWindow ?? self.toolWindow?.window ?? self.pickerBrowser?.view.window
                     guard let host else {
-                        self.reportAccessPreparationFailure("Choose Folder in Storage Analysis to grant access before scanning.")
+                        self.reportAccessPreparationFailure(request.expectedCatalogID == nil
+                            ? "Choose Folder in Storage Analysis to grant access before scanning."
+                            : "Choose the saved folder to grant access before reviewing its analysis.")
                         continue
                     }
                     let chosen: FolderAccessChoice?
@@ -1147,9 +1204,17 @@ final class ApplicationStorageAnalysis {
                     #endif
                     guard self.acceptsAnalysisDemand, self.generation == request.token, !self.stopping else { continue }
                     guard chosen != nil, scanAccess.hasSelectedAccess(to: request.root) else {
-                        self.reportAccessPreparationFailure(chosen == nil
-                            ? "Analysis did not start: folder access was cancelled. Analyze Again to choose the location."
-                            : "Analysis did not start: select the requested folder or drive, or one of its parents.", cancelled: chosen == nil)
+                        let message: String
+                        if request.expectedCatalogID != nil {
+                            message = chosen == nil
+                                ? "Saved analysis was not opened: folder access was cancelled."
+                                : "Saved analysis was not opened: select its recorded folder or a permitted parent."
+                        } else {
+                            message = chosen == nil
+                                ? "Analysis did not start: folder access was cancelled. Analyze Again to choose the location."
+                                : "Analysis did not start: select the requested folder or drive, or one of its parents."
+                        }
+                        self.reportAccessPreparationFailure(message, cancelled: chosen == nil)
                         continue
                     }
                 }
@@ -1187,11 +1252,13 @@ final class ApplicationStorageAnalysis {
                             await self.sessionReuse.remove(root: request.root)
                         }
                     }
-                    if request.allowReuse, self.keepsRecordedAnalyses,
-                       request.root.path != "/", request.root.path != "/System/Volumes/Data" {
+                    if (request.allowReuse || request.expectedCatalogID != nil), self.keepsRecordedAnalyses,
+                       request.expectedCatalogID != nil || (request.root.path != "/"
+                           && request.root.path != "/System/Volumes/Data") {
                         try? self.configureRecordedAnalyses()
                         if let saved = await self.recordedAnalyses.open(root: request.root,
-                            policy: request.metadataPolicy, using: scanAccess) {
+                            policy: request.metadataPolicy, expectedCatalogID: request.expectedCatalogID,
+                            using: scanAccess) {
                             guard self.acceptsAnalysisDemand, self.generation == request.token,
                                   !self.stopping, !Task.isCancelled, self.keepsRecordedAnalyses else {
                                 await self.recordedAnalyses.discard(saved); continue
@@ -1199,7 +1266,9 @@ final class ApplicationStorageAnalysis {
                             let callbacks = self.recordedConsumerCallbacks(token: request.token,
                                 catalogID: saved.presentation.metadata.catalogID)
                             guard self.recordedAnalyses.install(saved, revoke: callbacks.revoke, join: callbacks.join) else {
-                                await self.recordedAnalyses.discard(saved); continue
+                                await self.recordedAnalyses.discard(saved)
+                                if request.expectedCatalogID != nil { self.reportSavedOpenMiss(.busy) }
+                                continue
                             }
                             self.recordedObservation = saved
                             self.lastPagedUpdate = nil; self.lastPagedSummary = saved.summary
@@ -1210,7 +1279,13 @@ final class ApplicationStorageAnalysis {
                             continue
                         }
                     }
-                    if request.cacheOnly { self.reportReuseMiss(); continue }
+                    if request.cacheOnly {
+                        if request.expectedCatalogID != nil {
+                            self.reportSavedOpenMiss(self.keepsRecordedAnalyses
+                                ? self.recordedAnalyses.lastOpenIssue : .unavailable)
+                        } else { self.reportReuseMiss() }
+                        continue
+                    }
                     self.scanReuseEpoch = self.sessionReuse.epoch
                 }
                 if request.entry == nil {
@@ -1312,6 +1387,22 @@ final class ApplicationStorageAnalysis {
     private func reportReuseMiss() {
         explicitDemand = false
         propertyCallback?(.waiting("No saved analysis is available for this location. Choose Analyze to scan it."), nil)
+    }
+    private func reportSavedOpenMiss(_ issue: RecordedAnalysisIssue?) {
+        let message: String = switch issue {
+        case .accessDenied: "Access to this saved analysis was denied. Choose its folder again to review it."
+        case .busy: "Saved analyses are busy. Try again shortly."
+        case .indexRequiresAttention, .retentionPending, .consumerDrainPending:
+            "Saved analyses are in use or need attention. Try again after closing Storage Analysis; check Settings if this persists."
+        case .cancelled: "Opening this saved analysis was cancelled."
+        case .changed:
+            "This saved analysis changed or was removed. Refresh Recent Analyses to see what is available."
+        case .unavailable, .scan, nil:
+            "This saved analysis is unavailable. Refresh Recent Analyses or review saved analyses in Settings."
+        }
+        toolWindow?.showUnavailable(message)
+        propertyCallback?(.waiting(message), nil)
+        explicitDemand = false
     }
     private func reportAccessPreparationFailure(_ message: String, cancelled: Bool = false) {
         if let previous = refreshPreviousObservation {
@@ -1569,6 +1660,7 @@ final class ApplicationStorageAnalysis {
                                 using: self.pickerAccess ?? self.chooser, replacingCurrent: updatingChanges,
                                 revoke: callbacks.revoke, join: callbacks.join)
                             pendingAdmission = nil
+                            NotificationCenter.default.post(name: .recentAnalysesDidChange, object: nil)
                             guard self.acceptsAnalysisDemand, self.generation == token, !Task.isCancelled else {
                                 if adoption.managed, let id = update.result?.id { recording.release(result: id) }
                                 continue

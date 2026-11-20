@@ -72,8 +72,9 @@ extension UIVerification {
             "This Mac failed to offer an idle indexed-search field instead of an unavailable folder filter")
         browser.navigate(to: .directory(owned)); try await settled(browser)
         browser.showMetadataSearch(nil)
-        try require(!controller.isPresented && !browser.metadataSearch.isShowingResults,
-            "Revealing explicit search automatically searched or left a competing filter popup")
+        try require(controller.displaysSearch && controller.displayedField === browser.metadataSearch.queryField
+            && field.currentEditor() == nil && !browser.metadataSearch.isShowingResults && !browser.metadataSearch.hasActiveSession,
+            "Opening the search editor started a search or left the old filter editing")
         browser.metadataSearch.queryField.stringValue = "Match"
         browser.metadataSearch.scopePopup.selectItem(at: 0)
         browser.metadataSearch.submit() // explicit, bounded generated-root search
@@ -132,8 +133,16 @@ extension UIVerification {
         let controller = browser.folderFilter
         let field = browser.filterField
         let originalProfile = browser.settings.keyboardProfile
-        defer { browser.settings.keyboardProfile = originalProfile }
+        let originalDestination = browser.settings.newTabDestination
+        let originalScope = browser.settings.defaultSearchScope
+        defer {
+            browser.settings.keyboardProfile = originalProfile
+            browser.settings.newTabDestination = originalDestination
+            browser.settings.defaultSearchScope = originalScope
+        }
         browser.settings.keyboardProfile = .explorer
+        browser.settings.newTabDestination = .currentFolder
+        browser.settings.defaultSearchScope = .filter
         controller.button.performClick(nil)
         try await waitUntil("Native compact filter popup") { controller.isPresented && field.currentEditor() is NSTextView }
         guard let editor = field.currentEditor() as? NSTextView else { throw Failure(message: "Native filter editor missing") }
@@ -207,7 +216,8 @@ extension UIVerification {
         let previous = browser.activeID
         browser.newTab(nil); try await settled(browser)
         try await waitUntil("Old tab's native filter dismissal") { !controller.isPresented }
-        try require(!controller.isPresented && !controller.hasPopoverCommandsForVerification
+        try require(browser.location == .directory(folder)
+            && !controller.isPresented && !controller.hasPopoverCommandsForVerification
             && browser.activeID != previous && browser.tabs[browser.activeIndex].filter.isEmpty
             && browser.tabs.first(where: { $0.id == previous })?.filter == "Match",
             "Filter tab transition: presented=\(controller.isPresented), commands=\(controller.hasPopoverCommandsForVerification), changed=\(browser.activeID != previous), newFilterEmpty=\(browser.tabs[browser.activeIndex].filter.isEmpty), oldFilterMatch=\(browser.tabs.first(where: { $0.id == previous })?.filter == "Match")")

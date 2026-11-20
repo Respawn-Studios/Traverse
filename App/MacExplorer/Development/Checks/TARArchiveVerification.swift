@@ -94,6 +94,44 @@ import LocalStorage
             InterfacePresentation.shared.bind(settings)
             let controller=BrowserWindowController(settings:settings);owner=controller
             let browser=controller.browser;browser.readVolumesForVerification={[]};browser.permitsBackgroundVerification=true
+            func compareText(_ table: FileTableView, paths: [String], embedded: Bool, screenshot: String) async throws {
+                guard let parent = table.window, paths.count == 2 else { throw Failure.check(#line) }
+                show(parent)
+                try require(parent.makeFirstResponder(table))
+                table.selectRowIndexes([0, 1], byExtendingSelection: false)
+                let menu = embedded ? BrowserMenus.menu(.file, target: browser) : table.contextMenuProvider?()
+                let command = menu.flatMap { menu in
+                    embedded ? BrowserMenus.commandItem(#selector(BrowserViewController.compareTextFiles(_:)), in: menu)
+                        : menu.items.first(where: { $0.title == "Compare Text Files…" })
+                }
+                guard let item = command, let action = item.action,
+                      (item.target as? NSMenuItemValidation)?.validateMenuItem(item) == true else { throw Failure.check(#line) }
+                try require(NSApp.sendAction(action, to: item.target, from: item))
+                try await wait { controller.workspace.textComparisonWindow?.planForVerification != nil }
+                guard let comparison = controller.workspace.textComparisonWindow, let window = comparison.window else { throw Failure.check(#line) }
+                let expected = paths.map { $0 == "Note.txt" ? "note" : "abc" }
+                try require(Set(paths) == ["Note.txt", "Folder/Member.txt"]
+                    && comparison.beforeSurface.textView.string == expected[0]
+                    && comparison.currentSurface.textView.string == expected[1]
+                    && comparison.labels.left == paths[0] && comparison.labels.right == paths[1]
+                    && comparison.planForVerification?.changedLineCounts?.added == 1
+                    && comparison.planForVerification?.changedLineCounts?.removed == 1
+                    && !comparison.beforeSurface.textView.isEditable && !comparison.currentSurface.textView.isEditable)
+                try await capture(window, screenshot)
+                await comparison.closeAndDrain()
+                parent.makeKeyAndOrderFront(nil)
+            }
+            func compareTAR(_ model: TARBrowserModel, rows: TARMetadataRows, embedded: Bool, screenshot: String) async throws {
+                model.scope = .archive
+                model.query = ".txt"
+                try await wait { !model.busy && rows.rowIDsForVerification == model.items.map(\.id)
+                    && Set(model.items.map(\.path)) == ["Note.txt", "Folder/Member.txt"] }
+                try await compareText(rows.table, paths: model.items.map(\.path), embedded: embedded, screenshot: screenshot)
+                model.query = ""
+                model.scope = .folder
+                try await wait { !model.busy && rows.rowIDsForVerification == model.items.map(\.id)
+                    && model.items.map(\.name) == ["Folder", "Note.txt"] }
+            }
             let board = NSPasteboard.withUniqueName()
             defer { board.releaseGlobally() }
             browser.clipboardWriter = { text, urls in BrowserClipboard.publish(text, urls: urls, to: board) }
@@ -140,6 +178,18 @@ import LocalStorage
                 guard let archive = browser.currentArchive, let table = archive.table,
                       let model = archive.zipModelForVerification,
                       let index = model.visibleItems.firstIndex(where: { $0.name == "Note.txt" }) else { throw Failure.check(#line) }
+                try await verifyEmbeddedShortcuts(browser: browser, table: table)
+                if !offscreen {
+                    try await verifyArchiveNameSelection(table, browser: browser, names: model.visibleItems.map(\.name),
+                        extraName: "Poster.png", embedded: true)
+                    archive.setScope(.archive)
+                    archive.setQuery(".txt")
+                    try await wait { !model.isQueryPending && table.numberOfRows == 2 && model.visibleItems.count == 2 }
+                    try await compareText(table, paths: model.visibleItems.map(\.path), embedded: true, screenshot: "zip-archive-text-diff")
+                    archive.setQuery("")
+                    archive.setScope(.folder)
+                    try await wait { !model.isQueryPending && table.numberOfRows == model.visibleItems.count && model.visibleItems.count > 2 }
+                }
                 try require(!browser.commandEnabled(#selector(BrowserViewController.showProperties(_:))))
                 table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
                 try await inspect(table, archive: "Review.zip", path: "Note.txt", bytes: 4,
@@ -155,6 +205,35 @@ import LocalStorage
                 table.deselectAll(nil)
                 try require(!browser.commandEnabled(#selector(BrowserViewController.showProperties(_:))))
                 try await verifyTypedAddress(browser: browser, capture: { try await capture(main, $0) })
+                if !offscreen {
+                ApplicationZIPBrowser.shared.show(zip, from: browser)
+                guard let separateZIP = ApplicationZIPBrowser.shared.controller,
+                      let zipWindow = separateZIP.window else { throw Failure.check(#line) }
+                show(zipWindow)
+                try await wait { separateZIP.model.viewIsCurrent && !separateZIP.model.isPreparingSelection
+                    && separateZIP.model.rowsForVerification?.table.numberOfRows == separateZIP.model.visibleItems.count }
+                guard let zipRows = separateZIP.model.rowsForVerification,
+                      let note = separateZIP.model.visibleItems.firstIndex(where: { $0.name == "Note.txt" }) else { throw Failure.check(#line) }
+                try await verifyArchiveNameSelection(zipRows.table, browser: browser, names: separateZIP.model.visibleItems.map(\.name),
+                    extraName: "Poster.png", embedded: false)
+                separateZIP.model.nameScope = .archive
+                separateZIP.model.filter = ".txt"
+                try await wait { !separateZIP.model.isQueryPending && zipRows.table.numberOfRows == 2 && separateZIP.model.visibleItems.count == 2 }
+                try await compareText(zipRows.table, paths: separateZIP.model.visibleItems.map(\.path),
+                    embedded: false, screenshot: "zip-window-text-diff")
+                separateZIP.model.filter = ""
+                separateZIP.model.nameScope = .folder
+                try await wait { !separateZIP.model.isQueryPending && zipRows.table.numberOfRows == separateZIP.model.visibleItems.count
+                    && separateZIP.model.visibleItems.count > 2 }
+                zipRows.table.selectRowIndexes([note], byExtendingSelection: false)
+                try await verifyStandaloneClipboard(owner: controller, browser: browser,
+                    source: zip, archiveWindow: zipWindow, clipboard: separateZIP.clipboard, table: zipRows.table,
+                    ready: { separateZIP.model.viewIsCurrent && !separateZIP.model.isPreparingSelection },
+                    cutAllowed: separateZIP.model.canMoveMembers(separateZIP.model.selection), board: board,
+                    destination: location.appendingPathComponent("source/Separate ZIP Paste Destination", isDirectory: true))
+                await ApplicationZIPBrowser.shared.stopAndDrain()
+                browser.clipboardState.synchronize(); try require(browser.clipboardState.scopedItem == nil)
+                }
                 browser.navigate(to: .directory(source.deletingLastPathComponent()))
                 try await wait { !browser.isLoading && browser.orderingTask == nil && browser.rowsByURL[source] != nil }
                 show(main)
@@ -201,9 +280,16 @@ import LocalStorage
             guard let content=window.contentView,let rows=descendants(content).compactMap({$0 as? TARMetadataRows}).first else{throw Failure.check(#line)}
             // The model publishes before its coalesced AppKit table render.
             try await wait { rows.table.numberOfRows == 2 && rows.rowIDsForVerification == model.items.map(\.id) }
+            if compressed || inline { try await verifyEmbeddedShortcuts(browser: browser, table: rows.table) }
             if !offscreen {
+                try await verifyArchiveNameSelection(rows.table, browser: browser, names: model.items.map(\.name),
+                    extraName: "Folder", embedded: compressed || inline)
                 try BrowserShortcutVerification.verifyArchiveContextMenu(rows.table, browser: browser, settings: model.settings, label: "TAR member table")
+                try await compareTAR(model, rows: rows, embedded: compressed || inline,
+                    screenshot: compressed ? "tar-gzip-text-diff" : "tar-archive-text-diff")
                 checks.append("TAR keyboard and native ShowMenu actions preserve multiple selection and respect preset/custom/cleared bindings")
+                checks.append("Select by Name uses the shared native sheet for the displayed archive page, with normal typing, Return, Replace and Add.")
+                checks.append("Two archive search results open the exact member versions in the native text comparison. Browsing, normal extraction and Undo still use their ordinary owners.")
                 if inline && !compressed {
                     ApplicationTARBrowser.shared.show(source, from: browser)
                     guard let separate = ApplicationTARBrowser.shared.controller,
@@ -218,12 +304,39 @@ import LocalStorage
                     guard let content = separateWindow.contentView,
                           let separateRows = descendants(content).compactMap({ $0 as? TARMetadataRows }).first else { throw Failure.check(#line) }
                     try await wait { separateWindow.isKeyWindow }
+                    try await verifyArchiveNameSelection(separateRows.table, browser: browser, names: separate.model.items.map(\.name),
+                        extraName: "Folder", embedded: false)
                     try BrowserShortcutVerification.verifyArchiveContextMenu(separateRows.table, browser: browser,
                         settings: separate.model.settings, label: "Separate TAR window")
+                    try await compareTAR(separate.model, rows: separateRows, embedded: false, screenshot: "tar-window-text-diff")
+                    guard let query = descendants(content).compactMap({ $0 as? NSTextField })
+                        .first(where: { $0.identifier?.rawValue == "tar-name-query" }),
+                          separateWindow.makeFirstResponder(query), let nativeEditor = query.currentEditor() as? NSTextView else {
+                        throw Failure.check(#line)
+                    }
+                    try require(abs((query.font?.pointSize ?? 0) - (large ? 19.5 : 13)) < 0.01)
+                    nativeEditor.selectAll(nil); nativeEditor.insertText("Note", replacementRange: nativeEditor.selectedRange())
+                    nativeEditor.keyDown(with: UIVerification.key("\r", code: 36, flags: [], window: separateWindow))
+                    try await wait { separate.model.current && !separate.model.busy && separate.model.query == "Note"
+                        && separate.model.items.map(\.name) == ["Note.txt"] }
+                    nativeEditor.keyDown(with: UIVerification.key("\u{1b}", code: 53, flags: [], window: separateWindow))
+                    try await wait { separate.model.current && !separate.model.busy && separate.model.query.isEmpty
+                        && separateRows.table.numberOfRows == 2 }
+                    try require(separateWindow.makeFirstResponder(separateRows.table))
+                    try await capture(separateWindow, "separate-tar-keyboard")
+                    guard let note = separate.model.items.firstIndex(where: { $0.name == "Note.txt" }) else { throw Failure.check(#line) }
+                    separateRows.table.selectRowIndexes([note], byExtendingSelection: false)
+                    try await verifyStandaloneClipboard(owner: controller, browser: browser,
+                        source: source, archiveWindow: separateWindow, clipboard: separate.clipboard, table: separateRows.table,
+                        ready: { separate.model.current && !separate.model.busy && !separate.model.isPreparingPreview },
+                        cutAllowed: separate.model.canGroupMembers, board: board,
+                        destination: location.appendingPathComponent("source/Separate Paste Destination", isDirectory: true))
                     await ApplicationTARBrowser.shared.closeAndDrain()
+                    browser.clipboardState.synchronize()
+                    try require(browser.clipboardState.scopedItem == nil)
                     show(window)
                     try await wait { window.isKeyWindow }
-                    checks.append("Separate TAR uses the same focus/menu bridge as ZIP; closing it drains its reader while the embedded archive stays current")
+                    checks.append("Separate ZIP/TAR Copy delivers exact bytes into a local pane with Undo; remapped New Folder, Create File, Duplicate and Remove open their actual reviews and Cancel unchanged. Local Add rejects a changed clipboard, source close expires its intent, and native keys follow the focused archive")
                 }
             }
             try require(rows.table.marquee != nil)
@@ -263,8 +376,8 @@ import LocalStorage
                 checks.append("Native ZIP/TAR address editing preserves full paths, checks missing folders before navigation and supports relative folders, Back/Forward, Escape and stale-field refusal")
             }
             checks.append("Native archive image preview checks the selected complete image without extracting it; a mislabeled image shows an error and the next Space preview succeeds")
-            let clipboardHistoryCount = compressed || inline ? 2 : 0
-            if clipboardHistoryCount > 0 {
+            let clipboardHistoryCount = (compressed || inline ? 2 : 0) + (inline && !compressed && !offscreen ? 2 : 0)
+            if compressed || inline {
                 try await verifyFolderPaste(owner: controller, browser: browser, model: model, rows: rows,
                     board: board, destination: location.appendingPathComponent("source/Paste Destination", isDirectory: true))
                 checks.append("TAR Copy/Paste and shared native row-drop callbacks each copy a folder directly with nested text/empty child and ordinary Undo; stale selection and duplicate-drop admission refuse, and TAR offers carry no ZIP identity")
@@ -386,7 +499,9 @@ import LocalStorage
             extraction.model.undo();try await wait{extraction.model.undoOutcome != nil && !extraction.model.isRunning}
             try require(extraction.model.undoOutcome?.result.disposition == .succeeded && !FileManager().fileExists(atPath:output.path))
             let history=try await browser.recoverableFileOperations!.inspectExistingHistory()
-            try require(history.records.count == clipboardHistoryCount + 1 && history.records.allSatisfy { $0.operation == "Extract TAR" })
+            try require(history.records.count == clipboardHistoryCount + 1
+                && history.records.filter { $0.operation == "Extract ZIP" }.count == (inline && !compressed && !offscreen ? 1 : 0)
+                && history.records.allSatisfy { ["Extract TAR", "Extract ZIP"].contains($0.operation) })
             try require(history.records.contains { $0.locations.contains(output) }
                 && !history.records.flatMap(\.locations).contains(where: { $0.path.hasPrefix(location.appendingPathComponent("cache").path + "/") }))
             try require(try await Task.detached { SHA256.hash(data: try Data(contentsOf: source)) == originalDigest }.value)
@@ -430,8 +545,24 @@ import LocalStorage
             try await verifyDirectExtraction(browser: browser, source: source)
             checks.append("Direct whole-archive extraction prepares plain/compressed TAR in the shared workbench, preserves the source, avoids an occupied folder and Undoes the exact output")
             if compressed {
-                try await verifyDirectExtraction(browser: browser, source: location.appendingPathComponent("source/Review bzip2.tbz"))
+                let bzip2 = location.appendingPathComponent("source/Review bzip2.tbz")
+                try await verifyDirectExtraction(browser: browser, source: bzip2)
                 checks.append("The same whole-archive extraction prepares a bzip2 TAR alias, keeps its compound identity and verifies nested/empty delivery, collision naming and Undo")
+                if inline && !offscreen {
+                    try await wait { !browser.isLoading && browser.orderingTask == nil && browser.rowsByURL[bzip2] != nil }
+                    show(main)
+                    browser.setFileSelection([bzip2]); browser.fileSelectionDidChange(); browser.openSelection(nil)
+                    try await wait { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true
+                        && browser.currentArchive?.tarModelForVerification?.current == true && browser.currentArchive?.busy == false }
+                    guard let candidate = browser.currentArchive?.tarModelForVerification, let content = main.contentView,
+                          let matches = descendants(content).compactMap({ $0 as? TARMetadataRows }).first(where: { $0.window === main }) else { throw Failure.check(#line) }
+                    try await compareTAR(candidate, rows: matches, embedded: true, screenshot: "tar-bzip2-text-diff")
+                    checks.append("A prepared bzip2 TAR alias opens the exact same two text members through the native comparison.")
+                }
+            }
+            if inline && !offscreen {
+                try await verifyInactivePaneClipboard(owner: controller, root: location, board: board, compressed: compressed)
+                checks.append("Closing a pane moves its inactive copied archive tab without reopening it; explicit navigation survives pending pane startup, and Paste from the surviving local pane delivers exact bytes with ordinary Undo")
             }
             try require(ApplicationFileActivity.gate.activeCount==0 && browser.operationTask==nil && browser.operationPreparationTask==nil)
             try write(["passed":true,"checks":checks,"clips":clips,"interfacePercent":settings.interfaceSize.percent,"activityAfter":0,
@@ -610,6 +741,403 @@ import LocalStorage
         try require(workspace.closeActivePane() && workspace.activeBrowser === browser)
         browser.clipboardState.clear()
     }
+    private static func verifyStandaloneClipboard(owner: BrowserWindowController, browser: BrowserViewController,
+        source: URL, archiveWindow: NSWindow, clipboard: ArchiveWindowClipboard, table: ArchiveMetadataTable,
+        ready: () -> Bool, cutAllowed: Bool, board: NSPasteboard, destination: URL) async throws {
+        guard let window = owner.window, let engine = browser.recoverableFileOperations else { throw Failure.check(#line) }
+        let workspace = owner.workspace
+        let selection = table.selectedRowIndexes
+        let archiveDigest = try await Task.detached { try SHA256.hash(data: Data(contentsOf: source)) }.value
+        let previousBoard = browser.transferPasteboard
+        browser.transferPasteboard = board
+        defer { browser.transferPasteboard = previousBoard }
+        try await Task.detached { try FileManager().createDirectory(at: destination, withIntermediateDirectories: false) }.value
+        window.makeKeyAndOrderFront(nil); workspace.activate(browser)
+        if window.frame.width < 1140 { window.setContentSize(.init(width: 1140, height: window.contentLayoutRect.height)) }
+        try require(workspace.splitActive(at: .trailing))
+        let peer = workspace.activeBrowser
+        peer.permitsBackgroundVerification = true; peer.recoverableFileOperations = engine
+        peer.navigate(to: .directory(destination))
+        try await wait { !peer.isLoading && peer.orderingTask == nil }
+        archiveWindow.makeKeyAndOrderFront(nil)
+        try await wait { archiveWindow.isKeyWindow && ready() }
+        try require(archiveWindow.makeFirstResponder(table))
+        let copy = NSMenuItem(title: "Copy", action: #selector(FileTableView.copy(_:)), keyEquivalent: "c")
+        let cut = NSMenuItem(title: "Cut", action: #selector(FileTableView.cut(_:)), keyEquivalent: "x")
+        let paste = NSMenuItem(title: "Paste", action: #selector(FileTableView.paste(_:)), keyEquivalent: "v")
+        guard let menu = table.contextMenuProvider?(), let contextCopy = menu.items.first(where: { $0.title == "Copy" }),
+              let validator = contextCopy.target as? NSMenuItemValidation else { throw Failure.check(#line) }
+        try require(validator.validateMenuItem(contextCopy) && table.validateMenuItem(copy)
+            && table.validateMenuItem(cut) == cutAllowed)
+        let savedProfile = browser.settings.keyboardProfile, savedKeys = browser.settings.shortcutPreferences
+        let savedBehavior = browser.settings.customBehavior
+        browser.settings.keyboardProfile = .mac; browser.settings.shortcutPreferences = .init()
+        defer {
+            browser.settings.customBehavior = savedBehavior
+            browser.settings.keyboardProfile = savedProfile; browser.settings.shortcutPreferences = savedKeys
+        }
+        try require(archiveWindow.performKeyEquivalent(with: UIVerification.key("c", code: 8, flags: .command, window: archiveWindow)))
+        try await wait { browser.clipboardState.scopedItem?.archiveWindowOwner === clipboard && ready() }
+        try require(board.types == [ScopedItemClipboardIntent.pasteboardType] && browser.clipboardState.scopedItem?.isAlive == true)
+        // A different selection does not silently replace the sealed copied IDs.
+        table.deselectAll(nil)
+        window.makeKeyAndOrderFront(nil); workspace.activate(peer); peer.focusBrowserContent()
+        try await wait { window.isKeyWindow }
+        try require(!table.routeStandaloneKeyEquivalent(UIVerification.key("c", code: 8, flags: .command, window: archiveWindow)))
+        try require(peer.table.validateMenuItem(paste))
+        let before = peer.lastRecoveryRecordID, output = destination.appendingPathComponent("Note.txt")
+        NSApp.sendAction(paste.action!, to: peer.table, from: paste)
+        try await wait { ApplicationArchiveExtraction.shared.canAcceptPreparedSelection && peer.lastRecoveryRecordID != before
+            && peer.operationTask == nil && !peer.isLoading && peer.rowsByURL[output] != nil }
+        try require(peer.lastOperationResult?.disposition == .succeeded)
+        try require(try await Task.detached { try Data(contentsOf: output) == Data("note".utf8) }.value)
+        try await wait { peer.canUndoFileOperation }
+        peer.undoFileOperation(nil)
+        try await wait { peer.operationTask == nil && !peer.isLoading && peer.rowsByURL[output] == nil }
+        try require(peer.lastOperationResult?.disposition == .succeeded && browser.clipboardState.scopedItem?.isAlive == true)
+        await ApplicationArchiveExtraction.shared.closeAndDrain()
+        workspace.activate(peer); try require(workspace.closeActivePane() && workspace.activeBrowser === browser)
+        archiveWindow.makeKeyAndOrderFront(nil); try require(archiveWindow.makeFirstResponder(table))
+        table.selectRowIndexes(selection, byExtendingSelection: false)
+        try require(table.commandValidation?(#selector(BrowserViewController.renameSelection(_:))) == cutAllowed)
+        let customKey = UIVerification.key(String(UnicodeScalar(NSF8FunctionKey)!), code: 100,
+            flags: [.control, .option, .shift], window: archiveWindow)
+        guard let chord = BrowserShortcut(customKey), !SystemShortcutSnapshot.shared.conflicts(customKey) else { throw Failure.check(#line) }
+        browser.settings.customizeBehavior()
+        for command in [BrowserCommand.newFolder, .newTextFile, .duplicate, .trash] {
+            browser.settings.shortcutPreferences = .init(overrides: [command: [chord]])
+            try require(browser.settings.shortcutMap.issues.isEmpty
+                && archiveWindow.makeFirstResponder(table) && archiveWindow.performKeyEquivalent(with: customKey))
+            try await wait { ApplicationArchiveCreation.shared.controller != nil }
+            guard let review = ApplicationArchiveCreation.shared.controller else { throw Failure.check(#line) }
+            switch command {
+            case .newFolder: try require(review.model.isMemberNewFolder)
+            case .newTextFile: try require(review.model.isMemberNewFile)
+            case .duplicate: try require(review.model.isMemberDuplicate)
+            case .trash: try require(review.model.isMemberRemoval)
+            default: throw Failure.check(#line)
+            }
+            await ApplicationArchiveCreation.shared.closeAndDrain()
+            try await wait { ready() }
+            archiveWindow.makeKeyAndOrderFront(nil)
+        }
+        browser.settings.keyboardProfile = .mac; browser.settings.shortcutPreferences = .init()
+        try require(archiveWindow.makeFirstResponder(table))
+        table.deselectAll(nil)
+        try require(table.commandValidation?(#selector(BrowserViewController.renameSelection(_:))) == false)
+        let added = destination.deletingLastPathComponent().appendingPathComponent(destination.lastPathComponent + " Input.txt")
+        try await Task.detached { try Data("added".utf8).write(to: added, options: .withoutOverwriting) }.value
+        func localCopy() throws {
+            browser.clipboardState.clear()
+            try require(BrowserClipboard.write(nil, urls: [added], to: board) && table.validateMenuItem(paste))
+        }
+        try localCopy(); NSApp.sendAction(paste.action!, to: table, from: paste)
+        try await wait { ApplicationArchiveCreation.shared.controller != nil }
+        await ApplicationArchiveCreation.shared.closeAndDrain()
+        try await wait { ready() }
+        archiveWindow.makeKeyAndOrderFront(nil); try require(archiveWindow.makeFirstResponder(table))
+        try localCopy(); NSApp.sendAction(paste.action!, to: table, from: paste)
+        board.clearContents()
+        try await wait { ready() }
+        try require(ApplicationArchiveCreation.shared.controller == nil)
+        let afterCancel = try await Task.detached { try SHA256.hash(data: Data(contentsOf: source)) }.value
+        try require(afterCancel == archiveDigest)
+        table.selectRowIndexes(selection, byExtendingSelection: false)
+        try require(archiveWindow.performKeyEquivalent(with: UIVerification.key("c", code: 8, flags: .command, window: archiveWindow)))
+        try await wait { browser.clipboardState.scopedItem?.archiveWindowOwner === clipboard && ready() }
+    }
+    private static func verifyInactivePaneClipboard(owner: BrowserWindowController, root: URL, board: NSPasteboard,
+                                                   compressed: Bool) async throws {
+        let workspace = owner.workspace
+        guard let window = owner.window else { throw Failure.check(#line) }
+        let logger = DiagnosticRecorder(directory: root.appendingPathComponent("state/inactive-paste-diagnostics"),
+            limits: try .init(bytes: 64 << 10, segmentBytes: 8 << 10), recording: true)
+        let previousRecorder = ApplicationDiagnostics.shared.recorder
+        ApplicationDiagnostics.shared.configureForVerification(logger)
+        defer { ApplicationDiagnostics.shared.configureForVerification(previousRecorder) }
+        do {
+        let cases: [(label: String, source: String)] = compressed
+            ? [("gzip", "Review.tar.gz"), ("bzip2", "Review bzip2.tbz")]
+            : [("zip", "Review.zip"), ("tar", "Review.tar")]
+        for item in cases {
+            var browser = workspace.activeBrowser
+            guard let engine = browser.recoverableFileOperations else { throw Failure.check(#line) }
+            let source = root.appendingPathComponent("source/" + item.source)
+            let destination = root.appendingPathComponent("source/Inactive " + item.label, isDirectory: true)
+            try await Task.detached { try FileManager().createDirectory(at: destination, withIntermediateDirectories: false) }.value
+            window.makeKeyAndOrderFront(nil); workspace.activate(browser)
+            browser.navigate(to: .directory(source.deletingLastPathComponent()))
+            try await wait { !browser.isLoading && browser.orderingTask == nil && browser.rowsByURL[source] != nil }
+            browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.openSelection(nil)
+            if compressed && !CompressedArchiveOpenFeature.available {
+                try await wait { browser.currentArchive?.tarModelForVerification?.requiresPreparation == true
+                    && browser.currentArchive?.busy == false }
+                browser.currentArchive?.tarModelForVerification?.prepareCompressed()
+            }
+            try await wait { browser.currentArchive?.current == true && browser.currentArchive?.busy == false
+                && browser.currentArchive?.hasRenderedCurrentRowsForVerification == true }
+            if item.label != "zip" {
+                guard let archive = browser.currentArchive, let tar = archive.tarModelForVerification else { throw Failure.check(#line) }
+                browser = try await verifyPendingOpenTransfer(owner: owner, browser: browser, archive: archive,
+                    model: tar, destination: destination, compressed: compressed,
+                    evidence: root.appendingPathComponent("evidence/pending-" + item.label + ".json"))
+            }
+            guard let archive = browser.currentArchive, let table = archive.table,
+                  let note = archive.zipModelForVerification?.visibleItems.firstIndex(where: { $0.name == "Note.txt" })
+                    ?? archive.tarModelForVerification?.items.firstIndex(where: { $0.name == "Note.txt" }) else { throw Failure.check(#line) }
+            let tab = browser.activeID
+            let preparations = ApplicationCompressedArchives.shared.preparationRequestsForVerification
+            browser.transferPasteboard = board
+            table.selectRowIndexes([note], byExtendingSelection: false)
+            try require(window.makeFirstResponder(table))
+            let copy = NSMenuItem(title: "Copy", action: #selector(FileTableView.copy(_:)), keyEquivalent: "c")
+            try require(table.validateMenuItem(copy) && NSApp.sendAction(copy.action!, to: table, from: copy))
+            try await wait { !archive.busy && browser.clipboardState.scopedItem?.archiveOwner === archive }
+            guard let copied = browser.clipboardState.scopedItem?.id else { throw Failure.check(#line) }
+            let local = BrowserTab(location: .directory(destination))
+            browser.tabs.append(local); browser.selectTab(local.id)
+            try await wait { !browser.isLoading && browser.orderingTask == nil && browser.location.directoryURL?.path == destination.path }
+            try require(workspace.splitActive(at: .trailing))
+            let survivor = workspace.activeBrowser
+            try require(survivor.isLoading && !survivor.canModifyCurrentFolder)
+            var beginFinished = false
+            survivor.didFinishBeginForVerification = { beginFinished = true }
+            survivor.permitsBackgroundVerification = true; survivor.recoverableFileOperations = engine
+            survivor.folderAccess = browser.folderAccess; survivor.privateNames = browser.privateNames
+            survivor.readVolumesForVerification = { [] }
+            // Explicit navigation must supersede the still-queued begin task.
+            survivor.navigate(to: .directory(destination))
+            let explicitVisit = survivor.sessionID
+            try await wait { beginFinished && !survivor.isLoading && survivor.orderingTask == nil }
+            survivor.didFinishBeginForVerification = nil
+            try require(survivor.sessionID == explicitVisit)
+            workspace.activate(browser)
+            try require(workspace.closeActivePane() && workspace.activeBrowser === survivor)
+            try await wait { browser.isBrowserSuspended && !survivor.isLoading && survivor.orderingTask == nil && survivor.canvasTransition == nil }
+            survivor.focusBrowserContent()
+            try await wait { survivor.canPasteArchiveIntoLocalFolder }
+            try require(survivor.archiveTabs[tab] === archive && !archive.isPresented
+                && survivor.clipboardState.scopedItem?.id == copied && survivor.clipboardState.scopedItem?.isAlive == true)
+            let receiptCurrent = ScopedItemPaste(state: survivor.clipboardState)?.isCurrent() == true
+            try require(receiptCurrent && survivor.recoverableFileOperations === engine)
+            try JSONSerialization.data(withJSONObject: ["targetReady": survivor.canPasteArchiveIntoLocalFolder,
+                "exactEngine": survivor.recoverableFileOperations === engine, "receiptCurrent": receiptCurrent,
+                "sourcePaneSuspended": browser.isBrowserSuspended, "ownerMoved": survivor.archiveTabs[tab] === archive,
+                "sourceInactive": !archive.isPresented, "commandPaneFocused": survivor.hasFileCommandFocus,
+                "startupFinished": beginFinished, "explicitVisitPreserved": survivor.sessionID == explicitVisit,
+                "textEditorFocused": survivor.view.window?.firstResponder is NSTextView,
+                "hasSheet": survivor.view.window?.attachedSheet != nil,
+                "canPaste": survivor.canPasteScopedItem], options: [.sortedKeys])
+                .write(to: root.appendingPathComponent("evidence/inactive-" + item.label + "-clipboard.json"), options: .withoutOverwriting)
+            try UIVerification.require(survivor.canPasteScopedItem,
+                "An inactive copied " + item.label + " tab lost its live Paste owner after Close Pane")
+            let paste = NSMenuItem(title: "Paste", action: #selector(FileTableView.paste(_:)), keyEquivalent: "v")
+            let earlier = survivor.lastRecoveryRecordID, output = destination.appendingPathComponent("Note.txt")
+            try require(survivor.table.validateMenuItem(paste) && NSApp.sendAction(paste.action!, to: survivor.table, from: paste))
+            try JSONSerialization.data(withJSONObject: ["callbackInstalled": survivor.table.onPaste != nil,
+                "sourcePreparationBegan": archive.busy,
+                "pasteDestinationCaptured": survivor.status.stringValue == "Checking the archive and destination…",
+                "canPasteAfterDispatch": survivor.canPasteScopedItem], options: [.sortedKeys])
+                .write(to: root.appendingPathComponent("evidence/inactive-" + item.label + "-dispatch.json"), options: .withoutOverwriting)
+            do {
+                try await wait { ApplicationArchiveExtraction.shared.canAcceptPreparedSelection && survivor.lastRecoveryRecordID != earlier
+                    && survivor.operationTask == nil && !survivor.isLoading && survivor.rowsByURL[output] != nil }
+            } catch {
+                let sourceMatches: Bool
+                switch survivor.clipboardState.scopedItem?.source {
+                case .zip(let copied): sourceMatches = copied.archiveURL == archive.source
+                case .tar(let copied): sourceMatches = copied.archiveURL == archive.source
+                default: sourceMatches = false
+                }
+                let status = survivor.status.stringValue.replacingOccurrences(of: root.path, with: "<generated>")
+                let notice = (archive.zipModelForVerification?.notice ?? archive.tarModelForVerification?.notice ?? "")
+                    .replacingOccurrences(of: root.path, with: "<generated>")
+                try JSONSerialization.data(withJSONObject: ["targetStatus": status, "sourceNotice": notice,
+                    "sourceMatches": sourceMatches, "sourceBusy": archive.busy, "canPaste": survivor.canPasteScopedItem,
+                    "receiptCurrent": ScopedItemPaste(state: survivor.clipboardState)?.isCurrent() == true,
+                    "extractionReady": ApplicationArchiveExtraction.shared.canAcceptPreparedSelection,
+                    "hasExtractionReview": ApplicationArchiveExtraction.shared.controller != nil,
+                    "historyChanged": survivor.lastRecoveryRecordID != earlier], options: [.sortedKeys])
+                    .write(to: root.appendingPathComponent("evidence/inactive-" + item.label + "-terminal.json"), options: .withoutOverwriting)
+                throw error
+            }
+            let exactBytes = try await Task.detached { try Data(contentsOf: output) == Data("note".utf8) }.value
+            try require(survivor.lastOperationResult?.disposition == .succeeded && exactBytes)
+            try await wait { survivor.canUndoFileOperation }
+            survivor.undoFileOperation(nil)
+            try await wait { survivor.operationTask == nil && !survivor.isLoading && survivor.rowsByURL[output] == nil }
+            try require(survivor.lastOperationResult?.disposition == .succeeded)
+            try require(ApplicationCompressedArchives.shared.preparationRequestsForVerification == preparations)
+            await ApplicationArchiveExtraction.shared.closeAndDrain()
+            survivor.clipboardState.clear(); survivor.closeTab(id: tab); await archive.closeAndDrain()
+        }
+        if compressed { try require(await ApplicationCompressedArchives.shared.closeAndDrain()) }
+        } catch {
+            _ = await logger.export(to: root.appendingPathComponent("evidence/inactive-paste-diagnostics.json"), retainingAccess: ())
+            await logger.closeAndDrain()
+            throw error
+        }
+        _ = await logger.export(to: root.appendingPathComponent("evidence/inactive-paste-diagnostics.json"), retainingAccess: ())
+        await logger.closeAndDrain()
+    }
+    private static func verifyPendingOpenTransfer(owner: BrowserWindowController, browser: BrowserViewController,
+        archive: ArchiveTabController, model: TARBrowserModel, destination: URL, compressed: Bool,
+        evidence: URL) async throws -> BrowserViewController {
+        let workspace = owner.workspace, tab = browser.activeID
+        guard let engine = browser.recoverableFileOperations else { throw Failure.check(#line) }
+        var entered = false, release: CheckedContinuation<Void, Never>?
+        model.beforeOpenAccessForVerification = {
+            entered = true
+            await withCheckedContinuation { release = $0 }
+        }
+        defer { model.beforeOpenAccessForVerification = nil; release?.resume() }
+        let preparations = ApplicationCompressedArchives.shared.preparationRequestsForVerification
+        model.refresh()
+        try await wait { entered }
+        try require(model.busy && model.summary == nil)
+        let local = BrowserTab(location: .directory(destination))
+        browser.tabs.append(local); browser.selectTab(local.id)
+        try await wait { !browser.isLoading && browser.orderingTask == nil }
+        try require(workspace.splitActive(at: .trailing))
+        let survivor = workspace.activeBrowser
+        var began = false
+        survivor.didFinishBeginForVerification = { began = true }
+        survivor.permitsBackgroundVerification = true; survivor.recoverableFileOperations = engine
+        survivor.folderAccess = browser.folderAccess; survivor.privateNames = browser.privateNames
+        survivor.readVolumesForVerification = { [] }
+        survivor.navigate(to: .directory(destination))
+        try await wait { began && !survivor.isLoading && survivor.orderingTask == nil }
+        survivor.didFinishBeginForVerification = nil
+        workspace.activate(browser)
+        try require(workspace.closeActivePane() && workspace.activeBrowser === survivor
+            && survivor.archiveTabs[tab] === archive && browser.isBrowserSuspended && !archive.isPresented)
+        release?.resume(); release = nil
+        try await wait { !model.busy }
+        try UIVerification.require(model.summary != nil,
+            "A consumed TAR Open lost its pane owner while draining before access")
+        let completedPreparations = ApplicationCompressedArchives.shared.preparationRequestsForVerification
+        try require(completedPreparations == preparations + (compressed ? 1 : 0))
+        survivor.selectTab(tab)
+        try await wait { archive.current && !archive.busy && archive.hasRenderedCurrentRowsForVerification }
+        try require(ApplicationCompressedArchives.shared.preparationRequestsForVerification == completedPreparations)
+        try JSONSerialization.data(withJSONObject: ["consumedOpenTransferred": true,
+            "summaryBeforeReselect": true, "preparationOnReselect": false], options: [.sortedKeys])
+            .write(to: evidence, options: .withoutOverwriting)
+        return survivor
+    }
+    private static func verifyArchiveNameSelection(_ surface: FileTableView, browser: BrowserViewController,
+                                                  names: [String], extraName: String, embedded: Bool) async throws {
+        guard let table = surface as? ArchiveMetadataTable, let window = table.window,
+              let note = names.firstIndex(of: "Note.txt"), let extra = names.firstIndex(of: extraName) else {
+            throw UIVerification.Failure(message: "Archive name selection fixture is incomplete")
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(table)
+        let previous = table.selectedRowIndexes
+        defer { table.selectRowIndexes(previous, byExtendingSelection: false) }
+        let originalMenu = NSApp.mainMenu
+        if originalMenu?.item(withTitle: "Edit") == nil { NSApp.mainMenu = BrowserMenus.applicationMenu(target: browser) }
+        defer { if NSApp.mainMenu !== originalMenu { NSApp.mainMenu = originalMenu } }
+        guard let menu = NSApp.mainMenu?.item(withTitle: "Edit")?.submenu else {
+            throw UIVerification.Failure(message: "The native Edit menu is unavailable")
+        }
+        let action = BrowserCommand.selectByName.selector
+        func choose(_ text: String, mode: NameSelectionPrompt.Mode, expected: IndexSet) async throws {
+            try await UIVerification.waitUntil("Archive selection command is available") { table.canSelectByName }
+            BrowserShortcutMenus.refresh(menu, browser: browser)
+            guard let item = BrowserMenus.commandItem(action, in: menu), let target = item.target as? NSMenuItemValidation,
+                  (embedded ? target as AnyObject === browser : target as AnyObject === table), target.validateMenuItem(item),
+                  NSApp.sendAction(action, to: target, from: item) else {
+                throw UIVerification.Failure(message: "The archive's native Edit menu did not invoke Select by Name")
+            }
+            try await UIVerification.completeNameSelection(in: window, text: text, mode: mode)
+            try await UIVerification.waitUntil("Archive name selection completed") { table.canSelectByName }
+            try UIVerification.require(table.selectedRowIndexes == expected, "The archive selected different visible names")
+        }
+        try await choose("Note*.txt", mode: .replace, expected: IndexSet(integer: note))
+        try await choose(extraName, mode: .add, expected: IndexSet([note, extra]))
+    }
+
+    private static func verifyEmbeddedShortcuts(browser: BrowserViewController, table: FileTableView) async throws {
+        guard let owner = browser.currentArchive, let window = browser.view.window else { throw Failure.check(#line) }
+        let settings = browser.settings
+        let profile = settings.keyboardProfile, custom = settings.customBehavior
+        let shortcuts = settings.shortcutPreferences, hidden = settings.showsHiddenFiles
+        let selected = table.selectedRowIndexes, location = browser.location
+        defer {
+            settings.shortcutPreferences = .init(); settings.customBehavior = custom
+            settings.shortcutPreferences = shortcuts; settings.keyboardProfile = profile
+            settings.showsHiddenFiles = hidden
+            table.selectRowIndexes(selected, byExtendingSelection: false)
+        }
+        settings.keyboardProfile = .explorer; settings.customizeBehavior()
+        func send(_ characters: String, code: UInt16, flags: NSEvent.ModifierFlags = []) throws {
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)
+            else { throw Failure.check(#line) }
+            guard let folder = owner.zipModelForVerification?.visibleItems.firstIndex(where: { $0.path == "Folder" && $0.folder != nil })
+                ?? owner.tarModelForVerification?.items.firstIndex(where: { $0.path == "Folder" && $0.folder != nil }) else { throw Failure.check(#line) }
+            table.selectRowIndexes(IndexSet(integer: folder), byExtendingSelection: false)
+            let exactSelection: Bool
+            if let zip = owner.zipModelForVerification { exactSelection = zip.selection == [zip.visibleItems[folder].id] }
+            else if let tar = owner.tarModelForVerification { exactSelection = tar.selection == [tar.items[folder].id] }
+            else { exactSelection = false }
+            try UIVerification.require(exactSelection && owner.hasRenderedCurrentRowsForVerification,
+                "Generated shortcut event lacks its exact current Folder selection")
+            try require(window.makeFirstResponder(table))
+            table.keyDown(with: event)
+        }
+        settings.shortcutPreferences = .init(overrides: [.open: [], .hiddenFiles: [.init(.special(.returnKey))]])
+        try require(settings.shortcutMap.issues.isEmpty)
+        try send("\r", code: 36)
+        try UIVerification.require(settings.showsHiddenFiles != hidden && browser.location == location,
+            "Archive Return ignored its remapped shared binding")
+        try await wait { owner.current && !owner.busy && owner.hasRenderedCurrentRowsForVerification }
+
+        let beforeFind = settings.showsHiddenFiles
+        settings.shortcutPreferences = .init(overrides: [.filter: [], .hiddenFiles: [.init(.character("f"), .command)]])
+        try require(settings.shortcutMap.issues.isEmpty)
+        try send("f", code: 3, flags: .command)
+        try UIVerification.require(settings.showsHiddenFiles != beforeFind && browser.filterField.currentEditor() == nil,
+            "Archive Find ignored its remapped shared binding")
+        try await wait { owner.current && !owner.busy && owner.hasRenderedCurrentRowsForVerification }
+
+        settings.shortcutPreferences = .init(overrides: [.open: [], .filter: [], .quickLook: []])
+        try send("\r", code: 36)
+        try send("f", code: 3, flags: .command)
+        try await Task.sleep(for: .milliseconds(40))
+        try UIVerification.require(browser.location == location && browser.filterField.currentEditor() == nil,
+            "Cleared archive Open or Find binding still dispatched")
+
+        guard let preview = owner.zipModelForVerification?.textPreviewForVerification
+                ?? owner.tarModelForVerification?.textPreviewForVerification,
+              let note = owner.zipModelForVerification?.visibleItems.firstIndex(where: { $0.name == "Note.txt" })
+                ?? owner.tarModelForVerification?.items.firstIndex(where: { $0.name == "Note.txt" }) else { throw Failure.check(#line) }
+        table.selectRowIndexes(IndexSet(integer: note), byExtendingSelection: false)
+        let space = UIVerification.key(" ", code: 49, flags: [], window: window)
+        table.keyDown(with: space)
+        try await Task.sleep(for: .milliseconds(40))
+        try UIVerification.require(!preview.retainsPresentation && !browser.quickLook.isActive,
+            "Cleared archive Preview binding still read a member")
+        settings.shortcutPreferences = .init()
+        try await wait { owner.current && !owner.busy && owner.hasRenderedCurrentRowsForVerification }
+        guard let currentNote = owner.zipModelForVerification?.visibleItems.firstIndex(where: { $0.name == "Note.txt" })
+                ?? owner.tarModelForVerification?.items.firstIndex(where: { $0.name == "Note.txt" }) else { throw Failure.check(#line) }
+        table.selectRowIndexes(IndexSet(integer: currentNote), byExtendingSelection: false)
+        try require(window.makeFirstResponder(table))
+        try UIVerification.require(owner.canPreview && browser.commandEnabled(#selector(BrowserViewController.showQuickLook(_:)))
+            && settings.shortcutMap.resolve(.init(.special(.space)), fileSurface: true) == .quickLook,
+            "Archive text-Preview fixture lacks its exact selection or configured action")
+        table.keyDown(with: space)
+        try await wait { !preview.isReading && preview.windowForVerification != nil }
+        try UIVerification.require(preview.textForVerification?.isEmpty == false && !browser.quickLook.isActive,
+            "Archive Space did not use its bounded in-app preview")
+        preview.windowForVerification?.performClose(nil)
+        try await wait { !preview.retainsPresentation }
+        await preview.drain()
+    }
+
     private static func write(_ value:[String:Any],root:URL)throws{
         try JSONSerialization.data(withJSONObject:value,options:[.prettyPrinted,.sortedKeys]).write(to:root.appendingPathComponent("evidence/native-tar-archive.json"),options:.withoutOverwriting)
     }

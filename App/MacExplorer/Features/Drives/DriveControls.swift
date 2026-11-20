@@ -15,10 +15,11 @@ final class DriveStatusControl: NSHostingView<InterfaceRoot<DriveStatusView>> {
         InterfacePresentation.markHosting(self)
         setContentHuggingPriority(.required, for: .horizontal)
         setAccessibilityLabel("Drives and pending requests")
-        visibility = Publishers.CombineLatest3(browser.settings.$showsDriveStatus,
-            browser.operationCoordinator.drives.$pending, browser.operationCoordinator.drives.$isPreparing)
-            .sink { [weak self] enabled, pending, preparing in
-                self?.isHidden = !enabled && pending == nil && !preparing
+        visibility = Publishers.CombineLatest4(browser.settings.$showsDriveStatus,
+            browser.operationCoordinator.drives.$pending, browser.operationCoordinator.drives.$isPreparing,
+            browser.operationCoordinator.drives.$isFormatting)
+            .sink { [weak self] enabled, pending, preparing, formatting in
+                self?.isHidden = !enabled && pending == nil && !preparing && !formatting
             }
     }
     @available(*, unavailable) required init(rootView: InterfaceRoot<DriveStatusView>) { fatalError() }
@@ -54,7 +55,8 @@ struct DriveStatusView: View {
     var inspectVolume: ((ManagedVolume) -> Void)?
     var body: some View {
         Button { drives.loadNativeDriveJobIfNeeded(); presentation.show() } label: {
-            Label(drives.pending == nil ? "Drives" : drives.pendingActionTitle + " pending", systemImage: "eject")
+            Label(drives.isFormatting ? "APFS Format in progress"
+                  : drives.pending == nil ? "Drives" : drives.pendingActionTitle + " pending", systemImage: "eject")
                 .interfaceFont(.system(size: 11))
         }
         .buttonStyle(.borderless)
@@ -90,6 +92,11 @@ struct DriveControlsView: View {
             if !drives.nativeDriveJobIssue.isEmpty {
                 Label(drives.nativeDriveJobIssue, systemImage: "exclamationmark.triangle")
                     .interfaceFont(.callout).fixedSize(horizontal: false, vertical: true)
+            }
+            if !drives.nativeDriveJobLastOutcome.isEmpty {
+                Label(drives.nativeDriveJobLastOutcome, systemImage: "clock.arrow.circlepath")
+                    .interfaceFont(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if !drives.protectionReady || !drives.protectionIssue.isEmpty {
                 Button(drives.isEditingProtection ? "Checking Protection…" : "Reload Protection", action: drives.reloadProtection)

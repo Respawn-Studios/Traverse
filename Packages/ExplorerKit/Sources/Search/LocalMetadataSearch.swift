@@ -57,6 +57,19 @@ public final class LocalMetadataSearch: @unchecked Sendable {
         }
     }
 
+    /// Cancels the current session and joins its actual reader before the
+    /// owning view releases its last folder access or shuts down.
+    public func cancelAndDrain() async {
+        lock.withLock {
+            active?.cancel()
+            active = nil
+            pending = nil
+        }
+        await withCheckedContinuation { continuation in
+            queue.addBarrierBlock { continuation.resume() }
+        }
+    }
+
     private func drain() {
         while let work = lock.withLock({ () -> Work? in
             let work = pending

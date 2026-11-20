@@ -1,49 +1,49 @@
 Copyright/SPDX headers retained from the checksum-verified published archive.
 
-russh-0.65.1/src/auth.rs
+russh-0.65.2/src/auth.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/cipher/chacha20poly1305.rs
+russh-0.65.2/src/cipher/chacha20poly1305.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/cipher/clear.rs
+russh-0.65.2/src/cipher/clear.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/cipher/gcm.rs
+russh-0.65.2/src/cipher/gcm.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/cipher/mod.rs
+russh-0.65.2/src/cipher/mod.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/client/encrypted.rs
+russh-0.65.2/src/client/encrypted.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/client/mod.rs
+russh-0.65.2/src/client/mod.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/kex/mod.rs
+russh-0.65.2/src/kex/mod.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/keys/key.rs
+russh-0.65.2/src/keys/key.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/lib.rs
+russh-0.65.2/src/lib.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/msg.rs
+russh-0.65.2/src/msg.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/negotiation.rs
+russh-0.65.2/src/negotiation.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/server/encrypted.rs
+russh-0.65.2/src/server/encrypted.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/server/mod.rs
+russh-0.65.2/src/server/mod.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/session.rs
+russh-0.65.2/src/session.rs
 // Copyright 2016 Pierre-Étienne Meunier
 
-russh-0.65.1/src/sshbuffer.rs
+russh-0.65.2/src/sshbuffer.rs
 // Copyright 2016 Pierre-Étienne Meunier

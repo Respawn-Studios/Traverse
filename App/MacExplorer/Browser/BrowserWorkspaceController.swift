@@ -27,7 +27,13 @@ final class BrowserWorkspaceController: NSViewController {
         didSet {
             if isClosing {
                 profileWorkspaceController?.prepareToClose()
+                folderComparisonWindow?.close()
+                textComparisonWindow?.window?.close()
+                gitComparisonWindow?.window?.close()
+                gitFileHistoryWindow?.window?.close()
+                folderNavigation.close()
                 paneTransition?.finish(); paneTransition = nil
+                dividerControls.dismiss(animated: false)
                 sidebarSplit?.finishAnimation()
                 initialVolumeBootstrapTask?.cancel(); invalidateVolumeRefresh()
                 queuePresentation?.cancel()
@@ -55,6 +61,10 @@ final class BrowserWorkspaceController: NSViewController {
         launchProfilesModel = model; return model
     }
     var launchProfilesWindow: LaunchProfilesWindowController?
+    var folderComparisonWindow: FolderComparisonWindow?
+    var textComparisonWindow: EditorComparisonWindow?
+    var gitComparisonWindow: GitComparisonWindow?
+    var gitFileHistoryWindow: GitFileHistoryWindow?
     var quickProfileSwitcher: QuickLaunchProfiles?
 
     let sidebarHost = NSView()
@@ -69,8 +79,16 @@ final class BrowserWorkspaceController: NSViewController {
     private var sidebarControllers: [UUID: NSViewController] = [:]
     private(set) var paneHosts: [UUID: PaneHostView] = [:]
     private var paneSplits: [UUID: WorkspaceSplitView] = [:]
+    lazy var folderNavigation = WorkspaceFolderNavigation(workspace: self)
+    private lazy var dividerControls: WorkspaceDividerControls = {
+        let controls = WorkspaceDividerControls(frame: .zero)
+        controls.motion = primaryBrowser.settings.motion
+        controls.dividers = { [weak self] point, held in self?.visiblePaneDividers(near: point, keeping: held) ?? [] }
+        controls.perform = { [weak self] action, id in self?.performDividerAction(action, split: id) }
+        return controls
+    }()
     private var reconcilingPaneTree = false
-    private var sidebarSplit: WorkspaceSidebarSplitView?
+    private var sidebarSplit: NativeSidebarSplitView?
     var isSidebarCollapsed: Bool { sidebarSplit?.isSidebarCollapsed == true }
     var sidebarSnapshot: PaneWorkspaceSnapshot.Sidebar { sidebarSplit?.snapshot ?? .init() }
     private var rootBody: NSStackView?
@@ -86,11 +104,13 @@ final class BrowserWorkspaceController: NSViewController {
     private var initialVolumeBootstrapFinished = false
     private var initialVolumeBootstrapFailed = false
     #if DEBUG
+    private let fixtureVolumeReader: (() async throws -> [VolumeInfo])?
     var queueSharedRendersForVerification = 0
     var hasPaneTransitionForVerification: Bool { paneTransition != nil }
     var hasSidebarAnimationForVerification: Bool { sidebarSplit?.isAnimating == true }
     var paneTransitionOriginForVerification: WorkspacePaneTransition.Origin? { paneTransition?.origin }
     var paneTransitionFramesForVerification: [UUID: WorkspacePaneTransition.Frame] { paneTransition?.frames ?? [:] }
+    var paneTransitionCapturedForVerification: Set<UUID> { paneTransition?.capturedForVerification ?? [] }
     var paneTransitionHasOpaqueBackdropForVerification: Bool {
         paneTransition?.subviews.contains { ($0.layer?.backgroundColor?.alpha ?? 0) > 0 } ?? false
     }
@@ -109,6 +129,9 @@ final class BrowserWorkspaceController: NSViewController {
         activePaneID = primaryBrowser.paneID
         layout = PaneLayout(paneID: primaryBrowser.paneID)
         observedVolumes = primaryBrowser.volumes.isEmpty ? nil : primaryBrowser.volumes
+        #if DEBUG
+        fixtureVolumeReader = primaryBrowser.readVolumesForVerification
+        #endif
         super.init(nibName: nil, bundle: nil)
     }
     convenience init(settings: BrowserSettings) { self.init(primaryBrowser: BrowserViewController(settings: settings)) }
@@ -130,7 +153,7 @@ final class BrowserWorkspaceController: NSViewController {
         mainContent.alignment = .top
         mainContent.distribution = .fill
         for child in mainContent.arrangedSubviews { child.heightAnchor.constraint(equalTo: mainContent.heightAnchor).isActive = true }
-        let content = WorkspaceSidebarSplitView()
+        let content = NativeSidebarSplitView()
         sidebarSplit = content
         content.remainingMinimum = { [weak self] in
             guard let self else { return 400 }
@@ -214,6 +237,11 @@ final class BrowserWorkspaceController: NSViewController {
     func attachBrowser(_ browser: BrowserViewController) {
         guard paneHosts[browser.paneID] == nil else { return }
         browser.workspace = self
+        #if DEBUG
+        if browser.readVolumesForVerification == nil {
+            browser.readVolumesForVerification = fixtureVolumeReader
+        }
+        #endif
         if let observedVolumes { browser.volumes = observedVolumes }
         browser.pinsController = primaryBrowser.pinsController
         browser.sidebarLayoutOwner = primaryBrowser.sidebarLayoutOwner
@@ -412,6 +440,7 @@ final class BrowserWorkspaceController: NSViewController {
         // action that would otherwise close the explicitly clicked tab.
         for pane in browsers.values { pane.tabStrip.refreshManagementAvailability() }
         preview.updateSelection(from: browser)
+        refreshPaneDividerControls()
     }
 
     func activatePane(at windowPoint: NSPoint) {
@@ -428,14 +457,171 @@ final class BrowserWorkspaceController: NSViewController {
         activate(browser)
     }
 
+    func isPaneDividerButton(at windowPoint: NSPoint) -> Bool {
+        dividerControls.button(at: windowPoint) != nil
+    }
+
+    func updatePaneDividerHover(at windowPoint: NSPoint) { dividerControls.updateHover(at: windowPoint) }
+
+    func dismissPaneDividerControls() { dividerControls.dismiss(animated: false) }
+
+    func refreshPaneDividerControls() {
+        if isViewLoaded { dividerControls.refreshPresentation() }
+    }
+
+    func settlePaneRearrangementBeforePointerInput() {
+        guard paneTransition?.rearrangement != nil else { return }
+        paneTransition?.finish()
+    }
+
+    private func visiblePaneDividers(near point: NSPoint?, keeping held: UUID?) -> [WorkspaceDividerControls.Divider] {
+        guard canChangePaneLayout, !ApplicationFileActivity.gate.isClosed else { return [] }
+        return layout.nodes.compactMap { node in
+            if point == nil, let held, node.id != held { return nil }
+            guard case .split(let axis, let fraction, let first, let second) = node.content,
+                  let split = paneSplits[node.id], split.superview != nil, let line = split.dividerLine else { return nil }
+            let bounds = split.convert(line, to: paneTreeHost)
+            if let point, node.id != held {
+                guard let distance = WorkspaceDividerControls.Divider.distance(from: bounds, axis: axis, to: point),
+                      distance <= WorkspaceDividerControls.revealDistance else { return nil }
+            }
+            let left = browsers[first], right = browsers[second]
+            let pairAction: WorkspaceDividerAction?
+            let canCompareGit: Bool
+            if let left, let right {
+                if left.canCompareSelectedText(with: right) { pairAction = .compareText }
+                else if left.canCompareSelectedText(with: right, matchingName: true) { pairAction = .compareMatchingText }
+                else if dividerNameMatch(first: first, second: second) != nil { pairAction = .selectMatch }
+                else if left.canCompareCurrentFolders(with: right) { pairAction = .compare }
+                else { pairAction = nil }
+                canCompareGit = left.canCompareGitCheckout(with: right)
+            } else { pairAction = nil; canCompareGit = false }
+            return .init(id: node.id, axis: axis, line: bounds,
+                         canBalance: abs(fraction - 0.5) > 0.001, canRotate: rotatedLayout(for: node.id) != nil,
+                         pairAction: pairAction, canCompareGit: canCompareGit,
+                         canLink: folderNavigation.canToggle(node.id), isLinked: folderNavigation.isLinked(node.id),
+                         copyDestination: dividerCopyDestination(first: first, second: second))
+        }
+    }
+
+    private func rotatedLayout(for id: UUID) -> PaneLayout? {
+        guard sidebarSplit?.isAnimating != true, let split = paneSplits[id], !split.inLiveResize else { return nil }
+        var proposed = layout
+        guard (try? proposed.rotateSplit(id)) != nil,
+              Self.fits(minimum: minimumSize(for: id, in: proposed), in: split.bounds.size) else { return nil }
+        // A changed minimum must not move the already visible ancestor dividers.
+        var branch = id
+        while let parent = layout.parent(of: branch) {
+            guard let ratio = paneSplits[parent.id]?.displayedFraction,
+                  (try? proposed.setFraction(ratio, for: parent.id)) != nil else { return nil }
+            branch = parent.id
+        }
+        return proposed
+    }
+
+    private func dividerCopyDestination(first: UUID, second: UUID) -> LocalPaneDestination? {
+        guard let peer = dividerPeer(first: first, second: second) else { return nil }
+        return activeBrowser.paneTransfers.copyDestination(in: peer.paneID)
+    }
+
+    private func dividerPeer(first: UUID, second: UUID) -> BrowserViewController? {
+        guard browsers[first] != nil, browsers[second] != nil, activePaneID == first || activePaneID == second else { return nil }
+        return browsers[activePaneID == first ? second : first]
+    }
+
+    private func dividerNameMatch(first: UUID, second: UUID) -> (browser: BrowserViewController, url: URL)? {
+        guard let peer = dividerPeer(first: first, second: second), let url = peer.unselectedNameMatch(for: activeBrowser),
+              let window = activeBrowser.viewIfLoaded?.window, peer.viewIfLoaded?.window === window,
+              window.isKeyWindow, window.attachedSheet == nil else { return nil }
+        return (peer, url)
+    }
+
+    func canPerformDividerAction(_ action: WorkspaceDividerAction, split id: UUID? = nil) -> Bool {
+        guard canChangePaneLayout, !ApplicationFileActivity.gate.isClosed,
+              let id = id ?? layout.parent(of: activePaneID)?.id,
+              let node = layout.node(id), case .split(_, let fraction, let first, let second) = node.content,
+              paneSplits[id]?.superview != nil else { return false }
+        switch action {
+        case .swap: return true
+        case .balance: return abs(fraction - 0.5) > 0.001
+        case .rotate: return rotatedLayout(for: id) != nil
+        case .compare, .compareText, .compareMatchingText, .compareGit:
+            guard let left = browsers[first], let right = browsers[second] else { return false }
+            switch action {
+            case .compare: return left.canCompareCurrentFolders(with: right)
+            case .compareText: return left.canCompareSelectedText(with: right)
+            case .compareMatchingText: return left.canCompareSelectedText(with: right, matchingName: true)
+            default: return left.canCompareGitCheckout(with: right)
+            }
+        case .link:
+            return folderNavigation.canToggle(id)
+        case .selectMatch:
+            return dividerNameMatch(first: first, second: second) != nil
+        case .copy:
+            return dividerCopyDestination(first: first, second: second) != nil
+        }
+    }
+
+    @discardableResult
+    func performDividerAction(_ action: WorkspaceDividerAction, split id: UUID? = nil) -> Bool {
+        guard let id = id ?? layout.parent(of: activePaneID)?.id, canPerformDividerAction(action, split: id) else { return false }
+        var proposed = layout
+        do {
+            switch action {
+            case .swap:
+                try proposed.swapSides(of: id)
+                preparePaneTransition(rearranging: (id, .swap))
+            case .balance:
+                try proposed.setFraction(0.5, for: id)
+                preparePaneTransition(only: Set(layout.paneIDs(in: id)))
+            case .rotate:
+                guard let rotated = rotatedLayout(for: id) else { return false }
+                proposed = rotated
+                preparePaneTransition(rearranging: (id, .direction))
+            case .compare, .compareText, .compareMatchingText, .compareGit:
+                guard case .split(_, _, let first, let second)? = layout.node(id)?.content,
+                      let left = browsers[first], let right = browsers[second] else { return false }
+                dismissPaneDividerControls()
+                switch action {
+                case .compare: return left.compareCurrentFolders(with: right)
+                case .compareText: return left.compareSelectedText(with: right)
+                case .compareMatchingText: return left.compareSelectedText(with: right, matchingName: true)
+                default: return left.compareGitCheckout(with: right)
+                }
+            case .link:
+                dismissPaneDividerControls()
+                return folderNavigation.toggle(id)
+            case .selectMatch:
+                guard case .split(_, _, let first, let second)? = layout.node(id)?.content,
+                      let match = dividerNameMatch(first: first, second: second) else { return false }
+                dismissPaneDividerControls()
+                match.browser.setFileSelection([match.url])
+                if match.browser.usesFileIcons { match.browser.fileSelectionDidChange() }
+                match.browser.revealFile(match.url)
+                return true
+            case .copy:
+                guard case .split(_, _, let first, let second)? = layout.node(id)?.content,
+                      let destination = dividerCopyDestination(first: first, second: second) else { return false }
+                dismissPaneDividerControls()
+                return activeBrowser.paneTransfers.request(move: false, to: destination.pane)
+            }
+        } catch { return false }
+        layout = proposed
+        rebuildPaneTree()
+        recordSession()
+        return true
+    }
+
     func selectionDidChange(in browser: BrowserViewController) {
         guard activeBrowser === browser else { return }
         preview.updateSelection(from: browser)
     }
     func locationWillChange(in browser: BrowserViewController) {
+        folderNavigation.locationWillChange(in: browser)
         if activeBrowser === browser { preview.endSession() }
     }
     func paneWillSuspend(_ browser: BrowserViewController) {
+        folderNavigation.paneWillSuspend(browser.paneID)
         invalidateVolumeRefresh(owner: browser)
         if activeBrowser === browser { preview.endSession() }
         paneHosts[browser.paneID]?.clearSnap()
@@ -500,18 +686,22 @@ final class BrowserWorkspaceController: NSViewController {
     }
 
     @discardableResult
-    func splitActive(at edge: PaneDropEdge) -> Bool {
+    func splitActive(at edge: PaneDropEdge, showing location: BrowserLocation? = nil) -> Bool {
         guard canSplitActive(at: edge) else { explainSplitRefusal(); return false }
         let source = activeBrowser
         source.saveViewState()
         let peer = BrowserViewController(settings: source.settings)
-        preparePaneTransition(source: source, tabID: source.activeID, edge: edge)
         peer.paneViewMode = source.isArchiveLocation ? source.paneViewMode : source.effectiveViewMode
         peer.folderViews = source.folderViews
-        let duplicate = source.isRemoteLocation ? BrowserTab(location: .computer) : ClosedBrowserTab(source.tabs[source.activeIndex]).restored()
-        peer.tabs = [duplicate]; peer.activeID = duplicate.id
-        do { try layout.split(source.paneID, inserting: peer.paneID, at: edge) }
+        let tab = location.map { BrowserTab(location: $0) }
+            ?? (source.isRemoteLocation ? BrowserTab(location: .computer) : ClosedBrowserTab(source.tabs[source.activeIndex]).restored())
+        peer.tabs = [tab]; peer.activeID = tab.id
+        var proposed = layout
+        do { try proposed.split(source.paneID, inserting: peer.paneID, at: edge) }
         catch { explainSplitRefusal(); return false }
+        preparePaneTransition(source: source, tabID: source.activeID, edge: edge,
+            split: (source.paneID, proposed))
+        layout = proposed
         browsers[peer.paneID] = peer
         attachBrowser(peer)
         paneTransition?.arrivingPaneID = peer.paneID
@@ -587,39 +777,32 @@ final class BrowserWorkspaceController: NSViewController {
                  edge: PaneDropEdge, dropFrame: NSRect? = nil) -> Bool {
         guard canMoveTab(id, from: source, beside: target.paneID, edge: edge),
               let index = source.tabs.firstIndex(where: { $0.id == id }) else { explainSplitRefusal(); return false }
-        preparePaneTransition(source: source, tabID: id, edge: edge, dropFrame: dropFrame)
+        let peer = source.tabs.count == 1 ? nil : BrowserViewController(settings: source.settings)
+        var proposed = layout
+        do {
+            if let peer { try proposed.split(target.paneID, inserting: peer.paneID, at: edge) }
+            else { try proposed.relocate(source.paneID, beside: target.paneID, at: edge) }
+        } catch { return false }
+        preparePaneTransition(source: source, tabID: id, edge: edge, dropFrame: dropFrame,
+            split: peer.map { _ in (target.paneID, proposed) })
         preview.endSession()
         source.saveViewState()
-        if source.tabs.count == 1 {
-            paneTransition?.arrivingPaneID = source.paneID
-            do { try layout.relocate(source.paneID, beside: target.paneID, at: edge) }
-            catch { return false }
-            rebuildPaneTree()
-            activate(source)
-        } else {
+        layout = proposed
+        let arriving = peer ?? source
+        paneTransition?.arrivingPaneID = arriving.paneID
+        if let peer {
             let tab = source.tabs[index]
-            let peer = BrowserViewController(settings: source.settings)
             peer.paneViewMode = source.isArchiveLocation ? source.paneViewMode : source.effectiveViewMode
             peer.folderViews = source.folderViews
             peer.tabs = [tab]; peer.activeID = tab.id
-            do { try layout.split(target.paneID, inserting: peer.paneID, at: edge) }
-            catch { return false }
-            peer.smbTabs[id] = source.smbTabs.removeValue(forKey: id)
-            peer.sftpTabs[id] = source.sftpTabs.removeValue(forKey: id)
-            peer.archiveTabs[id] = source.archiveTabs.removeValue(forKey: id)
-            peer.archiveTabs[id]?.rebind(to: peer)
-            peer.sftpClosedUploadNotices[id] = source.sftpClosedUploadNotices.removeValue(forKey: id)
-            peer.smbClosedUploadNotices[id] = source.smbClosedUploadNotices.removeValue(forKey: id)
-            source.tabs.remove(at: index)
-            if source.activeID == id { source.activeID = source.tabs[min(index, source.tabs.count - 1)].id; source.loadLocation() }
-            else { source.tabStrip.update(tabs: source.tabs, activeID: source.activeID) }
+            removeTransferredTab(id, at: index, from: source)
+            transferTabOwners(id, from: source, to: peer)
             browsers[peer.paneID] = peer
             attachBrowser(peer)
-            paneTransition?.arrivingPaneID = peer.paneID
-            rebuildPaneTree()
-            activate(peer)
-            startBrowser(peer)
         }
+        rebuildPaneTree()
+        activate(arriving)
+        if let peer { startBrowser(peer) }
         recordSession()
         return true
     }
@@ -629,38 +812,52 @@ final class BrowserWorkspaceController: NSViewController {
         guard source !== target, canChangePaneLayout, browsers[source.paneID] === source, browsers[target.paneID] === target,
               let index = source.tabs.firstIndex(where: { $0.id == id }),
               beforeID == nil || target.tabs.contains(where: { $0.id == beforeID }) else { return false }
-        preparePaneTransition()
+        let retiresSource = source.tabs.count == 1
+        if retiresSource { preparePaneTransition() }
+        else { settlePaneMotion() }
         preview.endSession()
         source.saveViewState(); target.saveViewState()
         let tab = source.tabs[index]
         let destination = beforeID.flatMap { before in target.tabs.firstIndex { $0.id == before } } ?? target.tabs.count
         target.tabs.insert(tab, at: destination)
+        if !retiresSource { removeTransferredTab(id, at: index, from: source) }
+        transferTabOwners(id, from: source, to: target)
+        target.activeID = tab.id
+        if retiresSource {
+            // Retirement still saves view state and releases native sessions.
+            // Keep its last visit valid through that complete lifecycle.
+            removePane(source)
+            rebuildPaneTree()
+        }
+        activate(target)
+        target.loadLocation(animatingTab: !retiresSource)
+        recordSession()
+        return true
+    }
+
+    private func transferTabOwners(_ id: UUID, from source: BrowserViewController, to target: BrowserViewController) {
         target.smbTabs[id] = source.smbTabs.removeValue(forKey: id)
         target.sftpTabs[id] = source.sftpTabs.removeValue(forKey: id)
         target.archiveTabs[id] = source.archiveTabs.removeValue(forKey: id)
         target.archiveTabs[id]?.rebind(to: target)
         target.sftpClosedUploadNotices[id] = source.sftpClosedUploadNotices.removeValue(forKey: id)
         target.smbClosedUploadNotices[id] = source.smbClosedUploadNotices.removeValue(forKey: id)
-        target.activeID = tab.id
-        if source.tabs.count == 1 {
-            // Retirement still saves view state and releases native sessions.
-            // Keep its last visit valid through that complete lifecycle.
-            removePane(source)
-            rebuildPaneTree()
+    }
+
+    private func removeTransferredTab(_ id: UUID, at index: Int, from source: BrowserViewController) {
+        source.tabs.remove(at: index)
+        if source.activeID == id {
+            source.activeID = source.tabs[min(index, source.tabs.count - 1)].id
+            source.loadLocation(animatingTab: true)
         } else {
-            source.tabs.remove(at: index)
-            if source.activeID == id { source.activeID = source.tabs[min(index, source.tabs.count - 1)].id; source.loadLocation() }
-            else { source.tabStrip.update(tabs: source.tabs, activeID: source.activeID) }
+            source.tabStrip.update(tabs: source.tabs, activeID: source.activeID)
         }
-        activate(target)
-        target.loadLocation()
-        recordSession()
-        return true
     }
 
     private func removePane(_ browser: BrowserViewController) {
         // Layout was validated and the caller has another nonempty pane.
         do { try layout.remove(browser.paneID) } catch { return }
+        let retiredHistoryReader = browser.operationHistory.recoveryInspectionOwner == browser.paneID
         invalidateVolumeRefresh(owner: browser)
         if activePaneID == browser.paneID { preview.endSession() }
         retireOperationHost(for: browser)
@@ -673,6 +870,7 @@ final class BrowserWorkspaceController: NSViewController {
         startedBrowsers.remove(browser.paneID)
         if primaryBrowser === browser, let replacement = layout.paneIDs.compactMap({ browsers[$0] }).first { primaryBrowser = replacement }
         requestInitialVolumeObservationIfNeeded()
+        if retiredHistoryReader { refreshRecoveryViews() }
     }
 
     func startBrowser(_ browser: BrowserViewController) {
@@ -733,13 +931,14 @@ final class BrowserWorkspaceController: NSViewController {
         guard isViewLoaded, !reconcilingPaneTree else { return }
         reconcilingPaneTree = true
         defer { reconcilingPaneTree = false }
+        dismissPaneDividerControls()
         var retainedSplits = Set<UUID>()
         func build(_ id: UUID, size: NSSize) -> NSView {
             guard let node = layout.node(id) else { return NSView() }
             switch node.content {
             case .pane(let pane):
                 let host = paneHosts[pane] ?? NSView()
-                host.frame = NSRect(origin: .zero, size: size)
+                if host.frame.size != size { host.setFrameSize(size) }
                 return host
             case .split(let axis, let fraction, let first, let second):
                 // Keep unchanged branches attached. Reparenting every native
@@ -750,7 +949,7 @@ final class BrowserWorkspaceController: NSViewController {
                 split.isVertical = axis == .columns
                 split.fraction = fraction
                 split.firstMinimum = minimumSize(for: first); split.secondMinimum = minimumSize(for: second)
-                split.frame = NSRect(origin: .zero, size: size)
+                if split.frame.size != size { split.setFrameSize(size) }
                 let a = minimumSize(for: first), b = minimumSize(for: second)
                 let available = max(0, (axis == .columns ? size.width : size.height) - split.dividerThickness)
                 let firstLength = min(available - (axis == .columns ? b.width : b.height),
@@ -768,13 +967,15 @@ final class BrowserWorkspaceController: NSViewController {
                     // subtree to a live window otherwise solves its controls at zero.
                     child.translatesAutoresizingMaskIntoConstraints = true
                     child.autoresizingMask = []
-                    if child.superview === split { split.removeArrangedSubview(child); child.removeFromSuperview() }
+                    // Moving an arranged child within the same split keeps its
+                    // field editor, mouse focus and native material attached.
                     split.insertArrangedSubview(child, at: min(index, split.arrangedSubviews.count))
                 }
                 split.fraction = fraction
                 split.resizeSubviews(withOldSize: split.bounds.size)
                 split.onFractionChanged = { [weak self] value in
                     guard let self, !self.reconcilingPaneTree else { return }
+                    self.dismissPaneDividerControls()
                     try? self.layout.setFraction(value, for: id)
                     self.recordSession()
                 }
@@ -790,6 +991,13 @@ final class BrowserWorkspaceController: NSViewController {
         }
         for (id, retired) in paneSplits where !retainedSplits.contains(id) { retired.removeFromSuperview() }
         paneSplits = paneSplits.filter { retainedSplits.contains($0.key) }
+        if !paneSplits.isEmpty && dividerControls.superview !== paneTreeHost {
+            dividerControls.frame = paneTreeHost.bounds
+            paneTreeHost.addSubview(dividerControls)
+        } else if paneSplits.isEmpty {
+            dividerControls.removeFromSuperview()
+        }
+        folderNavigation.reconcileLayout()
         for (index, id) in layout.paneIDs.enumerated() {
             paneHosts[id]?.isSplit = layout.paneIDs.count > 1
             paneHosts[id]?.isActive = id == activePaneID
@@ -798,7 +1006,13 @@ final class BrowserWorkspaceController: NSViewController {
         view.layoutSubtreeIfNeeded()
         enforceWindowMinimum(grow: animated)
         if animated, let transition = paneTransition {
-            transition.play(to: paneHosts, in: paneTreeHost) { [weak self, weak transition] in
+            let sides = transition.rearrangement?.sides ?? []
+            let targets = Dictionary(uniqueKeysWithValues: sides.compactMap { id in paneLayoutView(id).map { (id, $0) } })
+            let foreground = sides.flatMap { layout.paneIDs(in: $0) }.flatMap { id in
+                (browsers[id]?.paneRearrangementLiveForeground ?? []) + (paneHosts[id].map { [$0.focusForeground] } ?? [])
+            }
+            transition.play(to: paneHosts, in: paneTreeHost, rearrangementTargets: targets,
+                            liveRearrangementForeground: foreground) { [weak self, weak transition] in
                 guard let self, self.paneTransition === transition else { return }
                 for host in self.paneHosts.values { host.alphaValue = 1 }
                 self.paneTransition = nil
@@ -808,15 +1022,48 @@ final class BrowserWorkspaceController: NSViewController {
         }
     }
 
-    private func preparePaneTransition(source: BrowserViewController? = nil, tabID: UUID? = nil,
-                                       edge: PaneDropEdge? = nil, dropFrame: NSRect? = nil) {
+    private func settlePaneMotion(only affected: Set<UUID>? = nil) {
         paneTransition?.finish(); paneTransition = nil
-        for host in paneHosts.values { host.alphaValue = 1 }
-        for browser in browsers.values { browser.canvasTransition?.finish(); browser.canvasTransition = nil }
+        for (id, host) in paneHosts where affected?.contains(id) ?? true { host.alphaValue = 1 }
+        for (id, browser) in browsers where affected?.contains(id) ?? true {
+            browser.canvasTransition?.finish()
+            browser.canvasTransition = nil
+        }
+    }
+
+    private func paneLayoutView(_ id: UUID) -> NSView? {
+        if let split = paneSplits[id] { return split }
+        return paneHosts[id]
+    }
+
+    private func preparePaneTransition(source: BrowserViewController? = nil, tabID: UUID? = nil,
+                                       edge: PaneDropEdge? = nil, dropFrame: NSRect? = nil,
+                                       split: (target: UUID, layout: PaneLayout)? = nil, only: Set<UUID>? = nil,
+                                       rearranging: (split: UUID, kind: WorkspacePaneTransition.Rearrangement.Kind)? = nil) {
+        settlePaneMotion(only: rearranging.map { Set(layout.paneIDs(in: $0.split)) } ?? only)
         guard primaryBrowser.settings.motion.allows(.panes) else { return }
         let transition = WorkspacePaneTransition()
         transition.mode = primaryBrowser.settings.motion.mode
-        transition.capture(paneHosts, in: paneTreeHost) { browsers[$0]?.paneTransitionForeground ?? [] }
+        if let rearranging {
+            guard let node = layout.node(rearranging.split), case .split(let axis, _, let first, let second) = node.content,
+                  let divider = paneSplits[rearranging.split], let left = paneLayoutView(first), let right = paneLayoutView(second) else { return }
+            let foreground = layout.paneIDs(in: first).contains(activePaneID) ? first : second
+            transition.rearrangement = .init(kind: rearranging.kind, sides: [first, second],
+                foregroundSide: foreground, axis: axis, bounds: divider.convert(divider.bounds, to: paneTreeHost))
+            transition.capture([first: left, second: right], in: paneTreeHost) { side in
+                layout.paneIDs(in: side).flatMap { id in
+                    (browsers[id]?.paneRearrangementSnapshot ?? []) + (paneHosts[id].map { [$0.focusForeground] } ?? [])
+                }
+            }
+        } else if let only {
+            transition.capture(paneHosts.filter { only.contains($0.key) }, in: paneTreeHost) { browsers[$0]?.paneTransitionForeground ?? [] }
+        } else if let split, let edge, let host = paneHosts[split.target], splitFitsExistingFrame(host, edge: edge, proposed: split.layout) {
+            // There is enough room within this leaf. Its parent allocations
+            // and the surrounding workspace stay put, so only capture it.
+            transition.capture([split.target: host], in: paneTreeHost) { browsers[$0]?.paneTransitionForeground ?? [] }
+        } else {
+            transition.capture(paneHosts, in: paneTreeHost) { browsers[$0]?.paneTransitionForeground ?? [] }
+        }
         guard !transition.frames.isEmpty else { return }
         if let source, let tabID, let edge,
            let tab = source.tabStrip.paneTransitionFrame(for: tabID, in: paneTreeHost) {
@@ -831,6 +1078,10 @@ final class BrowserWorkspaceController: NSViewController {
     }
 
     func applyMotionPreferences(_ value: BrowserMotionPreferences) {
+        if dividerControls.motion != value {
+            dividerControls.motion = value
+            dismissPaneDividerControls()
+        }
         if sidebarSplit?.motion != value {
             sidebarSplit?.motion = value
             sidebarSplit?.finishAnimation()
@@ -853,8 +1104,8 @@ final class BrowserWorkspaceController: NSViewController {
         operationButton.removeFromSuperview()
         if let oldRow = sidebarRestoreButton.superview as? NSStackView { oldRow.removeArrangedSubview(sidebarRestoreButton) }
         sidebarRestoreButton.removeFromSuperview()
-        for host in [sidebarHost, activeFooterHost, pathHost] { host.subviews.forEach { $0.removeFromSuperview() } }
-        if let sidebar = sidebarControllers[activePaneID]?.view { pin(sidebar, inside: sidebarHost) }
+        for host in [activeFooterHost, pathHost] { host.subviews.forEach { $0.removeFromSuperview() } }
+        sidebarSplit?.installSidebarContent(sidebarControllers[activePaneID]?.view)
         if let footer = activeBrowser.statusSurface { pin(footer, inside: activeFooterHost) }
         activeBrowser.statusRow?.insertArrangedSubview(sidebarRestoreButton, at: 0)
         updateSidebarRestorePresentation()
@@ -887,13 +1138,24 @@ final class BrowserWorkspaceController: NSViewController {
     }
     private var sidebarReservation: CGFloat { sidebarSplit?.reservedWidth ?? 201 }
     var minimumWorkspaceSize: NSSize { workspaceMinimum(previewEnabled: preview.isEnabled) }
-    private func workspaceMinimum(previewEnabled: Bool, sidebarCollapsed: Bool? = nil) -> NSSize {
-        let minimum = minimumSize(for: layout.rootID)
+    private func workspaceMinimum(previewEnabled: Bool, sidebarCollapsed: Bool? = nil,
+                                  prospectiveLayout: PaneLayout? = nil) -> NSSize {
+        let proposed = prospectiveLayout ?? layout
+        let minimum = minimumSize(for: proposed.rootID, in: proposed)
         let sidebar = (sidebarCollapsed ?? isSidebarCollapsed) ? 0 : (sidebarSplit?.sidebarWidth ?? 200) + 1
         // Reserve the expanded operation row even while it is hidden so a job
         // starting at minimum size cannot shrink the smallest pane below its limit.
         return NSSize(width: max(820, minimum.width + sidebar + (previewEnabled ? 301 : 0)),
                       height: max(500, minimum.height + InterfaceMetrics.points(40 + (primaryBrowser.settings.showsPathBar ? 26 : 0))))
+    }
+    private func splitFitsExistingFrame(_ host: PaneHostView, edge: PaneDropEdge, proposed: PaneLayout) -> Bool {
+        guard sidebarSplit?.isAnimating != true, let window = view.window, let content = window.contentView,
+              Self.fits(minimum: Self.join(Self.leafMinimum, Self.leafMinimum, axis: edge.axis), in: host.bounds.size) else {
+            return false
+        }
+        let workspace = workspaceMinimum(previewEnabled: preview.isEnabled, prospectiveLayout: proposed)
+        let available = NSSize(width: content.bounds.width, height: min(content.bounds.height, window.contentLayoutRect.height))
+        return Self.fits(minimum: workspace, in: available)
     }
     private func enforceWindowMinimum(grow: Bool) {
         guard let window = view.window else { return }
@@ -923,15 +1185,20 @@ final class BrowserWorkspaceController: NSViewController {
             : "There is not enough room to split this pane. Enlarge the window or choose a different edge."
     }
     private func minimumSize(for id: UUID) -> NSSize { minimumSize(for: id, in: layout) }
+    private static let leafMinimum = NSSize(width: 400, height: 220)
+
     private func minimumSize(for id: UUID, in proposed: PaneLayout) -> NSSize {
-        guard let node = proposed.node(id) else { return NSSize(width: 400, height: 220) }
+        guard let node = proposed.node(id) else { return Self.leafMinimum }
         switch node.content {
-        case .pane: return NSSize(width: 400, height: 220)
+        case .pane: return Self.leafMinimum
         case .split(let axis, _, let first, let second):
-            let left = minimumSize(for: first, in: proposed), right = minimumSize(for: second, in: proposed)
-            return axis == .columns ? NSSize(width: left.width + right.width + 1, height: max(left.height, right.height))
-                : NSSize(width: max(left.width, right.width), height: left.height + right.height + 1)
+            return Self.join(minimumSize(for: first, in: proposed), minimumSize(for: second, in: proposed), axis: axis)
         }
+    }
+
+    private static func join(_ first: NSSize, _ second: NSSize, axis: PaneSplitAxis) -> NSSize {
+        axis == .columns ? NSSize(width: first.width + second.width + 1, height: max(first.height, second.height))
+            : NSSize(width: max(first.width, second.width), height: first.height + second.height + 1)
     }
 }
 
@@ -950,11 +1217,25 @@ private final class WorkspaceSplitView: NSSplitView, NSSplitViewDelegate {
         super.init(frame: .zero)
         isVertical = axis == .columns
         dividerStyle = .thin
+        arrangesAllSubviews = false
         delegate = self
     }
     required init?(coder: NSCoder) { nil }
+    var dividerLine: NSRect? {
+        guard let first = arrangedSubviews.first, arrangedSubviews.count == 2 else { return nil }
+        return isVertical
+            ? NSRect(x: first.frame.maxX, y: bounds.minY, width: dividerThickness, height: bounds.height)
+            : NSRect(x: bounds.minX, y: first.frame.maxY, width: bounds.width, height: dividerThickness)
+    }
+    var displayedFraction: Double? {
+        guard let first = arrangedSubviews.first, arrangedSubviews.count == 2 else { return nil }
+        let available = (isVertical ? bounds.width : bounds.height) - dividerThickness
+        guard available > 0 else { return nil }
+        return min(0.9, max(0.1, Double(isVertical ? first.frame.width : first.frame.height) / available))
+    }
     override func resizeSubviews(withOldSize oldSize: NSSize) {
-        guard subviews.count == 2 else { return }
+        let children = arrangedSubviews
+        guard children.count == 2 else { return }
         positioning = true
         defer { positioning = false }
         let available = max(0, (isVertical ? bounds.width : bounds.height) - dividerThickness)
@@ -962,11 +1243,11 @@ private final class WorkspaceSplitView: NSSplitView, NSSplitViewDelegate {
         let other = isVertical ? secondMinimum.width : secondMinimum.height
         let first = available >= minimum + other ? min(available - other, max(minimum, available * fraction)) : available * fraction
         if isVertical {
-            subviews[0].frame = NSRect(x: 0, y: 0, width: first, height: bounds.height)
-            subviews[1].frame = NSRect(x: first + dividerThickness, y: 0, width: max(0, available - first), height: bounds.height)
+            children[0].frame = NSRect(x: 0, y: 0, width: first, height: bounds.height)
+            children[1].frame = NSRect(x: first + dividerThickness, y: 0, width: max(0, available - first), height: bounds.height)
         } else {
-            subviews[0].frame = NSRect(x: 0, y: 0, width: bounds.width, height: first)
-            subviews[1].frame = NSRect(x: 0, y: first + dividerThickness, width: bounds.width, height: max(0, available - first))
+            children[0].frame = NSRect(x: 0, y: 0, width: bounds.width, height: first)
+            children[1].frame = NSRect(x: 0, y: first + dividerThickness, width: bounds.width, height: max(0, available - first))
         }
     }
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
@@ -976,10 +1257,8 @@ private final class WorkspaceSplitView: NSSplitView, NSSplitViewDelegate {
         min(proposedMaximumPosition, (isVertical ? bounds.width - secondMinimum.width : bounds.height - secondMinimum.height) - dividerThickness)
     }
     func splitViewDidResizeSubviews(_ notification: Notification) {
-        guard !positioning, subviews.count == 2 else { return }
-        let available = (isVertical ? bounds.width : bounds.height) - dividerThickness
-        guard available > 0 else { return }
-        fraction = min(0.9, max(0.1, Double(isVertical ? subviews[0].frame.width : subviews[0].frame.height) / available))
+        guard !positioning, let displayedFraction else { return }
+        fraction = displayedFraction
         onFractionChanged?(fraction)
     }
 }

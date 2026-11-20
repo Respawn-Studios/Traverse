@@ -15,8 +15,9 @@ import SwiftUI
     @Published private(set) var notice = ""
     private let backend = APFSVolumeCreation()
     private var work: Task<Void, Never>?
+    private var runID: UUID?
     private var subscriptions = Set<AnyCancellable>()
-    private let permission = Permission()
+    private let permission = NativeAPFSRequestPermission()
     private(set) var target: ManagedVolume?
     private weak var operations: ApplicationOperationCoordinator?
     private var changed: (@MainActor () -> Void)?
@@ -67,20 +68,17 @@ import SwiftUI
     func configure(target: ManagedVolume?, operations: ApplicationOperationCoordinator?, changed: @escaping @MainActor () -> Void) {
         guard !isWorking else { return }
         self.target = target; self.operations = operations; self.changed = changed
-        plan = nil; result = nil; notice = ""; permission.set(false)
+        plan = nil; result = nil; notice = ""; isSubmitted = false; permission.reset()
         subscriptions.removeAll()
         if let drives = operations?.drives {
             drives.$protectionRevision.combineLatest(drives.$volumes).dropFirst().sink { [weak self] _ in
-                guard let self else { return }
-                self.permission.set(false)
-                if !self.isSubmitted {
-                    self.plan = nil; self.work?.cancel()
-                    self.notice = "Drive observations or protection changed. Review the current container again."
-                }
+                guard let self, self.permission.cancelBeforeSubmission() else { return }
+                self.plan = nil; self.work?.cancel()
+                self.notice = "Drive observations or protection changed. Review the current container again."
             }.store(in: &subscriptions)
         }
     }
-    func invalidateReview() { guard !isWorking else { return }; plan = nil; result = nil; notice = ""; permission.set(false) }
+    func invalidateReview() { guard !isWorking else { return }; plan = nil; result = nil; notice = ""; permission.reset() }
     func review() {
         guard canReview, let target, let operations, let inspection = operations.beginInspection() else { return }
         let activity: any Sendable
@@ -112,16 +110,24 @@ import SwiftUI
             verificationAttemptsRemaining = remaining - 1; verificationCreationAttempts += 1
         }
         #endif
-        permission.set(true)
+        permission.start()
         isWorking = true; isSubmitted = false; notice = "Rechecking the selected container…"
         let permission = permission
+        let runID = UUID()
+        self.runID = runID
         work = Task { [self] in
             defer {
-                withExtendedLifetime(activity) {}; permission.set(false)
+                withExtendedLifetime(activity) {}; permission.reset()
+                self.runID = nil
                 operations.finish(owner: owner); isWorking = false; work = nil
             }
             let completed = await backend.perform(plan, permitted: { permission.allowed && Self.permitsInAppCreation(target) }) { [weak self] in
-                Task { @MainActor in self?.isSubmitted = true; self?.notice = "Adding the volume. Waiting for macOS and checking the result…" }
+                permission.markSubmitted()
+                Task { @MainActor in
+                    guard let self, self.runID == runID, self.isWorking, self.result == nil else { return }
+                    self.isSubmitted = true
+                    self.notice = "Adding the volume. Waiting for macOS and checking the result…"
+                }
             }
             result = completed; self.plan = nil
             isSubmitted = completed.submitted
@@ -130,20 +136,14 @@ import SwiftUI
             if completed.submitted { changed?() }
         }
     }
-    func cancelCheck() { guard !isSubmitted else { return }; permission.set(false); work?.cancel() }
-    func dismiss() { subscriptions.removeAll(); permission.set(false); if !isSubmitted { work?.cancel() } }
+    func cancelCheck() { guard permission.cancelBeforeSubmission() else { return }; work?.cancel() }
+    func dismiss() { subscriptions.removeAll(); if permission.cancelBeforeSubmission() { work?.cancel() } }
     func drain() async { if let work { await work.value } }
     func openDiskUtility() {
         guard DriveDiskUtilityHandoff.open() else {
             notice = "Disk Utility could not be opened."; return
         }
         notice = "Disk Utility opened separately. Select \(target?.name ?? "the intended APFS volume"), then choose Edit → Add APFS Volume. Traverse did not select a device or request creation in Disk Utility."
-    }
-    private final class Permission: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = false
-        var allowed: Bool { lock.withLock { value } }
-        func set(_ value: Bool) { lock.withLock { self.value = value } }
     }
 }
 

@@ -19,7 +19,11 @@ final class EditorFindBar: NSView, NSSearchFieldDelegate {
     var onReplacement: (() -> Void)?
     var onCommand: ((NSTextFinder.Action) -> Void)?
     var onOptions: ((EditorFindOptions) -> Void)?
+    var onSelectionScope: (() -> Void)?
+    var onWholeDocument: (() -> Void)?
     private var selectedOptions = EditorFindOptions()
+    private var scopeLabel: EditorFindScopeLabel?
+    private var selectionScopeAvailable = false
     private(set) var interfaceScale: CGFloat = 1
     private var layoutMetrics: [(NSLayoutConstraint, CGFloat)] = []
     private var rows: [NSStackView] = []
@@ -127,9 +131,19 @@ final class EditorFindBar: NSView, NSSearchFieldDelegate {
         return false
     }
     func setOptions(_ value: EditorFindOptions) { selectedOptions = value; rebuildOptions() }
+    func setScope(_ label: EditorFindScopeLabel?, canSelect: Bool) {
+        guard scopeLabel != label || selectionScopeAvailable != canSelect else { return }
+        scopeLabel = label
+        selectionScopeAvailable = canSelect
+        query.placeholderString = "Find in \(label?.title ?? "Document")"
+        query.setAccessibilityLabel(query.placeholderString)
+        options.toolTip = label.map { "Search only in \($0.title)" }
+        options.setAccessibilityLabel(options.toolTip ?? "Find options")
+        rebuildOptions()
+    }
     func clear() {
         query.stringValue = ""; replacement.stringValue = ""; count.stringValue = ""; notice.stringValue = ""
-        onQuery = nil; onReplacement = nil; onCommand = nil; onOptions = nil
+        onQuery = nil; onReplacement = nil; onCommand = nil; onOptions = nil; onSelectionScope = nil; onWholeDocument = nil
     }
     @objc private func command(_ sender: NSButton) {
         guard let action = NSTextFinder.Action(rawValue: sender.tag) else { return }
@@ -137,13 +151,22 @@ final class EditorFindBar: NSView, NSSearchFieldDelegate {
     }
     private func rebuildOptions() {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Options", action: nil, keyEquivalent: "")
-        func item(_ title: String, tag: Int, checked: Bool) {
+        menu.autoenablesItems = false
+        let title = switch scopeLabel {
+        case .selection: "Selection"
+        case .outline(let name): "In " + name.prefix(14) + (name.count > 14 ? "…" : "")
+        case nil: "Options"
+        }
+        menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        func item(_ title: String, tag: Int, checked: Bool, enabled: Bool = true) {
             let value = NSMenuItem(title: title, action: #selector(changeOption(_:)), keyEquivalent: "")
-            value.target = self; value.tag = tag; value.state = checked ? .on : .off; menu.addItem(value)
+            value.target = self; value.tag = tag; value.state = checked ? .on : .off; value.isEnabled = enabled
+            menu.addItem(value)
         }
         item("Match Case", tag: 0, checked: selectedOptions.matchesCase)
         item("Wrap Around", tag: 1, checked: selectedOptions.wraps)
+        item("Find in Selection", tag: 2, checked: scopeLabel == .selection, enabled: selectionScopeAvailable)
+        if case .outline = scopeLabel { item("Search Whole Document", tag: 3, checked: false) }
         menu.addItem(.separator())
         for (index, mode) in EditorFindMatchMode.allCases.enumerated() {
             item(mode.title, tag: index + 10, checked: selectedOptions.matchMode == mode)
@@ -154,6 +177,8 @@ final class EditorFindBar: NSView, NSSearchFieldDelegate {
         switch sender.tag {
         case 0: selectedOptions.matchesCase.toggle()
         case 1: selectedOptions.wraps.toggle()
+        case 2: onSelectionScope?(); return
+        case 3: onWholeDocument?(); return
         default:
             guard EditorFindMatchMode.allCases.indices.contains(sender.tag - 10) else { return }
             selectedOptions.matchMode = EditorFindMatchMode.allCases[sender.tag - 10]

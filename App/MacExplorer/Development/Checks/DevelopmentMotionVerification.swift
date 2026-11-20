@@ -132,7 +132,8 @@ import StorageAnalysis
                 guard visiblePages == [.general] else { throw Failure.presentation }
                 settings.motion.mode = .off
                 try await Task.sleep(for: .milliseconds(40))
-                guard (window.contentViewController as? ToolWindowChrome)?.contentHost.layer?.animation(forKey: "tool-page-crossfade") == nil else { throw Failure.presentation }
+                guard let chrome = window.contentViewController as? ToolWindowChrome,
+                      !ToolContentMotion.hasCrossfade(in: chrome.contentHost, kind: .page) else { throw Failure.presentation }
             } else if surface == "help" {
                 let controller = BrowserWindowController(settings: settings); browser = controller
                 controller.window?.orderOut(nil)
@@ -396,15 +397,21 @@ import StorageAnalysis
                 value["fieldVisibility"] = "different native window; not measured"
                 return value
             }
-            let frame = field.convert(field.bounds, to: nil)
-            let region = NSRect(x: frame.minX, y: CGFloat(report.height) - frame.maxY, width: frame.width, height: frame.height)
-            if NSRect(x: 0, y: 0, width: report.width, height: report.height).contains(region), !field.isHiddenOrHasHiddenAncestor {
+            if let region = visibleRegion(of: field, in: window, report: report) {
                 value["fieldRegion"] = ["x": region.minX, "y": region.minY, "width": region.width, "height": region.height]
                 value["fieldVisibility"] = "visible"
                 value["fieldOwnerVerified"] = true
             } else { value["fieldVisibility"] = "outside viewport; not measured" }
         }
         return value
+    }
+    static func visibleRegion(of view: NSView, in window: NSWindow,
+                              report: NativeMotionRecorder.Report) -> NSRect? {
+        guard view.window === window, !view.isHiddenOrHasHiddenAncestor else { return nil }
+        let frame = view.convert(view.bounds, to: nil)
+        let region = NSRect(x: frame.minX, y: CGFloat(report.height) - frame.maxY, width: frame.width, height: frame.height)
+        let viewport = NSRect(x: 0, y: 0, width: report.width, height: report.height)
+        return !region.isEmpty && viewport.contains(region) ? region : nil
     }
     private static func encode(_ report: NativeMotionRecorder.Report, at path: URL) throws {
         try JSONEncoder().encode(report).write(to: path, options: .withoutOverwriting)

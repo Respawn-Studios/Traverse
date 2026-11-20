@@ -163,4 +163,20 @@ internal final class MountScopeResolver {
         case .currentLayer, .knownDeviceNamespace: throw VolumeLifecycleFailure.protectionUncertain
         }
     }
+
+    /// A booted APFS System can be a snapshot. Prove that both explicit
+    /// startup mounts resolve to native storage outside the selected image.
+    func validateStartupStorage(outside group: UInt64) throws {
+        guard group > 0 else { throw VolumeLifecycleFailure.protectionUncertain }
+        for path in ["/", "/System/Volumes/Data"] {
+            let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            try validateProtectedLocation(url, devices: [], wholeGroup: group)
+            guard let value = observations[url], value.mount.path == path, value.fileSystem == "apfs",
+                  value.flags & UInt32(MNT_LOCAL) != 0,
+                  case .block(let leaf, let whole) = value.native, leaf > 0, whole > 0 else {
+                throw VolumeLifecycleFailure.protectionUncertain
+            }
+        }
+        try revalidate()
+    }
 }

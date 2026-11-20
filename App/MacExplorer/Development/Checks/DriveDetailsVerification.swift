@@ -72,9 +72,9 @@ import SwiftUI
             drives.setProtection(.none, for: volume)
             try require(model.canRun, "Cleared generated protection did not restore admission")
             checks.append("Actual folder selection seals its filesystem and accepts an observed sibling volume in the selected storage group; stale selected-drive discovery and protection refuse before the workload")
-            model.size = .quick
-            model.workload = ProcessInfo.processInfo.arguments.contains("--random-benchmark") ? .random4K : .sequential
-            model.preset = quickMix ? .quickMix : .selected
+            model.configuration.size = .quick
+            model.configuration.workload = ProcessInfo.processInfo.arguments.contains("--random-benchmark") ? .random4K : .sequential
+            model.configuration.preset = quickMix ? .quickMix : .selected
             let active = ApplicationFileActivity.gate.activeCount
             let oldClipboardWriter = browser.clipboardWriter
             var copiedResults: [String] = []
@@ -106,7 +106,7 @@ import SwiftUI
             await model.drain()
             guard let result = model.result else { throw UIVerification.Failure(message: "Missing benchmark result") }
             let expectedBytes: Int64 = quickMix ? 16 << 20 : 64 << 20
-            let expectedWorkload: DriveBenchmarkWorkload = quickMix ? .random4K : model.workload
+            let expectedWorkload: DriveBenchmarkWorkload = quickMix ? .random4K : model.configuration.workload
             try require(result.outcome == .completed && result.bytesWritten == expectedBytes && result.bytesRead == expectedBytes
                 && result.workload == expectedWorkload && result.preparationBytesWritten == (expectedWorkload == .random4K ? expectedBytes : 0)
                 && result.scratchURL == nil && !model.isWorking && operations.activeOwner == nil
@@ -172,9 +172,37 @@ import SwiftUI
             checks.append("Explicit Summary/JSON copies use the shared text publisher on a private test sink, omit the chosen folder/volume identity and remain disabled during work")
             guard let reference = model.selectedRun else { throw UIVerification.Failure(message: "Missing recorded run") }
             let referenceSuite = model.selectedSuite
-            model.run(); await model.drain()
+            let originalConfiguration = model.configuration
+            drives.setProtection(.keepMounted, for: volume)
+            try require(!model.canRepeat, "A protected volume allowed a repeat benchmark")
+            model.repeatSelected()
+            try require(!model.hasPendingWork, "Repeating bypassed protection admission")
+            drives.setProtection(.none, for: volume)
+            model.configuration.size = .compact
+            model.configuration.cacheMode = .normal
+            model.configuration.preset = quickMix ? .selected : .quickMix
+            guard let window = model.window else { throw UIVerification.Failure(message: "Repeat Benchmark window is missing") }
+            window.makeKeyAndOrderFront(nil)
+            try await wait(seconds: 3) { window.isKeyWindow && model.canRepeat }
+            try await Task.sleep(for: .milliseconds(150))
+            try require(FolderCompositionOwnedControls.press("Repeat Benchmark", in: window) && model.hasPendingWork
+                && model.configuration == originalConfiguration, "Repeat Benchmark did not launch the captured configuration")
+            await model.drain()
             guard let selected = model.selectedRun else { throw UIVerification.Failure(message: "Missing second recorded run") }
             generatedBytes += selected.result.bytesWritten + selected.result.preparationBytesWritten
+            try require((quickMix ? model.comparisonSuiteID == reference.suiteID : model.comparisonRunID == reference.id)
+                && selected.id != reference.id && !model.hasPendingWork, "Repeat did not select the exact matching previous measurement")
+            checks.append("Native Repeat Benchmark restores the captured options, respects protection and compares with the prior result if the actual conditions match")
+            try require(model.canCopyComparison, "An exact matched comparison could not be copied")
+            model.copyResults(.comparisonSummary)
+            let comparison = copiedResults.last ?? ""
+            try require(model.notice == "Copied benchmark comparison."
+                && comparison.contains("Selected P95 (ms)") && comparison.contains("Reference P95 (ms)")
+                && comparison.contains("Write and flush") && comparison.contains("Read and verify")
+                && (!quickMix || comparison.contains("Sequential") && comparison.contains("Random 4 KiB"))
+                && !comparison.contains(folder.path) && !comparison.contains(volume.name),
+                "The comparison table lost measured phases or included a folder or volume name")
+            checks.append("Copy comparison uses the approved exact-match pair and exports tab-delimited metrics on the generated sink without selection identity")
             if quickMix {
                 guard let first = referenceSuite, let second = model.selectedSuite,
                       let firstRandom = first.random4K, let secondRandom = second.random4K else {
@@ -226,8 +254,9 @@ import SwiftUI
                     model.comparisonSuiteID = first.sequential.suiteID
                     try await Task.sleep(for: .milliseconds(30))
                     try require(model.history.map(\.id) == priorHistory && !model.hasPendingWork
-                        && (window.contentViewController as? ToolWindowChrome)?.contentHost.layer?
-                            .animation(forKey: "tool-page-crossfade") == nil,
+                        && (window.contentViewController as? ToolWindowChrome).map {
+                            !ToolContentMotion.hasCrossfade(in: $0.contentHost, kind: .page)
+                        } == true,
                         "Same comparison replayed motion or started a workload")
                 }
                 settings.motion.mode = priorMotion
@@ -251,21 +280,67 @@ import SwiftUI
             try require(DriveBenchmarkComparison(selected: selected, reference: otherVolume) == nil
                 && DriveBenchmarkComparison(selected: selected, reference: selected) == nil,
                 "Comparison admitted another volume or the same run")
-            checks.append("Two real matching runs can be compared without a new read; self/foreign-volume comparisons are refused and phase rates remain finite")
+            checks.append("Two matching runs compare without a new read; implicit comparisons stay on the selected volume and phase rates remain finite")
             if let window = model.window, CGPreflightScreenCaptureAccess() {
                 try await Task.sleep(for: .milliseconds(350))
                 try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/drive-benchmark.png"))
                 if ProcessInfo.processInfo.arguments.contains("--record-drive-benchmark") {
-                    let clip = try await NativeMotionRecorder.record(window: window, root: root,
-                        label: "drive-benchmark-comparison-size", sampling: .diagnostic(for: window)) {
-                        settings.interfaceSize = .init(150); settings.appearance = .light
+                    let initialMotion = settings.motion
+                    let layoutChecks: [(label: String, size: InterfaceSize, appearance: BrowserAppearance,
+                                        motion: BrowserMotionPreferences)] = [
+                        ("drive-benchmark-size-only", .init(150), .dark, initialMotion),
+                        ("drive-benchmark-appearance-only", .standard, .light, initialMotion),
+                        ("drive-benchmark-layout-off", .init(150), .light, .init(mode: .off)),
+                        ("drive-benchmark-comparison-size", .init(150), .light, initialMotion),
+                    ]
+                    for check in layoutChecks {
+                        settings.interfaceSize = .standard; settings.appearance = .dark
+                        settings.motion = check.motion
+                        try await Task.sleep(for: .milliseconds(350))
+                        let clip = try await NativeMotionRecorder.record(window: window, root: root,
+                            label: check.label, sampling: .diagnostic(for: window)) {
+                            if settings.interfaceSize != check.size { settings.interfaceSize = check.size }
+                            if settings.appearance != check.appearance { settings.appearance = check.appearance }
+                        }
+                        motionFrames += clip.frames.count; clips.append(["label": check.label])
                     }
-                    motionFrames += clip.frames.count; clips.append(["label": "drive-benchmark-comparison-size"])
+                    settings.motion = initialMotion
                 } else { settings.interfaceSize = .init(150); settings.appearance = .light }
                 try await Task.sleep(for: .milliseconds(350))
                 try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/drive-benchmark-comparison-150.png"))
                 settings.interfaceSize = .init(100); settings.appearance = .dark
             }
+            let priorHistory = model.recentRuns.map(\.id)
+            model.addRecordedComparisonsForVerification([otherVolume])
+            try require(model.comparisonCandidates.contains(where: { $0.id == otherVolume.id })
+                && model.recentRuns.map(\.id) == priorHistory, "A matching reference from another volume was missing or replaced this drive's history")
+            model.comparisonRunID = otherVolume.id
+            try require(model.comparison?.isSameVolume == false && model.comparison?.reference.volumeName == otherVolume.volumeName
+                && model.comparison?.selected.id == selected.id && model.comparison?.read.referenceRate?.isFinite == true,
+                "The cross-volume comparison lost its exact source or measurements")
+            if let first = referenceSuite, let firstRandom = first.random4K, quickMix {
+                let foreignSuite = UUID()
+                let sequential = DriveBenchmarkRun(date: first.sequential.date, volumeName: otherVolume.volumeName,
+                    fileSystemID: otherVolume.fileSystemID, result: first.sequential.result, healthSamples: [], suiteID: foreignSuite)
+                let random = DriveBenchmarkRun(date: firstRandom.date, volumeName: otherVolume.volumeName,
+                    fileSystemID: otherVolume.fileSystemID, result: firstRandom.result, healthSamples: [], suiteID: foreignSuite)
+                model.addRecordedComparisonsForVerification([sequential, random])
+                try require(model.suiteComparisonCandidates.contains(where: { $0.sequential.suiteID == foreignSuite }),
+                    "The complete other-volume Quick Mix pair could not be selected")
+                if ProcessInfo.processInfo.arguments.contains("--large-interface") {
+                    settings.interfaceSize = .init(150); settings.appearance = .light
+                }
+                model.comparisonSuiteID = foreignSuite
+                try require(model.suiteComparison?.sequential.isSameVolume == false && model.suiteComparison?.random4K.isSameVolume == false
+                    && model.comparisonRunID == nil, "The other-volume Quick Mix comparison mixed stage or selection identities")
+                if let window = model.window, CGPreflightScreenCaptureAccess() {
+                    try await Task.sleep(for: .milliseconds(320))
+                    try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/drive-benchmark-other-volume.png"))
+                }
+            }
+            try require(!model.hasPendingWork && ApplicationFileActivity.gate.activeCount == active,
+                "Reading benchmark comparison history began a device operation")
+            checks.append("Explicit comparisons can choose a matching recorded volume and Quick Mix pair with separate source labels; both preserve the live drive selection and start no I/O")
             if quickMix {
                 model.stageFinishedForVerification = { stage in
                     if stage == .sequential { model.stop() }
@@ -311,6 +386,11 @@ import SwiftUI
                 try require(model.canRun, "Cleared protection did not restore benchmark admission")
                 checks.append("Protection changed after sequential cleanup prevents Quick Mix random admission without retaining the operation owner")
             }
+            model.chooseFolder(); await model.drain()
+            model.review(reference)
+            try require(model.canRun && !model.canRepeat, "A different folder selection reused the previous repeat authority")
+            model.repeatSelected()
+            try require(!model.hasPendingWork, "A stale result started another benchmark")
             model.run(); model.window?.close()
             try require(model.hasPendingWork && model.isStopping, "Direct native close released work early")
             await model.drain()
@@ -334,7 +414,7 @@ import SwiftUI
             let report: [String: Any] = ["passed": failure == nil, "failure": failure as Any? ?? NSNull(), "checks": checks,
                 "generatedBytes": generatedBytes, "nativeSandboxGrant": false, "rawDeviceRequests": 0,
                 "networkRequests": 0, "keychainCalls": 0, "motionFrames": motionFrames, "clips": clips, "actualOwnerDrain": !model.hasPendingWork,
-                "workload": quickMix ? "quickMix" : model.workload.rawValue]
+                "workload": quickMix ? "quickMix" : model.configuration.workload.rawValue]
             try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
                 .write(to: area.appendingPathComponent("evidence/native-drive-benchmark.json"), options: .withoutOverwriting)
         }
@@ -458,7 +538,10 @@ import SwiftUI
         let priorSize = settings.interfaceSize, priorAppearance = settings.appearance
         defer { settings.interfaceSize = priorSize; settings.appearance = priorAppearance }
         settings.interfaceSize = .init(150); settings.appearance = .light
-        let window = NSWindow(contentRect: .init(x: 250, y: 100, width: 920, height: 820),
+        // The standalone benchmark supports 640 pt width. Capture the result
+        // at that width with 150% text so bucket bars and percentile markers
+        // must remain legible without reserving a fixed marker column.
+        let window = NSWindow(contentRect: .init(x: 250, y: 100, width: 640, height: 1000),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "I/O latency · generated benchmark review"
         window.isReleasedWhenClosed = false
@@ -469,6 +552,8 @@ import SwiftUI
                 .padding(24)))
         defer { window.contentView = nil; window.close() }
         window.makeKeyAndOrderFront(nil)
+        try require(abs((window.contentView?.bounds.width ?? 0) - 640) < 1,
+                    "Minimum-width benchmark result capture did not use 640 pt content")
         try await Task.sleep(for: .milliseconds(350))
         try await GlassVerification.captureOwnedWindow(window, to: destination)
     }

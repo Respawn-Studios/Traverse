@@ -38,6 +38,14 @@ extension BrowserViewController {
     }
 
     func inspectOperationRecovery(loadMore: Bool = false) {
+        if loadMore { readOperationRecovery(loadMore: true); return }
+        guard let engine = recoverableFileOperations else { return }
+        operationCoordinator.refreshRecoveryHistory(for: engine, including: self)
+    }
+
+    /// Pagination belongs to this workspace; a changed journal head is shared
+    /// with every open window using the same engine.
+    func readOperationRecovery(loadMore: Bool = false) {
         guard !isBrowserSuspended, !isReadOnlyFileSession, let engine = recoverableFileOperations else { return }
         let cursor = loadMore ? recoveryNextCursor : nil
         if loadMore && cursor == nil { return }
@@ -45,44 +53,70 @@ extension BrowserViewController {
         let hadWindow = inspectionWindow != nil
         guard let inspectionToken = operationCoordinator.beginInspection() else { return }
         let coordinator = operationCoordinator
-        recoveryInspectionTask?.cancel()
+        let history = operationHistory
+        history.beginRecoveryInspection(inspectionToken, owner: paneID)
         recoveryInspectionTask = Task { [weak self, weak inspectionWindow] in
-            defer { coordinator.finishInspection(inspectionToken) }
+            defer {
+                coordinator.finishInspection(inspectionToken)
+                history.finishRecoveryInspection(inspectionToken)
+            }
             do {
                 let inspection = try await engine.inspectExistingHistory(after: cursor)
                 #if DEBUG
-                if let barrier = self?.beforeRecoveryInspectionReturnsForVerification { await barrier() }
+                if !Task.isCancelled, let barrier = self?.beforeRecoveryInspectionReturnsForVerification { await barrier() }
                 #endif
                 guard let self, !Task.isCancelled, !self.isBrowserSuspended,
                       self.recoverableFileOperations === engine, self.view.window === inspectionWindow,
                       !hadWindow || inspectionWindow != nil else { return }
-                if loadMore {
-                    let existing = Set(self.recoveryRecords.map(\.id))
-                    self.recoveryRecords += inspection.records.filter { !existing.contains($0.id) }
-                } else { self.recoveryRecords = inspection.records }
-                self.recoveryRecords.sort { $0.createdAt > $1.createdAt }
-                self.recoveryNextCursor = inspection.nextCursor
-                self.recoveryUnfinishedCount = inspection.unfinishedCount
-                self.recoveryHistoryReadiness = inspection.readiness
-                self.refusedRecoveryEntries = inspection.refusedEntries
-                self.recoveryWindow?.update(records: self.recoveryRecords, refusedEntries: inspection.refusedEntries,
-                                             hasMore: inspection.nextCursor != nil, unfinishedCount: inspection.unfinishedCount,
-                                             historyMessage: self.operationHistoryMessage,
-                                             canPrepareHistory: self.operationHistoryNeedsPreparation)
+                self.applyRecoveryInspection(inspection, mode: loadMore ? .loadEarlier : .replace)
                 if self.recoveryWindow?.isClosed == false { self.inspectRecoveryRetention() }
-                if let message = self.operationHistoryMessage { self.status.stringValue = message }
-                // Startup is observational. Unfinished history stays actionable
-                // in the window without interrupting every independent launch.
-                self.validateNavigationButtons()
             } catch {
                 guard let self, !Task.isCancelled, !self.isBrowserSuspended,
                       self.recoverableFileOperations === engine, self.view.window === inspectionWindow,
                       !hadWindow || inspectionWindow != nil else { return }
                 self.status.stringValue = "Operation recovery could not be read. Existing records were preserved."
                 self.recoveryHistoryReadiness = .unavailable
-                self.validateNavigationButtons()
+                self.refreshWorkspaceRecoveryPresentation()
             }
         }
+    }
+
+    private enum RecoveryInspectionMode { case replace, loadEarlier, lookup }
+
+    private func applyRecoveryInspection(_ inspection: OperationRecoveryInspection, mode: RecoveryInspectionMode) {
+        let hasLoadedRange = !recoveryRecords.isEmpty || recoveryNextCursor != nil
+        if mode != .replace {
+            let fresh = Set(inspection.records.map(\.id))
+            recoveryRecords.removeAll { fresh.contains($0.id) }
+            recoveryRecords += inspection.records
+            refusedRecoveryEntries = Array(Set(refusedRecoveryEntries + inspection.refusedEntries))
+                .sorted { $0.path < $1.path }
+        } else {
+            recoveryRecords = inspection.records
+            refusedRecoveryEntries = inspection.refusedEntries
+        }
+        recoveryRecords.sort { $0.createdAt > $1.createdAt }
+        // Finding a particular job must not move a browser's established
+        // Load Earlier position. A fresh cache can adopt the first head page.
+        if mode != .lookup || !hasLoadedRange { recoveryNextCursor = inspection.nextCursor }
+        recoveryUnfinishedCount = inspection.unfinishedCount
+        recoveryHistoryReadiness = inspection.readiness
+        refreshWorkspaceRecoveryPresentation()
+    }
+
+    private func refreshWorkspaceRecoveryPresentation() {
+        if let workspace { workspace.refreshRecoveryPresentations() }
+        else { refreshRecoveryPresentation() }
+    }
+
+    func refreshRecoveryPresentation() {
+        recoveryWindow?.update(records: recoveryRecords, refusedEntries: refusedRecoveryEntries,
+                               hasMore: recoveryNextCursor != nil, unfinishedCount: recoveryUnfinishedCount,
+                               historyMessage: operationHistoryMessage,
+                               canPrepareHistory: operationHistoryNeedsPreparation)
+        if let message = operationHistoryMessage { status.stringValue = message }
+        // Startup is observational; sharing the view does not prepare history.
+        validateNavigationButtons()
     }
 
     var hasRecoveryAttention: Bool {
@@ -128,7 +162,8 @@ extension BrowserViewController {
                 controller.showUnavailable("The selected operation changed. Select this job in Operation Recovery and open its review again.")
             }
             recoveryWindow?.onClose = { [weak self] in
-                self?.recoveryInspectionTask?.cancel()
+                // This snapshot also serves Undo in the browser's other panes.
+                // Closing its optional review must not cancel their refresh.
                 self?.retentionInspectionTask?.cancel()
                 self?.retentionInspectionID = nil
                 self?.groupedCopyRecoveryWindow?.close()
@@ -171,29 +206,45 @@ extension BrowserViewController {
         controller.requestSelection(recordID: recordID)
         guard let inspectionToken = operationCoordinator.beginInspection() else { return }
         let coordinator = operationCoordinator
-        recoveryInspectionTask?.cancel()
+        let history = operationHistory
+        history.beginRecoveryInspection(inspectionToken, owner: paneID)
         recoveryInspectionTask = Task { [weak self, weak controller] in
-            defer { coordinator.finishInspection(inspectionToken) }
+            defer {
+                coordinator.finishInspection(inspectionToken)
+                let current = history.finishRecoveryInspection(inspectionToken)
+                // The lookup replaced a browser snapshot read. If its optional
+                // review closed, restore that snapshot without touching a newer
+                // inspection or continuing the closed window's paged lookup.
+                if current, controller?.isClosed == true, let self,
+                   !self.isBrowserSuspended, self.recoverableFileOperations === engine {
+                    self.inspectOperationRecovery()
+                }
+            }
             var records: [OperationRecoveryRecord] = []
-            var refused: [URL] = []
             var cursor: UUID?
             do {
                 // A session retains at most sixteen jobs. Bound older-history
                 // lookup too; the existing Load Earlier action remains explicit.
                 for _ in 0..<16 {
-                    let page = try await engine.inspectExistingHistory(after: cursor)
+                    #if DEBUG
+                    let limit = min(64, max(1, self?.recoveryLookupPageSizeForVerification ?? 64))
+                    #else
+                    let limit = 64
+                    #endif
+                    let page = try await engine.inspectExistingHistory(after: cursor, limit: limit)
+                    #if DEBUG
+                    if !Task.isCancelled, let barrier = self?.beforeRecoveryInspectionReturnsForVerification { await barrier() }
+                    #endif
                     guard let self, let controller, !Task.isCancelled, !self.isBrowserSuspended,
-                          self.recoveryWindow === controller, self.recoverableFileOperations === engine else { return }
+                          !controller.isClosed, self.recoveryWindow === controller,
+                          self.recoverableFileOperations === engine else { return }
                     let existing = Set(records.map(\.id))
                     records += page.records.filter { !existing.contains($0.id) }
-                    refused += page.refusedEntries
                     cursor = page.nextCursor
-                    self.recoveryRecords = records
-                    self.refusedRecoveryEntries = refused
-                    self.recoveryNextCursor = cursor
-                    self.recoveryUnfinishedCount = page.unfinishedCount
-                    controller.update(records: records, refusedEntries: refused,
-                        hasMore: cursor != nil, unfinishedCount: page.unfinishedCount)
+                    // A lookup is a bounded query, not a replacement of the
+                    // window's loaded history. Preserve older loaded rows and
+                    // replace matching rows only with this fresh observation.
+                    self.applyRecoveryInspection(page, mode: .lookup)
                     if let record = records.first(where: { $0.id == recordID }) {
                         self.inspectRecoveryRetention(recordID)
                         if controller.selectedRecordID == recordID { onSelected?(record) }
@@ -202,14 +253,16 @@ extension BrowserViewController {
                     if cursor == nil { break }
                 }
                 guard let self, let controller, !Task.isCancelled, !self.isBrowserSuspended,
-                      self.recoveryWindow === controller, self.recoverableFileOperations === engine else { return }
+                      !controller.isClosed, self.recoveryWindow === controller,
+                      self.recoverableFileOperations === engine else { return }
                 controller.showRequestedRecordUnavailable(cursor == nil
                     ? "The requested operation is unavailable in this history. Its result and reported locations remain available; no recovery action has started."
                     : "The requested operation was not found in the first 1,024 records. Use Load Earlier Operations to inspect older history. No recovery action has started.")
                 onUnavailable?()
             } catch {
                 guard let self, let controller, !Task.isCancelled, !self.isBrowserSuspended,
-                      self.recoveryWindow === controller, self.recoverableFileOperations === engine else { return }
+                      !controller.isClosed, self.recoveryWindow === controller,
+                      self.recoverableFileOperations === engine else { return }
                 controller.showRequestedRecordUnavailable("The requested operation could not be read. Existing data was preserved; no recovery action has started.")
                 onUnavailable?()
             }
@@ -765,7 +818,7 @@ extension BrowserViewController {
         lastTransferContinuation = outcome.continuation
         continuationMoveClipboard = moveClipboard
         lastRecoveryRecordID = outcome.recordID
-        finishOperationPresentation()
+        finishOperationPresentation(result: result)
         consumeMoveClipboard(moveClipboard, after: result)
         refreshDirectoryAfterOperation(result, initiatingTab: initiatingTab, visit: visit,
                                        createdFolderRename: createdFolderRename)

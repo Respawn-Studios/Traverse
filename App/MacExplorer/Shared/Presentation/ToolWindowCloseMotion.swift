@@ -39,19 +39,21 @@ import QuartzCore
         let key = ObjectIdentifier(window)
         ToolContentMotion.cancelWindowEntrance(in: window)
         exits[key] = exit
-        exit.observation = BrowserNotificationObservation(name: NSWindow.willCloseNotification, object: window) { _ in
-            MainActor.assumeIsolated { cancel(window) }
+        exit.observation = BrowserNotificationObservation(name: NSWindow.willCloseNotification, object: window) { [weak window] _ in
+            MainActor.assumeIsolated { if let window { cancel(window) } }
         }
         // A document has already made its close decision before the accepted
         // gate. Resigning its editor here could commit text after that decision.
         if case .native = exit.kind { window.makeFirstResponder(nil) }
+        guard exits[key] === exit else { return }
         window.ignoresMouseEvents = true
+        let id = exit.id
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = exit.motion.mode.toolWindowDuration
+            context.duration = exit.motion.mode.toolWindowCloseDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             window.animator().alphaValue = 0
         } completionHandler: {
-            MainActor.assumeIsolated { finish(key, id: exit.id) }
+            MainActor.assumeIsolated { finish(key, id: id) }
         }
     }
     /// Used only after the feature's own pending-work/consent close guard.
@@ -145,6 +147,30 @@ import QuartzCore
     }
 }
 
+/// Both NSWindow and NSPanel keep their own native event and delegate path.
+/// They share the preparation and cleanup around those AppKit calls.
+@MainActor private enum ToolWindowOrdering {
+    static func show(_ window: NSWindow, order: () -> Void) {
+        let wasVisible = window.isVisible
+        ToolWindowCloseMotion.cancel(window)
+        let native = window.animationBehavior
+        let entrance = ToolContentMotion.prepareWindowEntrance(window, wasVisible: wasVisible)
+        if entrance != nil { window.animationBehavior = .none }
+        order()
+        window.animationBehavior = native
+        ToolContentMotion.revealWindow(window, motion: entrance)
+    }
+
+    static func close(_ window: NSWindow, userInitiated: Bool, order: () -> Void) {
+        if userInitiated && !ToolWindowCloseMotion.shouldClose(window) { return }
+        let native = window.animationBehavior
+        if userInitiated { window.animationBehavior = .none }
+        order()
+        window.animationBehavior = native
+        ToolContentMotion.finish(in: window)
+    }
+}
+
 /// Ordinary tool windows share the accepted-user-close boundary. AppKit still
 /// consults the feature delegate first; direct close() remains immediate for
 /// programmatic teardown and actual work draining.
@@ -168,24 +194,14 @@ import QuartzCore
         super.performClose(sender)
     }
     override func close() {
-        if userClose && !ToolWindowCloseMotion.shouldClose(self) { return }
-        let native = animationBehavior
-        if userClose { animationBehavior = .none }
-        super.close(); animationBehavior = native
-        ToolContentMotion.finish(in: self)
+        ToolWindowOrdering.close(self, userInitiated: userClose) { super.close() }
     }
     override func sendEvent(_ event: NSEvent) {
         guard !ToolWindowCloseMotion.isClosing(self) else { return }
         super.sendEvent(event)
     }
     override func makeKeyAndOrderFront(_ sender: Any?) {
-        let wasVisible = isVisible
-        ToolWindowCloseMotion.cancel(self)
-        let native = animationBehavior
-        let entrance = ToolContentMotion.prepareWindowEntrance(self, wasVisible: wasVisible)
-        if entrance != nil { animationBehavior = .none }
-        super.makeKeyAndOrderFront(sender); animationBehavior = native
-        ToolContentMotion.revealWindow(self, motion: entrance)
+        ToolWindowOrdering.show(self) { super.makeKeyAndOrderFront(sender) }
     }
 }
 
@@ -196,23 +212,13 @@ import QuartzCore
         super.performClose(sender)
     }
     override func close() {
-        if userClose && !ToolWindowCloseMotion.shouldClose(self) { return }
-        let native = animationBehavior
-        if userClose { animationBehavior = .none }
-        super.close(); animationBehavior = native
-        ToolContentMotion.finish(in: self)
+        ToolWindowOrdering.close(self, userInitiated: userClose) { super.close() }
     }
     override func sendEvent(_ event: NSEvent) {
         guard !ToolWindowCloseMotion.isClosing(self) else { return }
         super.sendEvent(event)
     }
     override func makeKeyAndOrderFront(_ sender: Any?) {
-        let wasVisible = isVisible
-        ToolWindowCloseMotion.cancel(self)
-        let native = animationBehavior
-        let entrance = ToolContentMotion.prepareWindowEntrance(self, wasVisible: wasVisible)
-        if entrance != nil { animationBehavior = .none }
-        super.makeKeyAndOrderFront(sender); animationBehavior = native
-        ToolContentMotion.revealWindow(self, motion: entrance)
+        ToolWindowOrdering.show(self) { super.makeKeyAndOrderFront(sender) }
     }
 }

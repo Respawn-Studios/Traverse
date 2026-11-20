@@ -2,6 +2,29 @@ import CryptoKit
 import Darwin
 import Foundation
 
+/// The observed FAT driver lacks the metadata and exclusive publication
+/// guarantees required by staged Copy and cross-volume Move. Read the filesystem
+/// through the already opened parent: a path or displayed drive name cannot
+/// authorize staging. Test refusal can only narrow production admission.
+internal enum CopyDestinationFilesystem {
+    static func requiresStaging(move: Bool, sourceDevice: dev_t, destinationDevice: dev_t,
+                                forceCrossVolumeForTest: Bool = false) -> Bool {
+        !move || sourceDevice != destinationDevice || forceCrossVolumeForTest
+    }
+
+    static func requireVerifiedStagingDestination(in parent: DirectoryAnchor,
+                                    forceFATRefusal: (@Sendable () -> Bool)? = nil) throws {
+        var filesystem = statfs()
+        guard fstatfs(parent.fd, &filesystem) == 0 else { throw posixFailure() }
+        let isFAT = withUnsafeBytes(of: filesystem.f_fstypename) { bytes in
+            bytes.prefix(while: { $0 != 0 }).elementsEqual("msdos".utf8)
+        }
+        guard !isFAT, forceFATRefusal?() != true else {
+            throw FileOperationFailure.fatTransferDestinationUnsupported
+        }
+    }
+}
+
 /// Transient, bounded observations. No security attribute bodies enter the journal.
 internal struct SecurityAttribute: Equatable, Sendable {
     let length: Int

@@ -8,14 +8,14 @@ private struct MemberStoreCase {
     let fixture: MoveFixture, source: URL, folder: URL
     let store: PersistentNameStore, item: RememberedItemID
     let engine: RecoverableFileOperations, admission: MoveReferenceAdmission
-    init() async throws {
+    init(locationPolicy: RememberedLocationPolicy = .localPermissions) async throws {
         fixture = try MoveFixture(entries: 48)
         folder = fixture.source.appendingPathComponent("Project")
         try FileManager().createDirectory(at: folder, withIntermediateDirectories: false)
         source = folder.appendingPathComponent("Document.txt")
         try Data("Generated member store data".utf8).write(to: source, options: .withoutOverwriting)
         let first = try await PersistentNameStore.createRemembering(directory: fixture.catalog,
-            first: AuthoredNames(nickname: "Orion"), source: source, allowDocumentFollowing: true)
+            first: AuthoredNames(nickname: "Orion"), source: source, allowDocumentFollowing: true, locationPolicy: locationPolicy)
         item = try await first.firstItemID(); await first.close()
         store = try await PersistentNameStore.open(directory: fixture.catalog, action: .upgradeMoveMembers)
         engine = RecoverableFileOperations(journalDirectory: fixture.history)
@@ -43,7 +43,7 @@ private struct MemberStoreCase {
     @Test(arguments: [false, true]) func b074cV3RootAssociationSurvivesExplicitMemberUpgrade(applied: Bool) async throws {
         let f = try MoveFixture(), source = try f.file()
         let first = try await PersistentNameStore.createRemembering(directory: f.catalog,
-            first: AuthoredNames(nickname: "Existing root"), source: source, allowDocumentFollowing: true)
+            first: AuthoredNames(nickname: "Existing root"), source: source, allowDocumentFollowing: true, locationPolicy: .localPermissions)
         let id = try await first.firstItemID(); await first.close()
         let old = try await PersistentNameStore.open(directory: f.catalog, action: .upgradeMoveContinuity)
         let engine = RecoverableFileOperations(journalDirectory: f.history)
@@ -75,7 +75,7 @@ private struct MemberStoreCase {
             try Data("Existing destination description".utf8).write(to: target, options: .withoutOverwriting)
             oldTarget = target
             oldTargetID = try await c.store.apply(c.store.prepareRemembering(AuthoredNames(nickname: "Destination only"),
-                source: target, allowDocumentFollowing: true))
+                source: target, allowDocumentFollowing: true, locationPolicy: .localPermissions))
         }
         let plan = try await c.engine.prepareTransfer(sources: [c.folder], destinationDirectory: c.fixture.destination, move: true)
         let choices = Dictionary(uniqueKeysWithValues: plan.conflicts.map { ($0.id, $0.canMerge ? TransferConflictResolution.merge : .replace) })
@@ -105,8 +105,9 @@ private struct MemberStoreCase {
         try c.fixture.receipt(["commonFacadeMoveUndo": true, "mergeReplacement": merge])
     }
 
-    @Test func b074cReceiptReopensBeforeApplicationAndColdUndoKeepsNames() async throws {
-        let c = try await MemberStoreCase(), ticket = try #require(c.admission.tickets.first)
+    @Test(arguments: ScopedReferenceQualification.locationPolicies)
+    func b074cReceiptReopensBeforeApplicationAndColdUndoKeepsNames(locationPolicy: RememberedLocationPolicy) async throws {
+        let c = try await MemberStoreCase(locationPolicy: locationPolicy), ticket = try #require(c.admission.tickets.first)
         let handle = try await c.store.prepareMoveHandoff(c.item, ticket: ticket)
         let moved = await c.engine.perform(c.admission.plan)
         let receipt = try #require(moved.referenceReceipts.first)
@@ -117,6 +118,7 @@ private struct MemberStoreCase {
         #expect(pending.receipt == receipt)
         _ = try await reopened.applyMoveHandoff(pending,
             evidence: c.engine.inspectMoveReference(ticket, direction: .forward, receipt: pending.receipt))
+        #expect(try await reopened.referenceScope(c.item) == locationPolicy.scope)
         let snapshot = try await reopened.snapshot(c.item)
         _ = try await reopened.apply(reopened.prepareEdit(snapshot, names: AuthoredNames(nickname: "Edited after Move")))
         await reopened.close()
@@ -128,6 +130,7 @@ private struct MemberStoreCase {
         _ = try await cold.applyMoveHandoff(inverse,
             evidence: c.engine.inspectMoveReference(ticket, direction: .undo, receipt: inverse.receipt))
         #expect(try referenceDisplay(await cold.resolveReference(c.item)).location?.path == c.source.path)
+        #expect(try await cold.referenceScope(c.item) == locationPolicy.scope)
         let names = try await cold.snapshot(c.item)
         var nickname: String?
         #expect(names.publish { nickname = $0.names.nickname })
@@ -174,7 +177,7 @@ private struct MemberStoreCase {
         case 1: #expect(try await c.store.finishRemoveAccess(c.store.prepareRemoveAccess(c.item)) == .removed)
         default:
             let other = try c.fixture.file("Relinked.txt")
-            _ = try await c.store.apply(c.store.prepareRelink(c.item, source: other, allowDocumentFollowing: true))
+            _ = try await c.store.apply(c.store.prepareRelink(c.item, source: other, allowDocumentFollowing: true, locationPolicy: .localPermissions))
         }
         await #expect(throws: RememberedReferenceFailure.stale) { _ = try await c.store.retainMoveReceipt(handle, receipt: receipt) }
         #expect(try await c.store.memberReceiptCount() == 0)
@@ -185,7 +188,7 @@ private struct MemberStoreCase {
     @Test func b074cIndexedCandidateBoundaryAndCapacity() async throws {
         let c = try await MemberStoreCase()
         let sibling = try c.fixture.file("Sibling.txt")
-        _ = try await c.store.apply(c.store.prepareRemembering(AuthoredNames(nickname: "Sibling"), source: sibling, allowDocumentFollowing: true))
+        _ = try await c.store.apply(c.store.prepareRemembering(AuthoredNames(nickname: "Sibling"), source: sibling, allowDocumentFollowing: true, locationPolicy: .localPermissions))
         let candidates = try await c.store.moveCandidateIDs(beneath: [c.folder])
         #expect(candidates.ids == [c.item] && !candidates.limited)
         let bounded = try await c.store.moveCandidateIDs(beneath: [c.fixture.source], limit: 1)
@@ -201,6 +204,9 @@ private struct MemberStoreCase {
 
 extension PersistentNameStore {
     fileprivate func memberProbe(_ value: NameStoreProbe?) { database.probe = value }
+    fileprivate func referenceScope(_ id: RememberedItemID) throws -> NativeDocumentReference.Scope? {
+        try database.reference(id)?.evidence?.scope
+    }
     fileprivate func memberReceiptCount() throws -> Int { try database.scalar("SELECT count(*) FROM move_member_receipts") }
     fileprivate func memberQueryPlan(_ root: URL) throws -> [String] {
         let query = try database.prepare("EXPLAIN QUERY PLAN SELECT n.id FROM item_references r INDEXED BY references_by_hint JOIN records n ON n.record=r.record WHERE r.access=0 AND n.hidden=0 AND r.hint>=? AND r.hint<? ORDER BY r.hint,r.record LIMIT 128")

@@ -7,6 +7,12 @@ extension BrowserViewController {
         settings.$showsTerminalButton.removeDuplicates().dropFirst().sink { [weak self] _ in
             Task { @MainActor [weak self] in self?.validateNavigationButtons() }
         }.store(in: &subscriptions)
+        settings.$showsGitControls.removeDuplicates().dropFirst().sink { [weak self] _ in
+            Task { @MainActor [weak self] in self?.gitControls.update() }
+        }.store(in: &subscriptions)
+        settings.$showsGitFileBadges.removeDuplicates().dropFirst().sink { [weak self] _ in
+            Task { @MainActor [weak self] in self?.gitControls.badgePreferenceChanged() }
+        }.store(in: &subscriptions)
         settings.$interfaceSize.removeDuplicates().dropFirst().sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }

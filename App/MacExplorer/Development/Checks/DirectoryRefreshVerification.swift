@@ -103,7 +103,7 @@ extension UIVerification {
             }
             checks.append("Hidden browser refuses address editing; real filesystem changes refresh normally without an editor. Native address-editor deferral NOT EXERCISED")
         } else {
-            try await waitUntil("Deferred external change") { browser.directoryRefreshPending }
+            try await waitUntil("Deferred external change") { browser.directoryRefreshPending == .observedChange }
             try await Task.sleep(for: .milliseconds(350))
             try require(browser.sessionID == editingVisit && browser.pathField.stringValue == "Literal unfinished address"
                         && browser.pathField.currentEditor() === editor && browser.rowsByURL[deferred] == nil,
@@ -123,7 +123,7 @@ extension UIVerification {
         let preparationVisit = browser.sessionID
         let duringPreparation = first.appendingPathComponent("kept-preparation.txt")
         try await Task.detached { try Data().write(to: duringPreparation, options: .withoutOverwriting) }.value
-        try await waitUntil("Change during operation preparation") { browser.directoryRefreshPending }
+        try await waitUntil("Change during operation preparation") { browser.directoryRefreshPending == .observedChange }
         try await Task.sleep(for: .milliseconds(350))
         try require(browser.sessionID == preparationVisit && browser.operationPreparationTask != nil
                     && browser.rowsByURL[duringPreparation] == nil, "Auto refresh invalidated an operation before its prompt finished")

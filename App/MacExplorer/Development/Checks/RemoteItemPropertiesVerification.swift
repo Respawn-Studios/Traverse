@@ -361,10 +361,10 @@ import FileOperations
             presentation.close(); try require(presentation.item == nil && presentation.window == nil)
             checks.append("Closing releases private item facts and the independent window owner")
             for protocolKind in ExplorerConnectionProtocol.allCases {
-                let readOnly = RemoteTextSnapshotController(contents: try .original(Data("Generated read-only text.\nSecond line.\n".utf8)),
-                    name: "Snapshot.txt", connection: UUID(),
+                let readOnly = NativeTextSnapshotController(contents: try .original(Data("Generated read-only text.\nSecond line.\n".utf8)),
+                    filename: "Snapshot.txt",
                     location: .remoteSnapshot(server: "Generated server", path: "/fixture/Snapshot.txt", captured: Date()),
-                    settings: settings, retainedCopy: false, protocolKind: protocolKind)
+                    status: "Read-only snapshot · " + protocolKind.rawValue, settings: settings, group: .connection(UUID()))
                 var snapshotClosed = false, writeActions = 0
                 readOnly.didClose = { _ in snapshotClosed = true }
                 readOnly.window.onSave = { writeActions += 1 }; readOnly.window.onSaveAs = { writeActions += 1 }
@@ -384,7 +384,7 @@ import FileOperations
                 if CGPreflightScreenCaptureAccess(), let native = readOnly.window.window {
                     try await GlassVerification.captureOwnedWindow(native, to: admitted.appendingPathComponent("evidence/read-only-snapshot-\(protocolKind.rawValue.lowercased()).png"))
                 }
-                readOnly.connectionClosed()
+                readOnly.updateStatus("Read-only snapshot · disconnected")
                 try require(!readOnly.window.saveAsButton.isEnabled && !readOnly.window.surface.textView.isEditable)
                 await readOnly.closeAndDrain()
                 try require(snapshotClosed && readOnly.closed && readOnly.window.window?.isVisible != true && writeActions == 0)

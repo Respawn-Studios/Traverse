@@ -9,11 +9,17 @@ and choose the check that exercises the changed route. See the
 | Area | Existing entry |
 | --- | --- |
 | Local text editing | `native-check local-editor`, `editor-preferences`, `editor-lines` |
+| Native text diff, exact match navigation and change previews | `check section editor-comparison` or `native-check editor-comparison` |
+| Text diff stacking and reflow while resizing | `native-check editor-comparison --motion` |
+| Local folder and pane comparison | `verify-ui --check-substantial --count 160` |
+| Git tools, index actions, revision pickers and file history | `verify-ui --check-git --count 160` |
+| Guarded Stage and Unstage only | `check section git-index` or `verify-ui --check-git --git-index-only --count 160` |
 | Archive creation | `native-check create-zip`, `create-tar` |
 | ZIP edits | `native-check zip-add-copy`, `batch-rename` and the relevant editor journey |
 | Compressed TAR | `native-check compressed-tar` |
 | Archive native exports | `native-check archive-export --archive-format zip`; choose TAR/gzip/bzip2 for its concrete producer |
 | Grouped operations | `native-check selection-group` |
+| New Folder and inline rename motion in Details, List and Icons | `native-check selection-group --motion`, optionally add `--large-interface` for Light at 150% |
 | Saved analyses | `native-check analysis-persistence`; `--incremental-analysis` adds the retained-source refresh pair |
 | Generated chart presentation | `native-check storage-chart` |
 | Support report review | `native-check support-details` |

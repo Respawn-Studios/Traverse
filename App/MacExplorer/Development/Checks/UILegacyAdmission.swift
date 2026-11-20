@@ -37,13 +37,16 @@ import StorageAnalysis
     }
 
     static func legacyValidateModes(_ args: [String]) throws -> UILegacyAdmission {
-            let focusedModes = ["--show-chart-integration-review", "--check-chart-integration", "--check-classification-v3", "--show-dimensional-review", "--check-dimensional-chart", "--check-startup-prefix", "--check-analysis-prefix", "--check-analysis-chart", "--check-analysis-paged", "--check-analysis-ram", "--check-analysis", "--check-address", "--check-tabs", "--check-rename", "--profile-rename", "--check-polish", "--qualify-search-index", "--check-queue", "--check-drag-tracking", "--verify-grouped-recovery", "--verify-grouped-copy-queue", "--verify-grouped-copy-responsiveness"].filter(args.contains)
+            let focusedModes = ["--show-chart-integration-review", "--check-chart-integration", "--check-classification-v3", "--show-dimensional-review", "--check-dimensional-chart", "--check-startup-prefix", "--check-analysis-prefix", "--check-analysis-chart", "--check-analysis-paged", "--check-analysis-ram", "--check-analysis", "--check-git", "--check-address", "--check-tabs", "--check-rename", "--profile-rename", "--check-polish", "--qualify-search-index", "--check-queue", "--check-drag-tracking", "--verify-grouped-recovery", "--verify-grouped-copy-queue", "--verify-grouped-copy-responsiveness"].filter(args.contains)
+            try require(!args.contains("--git-index-only") || focusedModes == ["--check-git"], "Git index checks require the generated Git route")
             let allFocusedModes = focusedModes + ["--check-chart-keyboard", "--check-workspace-analysis", "--check-app-accounting", "--show-app-accounting-review", "--check-sorted-pages", "--check-chart-lifecycle", "--check-location-actions", "--check-first-use", "--check-summary-hover", "--check-browser-regressions", "--show-browser-repair-review", "--qualify-address-directory-hint", "--check-classification-audit"].filter(args.contains)
             if !allFocusedModes.isEmpty {
                 let otherModes = ["--check-substantial", "--check-sidebar", "--check-everyday", "--check-workspace", "--check-chrome", "--check-presentation", "--layout-matrix", "--qualify-permissions", "--qualify-permission-retry", "--qualify-folder-access", "--qualify-trash", "--qualify-trash-fixture", "--qualify-glass", "--qualify-folder-reopen", "--resume-folder-access", "--restore-trash-fixture"]
                 try require(allFocusedModes.count == 1 && !otherModes.contains(where: args.contains),
                             "Focused workflow checks require one separate generated-fixture mode")
             }
+            try require(!args.contains("--check-git") || !args.contains("--offscreen"),
+                        "Git review checks require a visible generated window")
             try require(!args.contains("--layout-matrix") || args.contains("--check-sidebar"),
                         "Layout matrix requires the sidebar-only verification mode")
             let requestsFolderReopen = args.contains("--qualify-folder-reopen") || args.contains("--resume-folder-access")

@@ -5,6 +5,8 @@ import AppKit
 @MainActor
 final class BrowserAddressLayout {
     static let bottomRowHeight: CGFloat = 34
+    static let preferredAddressWidth: CGFloat = 190
+    static func buttonWidth(inWorkspace: Bool) -> CGFloat { inWorkspace ? 24 : 28 }
     let tabRow = stack([], orientation: .horizontal, spacing: 4)
     let bottomSurface: NavigationGlassSurface
     private let bottomRow = stack([], orientation: .horizontal, spacing: 4)
@@ -25,7 +27,9 @@ final class BrowserAddressLayout {
     }
 
     private func detach(_ view: NSView) {
-        (view.superview as? NSStackView)?.removeArrangedSubview(view)
+        for row in [addressRow, tabRow, bottomRow] where row.views.contains(where: { $0 === view }) {
+            row.removeArrangedSubview(view)
+        }
         view.removeFromSuperview()
     }
 
@@ -59,6 +63,41 @@ final class BrowserAddressLayout {
         browser.pathContainer.isHidden = next
         bottomSurface.isHidden = !next
         bottomSurface.isGlassEnabled = browser.settings.navigationStyle == .glass && browser.settings.glassNavigation
+        updateCommandVisibility()
         browser.viewIfLoaded?.needsLayout = true
+    }
+
+    func updateCommandVisibility() {
+        guard let browser, let paneWidth = browser.viewIfLoaded?.bounds.width, paneWidth > 0 else { return }
+        let terminal = #selector(BrowserViewController.openTerminalHere(_:))
+        let git = #selector(BrowserViewController.showGitMenu(_:))
+        var offered = Set(browser.navigationButtons.compactMap { _, action -> Selector? in
+            if action == git && !browser.gitControls.isAvailable { return nil }
+            if action == terminal && (!browser.settings.showsTerminalButton || browser.location.directoryURL == nil
+                || browser.isRemoteLocation || browser.isArchiveLocation) { return nil }
+            return action
+        })
+        if bottom == false, browser.workspace != nil {
+            let buttonWidth = Self.buttonWidth(inWorkspace: true) * InterfaceMetrics.scale
+            var reserved = Self.preferredAddressWidth + addressRow.edgeInsets.left + addressRow.edgeInsets.right
+                + browser.folderFilter.preferredLayoutWidth + addressRow.spacing
+            if !browser.navigationOperationButton.isHidden {
+                reserved += browser.navigationOperationButton.intrinsicContentSize.width + addressRow.spacing
+            }
+            let cost = buttonWidth + addressRow.spacing
+            // Make room for the address before secondary buttons. Their
+            // ordinary menu and keyboard commands remain available.
+            for action in [#selector(BrowserViewController.refresh(_:)), #selector(BrowserViewController.goUp(_:)), terminal, git]
+                where reserved + CGFloat(offered.count) * cost > paneWidth {
+                offered.remove(action)
+            }
+        }
+        for (button, action) in browser.navigationButtons {
+            let hide = !offered.contains(action)
+            guard hide != button.isHidden else { continue }
+            let focused = hide && button.window?.firstResponder === button
+            button.isHidden = hide
+            if focused { browser.focusBrowserContent() }
+        }
     }
 }

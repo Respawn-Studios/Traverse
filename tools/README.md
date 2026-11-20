@@ -8,7 +8,7 @@ exercises the behavior being changed.
 
 | Entry | Purpose |
 | --- | --- |
-| `dev.py` | Incremental app build, Swift package tests and generated native feature checks |
+| `dev.py` | Incremental app build and unit, section and candidate checks |
 | `worker_setup.py` | Offline production-worker prerequisite check; explicit `--fetch` seeds only the two locked Cargo caches |
 | `generate_project.py` | Deterministic project creation when missing; regeneration is explicit |
 | `build_storage_worker.py`, `build_network_helpers.py` | Bundled Rust worker builds |
@@ -28,6 +28,11 @@ Choose the relevant check; a menu of available flows is not a test quota.
 ## Validation without a second toolchain
 
 Most contributions need a focused package suite and one ordinary app workflow.
+Use `dev.py check unit --filter <suite-or-case>` while editing a unit, then
+`dev.py check section <feature>` for the native path. Before packing a release
+candidate, `dev.py check candidate` runs the complete generated baseline.
+Add `--plan` to see what each command runs.
+
 The root `verify_*.py` commands retain deeper generated-file checks for archive
 publication, operation recovery and process interruption. Read a command's help
 and fixture requirements before running it. Some package tests need one of these

@@ -82,6 +82,18 @@ import FileMemory
             let originalOne = Data("let generated = 1\n".utf8), originalTwo = Data("{\"generated\": true}\n".utf8)
             try originalOne.write(to: one, options: .withoutOverwriting); try originalTwo.write(to: two, options: .withoutOverwriting)
             for url in [one, two] { try need(chmod(url.path, 0o600) == 0, "editor-app-source-mode") }
+            let branchText = "let generated = 0\n"
+            let gitWitnesses = [items.appendingPathComponent(".git/HEAD"), items.appendingPathComponent(".git/index")]
+            let beforeGit = try await Task.detached {
+                try UIVerification.generateGit(in: items, ["init", "--template=", "--initial-branch=main"])
+                try Data(branchText.utf8).write(to: one)
+                try UIVerification.generateGit(in: items, ["add", "-A"])
+                try UIVerification.generateGit(in: items, ["commit", "-m", "Earlier generated draft"])
+                try UIVerification.generateGit(in: items, ["branch", "earlier-saved-base"])
+                try originalOne.write(to: one)
+                try UIVerification.generateGit(in: items, ["commit", "-am", "Current file before Traverse Save"])
+                return try gitWitnesses.map { try Data(contentsOf: $0) }
+            }.value
             let history = state.appendingPathComponent("history")
             boundary = "generated-history-setup"
             do { let journal = try OperationJournal(history); try journal.validateWritableCatalog() }
@@ -132,9 +144,36 @@ import FileMemory
             let first = documents[0], second = documents[1], coordinator = host.operationCoordinator
             boundary = "coordinator-save-and-stop"
             type("// Generated queued text\n", first); type("// Generated other edit\n", second)
+            try await wait("editor-app-marks-unsaved-insertion") {
+                documents.allSatisfy { $0.window.surface.unsavedLineChanges?.kind(at: 1) == .added }
+            }
+            let markerPreferences = settings.editorPreferences
+            var hiddenMarkers = markerPreferences
+            hiddenMarkers.showsUnsavedLineChanges = false
+            settings.updateEditorPreferences(hiddenMarkers)
+            try need(documents.allSatisfy { $0.window.surface.unsavedLineChanges == nil }, "editor-app-marker-preference-clears-gutter")
+            settings.updateEditorPreferences(markerPreferences)
+            try await wait("editor-app-restores-markers") {
+                documents.allSatisfy { $0.window.surface.unsavedLineChanges?.kind(at: 1) == .added }
+            }
             try await wait("editor-app-observations-drain") { coordinator.inspectionCount == 0 }
             second.window.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
             try await wait("editor-app-key-window") { second.window.window?.isKeyWindow == true }
+            if let native = second.window.window {
+                let surface = second.window.surface
+                guard let added = surface.lineIndex?.start(ofLine: 2),
+                      let menu = NSApp.mainMenu, let change = UIVerification.menuItem("Go", "Next Unsaved Change") else {
+                    throw Failure(stage: "editor-app-unsaved-change-command-available")
+                }
+                try need(surface.goToLine(1, generation: surface.generation, remembersLocation: false)
+                    && second.window.validateUserInterfaceItem(change), "editor-app-can-jump-to-unsaved-change")
+                let f7 = String(UnicodeScalar(NSF7FunctionKey)!)
+                try need(menu.performKeyEquivalent(with: UIVerification.key(f7, code: 98, flags: [], window: native))
+                    && surface.textView.selectedRange() == NSRange(location: added, length: 0), "editor-app-f7-jumps-to-unsaved-line")
+                try await UIVerification.snapshot(native, to: scope.appendingPathComponent("evidence/editor-unsaved-line-marker.png"))
+                try await verifyUnsavedChangeReview(second, native: native, settings: settings, fixture: scope)
+                checks.append("The native change marker and Option-F7 reach the same edited lines. The preview distinguishes inserted and removed lines and labels missing sides. Escape closes the preview, Return opens the exact change, and a draft edit invalidates a retained button.")
+            }
             first.window.saveButton.performClick(nil)
             try need(first.window.window?.isKeyWindow == false && !first.hasPendingSave && !first.hasPendingFileWork,
                 "background-editor-button-does-not-dispatch-save")
@@ -144,6 +183,8 @@ import FileMemory
             try await wait("editor-app-two-queued-captures") { editors.waitingMutationsForVerification == 2 }
             second.window.stopButton.performClick(nil)
             try await wait("editor-app-queued-stop") { editors.waitingMutationsForVerification == 1 && !second.hasPendingSave && !second.hasPendingFileWork }
+            try need(second.window.surface.unsavedLineChanges?.kind(at: 1) == .added,
+                "editor-app-stopped-save-keeps-markers")
             try need((try Data(contentsOf: one)) == originalOne && (try Data(contentsOf: two)) == originalTwo,
                 "editor-app-queued-save-entered-before-barrier")
             second.window.saveButton.performClick(nil)
@@ -161,6 +202,9 @@ import FileMemory
             }
             try need((try Data(contentsOf: one)) == Data(first.window.surface.textView.string.utf8)
                 && (try Data(contentsOf: two)) == Data(second.window.surface.textView.string.utf8), "editor-app-save-contents")
+            try await wait("editor-app-confirmed-saved-markers-retired") {
+                documents.allSatisfy { $0.window.surface.unsavedLineChanges?.marks.isEmpty == true }
+            }
             let readiness = try await engine.inspectExistingHistory().readiness
             try need(readiness == .available(catalogVersion: 10), "editor-app-explicit-history-upgrade")
             let rememberedAfterSave = try await host.privateNames.entry(remembered)
@@ -171,6 +215,7 @@ import FileMemory
             checks.append("Actual File command opens two local editors; passive Open leaves operation records unchanged")
             checks.append("Real coordinator volume barrier, two captured Save intents, queued Stop, automatic signal wakeup and one actual writer through native return")
             checks.append("Real history upgrade consent and two exact captured saves")
+            checks.append("Native editor gutters mark inserted lines against the saved buffer, follow the display preference, preserve marks after Stop, and clear them after a confirmed Save")
 
             owner.window?.makeKeyAndOrderFront(nil); host.focusBrowserContent(); host.inspectOperationRecovery()
             boundary = "file-undo-review-and-host-lifetime"
@@ -215,6 +260,68 @@ import FileMemory
                   let undoRecord = first.latestRecordID else { throw Failure(stage: "editor-app-undo-table") }
             let undoRow = versionTable.selectedRow
             try need(undoRow >= 0 && versionOwner.selectedRecordIDForVerification == undoRecord, "editor-app-undo-initial-selection")
+            let beforeText = String(decoding: originalOne, as: UTF8.self)
+            let savedText = first.window.surface.textView.string
+            func compareSavedVersions() async throws -> EditorComparisonWindow {
+                review.makeKeyAndOrderFront(nil)
+                try await wait("editor-app-saved-comparison-ready") { button("Compare Versions…", review)?.isEnabled == true }
+                button("Compare Versions…", review)?.performClick(nil)
+                try await wait("editor-app-saved-comparison-rendered") {
+                    guard let diff = versionOwner.comparisonForVerification else { return false }
+                    return diff.window?.isKeyWindow == true && diff.planForVerification != nil && !diff.hasWorkForVerification
+                }
+                guard let diff = versionOwner.comparisonForVerification else { throw Failure(stage: "editor-app-saved-comparison-window") }
+                try need(!diff.beforeSurface.textView.isEditable && !diff.currentSurface.textView.isEditable,
+                         "editor-app-saved-comparison-is-read-only")
+                return diff
+            }
+            let saveDiff = try await compareSavedVersions()
+            try need(saveDiff.labels.left == "Before Save" && saveDiff.labels.right == "Submitted Text"
+                && saveDiff.beforeSurface.textView.string == beforeText && saveDiff.currentSurface.textView.string == savedText
+                && (try Data(contentsOf: one)) == Data(savedText.utf8) && versionTable.selectedRow == undoRow,
+                "editor-app-retained-save-before-after-exact")
+            if let diffWindow = saveDiff.window {
+                try await UIVerification.snapshot(diffWindow, to: scope.appendingPathComponent("evidence/editor-saved-comparison.png"))
+            }
+            await saveDiff.closeAndDrain()
+            @MainActor func gitChoice() async throws -> NSWindow {
+                review.makeKeyAndOrderFront(nil)
+                try await wait("saved-versions-git-action-ready") {
+                    guard let action = button("Compare with Git Revision…", review) else { return false }
+                    return review.isKeyWindow && action.isEnabled && !action.isHidden
+                }
+                button("Compare with Git Revision…", review)?.performClick(nil)
+                try await wait("saved-versions-native-git-search") {
+                    guard let sheet = review.attachedSheet else { return false }
+                    return sheet.title == "Git Revision" && sheet.isKeyWindow && sheet.firstResponder is NSTextView
+                }
+                guard let sheet = review.attachedSheet else { throw Failure(stage: "saved-git-choice-sheet") }
+                return sheet
+            }
+            let dismissed = try await gitChoice()
+            dismissed.sendEvent(UIVerification.key("\u{1b}", code: 53, flags: [], window: dismissed))
+            try await wait("saved-versions-git-cancel-ends-selection") { review.attachedSheet == nil && !versionOwner.hasPendingWorkForVerification }
+            try need(versionOwner.comparisonForVerification == nil && versionTable.selectedRow == undoRow, "saved-versions-git-cancel-keeps-saved-review")
+            let picker = try await gitChoice()
+            for character in "earlier" { picker.sendEvent(UIVerification.key(String(character), code: 0, flags: [], window: picker)) }
+            try await wait("saved-versions-git-search-accepts-typing") { (picker.firstResponder as? NSTextView)?.string == "earlier" }
+            try await Task.sleep(for: .milliseconds(100))
+            picker.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: picker))
+            try await wait("saved-versions-git-diff-exact") {
+                guard let diff = versionOwner.comparisonForVerification else { return false }
+                return diff.window?.isKeyWindow == true && diff.planForVerification != nil && !diff.hasWorkForVerification
+            }
+            guard let gitDiff = versionOwner.comparisonForVerification else { throw Failure(stage: "saved-versions-git-diff-window") }
+            try need(gitDiff.beforeSurface.textView.string == branchText && gitDiff.currentSurface.textView.string == savedText
+                && gitDiff.labels.right == "Submitted Text" && versionTable.selectedRow == undoRow
+                && (try Data(contentsOf: one)) == Data(savedText.utf8), "saved-versions-git-pinned-branch-and-exact-attempt")
+            if let diffWindow = gitDiff.window {
+                try await UIVerification.snapshot(diffWindow, to: scope.appendingPathComponent("evidence/editor-saved-git-comparison.png"))
+            }
+            await gitDiff.closeAndDrain()
+            let afterGit = try await Task.detached { try gitWitnesses.map { try Data(contentsOf: $0) } }.value
+            try need(beforeGit == afterGit, "saved-versions-git-checkout-or-index-changed")
+            review.makeKeyAndOrderFront(nil)
             button("Undo Saved Change…", review)?.performClick(nil)
             try await prompt(review, action: "Undo Saved Change")
             try await wait("editor-app-file-undo-drain") { button("Done", review)?.isEnabled == true && !first.files.isWorking }
@@ -241,10 +348,70 @@ import FileMemory
             }
             try need(host.recoverableFileOperations === engine, "editor-results-created-different-history")
             host.recoveryWindow?.close()
+            let undoDiff = try await compareSavedVersions()
+            try need(undoDiff.labels.left == "Before Undo" && undoDiff.labels.right == "Restore Target"
+                && undoDiff.beforeSurface.textView.string == savedText && undoDiff.currentSurface.textView.string == beforeText
+                && first.window.surface.textView.string == savedText && (try Data(contentsOf: one)) == originalOne,
+                "editor-app-retained-undo-before-after-exact")
+            review.makeKeyAndOrderFront(nil)
             button("Done", review)!.performClick(nil)
             try await wait("editor-app-versions-closed") { !first.hasPendingFileWork && first.window.window?.attachedSheet == nil }
+            try need(undoDiff.closed && !undoDiff.hasWorkForVerification && !first.files.isWorking,
+                "editor-app-saved-comparison-drains-with-parent-sheet")
             checks.append("Actual attached Saved Versions uses real Undo confirmation; retirement visibility follows the explicit Debug/Release feature policy")
+            checks.append("Compare Versions in Saved Versions uses exact retained Save and Undo pairs, keeps the live document and original selection, and drains the diff when the review closes")
+            checks.append("Saved Versions compares an exact retained Save with an earlier Git branch through the native picker while preserving the selected change, on-disk text, Git HEAD and index")
             checks.append("Exact View Results reopens the closed originating Explorer with the same history engine")
+
+            boundary = "editor-compare-with-disk"
+            first.window.window?.makeKeyAndOrderFront(nil)
+            try await wait("editor-disk-comparison-parent-key") { first.window.window?.isKeyWindow == true }
+            type("// Generated draft for disk comparison\n", first)
+            let visibleDraft = first.window.surface.textView.string
+            let priorBinding = first.files.binding
+            let priorHistory = try await engine.inspectExistingHistory().records.map(\.id)
+            guard let compareDisk = UIVerification.menuItem("File", "Compare", "Compare with File on Disk…"),
+                  let compareDiskAction = compareDisk.action else { throw Failure(stage: "editor-disk-native-menu") }
+            try need(compareDisk.target === first.window && first.window.validateUserInterfaceItem(compareDisk)
+                && NSApp.sendAction(compareDiskAction, to: first.window, from: compareDisk), "editor-disk-menu-admission")
+            try await wait("editor-disk-comparison-presented") {
+                guard let diff = first.window.diskComparisonForVerification else { return false }
+                return !diff.hasWorkForVerification && diff.window?.isKeyWindow == true && diff.planForVerification != nil
+            }
+            guard let diskDiff = first.window.diskComparisonForVerification, let diskWindow = diskDiff.window else {
+                throw Failure(stage: "editor-disk-comparison-window")
+            }
+            try need(diskDiff.labels.left == "File on Disk" && diskDiff.labels.right == "Editor Buffer"
+                && diskDiff.planForVerification?.before.encoded == originalOne
+                && diskDiff.currentSurface.textView.string == visibleDraft,
+                "editor-disk-compares-current-on-disk-bytes-with-unsaved-buffer")
+            let unchangedSide = diskDiff.beforeSurface.generation
+            first.window.window?.makeKeyAndOrderFront(nil)
+            type("// Newer editor text\n", first)
+            let updatedDraft = first.window.surface.textView.string
+            diskWindow.makeKeyAndOrderFront(nil)
+            try await wait("editor-disk-refresh-menu") { diskWindow.isKeyWindow && ToolWindowMenuOwnership.owns(diskDiff) }
+            guard let refresh = NSApp.mainMenu?.item(withTitle: "File")?.submenu?.items.first(where: { $0.title == "Refresh" }),
+                  let refreshAction = refresh.action, NSApp.sendAction(refreshAction, to: diskDiff, from: refresh) else {
+                throw Failure(stage: "editor-disk-native-refresh")
+            }
+            try await wait("editor-disk-updated-draft") {
+                !diskDiff.hasWorkForVerification && diskDiff.currentSurface.textView.string == updatedDraft
+            }
+            let historyAfterComparison = try await engine.inspectExistingHistory().records.map(\.id)
+            try need(diskDiff.beforeSurface.generation == unchangedSide && first.files.binding == priorBinding
+                && first.files.mustReloadBeforeOriginalSave && first.isDirty
+                && (try Data(contentsOf: one)) == originalOne
+                && historyAfterComparison == priorHistory,
+                "editor-disk-refresh-changed-save-authority-history-or-unchanged-side")
+            let earlierSize = settings.interfaceSize
+            settings.interfaceSize = .init(150)
+            try await UIVerification.snapshot(diskWindow, to: scope.appendingPathComponent("evidence/disk-editor-diff-150.png"))
+            settings.interfaceSize = earlierSize
+            await diskDiff.closeAndDrain()
+            try need(first.window.diskComparisonForVerification == nil && !diskDiff.hasWorkForVerification
+                && coordinator.inspectionCount == 0, "editor-disk-comparison-drain")
+            checks.append("Compare with File on Disk reads the current local file into the shared diff, including an unsaved editor buffer. Refresh keeps the unchanged pane, and the comparison does not adopt a Save baseline or add history")
 
             boundary = "new-text-file-command"
             let created = items.appendingPathComponent("New Note.txt")
@@ -340,6 +507,179 @@ import FileMemory
         if let root { try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("evidence/native-editor-app.json"), options: .withoutOverwriting) }
         print("TRAVERSE_EDITOR_APP_RESULT " + (failure ?? "passed"))
         exit(result["passed"] as? Bool == true ? 0 : 1)
+    }
+
+    private static func verifyUnsavedChangeReview(_ document: LocalTextDocumentController, native: NSWindow,
+                                                  settings: BrowserSettings, fixture: URL) async throws {
+        let editor = document.window, surface = editor.surface, text = surface.textView
+        let firstDraft = text.string
+        text.insertText("// Earlier generated edit\n", replacementRange: .init(location: 0, length: 0))
+        text.breakUndoCoalescing()
+        try await wait("change-review-two-distinct-marks") { surface.unsavedLineChanges?.marks.count == 2 && surface.canGoToLine }
+        try need(surface.goToLine(3, generation: surface.generation, remembersLocation: false), "change-review-visit-second-change")
+        let caret = text.selectedRange(), origin = surface.scrollView.contentView.bounds.origin, draft = text.string
+        let f7 = String(UnicodeScalar(NSF7FunctionKey)!)
+        func chooser(_ phase: String) async throws -> NSWindow {
+            native.makeFirstResponder(text)
+            try await wait("unsaved-change-chooser-menu-admission-" + phase) {
+                guard let item = UIVerification.menuItem("Go", "Go to Unsaved Change…"), item.target === editor else { return false }
+                return editor.validateUserInterfaceItem(item)
+            }
+            guard let item = UIVerification.menuItem("Go", "Go to Unsaved Change…"), item.target === editor,
+                  editor.validateUserInterfaceItem(item) else { throw Failure(stage: "unsaved-change-chooser-menu-admission") }
+            let key = UIVerification.key(f7, code: 98, flags: [.command, .option], window: native)
+            try need(NSApp.mainMenu?.performKeyEquivalent(with: key) == true, "unsaved-change-chooser-native-shortcut")
+            do {
+                try await wait("unsaved-change-chooser-opens") {
+                    native.attachedSheet?.title == "Go to Unsaved Change" && native.attachedSheet?.isKeyWindow == true
+                }
+            } catch {
+                print("UNSAVED_CHOICE phase=\(phase) sheet=\(native.attachedSheet != nil) sheetKey=\(native.attachedSheet?.isKeyWindow == true) parentKey=\(native.isKeyWindow) popover=\(editor.unsavedChangePreviewForVerification != nil) mask=\(item.keyEquivalentModifierMask.rawValue) selectionChanged=\(text.selectedRange() != caret)")
+                throw error
+            }
+            guard let sheet = native.attachedSheet else { throw Failure(stage: "unsaved-change-chooser-sheet") }
+            return sheet
+        }
+        let cancel = try await chooser("cancel")
+        cancel.sendEvent(UIVerification.key("\u{1b}", code: 53, flags: [], window: cancel))
+        try await wait("unsaved-change-chooser-cancel-preserves-position") {
+            native.attachedSheet == nil && native.isKeyWindow && text.selectedRange() == caret
+        }
+        let list = try await chooser("choose")
+        guard let table = UIVerification.nativeTables(in: list.contentView).first else { throw Failure(stage: "unsaved-change-chooser-rows") }
+        func shows(_ line: String) -> Bool {
+            guard let content = list.contentView,
+                  let excerpt = views(content).first(where: { $0.identifier?.rawValue == "diff-excerpt-inserted" }) else { return false }
+            return views(excerpt).contains { ($0 as? NSTextField)?.stringValue == line }
+        }
+        try need(table.numberOfRows == 2 && table.selectedRow == 1, "unsaved-change-chooser-preselects-caret-change")
+        try await wait("unsaved-change-chooser-previews-exact-edited-line") { shows("// Generated other edit") }
+        try await UIVerification.snapshot(list, to: fixture.appendingPathComponent("evidence/editor-unsaved-change-list.png"))
+        NSApp.sendEvent(UIVerification.key("\u{f700}", code: 126, flags: [], window: list))
+        try await wait("unsaved-change-chooser-moves-and-updates-preview") {
+            table.selectedRow == 0 && shows("// Earlier generated edit") && !shows("// Generated other edit")
+        }
+        try need(text.selectedRange() == caret && surface.scrollView.contentView.bounds.origin == origin,
+            "unsaved-change-chooser-preview-keeps-original-caret")
+        NSApp.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: list))
+        try await wait("unsaved-change-chooser-jumps-to-first-edit") {
+            native.attachedSheet == nil && native.isKeyWindow && text.selectedRange().location == 0
+        }
+        guard let previous = UIVerification.menuItem("Go", "Previous Text Location"), let back = previous.action else {
+            throw Failure(stage: "unsaved-change-chooser-return-command")
+        }
+        try need(editor.validateUserInterfaceItem(previous) && NSApp.sendAction(back, to: editor, from: previous),
+            "unsaved-change-chooser-shares-text-location-trail")
+        try await wait("unsaved-change-chooser-returns-to-caret") {
+            text.selectedRange() == caret && surface.scrollView.contentView.bounds.origin == origin
+        }
+        try need(NSApp.mainMenu?.performKeyEquivalent(with: UIVerification.key(f7, code: 98, flags: .option, window: native)) == true,
+            "change-review-native-key-equivalent")
+        try await wait("change-review-first-native-popover") { editor.unsavedChangePreviewForVerification?.view.window != nil }
+        guard let preview = editor.unsavedChangePreviewForVerification, let popover = preview.view.window else { throw Failure(stage: "change-review-popover-window") }
+        let labels = views(preview.view).compactMap { ($0 as? NSTextField)?.stringValue }
+        try need(labels.contains("No lines") && labels.contains("// Generated other edit")
+            && labels.contains { $0.hasPrefix("+  Edited") } && !labels.contains("// Earlier generated edit"),
+            "change-review-exact-short-excerpt-and-inserted-sign")
+        try await UIVerification.snapshot(popover, to: fixture.appendingPathComponent("evidence/editor-unsaved-change-preview.png"))
+        popover.sendEvent(UIVerification.key("\u{1b}", code: 53, flags: [], window: popover))
+        try await wait("change-review-Escape-dismisses") { editor.unsavedChangePreviewForVerification == nil }
+        native.makeKeyAndOrderFront(nil)
+        try await wait("change-review-source-visible") { native.isKeyWindow }
+        let (gutter, hit) = surface.unsavedLineAnchor(3)
+        try need(gutter is NSRulerView && !hit.isEmpty, "change-review-pointer-gutter-target")
+        let point = gutter.convert(.init(x: hit.midX, y: hit.midY), to: nil)
+        guard let click = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: native.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1) else { throw Failure(stage: "change-review-pointer-event") }
+        native.sendEvent(click)
+        try await wait("change-review-pointer-opens-marked-line") { editor.unsavedChangePreviewForVerification?.view.window != nil }
+        guard let pointerPreview = editor.unsavedChangePreviewForVerification, let popup = pointerPreview.view.window else {
+            throw Failure(stage: "change-review-pointer-popover")
+        }
+        do {
+            try await wait("change-review-popover-default-key-focus") { popup.defaultButtonCell === pointerPreview.diff.cell }
+            popup.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: popup))
+            try await wait("change-review-full-diff") {
+                editor.comparisonForVerification?.position?.index == 1 && editor.comparisonForVerification?.window?.isKeyWindow == true
+            }
+        } catch {
+            print("CHANGE_REVIEW default=\(popup.defaultButtonCell === pointerPreview.diff.cell) popupKey=\(popup.isKeyWindow) parentKey=\(native.isKeyWindow) shown=\(editor.unsavedChangePreviewForVerification != nil) comparison=\(editor.comparisonForVerification != nil) exactIndex=\(editor.comparisonForVerification?.position?.index ?? -1)")
+            throw error
+        }
+        guard let comparison = editor.comparisonForVerification else { throw Failure(stage: "change-review-full-diff-owner") }
+        try need(comparison.planForVerification?.current.text == draft && document.isDirty && text.selectedRange() == caret
+            && surface.scrollView.contentView.bounds.origin == origin, "change-review-preserves-exact-draft-and-viewport")
+        await comparison.closeAndDrain()
+        native.makeKeyAndOrderFront(nil)
+        try await wait("change-review-source-returns") { native.isKeyWindow }
+        native.makeFirstResponder(text)
+        let initialSize = settings.interfaceSize, initialAppearance = settings.appearance
+        settings.interfaceSize = .init(150); settings.appearance = .light
+        defer { settings.interfaceSize = initialSize; settings.appearance = initialAppearance }
+        try await wait("change-review-larger-interface-committed") { InterfaceMetrics.scale == 1.5 }
+        let enlarged = try await chooser("stale")
+        try await UIVerification.snapshot(enlarged, to: fixture.appendingPathComponent("evidence/editor-unsaved-change-list-150.png"))
+        text.insertText("// New edit while choice is open\n", replacementRange: .init(location: 0, length: 0))
+        text.breakUndoCoalescing()
+        let editedCaret = text.selectedRange()
+        NSApp.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: enlarged))
+        try await wait("unsaved-change-chooser-refuses-outdated-choice") {
+            native.attachedSheet == nil && native.isKeyWindow && text.selectedRange() == editedCaret
+                && editor.navigationStatus == "The text or selection changed. Try again."
+        }
+        text.undoManager?.undo()
+        try await wait("unsaved-change-chooser-edit-Undo-and-preparation") {
+            text.string == draft && surface.unsavedLineChanges?.marks.count == 2
+        }
+        try need(surface.goToLine(3, generation: surface.generation, remembersLocation: false), "change-review-restores-second-change")
+        try need(NSApp.mainMenu?.performKeyEquivalent(with: UIVerification.key(f7, code: 98, flags: .option, window: native)) == true,
+            "change-review-large-key-equivalent")
+        try await wait("change-review-large-popover-visible") { editor.unsavedChangePreviewForVerification?.view.window != nil }
+        guard let stale = editor.unsavedChangePreviewForVerification, let large = stale.view.window else {
+            throw Failure(stage: "change-review-large-native-popover")
+        }
+        try await UIVerification.snapshot(large, to: fixture.appendingPathComponent("evidence/editor-unsaved-change-preview-150.png"))
+        let button = stale.diff.convert(stale.diff.bounds, to: stale.view)
+        try need(stale.view.bounds.width > 480 && stale.view.bounds.insetBy(dx: 1, dy: 1).contains(button)
+            && button.width >= 90, "change-review-large-native-button-fits")
+        text.insertText("// New edit invalidates the review\n", replacementRange: .init(location: 0, length: 0))
+        text.breakUndoCoalescing()
+        try await wait("change-review-new-edit-closes-stale-preview") { editor.unsavedChangePreviewForVerification == nil }
+        stale.diff.performClick(nil)
+        try need(editor.comparisonForVerification == nil && text.string.hasPrefix("// New edit invalidates the review"),
+            "change-review-retained-native-action-refuses-new-buffer")
+        text.undoManager?.undo()
+        try await wait("change-review-first-Undo-preserves-earlier-draft") { text.string == draft }
+        text.undoManager?.undo()
+        try await wait("change-review-Undo-restores-original-fixture-state") {
+            text.string == firstDraft && surface.unsavedLineChanges?.kind(at: 1) == .added
+        }
+        let original = (text.string as NSString).range(of: "true")
+        try need(original.location != NSNotFound, "change-review-replacement-baseline")
+        text.breakUndoCoalescing()
+        text.insertText("false", replacementRange: original)
+        text.breakUndoCoalescing()
+        try await wait("change-review-replacement-prepared") { surface.canGoToLine && text.string.contains("false") }
+        try need(surface.goToLine(2, generation: surface.generation, remembersLocation: false), "change-review-replacement-position")
+        try need(NSApp.mainMenu?.performKeyEquivalent(with: UIVerification.key(f7, code: 98, flags: .option, window: native)) == true,
+            "change-review-replacement-native-key-equivalent")
+        try await wait("change-review-replacement-visible") { editor.unsavedChangePreviewForVerification?.view.window != nil }
+        guard let changed = editor.unsavedChangePreviewForVerification, let changedWindow = changed.view.window else {
+            throw Failure(stage: "change-review-replacement-popover")
+        }
+        let content = views(changed.view)
+        let headings = content.compactMap { ($0 as? NSTextField)?.stringValue }
+        try need(headings.contains { $0.hasPrefix("−  Saved") } && headings.contains { $0.hasPrefix("+  Edited") }
+            && content.contains { $0.identifier?.rawValue == "diff-excerpt-removed" }
+            && content.contains { $0.identifier?.rawValue == "diff-excerpt-inserted" }, "change-review-both-signed-excerpts")
+        try await UIVerification.snapshot(changedWindow, to: fixture.appendingPathComponent("evidence/editor-change-replacement-150.png"))
+        changedWindow.sendEvent(UIVerification.key("\u{1b}", code: 53, flags: [], window: changedWindow))
+        try await wait("change-review-replacement-closed") { editor.unsavedChangePreviewForVerification == nil }
+        text.undoManager?.undo()
+        try await wait("change-review-replacement-Undo-keeps-prior-draft") {
+            text.string == firstDraft && document.isDirty && surface.unsavedLineChanges?.kind(at: 1) == .added
+        }
     }
 }
 #endif

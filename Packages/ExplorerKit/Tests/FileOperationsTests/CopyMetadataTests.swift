@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import CoreServices
 @testable import FileOperations
 import Testing
 
@@ -42,6 +43,17 @@ private func setMetadataAttribute(_ url: URL, _ name: String, _ value: String) t
     try setMetadataAttribute(fd, name, value)
 }
 private let fixtureQuarantine = "0083;67000000;MacExplorerGeneratedFixture;00000000-0000-0000-0000-000000000001"
+
+private func markGeneratedPublicQuarantine(_ source: URL) throws {
+    var values = URLResourceValues()
+    values.quarantineProperties = [kLSQuarantineAgentNameKey as String: "Traverse Generated FAT Review",
+        kLSQuarantineTimeStampKey as String: Date(timeIntervalSince1970: 1_700_000_000)]
+    var marked = source
+    try marked.setResourceValues(values)
+    guard try marked.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties?.isEmpty == false else {
+        throw FileOperationFailure.copyMetadataMismatch
+    }
+}
 
 private enum Fat32MountProof {
     static func device(_ value: String, whole: Bool) -> Bool {
@@ -153,6 +165,7 @@ private struct Fat32CopyFixture {
     private let markerData: Data
     private static let markerName = ".fat32-copy-owner-v2.json"
     private static let imageBytes: Int64 = 128 * 1024 * 1024
+    var diagnosticJobID: String { marker.jobID }
 
     init() throws {
         guard let raw = ProcessInfo.processInfo.environment["MAC_EXPLORER_FAT32_COPY_TEST_ROOT"] else {
@@ -241,7 +254,9 @@ private struct Fat32CopyFixture {
 
     func createCase(_ label: String, rich: Bool) throws -> (source: URL, destination: URL, journal: URL) {
         try validate()
-        guard label == "plain" || label == "rich" else { throw FileOperationFailure.invalidRequest }
+        guard ["plain", "rich", "marked"].contains(label), rich == (label == "rich") else {
+            throw FileOperationFailure.invalidRequest
+        }
         let name = label + "-" + UUID().uuidString
         let sourceDirectory = root.url.appendingPathComponent(name, isDirectory: true)
         let destinationDirectory = mount.url.appendingPathComponent(name, isDirectory: true)
@@ -252,6 +267,9 @@ private struct Fat32CopyFixture {
         if rich {
             try setMetadataAttribute(source, "com.macexplorer.generated-test", "generated attribute")
             try setMetadataAttribute(source, "com.apple.ResourceFork", "generated fork")
+        }
+        if label == "marked" {
+            try markGeneratedPublicQuarantine(source)
         }
         let fd = open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw posixFailure() }
@@ -267,75 +285,6 @@ private struct Fat32CopyFixture {
         return (source, destinationDirectory, root.url.appendingPathComponent("journal-" + name))
     }
 
-    /// At most one generated directory and three one-byte regular file names.
-    /// A successful fsync is an observed syscall result, not a durability claim.
-    func probeRegularFilePrimitives() throws {
-        try validate()
-        let name = "primitive-" + UUID().uuidString
-        guard mkdirat(mount.fd, name, 0o700) == 0 else { throw posixFailure() }
-        let probe = try DirectoryAnchor(mount.url.appendingPathComponent(name, isDirectory: true), resolve: false)
-        func syncStatus(_ result: Int32) throws -> String {
-            if result == 0 { return "ok" }
-            let failure = errno
-            if failure == EINVAL || failure == ENOTSUP || failure == EOPNOTSUPP { return "unsupported" }
-            throw posixFailure(failure)
-        }
-        func create(_ name: String, byte: UInt8) throws -> (stat, String) {
-            let fd = openat(probe.fd, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard fd >= 0 else { throw posixFailure() }
-            defer { close(fd) }
-            var value = byte, facts = stat()
-            guard write(fd, &value, 1) == 1, fstat(fd, &facts) == 0,
-                  facts.st_mode & S_IFMT == S_IFREG, facts.st_size == 1 else { throw FileOperationFailure.ioFailure }
-            return (facts, try syncStatus(fsync(fd)))
-        }
-        func prove(_ name: String, _ original: stat, _ byte: UInt8) throws {
-            let fd = openat(probe.fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
-            guard fd >= 0 else { throw FileOperationFailure.destinationChanged }
-            defer { close(fd) }
-            var facts = stat(), actual: UInt8 = 0
-            guard fstat(fd, &facts) == 0, facts.st_dev == original.st_dev, facts.st_ino == original.st_ino,
-                  facts.st_mode & S_IFMT == S_IFREG, facts.st_size == 1,
-                  pread(fd, &actual, 1, 0) == 1, actual == byte else { throw FileOperationFailure.destinationChanged }
-        }
-        let (source, fileSync) = try create("a", byte: 0x41)
-        let (target, _) = try create("b", byte: 0x42)
-        let duplicate = openat(probe.fd, "a", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        if duplicate >= 0 { close(duplicate); throw FileOperationFailure.destinationChanged }
-        guard errno == EEXIST else { throw FileOperationFailure.destinationChanged }
-        try prove("a", source, 0x41)
-        let collision = renameatx_np(probe.fd, "a", probe.fd, "b", UInt32(RENAME_EXCL))
-        guard collision != 0 else { throw FileOperationFailure.destinationChanged }
-        let collisionError = errno
-        try prove("a", source, 0x41)
-        try prove("b", target, 0x42)
-        guard collisionError == EEXIST || collisionError == EINVAL || collisionError == ENOTSUP
-                || collisionError == EOPNOTSUPP else { throw posixFailure(collisionError) }
-        var vacantStatus = "skipped"
-        if collisionError == EEXIST {
-            if renameatx_np(probe.fd, "a", probe.fd, "c", UInt32(RENAME_EXCL)) == 0 {
-                try prove("c", source, 0x41)
-                var missing = stat()
-                guard fstatat(probe.fd, "a", &missing, AT_SYMLINK_NOFOLLOW) == -1,
-                      errno == ENOENT else { throw FileOperationFailure.destinationChanged }
-                vacantStatus = "ok"
-            } else {
-                let failure = errno
-                try prove("a", source, 0x41)
-                var absent = stat()
-                guard fstatat(probe.fd, "c", &absent, AT_SYMLINK_NOFOLLOW) == -1,
-                      errno == ENOENT else { throw FileOperationFailure.destinationChanged }
-                guard failure == EINVAL || failure == ENOTSUP || failure == EOPNOTSUPP else {
-                    throw posixFailure(failure)
-                }
-                vacantStatus = "unsupported"
-            }
-        }
-        try prove("b", target, 0x42)
-        let directorySync = try syncStatus(fsync(probe.fd))
-        try validate()
-        print("FAT32_PRIMITIVE openExclusive=collision renameCollision=\(collisionError == EEXIST ? "protected" : "unsupported") renameVacant=\(vacantStatus) fileFsync=\(fileSync) directoryFsync=\(directorySync)")
-    }
 }
 
 /// Injects only at the generated payload's publish rename, before its native post-walk.
@@ -453,76 +402,281 @@ private final class MetadataPublicationMark: @unchecked Sendable {
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["MAC_EXPLORER_RUN_FAT32_COPY_TESTS"] == "1",
                    "Requires one separately admitted owned 128 MiB FAT32 image and fixed fixture marker."))
-    func generatedFAT32CopyDiagnosesMetadataWithoutTouchingOtherVolumes() async throws {
+    func generatedFAT32CopyRefusesBeforeStagingWithoutTouchingOtherVolumes() async throws {
         let fixture = try Fat32CopyFixture()
-        // Two fresh, tiny, generated sources. A third copy and one Undo belong
-        // only to a later reviewed portable-policy candidate.
+        // A future separately admitted image may verify the native fstatfs
+        // boundary. The former V5 metadata and primitive observations remain
+        // in its retained receipt; this test no longer submits a copy to FAT.
         for (label, rich) in [("plain", false), ("rich", true)] {
             let item = try fixture.createCase(label, rich: rich)
-            let sourceComparison = CopyComparison(diagnoseMetadataFamilies: true)
-            let before = try verifiedTree(item.source, cancellation: .init(), copyComparison: sourceComparison)
+            let before = try verifiedTree(item.source, cancellation: .init())
+            let destinationBefore = try Set(FileManager.default.contentsOfDirectory(atPath: item.destination.path))
             let operation = RecoverableFileOperations(journalDirectory: item.journal)
             let result = await operation.perform(.copy(sources: [item.source], destinationDirectory: item.destination), metadataPolicy: .strict)
             try fixture.validate()
-            let status = try #require(result.result.items.first { $0.role == .transfer }?.status)
-            let recordID = try #require(result.recordID)
-            let record = try #require(try OperationJournal(item.journal).inspectRecord(recordID))
-            let publicCopy = item.destination.appendingPathComponent(item.source.lastPathComponent)
+            let status = result.result.items.first(where: { $0.role == .job })?.status
+            let destinationAfter = try Set(FileManager.default.contentsOfDirectory(atPath: item.destination.path))
+            guard status == .failed(.fatTransferDestinationUnsupported), result.recordID == nil,
+                  result.result.items.first(where: { $0.source == item.source })?.status == .notStarted,
+                  before.matches(try verifiedTree(item.source, cancellation: .init())),
+                  destinationAfter == destinationBefore,
+                  !FileManager.default.fileExists(atPath: item.journal.path) else {
+                throw FileOperationFailure.destinationChanged
+            }
+            print("FAT32_COPY_REFUSAL variant=\(label) status=fatTransferDestinationUnsupported staged=false journal=false destinationUnchanged=true")
+        }
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["MAC_EXPLORER_RUN_FAT32_COPY_TESTS"] == "1",
+                   "Requires a separately admitted generated FAT32 image; observations do not authorize a transfer policy."))
+    func generatedFAT32NativeCopyObservesFilesystemMetadataWithoutChangingCopyPolicy() throws {
+        let fixture = try Fat32CopyFixture()
+        struct RawFile: Equatable { let identity: EntrySnapshot; let flags: UInt32; let bytes: Data }
+        func rawSnapshot(_ url: URL) throws -> RawFile? {
+            let parent = try DirectoryAnchor(url.deletingLastPathComponent(), resolve: false)
+            var info = stat()
+            guard fstatat(parent.fd, url.lastPathComponent, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+                if errno == ENOENT { return nil }
+                throw posixFailure()
+            }
+            let observed = try EntrySnapshot(parent: parent.fd, name: url.lastPathComponent)
+            guard observed.type == S_IFREG, (0...65_536).contains(observed.size) else {
+                throw FileOperationFailure.destinationChanged
+            }
+            let fd = openat(parent.fd, url.lastPathComponent, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0 else { throw posixFailure() }; defer { close(fd) }
+            var opened = stat()
+            guard fstat(fd, &opened) == 0, opened.st_flags == info.st_flags,
+                  try EntrySnapshot(fd: fd) == observed else { throw FileOperationFailure.destinationChanged }
+            // AppleDouble is itself an opaque generated metadata file here.
+            // Read its raw bytes, without asking VFS for attributes of a sidecar.
+            var bytes = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+            while bytes.count < observed.size {
+                let count = read(fd, &buffer, min(buffer.count, Int(observed.size) - bytes.count))
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw FileOperationFailure.ioFailure }
+                bytes.append(contentsOf: buffer.prefix(count))
+            }
+            var after = stat(), named = stat()
+            guard fstat(fd, &after) == 0, fstatat(parent.fd, url.lastPathComponent, &named, AT_SYMLINK_NOFOLLOW) == 0,
+                  after.st_flags == info.st_flags, named.st_flags == info.st_flags,
+                  try EntrySnapshot(fd: fd) == observed,
+                  try EntrySnapshot(parent: parent.fd, name: url.lastPathComponent) == observed else {
+                throw FileOperationFailure.destinationChanged
+            }
+            return RawFile(identity: observed, flags: info.st_flags, bytes: bytes)
+        }
+        func quarantineState(_ url: URL) -> String {
+            do {
+                let fresh = URL(fileURLWithPath: url.path)
+                return try fresh.resourceValues(forKeys: [.quarantinePropertiesKey])
+                    .quarantineProperties?.isEmpty == false ? "present" : "missing"
+            } catch { return "unreadable" }
+        }
+        func hasProvenance(_ url: URL) throws -> Bool {
+            let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0 else { throw posixFailure() }; defer { close(fd) }
+            let length = fgetxattr(fd, "com.apple.provenance", nil, 0, 0, 0)
+            if length >= 0 { return true }
+            if errno == ENOATTR { return false }
+            throw posixFailure()
+        }
+        func observeOrphanCompanion() throws {
+            var stage = "sourceSetup"
+            defer {
+                if stage != "finished" { print("FAT32_NAMESPACE_STOP variant=orphan stage=\(stage)") }
+            }
+            let item = try fixture.createCase("marked", rich: false)
+            let seed = try fixture.createCase("rich", rich: true)
+            let before = try verifiedTree(item.source, cancellation: .init())
+            let seedBefore = try verifiedTree(seed.source, cancellation: .init())
+            guard let source = try rawSnapshot(item.source) else { throw FileOperationFailure.sourceChanged }
+            let destination = item.destination.appendingPathComponent("native.bin")
+            let sidecarURL = item.destination.appendingPathComponent("._native.bin")
+            guard try rawSnapshot(destination) == nil, try rawSnapshot(sidecarURL) == nil else {
+                throw FileOperationFailure.destinationChanged
+            }
+            // PACK writes the distinct generated seed's metadata into an owned
+            // ordinary file. It does not strip a mark or reuse an old payload.
+            stage = "pack"
+            errno = 0
+            let packed = copyfile(seed.source.path, sidecarURL.path, nil,
+                UInt32(COPYFILE_ALL | COPYFILE_PACK | COPYFILE_EXCL | COPYFILE_NOFOLLOW))
+            let packedError = packed == 0 ? 0 : errno
+            print("FAT32_NAMESPACE_PACK variant=orphan result=\(packed) errno=\(packedError)")
+            stage = "packSnapshot"
+            guard packed == 0, let baselineSidecar = try rawSnapshot(sidecarURL),
+                  baselineSidecar.bytes.count >= 4,
+                  Array(baselineSidecar.bytes.prefix(4)) == [0x00, 0x05, 0x16, 0x07] else {
+                throw FileOperationFailure.ioFailure
+            }
+            stage = "namespaceBaseline"
+            let baselineNames = try Set(FileManager.default.contentsOfDirectory(atPath: item.destination.path))
+            guard try rawSnapshot(destination) == nil, baselineNames == ["._native.bin"],
+                  before.matches(try verifiedTree(item.source, cancellation: .init())),
+                  seedBefore.matches(try verifiedTree(seed.source, cancellation: .init())) else {
+                throw FileOperationFailure.destinationChanged
+            }
+            try fixture.validate()
+            stage = "namespaceCopy"
+            errno = 0
+            let result = copyfile(item.source.path, destination.path, nil,
+                UInt32(COPYFILE_ALL | COPYFILE_EXCL | COPYFILE_NOFOLLOW))
+            let nativeError = result == 0 ? 0 : errno
+            print("FAT32_NAMESPACE_CALL variant=orphan result=\(result) errno=\(nativeError)")
+            stage = "namespaceRecheck"
+            let output = try rawSnapshot(destination), sidecar = try rawSnapshot(sidecarURL)
+            let names = try Set(FileManager.default.contentsOfDirectory(atPath: item.destination.path))
+            let sourceUnchanged = before.matches(try verifiedTree(item.source, cancellation: .init()))
+            let seedUnchanged = seedBefore.matches(try verifiedTree(seed.source, cancellation: .init()))
+            let refused = result == -1 && nativeError == EEXIST
+            print("FAT32_NAMESPACE variant=orphan refused=\(refused) outputPresent=\(output != nil) sidecarUnchanged=\(sidecar == baselineSidecar) namesUnchanged=\(names == baselineNames) sourceUnchanged=\(sourceUnchanged) seedUnchanged=\(seedUnchanged) contentEqual=\(output?.bytes == source.bytes) destinationQuarantine=\(quarantineState(destination)) productionQualified=false")
+            guard sourceUnchanged, seedUnchanged, names.count <= 2,
+                  names.isSubset(of: ["native.bin", "._native.bin"]),
+                  result == 0 || result < 0 && (1...4095).contains(nativeError) else {
+                throw FileOperationFailure.destinationChanged
+            }
+            if result == 0, output?.bytes != source.bytes { throw FileOperationFailure.copyContentMismatch }
+            try fixture.validate()
+            stage = "finished"
+        }
+        let comparisons = [("descriptor", "plain", false), ("path", "marked", false),
+                           ("descriptor", "marked", false), ("descriptor", "rich", true),
+                           ("path", "rich", true)]
+        let remainingOnly = ProcessInfo.processInfo.environment["MAC_EXPLORER_FAT32_NATIVE_REMAINDER"] == "1"
+        let collisionOnly = ProcessInfo.processInfo.environment["MAC_EXPLORER_FAT32_NATIVE_COLLISION_DIAGNOSTIC"] == "1"
+        if collisionOnly { print("FAT32_NATIVE_DIAGNOSTIC_OWNER job=\(fixture.diagnosticJobID)") }
+        for (method, label, rich) in comparisons where (!remainingOnly || rich)
+            && (!collisionOnly || method == "descriptor" && rich) {
+            var stage = "sourceSnapshot"
+            defer {
+                if stage != "finished" {
+                    print("FAT32_NATIVE_STOP method=\(method) variant=\(label) stage=\(stage)")
+                }
+            }
+            let item = try fixture.createCase(label, rich: rich)
+            stage = "sourceProtection"
+            let sourceQuarantine = quarantineState(item.source)
+            let sourceProvenance = try hasProvenance(item.source)
+            if label == "marked", sourceQuarantine != "present" { throw FileOperationFailure.copyMetadataMismatch }
+            print("FAT32_NATIVE_SOURCE method=\(method) variant=\(label) publicQuarantine=\(sourceQuarantine) provenancePresent=\(sourceProvenance)")
+            stage = "sourceSnapshot"
+            let sourceComparison = CopyComparison(diagnoseMetadataFamilies: true)
+            let before = try verifiedTree(item.source, cancellation: .init(), copyComparison: sourceComparison)
+            guard let sourceBytes = try rawSnapshot(item.source), sourceBytes.identity == before.identity else {
+                throw FileOperationFailure.sourceChanged
+            }
+            let destination = item.destination.appendingPathComponent("native.bin")
+            let result: Int32
+            let nativeError: Int32
+            stage = "nativeCopy"
+            if method == "path" {
+                result = copyfile(item.source.path, destination.path, nil,
+                                  UInt32(COPYFILE_ALL | COPYFILE_EXCL | COPYFILE_NOFOLLOW))
+                nativeError = result == 0 ? 0 : errno
+            } else {
+                let sourceFD = open(item.source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                guard sourceFD >= 0 else { throw posixFailure() }
+                defer { close(sourceFD) }
+                let destinationFD = open(destination.path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                guard destinationFD >= 0 else { throw posixFailure() }
+                defer { close(destinationFD) }
+                result = fcopyfile(sourceFD, destinationFD, nil, UInt32(COPYFILE_ALL))
+                nativeError = result == 0 ? 0 : errno
+            }
+            print("FAT32_NATIVE_CALL method=\(method) variant=\(label) result=\(result) errno=\(nativeError)")
+            guard result == 0 || result < 0 && (1...4095).contains(nativeError) else {
+                throw FileOperationFailure.ioFailure
+            }
+            stage = "fixtureRecheck"
+            try fixture.validate()
+            stage = "sourceRecheck"
             guard before.matches(try verifiedTree(item.source, cancellation: .init())) else {
                 throw FileOperationFailure.sourceChanged
             }
-
-            var families: [CopyOrdinaryMetadataFamily] = []
-            var contentEqual = false, staged = false, sidecar = false
-            let area = try #require(record.areas.count == 1 ? record.areas[0] : nil)
-            let prefix = ".mac-explorer-recovery-"
-            guard area.url.deletingLastPathComponent() == item.destination,
-                  area.url.lastPathComponent.hasPrefix(prefix),
-                  UUID(uuidString: String(area.url.lastPathComponent.dropFirst(prefix.count))) != nil else {
-                throw FileOperationFailure.invalidRequest
+            stage = "sidecarSnapshot"
+            let sidecarURL = item.destination.appendingPathComponent("._native.bin")
+            let sidecar = try rawSnapshot(sidecarURL)
+            stage = "outputIdentity"
+            let rawCopied = try rawSnapshot(destination)
+            guard rawCopied != nil || result != 0 else { throw FileOperationFailure.ioFailure }
+            guard let rawCopied else {
+                print("FAT32_NATIVE method=\(method) variant=\(label) result=\(result) errno=\(nativeError) outputPresent=false appleDouble=\(sidecar != nil)")
+                print("FAT32_NATIVE_COLLISION method=\(method) variant=\(label) attempted=false reason=noOutput")
+                stage = "finished"
+                continue
             }
-            if let anchor = try? DirectoryAnchor(area.url, resolve: false) {
-                var sibling = stat()
-                if fstatat(anchor.fd, "._payload", &sibling, AT_SYMLINK_NOFOLLOW) == 0 { sidecar = true }
-                else if errno != ENOENT { throw posixFailure() }
-                let destinationComparison = CopyComparison(diagnoseMetadataFamilies: true)
-                if let stagedTree = try? verifiedTree(parent: anchor.fd, name: "payload", cancellation: .init(),
-                                                        copyComparison: destinationComparison) {
-                    staged = true
-                    contentEqual = sourceComparison.contentDigest == destinationComparison.contentDigest
-                    families = try sourceComparison.differingMetadataFamilies(from: destinationComparison)
-                    guard stagedTree.identity.device == anchor.identity.device else {
-                        throw FileOperationFailure.destinationChanged
-                    }
-                }
+            stage = "outputSnapshot"
+            let destinationQuarantine = quarantineState(destination)
+            let destinationProvenance = try hasProvenance(destination)
+            let copiedComparison = CopyComparison(diagnoseMetadataFamilies: true)
+            let families: String
+            do {
+                _ = try verifiedTree(destination, cancellation: .init(), copyComparison: copiedComparison)
+                families = try sourceComparison.differingMetadataFamilies(from: copiedComparison).map(\.rawValue).joined(separator: ",")
+            } catch {
+                families = "unreadable"
+                print("FAT32_NATIVE_METADATA method=\(method) variant=\(label) readable=false failure=\((error as? FileOperationFailure)?.rawValue ?? "other")")
             }
-            let statusName: String
-            switch status {
-            case .failed(let failure): statusName = failure.rawValue
-            case .succeeded: statusName = "succeeded"
-            case .skipped: statusName = "skipped"
-            case .cancelled: statusName = "cancelled"
-            case .notStarted: statusName = "notStarted"
+            let names = try Set(FileManager.default.contentsOfDirectory(atPath: item.destination.path))
+            guard names.count <= 2 else { throw FileOperationFailure.destinationChanged }
+            print("FAT32_NATIVE method=\(method) variant=\(label) result=\(result) errno=\(nativeError) outputPresent=true contentEqual=\(sourceBytes.bytes == rawCopied.bytes) families=\(families) sourceMode=\(before.identity.mode & 0o7777) destinationMode=\(rawCopied.identity.mode & 0o7777) sourceTime=\(before.identity.modifiedSeconds).\(before.identity.modifiedNanos) destinationTime=\(rawCopied.identity.modifiedSeconds).\(rawCopied.identity.modifiedNanos) appleDouble=\(sidecar != nil)")
+            print("FAT32_NATIVE_PROTECTION method=\(method) variant=\(label) sourceQuarantine=\(sourceQuarantine) destinationQuarantine=\(destinationQuarantine) sourceProvenance=\(sourceProvenance) destinationProvenance=\(destinationProvenance)")
+            // This is a diagnostic of native EXCL behavior, not publication
+            // or Undo qualification. Metadata inspection may itself update
+            // native emulation state, so take the collision baseline last.
+            stage = "collisionBaseline"
+            let baselineOutput = try rawSnapshot(destination)
+            let baselineSidecar = try rawSnapshot(sidecarURL)
+            let baselineNames = try Set(FileManager.default.contentsOfDirectory(atPath: item.destination.path))
+            guard baselineOutput != nil, baselineNames.count <= 2 else {
+                throw FileOperationFailure.destinationChanged
             }
-            print("FAT32_COPY_FAMILY variant=\(label) status=\(statusName) staged=\(staged) contentEqual=\(contentEqual) families=\(families.map(\.rawValue).joined(separator: ",")) appleDouble=\(sidecar)")
-
-            if label == "plain" {
-                guard status == .failed(.copyMetadataMismatch), record.state == "needsReview",
-                      staged, contentEqual, families.contains(.modificationTime),
-                      !FileManager().fileExists(atPath: publicCopy.path) else {
-                    throw FileOperationFailure.destinationChanged
-                }
-            } else if case .failed = status {
-                guard record.state == "needsReview", !FileManager().fileExists(atPath: publicCopy.path) else {
-                    throw FileOperationFailure.destinationChanged
-                }
+            stage = "collision"
+            errno = 0
+            let collision = copyfile(item.source.path, destination.path, nil,
+                                     UInt32(COPYFILE_ALL | COPYFILE_EXCL | COPYFILE_NOFOLLOW))
+            let collisionError = errno
+            print("FAT32_NATIVE_COLLISION_CALL method=\(method) variant=\(label) result=\(collision) errno=\(collisionError)")
+            stage = "collisionRecheck"
+            let afterOutput = try rawSnapshot(destination)
+            let outputUnchanged = baselineOutput == afterOutput
+            // Compare the snapshots already required by the collision guard.
+            // Fixed booleans distinguish metadata drift from replacement/data
+            // changes without logging generated bodies or adding native reads.
+            if let baselineOutput, let afterOutput {
+                let a = baselineOutput.identity, b = afterOutput.identity
+                let identity = a.device == b.device && a.inode == b.inode
+                let modified = a.modifiedSeconds == b.modifiedSeconds && a.modifiedNanos == b.modifiedNanos
+                let changed = a.changedSeconds == b.changedSeconds && a.changedNanos == b.changedNanos
+                let birth = a.birthSeconds == b.birthSeconds && a.birthNanos == b.birthNanos
+                print("FAT32_NATIVE_COLLISION_FIELDS method=\(method) variant=\(label) outputPresent=true identitySame=\(identity) modeSame=\(a.mode == b.mode) sizeSame=\(a.size == b.size) modifiedSame=\(modified) changedSame=\(changed) birthSame=\(birth) flagsSame=\(baselineOutput.flags == afterOutput.flags) bytesSame=\(baselineOutput.bytes == afterOutput.bytes)")
             } else {
-                guard status == .succeeded, FileManager().fileExists(atPath: publicCopy.path) else {
-                    throw FileOperationFailure.destinationChanged
-                }
+                print("FAT32_NATIVE_COLLISION_FIELDS method=\(method) variant=\(label) outputPresent=false")
             }
+            let sidecarUnchanged = baselineSidecar == (try rawSnapshot(sidecarURL))
+            let namesUnchanged = baselineNames == (try Set(FileManager.default.contentsOfDirectory(atPath: item.destination.path)))
+            let sourceUnchanged = before.matches(try verifiedTree(item.source, cancellation: .init()))
+            let refused = collision == -1 && collisionError == EEXIST
+            print("FAT32_NATIVE_COLLISION method=\(method) variant=\(label) attempted=true refused=\(refused) outputUnchanged=\(outputUnchanged) sidecarUnchanged=\(sidecarUnchanged) namesUnchanged=\(namesUnchanged) sourceUnchanged=\(sourceUnchanged)")
+            guard refused, outputUnchanged, sidecarUnchanged, namesUnchanged, sourceUnchanged else {
+                throw FileOperationFailure.destinationChanged
+            }
+            stage = "fixtureAfterCollision"
+            try fixture.validate()
+            print("FAT32_NATIVE_COLLISION_VERIFIED method=\(method) variant=\(label) refused=true outputAndSidecarUnchanged=true")
+            stage = "finished"
         }
-        try fixture.probeRegularFilePrimitives()
+        if !collisionOnly { try observeOrphanCompanion() }
+    }
+
+    @Test func publicQuarantineSetterMarksOnlyTheGeneratedSource() throws {
+        let fixture = try MetadataFixture(); defer { fixture.remove() }
+        let before = try Data(contentsOf: fixture.source)
+        try markGeneratedPublicQuarantine(fixture.source)
+        #expect(try fixture.source.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties?.isEmpty == false)
+        #expect(try Data(contentsOf: fixture.source) == before)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.destination.path).isEmpty)
     }
 
     @Test func realNativeQuarantineCopiesWithActualFingerprintAndUndo() async throws {

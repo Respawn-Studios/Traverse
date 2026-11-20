@@ -85,7 +85,7 @@ extension PersistentNameStore {
         defer { references.finish(request); withExtendedLifetime(use) {} }
         guard let currentRow = try database.reference(row.item), currentRow.access == 0,
               let current = currentRow.evidence else { throw RememberedReferenceFailure.stale }
-        let observed = try await referenceReader.capture(evidence.location, scope: .readOnly,
+        let observed = try await referenceReader.capture(evidence.location, scope: current.scope,
             movedObject: evidence, cancellation: request.cancellation)
         try requireMoveWrite()
         guard references.current(request), publication.allows(row.item),
@@ -121,7 +121,7 @@ extension PersistentNameStore {
         _ = try requireMoveReference(row)
         let use = try publication.beginReferenceUse(row.item), request = try references.begin(row.item)
         defer { references.finish(request); withExtendedLifetime(use) {} }
-        let observed = try await referenceReader.capture(evidence.location, scope: .readOnly,
+        let observed = try await referenceReader.capture(evidence.location, scope: row.original.scope,
             allowDocumentFollowing: allowDocumentFollowing, movedObject: evidence, cancellation: request.cancellation)
         try requireMoveWrite()
         guard references.current(request), publication.allows(row.item),

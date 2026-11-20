@@ -1,7 +1,7 @@
 {
-  "downstreamPatchSHA256": "08a4d680a0a854295074057ca20bcf2094efc493de785cb7b54a5f9b8219ddbc",
+  "downstreamPatchSHA256": "7bd6e0633f35d085ae5dbefc39618290575433e0a3cccd55e0aa94c6ba73a6ff",
   "files": {
-    "Cargo.toml": "0e247573ddb568e6b19b6d8b7bf56d449029742fbe33756186cfd86a84ac9dca",
+    "Cargo.toml": "bd656c3425f000c116352ddc90f42616387239fe24ce7ff394e1fe8c12839cb9",
     "LICENSE-APACHE": "6955628237fe98483693c2e357db2b2e2b1d95661ad4dc48f05d1d019f96e0dd",
     "LICENSE-MIT": "23fd66b8f04b7e89001e863b25c45e7cd44a395530eadcd7aaa2014061d3ea8e",
     "README.md": "f03aebc04883ab52726587e60fa4a62112cb4f8cf59dad35dce75798656367a7",

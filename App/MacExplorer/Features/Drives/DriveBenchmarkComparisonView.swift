@@ -9,14 +9,13 @@ struct DriveBenchmarkComparisonView: View {
             Text((comparison.selected.result.workload == .random4K ? "Random 4 KiB" : "Sequential")
                  + " · " + FileSizeText.string(comparison.selected.result.bytesWritten))
                 .interfaceFont(.headline)
-            Text("Selected: " + comparison.selected.displayTimestamp)
-                .interfaceFont(.caption).foregroundStyle(.secondary)
+            DriveBenchmarkComparisonSources(comparison: comparison)
             AdaptiveToolColumns(settings: settings, minimumWidth: 560) {
                 phase("Write & flush", comparison.write)
             } trailing: {
                 phase("Read & verify", comparison.read)
             }
-            Text("Same volume, workload, test size and cache/flush settings. Other activity, caches and temperature can still affect the result.")
+            Text("Both runs used the same workload, test size and cache and flush settings. File systems, background activity and temperature can affect the result.")
                 .interfaceFont(.caption).foregroundStyle(.secondary)
         }
         .accessibilityIdentifier("benchmark-comparison")
@@ -93,11 +92,10 @@ struct DriveBenchmarkSuiteComparisonView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Quick Mix comparison").interfaceFont(.headline)
-            Text("Selected: \(comparison.selected.sequential.displayTimestamp) · Reference: \(comparison.reference.sequential.displayTimestamp)")
-                .interfaceFont(.caption).foregroundStyle(.secondary)
+            DriveBenchmarkComparisonSources(comparison: comparison.sequential)
             stage("Sequential · 64 MiB", write: comparison.sequential.write, read: comparison.sequential.read, random: false)
             stage("Random 4 KiB · 16 MiB", write: comparison.random4K.write, read: comparison.random4K.read, random: true)
-            Text("Each stage compares only the same completed workload, size, filesystem and cache/flush outcomes. Changes reflect these file workloads, not drive health.")
+            Text("Each stage matches the workload, test size and cache and flush settings. Compare the measured file rates and latency for each stage.")
                 .interfaceFont(.caption).foregroundStyle(.secondary)
         }.accessibilityIdentifier("benchmark-suite-comparison")
     }
@@ -133,5 +131,17 @@ struct DriveBenchmarkSuiteComparisonView: View {
     private func number(_ value: Double?) -> String {
         guard let value, value.isFinite, value >= 0 else { return "—" }
         return value.formatted(.number.precision(.fractionLength(1)))
+    }
+}
+
+private struct DriveBenchmarkComparisonSources: View {
+    let comparison: DriveBenchmarkComparison
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(comparison.isSameVolume ? "Same volume" : "Different volumes").fontWeight(.semibold)
+            Text("Selected · " + comparison.selected.comparisonLabel)
+            Text("Reference · " + comparison.reference.comparisonLabel)
+        }.interfaceFont(.caption).foregroundStyle(.secondary)
     }
 }

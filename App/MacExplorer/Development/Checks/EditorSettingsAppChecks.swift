@@ -18,7 +18,13 @@ enum EditorSettingsAppChecks {
              [("item", .keyword), ("title", .property), ("'a>b'", .string), ("&amp;", .literal), ("<!-- keep -->", .comment), ("<![CDATA[<raw>]]>", .string)]),
             (.html, "<p data-label=\"Orion\">Text</p>", [("p", .keyword), ("data-label", .property), ("\"Orion\"", .string)]),
             (.markdown, "# Orion 🧭\nUse `let x = 1` and [docs](https://example.invalid).\n```swift\nlet x = 1\n```\nAfter\n",
-             [("# Orion 🧭", .keyword), ("`let x = 1`", .string), ("https://example.invalid", .string), ("let x = 1", .string)])
+             [("# Orion 🧭", .keyword), ("`let x = 1`", .string), ("https://example.invalid", .string), ("let x = 1", .string)]),
+            (.ini, "; generated\r\nbefore: off\r\n[Clock🧭]\r\ntick = 10\r\nlabel = \"demo\"\r\n",
+             [("; generated", .comment), ("[Clock🧭]", .keyword), ("tick", .property),
+              ("10", .number), ("off", .literal), ("\"demo\"", .string)]),
+            (.go, "package example\nvar raw = `func InsideString() { }\n\\`\n/* func InsideComment() {} */\ntype Worker struct{}\nfunc (w *Worker) Run() rune { return '🧭' }\nfunc Total[T comparable]() int { return 1 }\n",
+             [("package", .keyword), ("`func InsideString() { }\n\\`", .string),
+              ("/* func InsideComment() {} */", .comment), ("rune", .type), ("'🧭'", .string)])
         ]
         for (language, source, expected) in samples {
             let value = try TextDocumentValue.original(Data(source.utf8))
@@ -37,6 +43,16 @@ enum EditorSettingsAppChecks {
                 throw Failure.check("markup-cancel-refusal")
             }
             try require(value.encoded == Data(source.utf8), "markup-styling-changed-source")
+            if language == .ini || language == .go {
+                let outline = EditorDocumentOutline.prepare(text: value.text, syntax: .tokens(tokens),
+                    language: language, lines: EditorLineIndex(value.text), cancelled: { false })
+                if language == .ini {
+                    try require(outline.entries.map(\.title) == ["before", "Clock🧭", "tick", "label"]
+                        && outline.entries.map(\.depth) == [0, 0, 1, 1], "INI-section-and-key-outline")
+                } else {
+                    try require(outline.entries.map(\.title) == ["Worker", "Run", "Total"], "Go-type-and-function-outline")
+                }
+            }
         }
         let busy = try TextDocumentValue.original(Data(String(repeating: "<a b='c'/>\n", count: 14_000).utf8))
         if case .plain(.tokenBudget) = TextSyntax.color(busy, language: .xml) {} else { throw Failure.check("markup-token-budget") }
@@ -44,8 +60,11 @@ enum EditorSettingsAppChecks {
             && TextSyntaxLanguage.inferred(extension: "htm") == .html
             && TextSyntaxLanguage.inferred(extension: "xml") == .xml
             && TextSyntaxLanguage.inferred(extension: "JSONC") == .jsonc
-            && TextSyntaxLanguage.inferred(extension: "json") == .json, "source-extension-inference")
-        return "JSONC, HTML/XML and Markdown highlight roles, Unicode ranges, cancellation and finite token fallback preserve source text"
+            && TextSyntaxLanguage.inferred(extension: "json") == .json
+            && EditorOpeningSupport.syntax(for: EditorOpeningSupport.key(forFilename: ".editorconfig")) == .ini
+            && EditorOpeningSupport.syntax(for: EditorOpeningSupport.key(forFilename: "worker.go")) == .go,
+            "source-extension-inference")
+        return "JSONC, HTML/XML, Markdown, INI and Go highlighting and outlines preserve source text and bounded Unicode ranges"
     }
     private static func languageDetectionChecks() throws -> String {
         for (source, expected) in [("{\"🧭\":true}", TextSyntaxLanguage.json), ("[1,2,3]", .json),
@@ -101,9 +120,10 @@ enum EditorSettingsAppChecks {
     private static func newlineChecks() throws -> String {
         func plan(_ source: String, _ caret: Int, _ preferences: EditorIndentationPreferences = .fresh,
                   language: TextSyntaxLanguage = .json, maximumBytes: Int = 1024,
-                  indentsJSONBlocks: Bool = true) -> EditorIndentationPlan {
+                  indentsJSONBlocks: Bool = true, indentsCodeBlocks: Bool = true) -> EditorIndentationPlan {
             EditorIndentation.plan(.newline, text: source, selection: .init(location: caret, length: 0),
-                preferences: preferences, maximumBytes: maximumBytes, language: language, indentsJSONBlocks: indentsJSONBlocks)
+                preferences: preferences, maximumBytes: maximumBytes, language: language,
+                indentsJSONBlocks: indentsJSONBlocks, indentsCodeBlocks: indentsCodeBlocks)
         }
         func result(_ source: String, _ caret: Int, _ expected: String, _ expectedCaret: Int,
                     preferences: EditorIndentationPreferences = .fresh, language: TextSyntaxLanguage = .json,
@@ -149,7 +169,34 @@ enum EditorSettingsAppChecks {
             throw Failure.check("bounded-context-keeps-indentation-continuation")
         }
         try require(continued.text.utf16.count == 65_537, "bounded-context-does-not-guess-delimiters")
-        return "Return expands JSON/JSONC braces and brackets, preserves indentation and Unicode offsets, and honors native selection, lexical and byte boundaries"
+
+        let swift = "    if ready {"
+        try result(swift + "    }", swift.utf16.count, swift + "\n        \n    }",
+                   swift.utf16.count + 9, language: .swift)
+        try require(plan(swift, swift.utf16.count, disabled, language: .swift, indentsCodeBlocks: false) == .native,
+                    "swift-Return-opt-out")
+        for source in ["// {", "/* /* nested */ {", "let raw = #\"not code {", "let pattern = /text{"] {
+            try require(plan(source, source.utf16.count, language: .swift) == .native, "swift-Return-skips-comment-literal-or-ambiguous-slash")
+        }
+        for (language, source) in [(TextSyntaxLanguage.javascript, "const test = / {"), (.typescript, "const value = `literal {"),
+                                   (.cpp, "auto raw = R\"test(literal {"), (.objectiveC, "NSString *value = @\"literal {"),
+                                   (.css, ".card { background: url(data:generated{"), (.css, ".escaped\\{")] {
+            try require(plan(source, source.utf16.count, language: language) == .native,
+                "\(language.rawValue)-Return-keeps-literal-or-ambiguous-opening-native")
+        }
+        let type = "  const typed = (a: number) => {"
+        try result(type + " }", type.utf16.count, type + "\n      \n  }", type.utf16.count + 7, language: .typescript)
+        try require(plan(type, type.utf16.count, disabled, language: .typescript, indentsCodeBlocks: false) == .native,
+            "typescript-Return-honors-shared-code-preference")
+        let python = "    async def fetch(\n        name: str,\n    ) -> str:"
+        try result(python, python.utf16.count, python + "\n        ", python.utf16.count + 9, language: .python)
+        let pythonSuite = "  if ready:"
+        try result(pythonSuite, pythonSuite.utf16.count, pythonSuite + "\n  \t", pythonSuite.utf16.count + 4,
+                   preferences: .legacy, language: .python)
+        for source in ["value:", "match:", "values[1:", "if values[1:", "if True: # comment:", "s = '''\nif ignored:"] {
+            try require(plan(source, source.utf16.count, language: .python) == .native, "python-Return-skips-annotation-slice-comment-or-string")
+        }
+        return "Return expands JSON and supported code delimiters and indents Python suites, respecting lexical context, Unicode offsets, native selection and byte limits"
     }
     private static func bracketChecks() throws -> String {
         func plan(_ typed: String, _ prefix: String?, next: UInt16? = nil, owned: Bool = false,
@@ -163,7 +210,7 @@ enum EditorSettingsAppChecks {
         try require(plan("{", "\"inside ") == .native && plan("[", "// ", language: .jsonc) == .native
             && plan("{", "/*\n ", language: .jsonc) == .native, "brackets-in-strings-and-comments-are-native")
         try require(plan("{", nil) == .native && plan("{", "", enabled: false) == .native
-            && plan("{", "", language: .swift) == .native, "completion-bounds-language-and-opt-out")
+            && plan("{", "", language: .plain) == .native, "completion-bounds-language-and-opt-out")
         try require(plan("{", "", next: 34) == .native && plan("{}", "") == .native
             && plan("\"", "") == .native, "completion-does-not-wrap-content-paste-or-quotes")
         try require(plan("}", "{", next: 125, owned: true) == .skip
@@ -172,7 +219,21 @@ enum EditorSettingsAppChecks {
             && plan("}", "[", next: 93, owned: true) == .native
             && plan("}", "{\"", next: 125, owned: true) == .native,
             "closing-skip-requires-code-context-and-exact-inserted-provenance")
-        return "JSON/JSONC bracket proposals honor lexical context, finite lookbehind, explicit opt-out and exact closing provenance"
+        try require(plan("(", "render", language: .swift) == .insert("()", 41)
+            && plan("[", "render(", next: 41, language: .typescript) == .insert("[]", 93)
+            && plan("{", "struct Generated ", language: .rust, enabled: false) == .native
+            && plan("(", "", language: .json) == .native && plan(")", "render(", next: 41, language: .python) == .native,
+            "code-bracket-pair-admission-and-language-boundaries")
+        for (language, prefix) in [(TextSyntaxLanguage.swift, "let s = #\"literal "), (.python, "# comment "),
+                                   (.javascript, "const r = /"), (.typescript, "const s = `literal "),
+                                   (.rust, "let character = '"), (.cpp, "auto s = R\"gen(literal "),
+                                   (.objectiveC, "NSString *s = @\"literal "), (.css, ".escaped\\")] {
+            try require(plan("(", prefix, language: language) == .native,
+                "\(language.rawValue)-completion-keeps-literal-comment-and-ambiguous-input-native")
+        }
+        try require(plan("(", String(repeating: " ", count: EditorIndentation.lexicalInputLimit), language: .swift) == .native,
+            "code-pair-keeps-the-bounded-context-budget")
+        return "JSON and optional code bracket proposals share native closing provenance, lexical context and finite lookbehind"
     }
     static func check() throws -> [String] {
         var named = EditorPreferences()
@@ -199,12 +260,18 @@ enum EditorSettingsAppChecks {
         preferences.windowArrangement = .separateWindows
         preferences.indentation = .init(columns: 8, insertion: .tabs, continuesIndentation: true)
         preferences.indentsJSONBlocks = false
+        preferences.indentsCodeBlocks = false
         preferences.completesJSONBrackets = false
+        preferences.completesCodeBrackets = true
+        preferences.showsMatchingBrackets = false
+        preferences.includesGeneratedProjectFolders = true
         try preferences.setTarget(.traverse, forExtension: "json")
         original.updateEditorPreferences(preferences)
+        original.showsGitFileBadges = true
         let encoded = try original.encodedSnapshot()
         let restored = BrowserSettings(persist: false, restoredData: encoded)
         try require(restored.editorPreferences == preferences, "actual-settings-preferences-roundtrip")
+        try require(restored.showsGitFileBadges, "browser-git-badges-preference-roundtrip")
         var prior = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
         var healthSnapshot = prior
         healthSnapshot["driveHealthLiveUpdates"] = true
@@ -223,16 +290,26 @@ enum EditorSettingsAppChecks {
         guard var oldEditor = prior["editorPreferences"] as? [String: Any] else { throw Failure.check("encoded-editor-preferences-object") }
         oldEditor.removeValue(forKey: "indentation")
         oldEditor.removeValue(forKey: "indentsJSONBlocks")
+        oldEditor.removeValue(forKey: "indentsCodeBlocks")
         oldEditor.removeValue(forKey: "completesJSONBrackets")
+        oldEditor.removeValue(forKey: "completesCodeBrackets")
+        oldEditor.removeValue(forKey: "showsMatchingBrackets")
+        oldEditor.removeValue(forKey: "includesGeneratedProjectFolders")
         oldEditor.removeValue(forKey: "openingIndicator")
         oldEditor.removeValue(forKey: "findHighlightColor")
         oldEditor.removeValue(forKey: "windowArrangement")
         var legacySnapshot = prior; legacySnapshot["editorPreferences"] = oldEditor
+        legacySnapshot.removeValue(forKey: "showsGitFileBadges")
         let legacy = BrowserSettings(persist: false, restoredData: try JSONSerialization.data(withJSONObject: legacySnapshot))
         var expectedLegacy = preferences; expectedLegacy.indentation = .legacy; expectedLegacy.windowArrangement = .tabs
         expectedLegacy.indentsJSONBlocks = true
+        expectedLegacy.indentsCodeBlocks = true
         expectedLegacy.completesJSONBrackets = true
-        try require(legacy.editorPreferences == expectedLegacy, "older-editor-preserves-legacy-indentation-and-enables-new-JSON-options")
+        expectedLegacy.completesCodeBrackets = false
+        expectedLegacy.showsMatchingBrackets = true
+        expectedLegacy.includesGeneratedProjectFolders = false
+        try require(legacy.editorPreferences == expectedLegacy && !legacy.showsGitFileBadges,
+                    "older-settings-keep-their-editor-options-and-browser-badges-opt-in")
         var inheritedEditor = oldEditor
         inheritedEditor["indentation"] = ["columns": 4, "insertion": "tabs", "continuesIndentation": false] as [String: Any]
         var inheritedSnapshot = prior; inheritedSnapshot["editorPreferences"] = inheritedEditor

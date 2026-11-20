@@ -18,36 +18,18 @@ enum ScannerWorkerProcess {
     /// allowlist; this pump never logs tool data or runs a shell.
     static func collect(pipes: (stdout: Int32, stderr: Int32), control: ScannerProcessControl,
                         maximumBytes: Int = 4 << 20, deadline: TimeInterval = 5) throws -> Data {
-        defer { close(pipes.stdout); close(pipes.stderr) }
-        let began = ProcessInfo.processInfo.systemUptime
-        var outputOpen = true, errorOpen = true, status: Int32?, rejected = false
         var output = Data(), errorCount = 0
-        while outputOpen || errorOpen || status == nil {
-            if ProcessInfo.processInfo.systemUptime - began > deadline { rejected = true; control.cancel() }
-            control.escalateIfNeeded()
-            if status == nil { status = control.reapIfExited() }
-            if !outputOpen && !errorOpen && status != nil { break }
-            var descriptors = [pollfd(fd: outputOpen ? pipes.stdout : -1, events: Int16(POLLIN), revents: 0),
-                pollfd(fd: errorOpen ? pipes.stderr : -1, events: Int16(POLLIN), revents: 0)]
-            let ready = poll(&descriptors, nfds_t(descriptors.count), 50)
-            if ready < 0 && errno != EINTR { rejected = true; control.cancel() }
-            for index in 0..<2 where descriptors[index].revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 {
-                var bytes = [UInt8](repeating: 0, count: 16 << 10)
-                let count = read(descriptors[index].fd, &bytes, bytes.count)
-                if count == 0 { if index == 0 { outputOpen = false } else { errorOpen = false }; continue }
-                if count < 0 {
-                    if errno == EINTR || errno == EAGAIN { continue }
-                    rejected = true; control.cancel()
-                    if index == 0 { outputOpen = false } else { errorOpen = false }; continue
-                }
-                guard !rejected else { continue }
-                if output.count + errorCount + count > maximumBytes { rejected = true; control.cancel(); continue }
-                if index == 0 { output.append(contentsOf: bytes.prefix(count)) } else { errorCount += count }
+        do {
+            let status = try pump(pipes: pipes, control: control, deadline: deadline) { stream, bytes in
+                guard output.count + errorCount + bytes.count <= maximumBytes else { throw StartupStorageFailure.unavailable }
+                if stream == .stdout { output.append(contentsOf: bytes) }
+                else { errorCount += bytes.count }
             }
-        }
-        guard !rejected, !control.cancelled, status == 0, errorCount == 0 else { throw StartupStorageFailure.unavailable }
-        return output
+            guard !control.cancelled, status == 0, errorCount == 0 else { throw StartupStorageFailure.unavailable }
+            return output
+        } catch { throw StartupStorageFailure.unavailable }
     }
+
     static func launch(workerURL: URL, descriptors: [(Int32, Int32)], arguments: [String],
                        control: ScannerProcessControl) throws -> (stdout: Int32, stderr: Int32) {
         // Normalize every handed descriptor before ordered child remapping.
@@ -123,55 +105,83 @@ enum ScannerWorkerProcess {
         return (standard[0], errors[0])
     }
 
-    /// A synchronous utility-worker pump. Payloads are bounded and never logged.
-    /// Rejecting a frame cancels the owned child but continues draining/reaping.
+    /// Parse bounded newline frames while the shared pump retains the child.
+    /// `onPoll` permits a progress observation even when the worker is quiet.
     static func drain(pipes: (stdout: Int32, stderr: Int32), control: ScannerProcessControl,
-                      deadline: TimeInterval? = nil, frame: (Data) throws -> Void) throws -> Int32 {
+                      deadline: TimeInterval? = nil, onPoll: () -> Void = {},
+                      onRejected: (Error) -> Void = { _ in }, frame: (Data) throws -> Void) throws -> Int32 {
+        var buffer = Data(), stderrCount = 0
+        let status = try pump(pipes: pipes, control: control, deadline: deadline,
+                              onPoll: onPoll, onRejected: onRejected) { stream, bytes in
+            if stream == .stderr {
+                stderrCount += bytes.count
+                guard stderrCount <= 64 << 10 else { throw StorageScanFailure.invalidOutput }
+                return // Diagnostic payloads are never retained.
+            }
+            try autoreleasepool {
+                var offset = bytes.startIndex
+                while offset < bytes.endIndex {
+                    let newline = bytes[offset...].firstIndex(of: 10), end = newline ?? bytes.endIndex
+                    guard buffer.count + end - offset < ScannerProtocolDecoder.maximumFrameBytes else {
+                        throw StorageScanFailure.invalidOutput
+                    }
+                    buffer.append(contentsOf: bytes[offset..<end])
+                    offset = end + (newline == nil ? 0 : 1)
+                    if newline != nil { try frame(buffer); buffer.removeAll(keepingCapacity: true) }
+                }
+            }
+        }
+        guard buffer.isEmpty, stderrCount == 0 else { throw StorageScanFailure.invalidOutput }
+        return status
+    }
+
+    private enum Stream { case stdout, stderr }
+
+    /// A rejected record ends interpretation, while the actual child and both
+    /// read ends continue draining. All scanner clients share that ownership.
+    private static func pump(pipes: (stdout: Int32, stderr: Int32), control: ScannerProcessControl,
+                             deadline: TimeInterval?, onPoll: () -> Void = {},
+                             onRejected: (Error) -> Void = { _ in },
+                             consume: (Stream, ArraySlice<UInt8>) throws -> Void) throws -> Int32 {
         defer { close(pipes.stdout); close(pipes.stderr) }
         let began = ProcessInfo.processInfo.systemUptime
-        var outputOpen = true, errorsOpen = true, status: Int32?, failure: Error?
-        var buffer = Data(), stderrCount = 0
-        while outputOpen || errorsOpen || status == nil {
+        var descriptors = [pollfd(fd: pipes.stdout, events: Int16(POLLIN), revents: 0),
+                           pollfd(fd: pipes.stderr, events: Int16(POLLIN), revents: 0)]
+        var bytes = [UInt8](repeating: 0, count: 16 << 10)
+        var status: Int32?, failure: Error?
+        func reject(_ error: Error) {
+            guard failure == nil else { return }
+            failure = error
+            onRejected(error)
+            control.cancel()
+        }
+        while true {
             if let deadline, ProcessInfo.processInfo.systemUptime - began > deadline {
-                failure = StorageScanFailure.workerFailed; control.cancel()
+                reject(StorageScanFailure.workerFailed)
             }
             control.escalateIfNeeded()
             if status == nil { status = control.reapIfExited() }
-            if !outputOpen && !errorsOpen && status != nil { break }
-            var descriptors = [pollfd(fd: outputOpen ? pipes.stdout : -1, events: Int16(POLLIN), revents: 0),
-                pollfd(fd: errorsOpen ? pipes.stderr : -1, events: Int16(POLLIN), revents: 0)]
-            let ready = poll(&descriptors, nfds_t(descriptors.count), 50)
-            if ready < 0 && errno != EINTR { failure = StorageScanFailure.workerFailed; control.cancel() }
-            for index in 0..<2 where descriptors[index].revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 {
-                var bytes = [UInt8](repeating: 0, count: 16 << 10)
-                let count = read(descriptors[index].fd, &bytes, bytes.count)
-                if count == 0 { if index == 0 { outputOpen = false } else { errorsOpen = false }; continue }
-                if count < 0 {
-                    if errno == EINTR || errno == EAGAIN { continue }
-                    failure = StorageScanFailure.workerFailed; control.cancel()
-                    if index == 0 { outputOpen = false } else { errorsOpen = false }; continue
-                }
-                if index == 1 {
-                    stderrCount += count
-                    if stderrCount > 64 << 10 { failure = StorageScanFailure.invalidOutput; control.cancel() }
-                    continue
-                }
-                guard failure == nil else { continue }
-                do {
-                    try autoreleasepool {
-                        var offset = 0
-                        while offset < count {
-                            let newline = bytes[offset..<count].firstIndex(of: 10), end = newline ?? count
-                            guard buffer.count + end - offset < 65536 else { throw StorageScanFailure.invalidOutput }
-                            buffer.append(contentsOf: bytes[offset..<end]); offset = end + (newline == nil ? 0 : 1)
-                            if newline != nil { try frame(buffer); buffer.removeAll(keepingCapacity: true) }
-                        }
-                    }
-                } catch { failure = error; control.cancel() }
+            if descriptors.allSatisfy({ $0.fd < 0 }), let status {
+                if let failure { throw failure }
+                return status
             }
+            let ready = poll(&descriptors, nfds_t(descriptors.count), 50)
+            if ready < 0 && errno != EINTR { reject(StorageScanFailure.workerFailed) }
+            if ready > 0 {
+                for index in descriptors.indices
+                where descriptors[index].revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 {
+                    let count = read(descriptors[index].fd, &bytes, bytes.count)
+                    if count <= 0 {
+                        if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                        if count < 0 { reject(StorageScanFailure.workerFailed) }
+                        descriptors[index].fd = -1
+                    } else if failure == nil {
+                        do { try consume(index == 0 ? .stdout : .stderr, bytes[..<count]) }
+                        catch { reject(error) }
+                    }
+                }
+            }
+            onPoll()
         }
-        if let failure { throw failure }
-        guard buffer.isEmpty, stderrCount == 0, let status else { throw StorageScanFailure.invalidOutput }
-        return status
     }
 }

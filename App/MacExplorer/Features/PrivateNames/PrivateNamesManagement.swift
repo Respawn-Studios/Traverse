@@ -26,10 +26,10 @@ struct PrivateNamesPrivacyView: View {
             Section("Private saved names") {
                 Text("Nicknames, alternate names and labels stay on this Mac under normal macOS protection. No AI model is required and file contents are not indexed.")
                     .interfaceFont(.callout)
-                Picker("Default search sources", selection: $settings.privateNamesSources) {
+                settingPicker("Default search sources", selection: $settings.privateNamesSources) {
                     ForEach(PrivateNameSources.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
-                Toggle("Suggest saved folder names in addresses", isOn: $settings.privateNamesAddressSuggestions)
+                settingToggle("Suggest saved folder names in addresses", isOn: $settings.privateNamesAddressSuggestions)
                 Text("Turning search off retains saved information. Forget removes current app records; older backups, exports and already viewed copies may retain them.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)
                 if let value = owner.management {
@@ -44,7 +44,7 @@ struct PrivateNamesPrivacyView: View {
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
                 if !owner.managementNotice.isEmpty { Text(owner.managementNotice).interfaceFont(.caption).foregroundStyle(.secondary) }
-                Button("Refresh Storage Figures") { Task { await owner.refreshManagement() } }.disabled(owner.isSaving)
+                settingButton("Refresh Storage Figures") { Task { await owner.refreshManagement() } }.disabled(owner.isSaving)
             }
             Section("Storage and backups") {
                 if let value = owner.management {
@@ -58,10 +58,10 @@ struct PrivateNamesPrivacyView: View {
                     .interfaceFont(.caption).foregroundStyle(.secondary)
                 Text("Spotlight's index is managed by macOS and excluded from these figures. Traverse has no content index.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)
-                Button("Open App Storage Analysis") { ApplicationStorageAnalysis.shared.showAppStorage(settings: settings) }
+                settingButton("Open App Storage Analysis") { ApplicationStorageAnalysis.shared.showAppStorage(settings: settings) }
             }
             Section("Export saved names") {
-                Toggle("Include last-known locations", isOn: $includesLocations).disabled(working)
+                settingToggle("Include last-known locations", isOn: $includesLocations).disabled(working)
                     .onChange(of: includesLocations) { _, _ in cancelPreview() }
                 Text("Export version 1 includes record IDs, nicknames, alternate names and labels. Locations are optional. Access tokens, native identities, operation evidence and file contents are never exported.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)
@@ -81,7 +81,7 @@ struct PrivateNamesPrivacyView: View {
                 if !notice.isEmpty { Text(notice).interfaceFont(.callout).textSelection(.enabled).accessibilityIdentifier("private-export-outcome") }
             }
             Section("Restore from an export") {
-                Button("Import Saved Names…") { if let window { owner.chooseNameImport(in: window) } }
+                settingButton("Import Saved Names…") { if let window { owner.chooseNameImport(in: window) } }
                     .disabled(!owner.enablesImport || working || owner.isSaving || owner.importInProgress)
                 if owner.importInProgress { ProgressView("Preparing or importing…").controlSize(.small) }
                 Text("Review one local metadata export before adding it. Imported descriptions get new IDs and need Relink; exported locations are discarded. Existing records are never replaced or merged. An older export may contain previously forgotten names.")
@@ -92,7 +92,7 @@ struct PrivateNamesPrivacyView: View {
                     Button("Retry Forget All") { Task { do { try await owner.retryForgetAllNames() } catch { notice = ApplicationPrivateNames.message(error) } } }
                         .disabled(owner.isSaving)
                 } else {
-                    Button("Forget All Saved Names…", role: .destructive) { confirmsForget = true }.disabled(owner.isSaving)
+                    settingButton("Forget All Saved Names…", role: .destructive) { confirmsForget = true }.disabled(owner.isSaving)
                 }
                 if !owner.status.isEmpty { Text(owner.status).interfaceFont(.caption).foregroundStyle(.secondary) }
                 Text("Removes names, labels, derived keys and saved access from this catalog. It does not delete source files, disable native document flags, erase SSD blocks or control older backups/exports.")

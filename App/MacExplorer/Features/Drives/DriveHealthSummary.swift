@@ -5,6 +5,7 @@ import SwiftUI
 struct DriveHealthSummary: View {
     @ObservedObject var model: ApplicationDriveDetails
     @ObservedObject var settings: BrowserSettings
+    let copyReading: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -52,12 +53,18 @@ struct DriveHealthSummary: View {
             // use the shared metric card's optional number transition.
             .id(model.target?.id)
             if let date = model.lastHealthDate {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let age = max(0, context.date.timeIntervalSince(date))
-                    let relative = age < 1 ? "just now" : date.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated))
-                    Text("\(model.healthIsStale ? "Last verified reading" : "Updated") \(relative)")
-                        .interfaceFont(.caption).foregroundStyle(.secondary).monospacedDigit()
+                HStack(spacing: 8) {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let age = max(0, context.date.timeIntervalSince(date))
+                        let relative = age < 1 ? "just now" : date.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated))
+                        Text("\(model.healthIsStale ? "Last verified reading" : "Updated") \(relative)")
+                            .foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    Spacer(minLength: 0)
+                    Button("Copy SMART Reading", systemImage: "doc.on.doc", action: copyReading)
+                        .help("Copies the displayed reading without device names or paths.")
                 }
+                .interfaceFont(.caption)
             } else {
                 Text(model.healthReaderUnavailableReason ?? "SMART availability depends on the drive and enclosure.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)

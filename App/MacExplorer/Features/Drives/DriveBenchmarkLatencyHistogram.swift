@@ -5,8 +5,18 @@ struct DriveBenchmarkLatencyHistogram: View {
     @Environment(\.interfaceScale) private var scale
     let result: DriveBenchmarkResult
 
-    private var write: DriveBenchmarkLatency.Distribution? { result.writeLatency.distribution }
-    private var read: DriveBenchmarkLatency.Distribution? { result.readLatency.distribution }
+    private var writeBands: [DriveBenchmarkLatency.PercentileBand]? {
+        result.outcome == .completed ? result.writeLatency.percentileBands : nil
+    }
+    private var readBands: [DriveBenchmarkLatency.PercentileBand]? {
+        result.outcome == .completed ? result.readLatency.percentileBands : nil
+    }
+    private var write: DriveBenchmarkLatency.Distribution? {
+        writeBands == nil ? nil : result.writeLatency.distribution
+    }
+    private var read: DriveBenchmarkLatency.Distribution? {
+        readBands == nil ? nil : result.readLatency.distribution
+    }
     private var buckets: [DriveBenchmarkLatency.Distribution.Bucket] { (write ?? read)?.buckets ?? [] }
     private var largestCount: Int {
         max(1, max(write?.buckets.map(\.count).max() ?? 0,
@@ -50,11 +60,13 @@ struct DriveBenchmarkLatencyHistogram: View {
                                 if let write {
                                     BucketBar(phase: "Write", abbreviation: "W", range: range,
                                         count: write.buckets[index].count, largestCount: largestCount,
+                                        markers: Self.markers(index: index, in: writeBands),
                                         color: .accentColor, scale: scale)
                                 }
                                 if let read {
                                     BucketBar(phase: "Read & verify", abbreviation: "R", range: range,
                                         count: read.buckets[index].count, largestCount: largestCount,
+                                        markers: Self.markers(index: index, in: readBands),
                                         color: .teal, scale: scale)
                                 }
                             }.frame(maxWidth: .infinity)
@@ -69,7 +81,7 @@ struct DriveBenchmarkLatencyHistogram: View {
                     Text("Read & verify block timings unavailable.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bars share the largest count as their scale. Each range includes its lower bound and excludes its upper bound; the final range has no upper bound.")
+                Text("P50/P95/P99 mark the range containing each nearest-rank observed I/O call. Bars share the largest count as their scale. Ranges include their lower bound and exclude their upper bound; the final range has no upper bound.")
                     .interfaceFont(.caption).foregroundStyle(.secondary)
             }
         }
@@ -85,6 +97,10 @@ struct DriveBenchmarkLatencyHistogram: View {
         return bucket.lowerBoundMilliseconds == 0 ? "<\(number(upper))"
             : "\(number(bucket.lowerBoundMilliseconds))–\(number(upper))"
     }
+
+    private static func markers(index: Int, in bands: [DriveBenchmarkLatency.PercentileBand]?) -> String {
+        bands?.filter { $0.bucketIndex == index }.map { "P\($0.percentile)" }.joined(separator: " ") ?? ""
+    }
 }
 
 private struct BucketBar: View {
@@ -93,28 +109,37 @@ private struct BucketBar: View {
     let range: String
     let count: Int
     let largestCount: Int
+    let markers: String
     let color: Color
     let scale: CGFloat
 
     var body: some View {
-        HStack(spacing: 5 * scale) {
-            Text(abbreviation).interfaceFont(.caption2)
-                .frame(width: 12 * scale, alignment: .leading)
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.07))
-                    if count > 0 {
-                        Capsule().fill(color)
-                            .frame(width: max(2 * scale,
-                                geometry.size.width * CGFloat(count) / CGFloat(largestCount)))
+        VStack(alignment: .leading, spacing: 2 * scale) {
+            HStack(spacing: 5 * scale) {
+                Text(abbreviation).interfaceFont(.caption2)
+                    .frame(width: 12 * scale, alignment: .leading)
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.07))
+                        if count > 0 {
+                            Capsule().fill(color)
+                                .frame(width: max(2 * scale,
+                                    geometry.size.width * CGFloat(count) / CGFloat(largestCount)))
+                        }
                     }
-                }
-            }.frame(height: 7 * scale)
-            Text(count.formatted()).interfaceFont(.caption).monospacedDigit()
-                .frame(width: 65 * scale, alignment: .trailing)
+                }.frame(height: 7 * scale)
+                Text(count.formatted()).interfaceFont(.caption).monospacedDigit()
+                    .frame(width: 65 * scale, alignment: .trailing)
+            }.frame(height: 13 * scale)
+            if !markers.isEmpty {
+                Text(markers).interfaceFont(.caption2).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 12 * scale)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .frame(height: 13 * scale)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(phase), \(range) milliseconds, \(count) completed block calls")
+        .accessibilityLabel("\(phase), \(range) milliseconds, \(count) completed block calls"
+            + (markers.isEmpty ? "" : ", contains \(markers) histogram band"))
     }
 }

@@ -7,23 +7,25 @@ extension PersistentNameStore {
     /// the durable names transaction; failure may leave the native flag set.
     public static func createRemembering(directory: URL, first: AuthoredNames, source: URL,
         retaining access: (any Sendable)? = nil, activity: FileActivityGate? = nil,
-        allowDocumentFollowing: Bool = false) async throws -> PersistentNameStore {
+        allowDocumentFollowing: Bool = false, locationPolicy: RememberedLocationPolicy = .selectedReadAccess) async throws -> PersistentNameStore {
         try await createRemembering(directory: directory, first: first, source: source, retaining: access,
-            activity: activity, allowDocumentFollowing: allowDocumentFollowing, probe: nil, vfs: nil)
+            activity: activity, allowDocumentFollowing: allowDocumentFollowing, probe: nil, vfs: nil, locationPolicy: locationPolicy)
     }
     internal static func createRemembering(directory: URL, first: AuthoredNames, source: URL,
         retaining access: (any Sendable)? = nil, activity: FileActivityGate? = nil,
-        allowDocumentFollowing: Bool, probe: NameStoreProbe?, vfs: String?) async throws -> PersistentNameStore {
+        allowDocumentFollowing: Bool, probe: NameStoreProbe?, vfs: String?,
+        locationPolicy: RememberedLocationPolicy = .selectedReadAccess) async throws -> PersistentNameStore {
         defer { withExtendedLifetime(access) {} }
         try probe?(.sourceCapture)
         let reader = NativeDocumentReferenceReader(activity: activity)
-        let observed = try await reader.capture(source, scope: .readOnly, allowDocumentFollowing: allowDocumentFollowing, cancellation: .init())
+        let observed = try await reader.capture(source, scope: locationPolicy.scope, allowDocumentFollowing: allowDocumentFollowing, cancellation: .init())
         try probe?(.sourcePrepared)
         return try await create(directory: directory, first: first, activity: activity, probe: probe, vfs: vfs, reference: observed.reference)
     }
 
     public func prepareRemembering(_ names: AuthoredNames, source: URL,
-                                  retaining access: (any Sendable)? = nil, allowDocumentFollowing: Bool = false) async throws -> PreparedReferenceChange {
+                                  retaining access: (any Sendable)? = nil, allowDocumentFollowing: Bool = false,
+                                  locationPolicy: RememberedLocationPolicy = .selectedReadAccess) async throws -> PreparedReferenceChange {
         let activityLease = try activity?.begin(); defer { withExtendedLifetime(activityLease) {} }
         try requireWrite()
         let edit = try core.prepareNew(names)
@@ -31,7 +33,7 @@ extension PersistentNameStore {
             let use = try publication.beginReferenceUse(edit.itemID)
             let request = try references.begin(edit.itemID)
             defer { references.finish(request); withExtendedLifetime(use) {}; withExtendedLifetime(access) {} }
-            let observed = try await referenceReader.capture(source, scope: .readOnly, allowDocumentFollowing: allowDocumentFollowing, cancellation: request.cancellation)
+            let observed = try await referenceReader.capture(source, scope: locationPolicy.scope, allowDocumentFollowing: allowDocumentFollowing, cancellation: request.cancellation)
             try requireWrite()
             guard references.current(request), publication.allows(edit.itemID) else { throw RememberedReferenceFailure.stale }
             if let collision = try database.referenceCollision(observed.reference, excluding: edit.itemID) {
@@ -44,7 +46,8 @@ extension PersistentNameStore {
     }
 
     public func prepareRelink(_ id: RememberedItemID, source: URL,
-                              retaining access: (any Sendable)? = nil, allowDocumentFollowing: Bool = false) async throws -> PreparedReferenceChange {
+                              retaining access: (any Sendable)? = nil, allowDocumentFollowing: Bool = false,
+                              locationPolicy: RememberedLocationPolicy = .selectedReadAccess) async throws -> PreparedReferenceChange {
         let activityLease = try activity?.begin(); defer { withExtendedLifetime(activityLease) {} }
         try requireWrite()
         guard !references.hasRemoval(id) else { throw NameStoreFailure.busy }
@@ -54,7 +57,7 @@ extension PersistentNameStore {
         let use = try publication.beginReferenceUse(id)
         let request = try references.begin(id, allowBlocked: true)
         defer { references.finish(request); withExtendedLifetime(use) {}; withExtendedLifetime(access) {} }
-        let observed = try await referenceReader.capture(source, scope: .readOnly, allowDocumentFollowing: allowDocumentFollowing, cancellation: request.cancellation)
+        let observed = try await referenceReader.capture(source, scope: locationPolicy.scope, allowDocumentFollowing: allowDocumentFollowing, cancellation: request.cancellation)
         try requireWrite()
         guard references.current(request), publication.allows(id), try database.revision(id) == authored,
               try database.reference(id)?.revision == previous?.revision else { throw RememberedReferenceFailure.stale }

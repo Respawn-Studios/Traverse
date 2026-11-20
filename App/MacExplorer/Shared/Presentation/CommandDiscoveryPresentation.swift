@@ -5,7 +5,7 @@ import AppKit
 @MainActor enum CommandDiscoveryPresentation {
     /// Match the actual viewport after native scrollers tile. Column
     /// autoresizing alone can retain the pre-scroller document width.
-    private final class ResultsScrollView: NSScrollView {
+    final class ResultsScrollView: NSScrollView {
         override func layout() {
             super.layout()
             guard let table = documentView as? NSTableView, table.tableColumns.count == 1,
@@ -81,23 +81,27 @@ import AppKit
             y: min(max(frame.minY, available.minY + 12), available.maxY - frame.height - 12)))
     }
 
-    static func animateEntrance(_ panel: NSPanel, motion: BrowserMotionPreferences) {
-        guard motion.allows(.windows), !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            panel.alphaValue = 1; return
-        }
-        panel.alphaValue = motion.mode.initialOpacity(0.7)
-        NSAnimationContext.runAnimationGroup {
-            $0.duration = 0.14 * motion.mode.durationScale
-            panel.animator().alphaValue = 1
-        }
+    static func retire(_ panel: NSPanel?, nativeCloseInProgress: Bool) {
+        guard let panel else { return }
+        panel.delegate = nil
+        guard !nativeCloseInProgress else { return }
+        panel.orderOut(nil)
+        panel.close()
     }
 
-    static func row(title: String, category: String, shortcut: String, enabled: Bool) -> NSTableCellView {
+    static func row(title: String, category: String, shortcut: String, enabled: Bool, emphasis: NSRange? = nil) -> NSTableCellView {
         let cell = NSTableCellView()
         let heading = label(title, size: 13, color: enabled ? .labelColor : .secondaryLabelColor)
+        if let emphasis, let font = heading.font, NSMaxRange(emphasis) <= title.utf16.count {
+            let text = NSMutableAttributedString(string: title, attributes: [.font: font])
+            text.addAttribute(.font, value: NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask), range: emphasis)
+            heading.attributedStringValue = text
+        }
         let subtitle = label(category + (enabled ? "" : " · Unavailable here"), size: 10, color: .secondaryLabelColor)
         heading.lineBreakMode = .byTruncatingTail
         heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitle.lineBreakMode = .byTruncatingMiddle
+        subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let titles = NSStackView(views: [heading, subtitle]); titles.orientation = .vertical
         titles.alignment = .leading; titles.spacing = 2
         titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -107,7 +111,7 @@ import AppKit
         let row = NSStackView(views: [titles, NSView(), key]); row.spacing = 12; row.alignment = .centerY
         row.edgeInsets = .init(top: 3, left: 10, bottom: 3, right: 10); pin(row, inside: cell)
         cell.textField = heading
-        cell.setAccessibilityLabel(title + ", " + category + (enabled ? "" : ", unavailable") + ", " + shortcut)
+        cell.setAccessibilityLabel(title + ", " + category + (enabled ? "" : ", unavailable") + (shortcut.isEmpty ? "" : ", " + shortcut))
         return cell
     }
 }

@@ -61,13 +61,24 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
     static let maximumOpeningRules = 64
     var wrapsLines = true
     var showsLineNumbers = true
+    var showsUnsavedLineChanges = true
+    var showsScrollContext = true
+    var showsIndentGuides = true
+    var showsMatchingBrackets = true
+    var showsWhitespaceMarks = false
     var basePointSize = 13
     var palette = EditorSyntaxPalette.adaptive
     var theme = EditorTheme.followApp
     var windowArrangement = EditorWindowArrangement.tabs
+    var opensFileSidebar = false
+    var includesGeneratedProjectFolders = false
+    var showsWorkingGitChanges = false
+    var linksComparisonScrolling = true
     var indentation = EditorIndentationPreferences.fresh
     var indentsJSONBlocks = true
+    var indentsCodeBlocks = true
     var completesJSONBrackets = true
+    var completesCodeBrackets = false
     var backspaceUnindents = true
     var detectsLanguageWithoutExtension = true
     var openingIndicator = EditorOpeningIndicator.subtle
@@ -86,13 +97,7 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
         defaultLanguage ?? .inferred(extension: value)
     }
     func language(forFilename name: String) -> TextSyntaxLanguage {
-        if let defaultLanguage { return defaultLanguage }
-        switch EditorOpeningSupport.key(forFilename: name) {
-        case "dockerfile": return .dockerfile
-        case "makefile": return .makefile
-        case "shellprofile", "env": return .shell
-        default: return .inferred(extension: (name as NSString).pathExtension)
-        }
+        defaultLanguage ?? EditorOpeningSupport.syntax(for: EditorOpeningSupport.key(forFilename: name))
     }
     func canDetectLanguage(forFilename name: String) -> Bool {
         detectsLanguageWithoutExtension && defaultLanguage == nil
@@ -162,19 +167,37 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
             && url.standardizedFileURL == url
     }
 
-    enum CodingKeys: String, CodingKey { case wrapsLines, showsLineNumbers, basePointSize, palette, theme, windowArrangement, indentation, indentsJSONBlocks, completesJSONBrackets, backspaceUnindents, detectsLanguageWithoutExtension, openingIndicator, findHighlightColor, defaultLanguage, openingRules }
+    enum CodingKeys: String, CodingKey {
+        case wrapsLines, showsLineNumbers, showsUnsavedLineChanges, showsScrollContext, showsIndentGuides, showsWhitespaceMarks
+        case showsMatchingBrackets
+        case basePointSize, palette, theme, windowArrangement, opensFileSidebar, includesGeneratedProjectFolders
+        case showsWorkingGitChanges, linksComparisonScrolling, indentation, indentsJSONBlocks, indentsCodeBlocks
+        case completesJSONBrackets, completesCodeBrackets, backspaceUnindents, detectsLanguageWithoutExtension, openingIndicator
+        case findHighlightColor, defaultLanguage, openingRules
+    }
     init() {}
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         wrapsLines = try values.decodeIfPresent(Bool.self, forKey: .wrapsLines) ?? true
         showsLineNumbers = try values.decodeIfPresent(Bool.self, forKey: .showsLineNumbers) ?? true
+        showsUnsavedLineChanges = try values.decodeIfPresent(Bool.self, forKey: .showsUnsavedLineChanges) ?? true
+        showsScrollContext = try values.decodeIfPresent(Bool.self, forKey: .showsScrollContext) ?? true
+        showsIndentGuides = try values.decodeIfPresent(Bool.self, forKey: .showsIndentGuides) ?? true
+        showsMatchingBrackets = try values.decodeIfPresent(Bool.self, forKey: .showsMatchingBrackets) ?? true
+        showsWhitespaceMarks = try values.decodeIfPresent(Bool.self, forKey: .showsWhitespaceMarks) ?? false
         basePointSize = try values.decodeIfPresent(Int.self, forKey: .basePointSize) ?? 13
         palette = try values.decodeIfPresent(EditorSyntaxPalette.self, forKey: .palette) ?? .adaptive
         theme = try values.decodeIfPresent(EditorTheme.self, forKey: .theme) ?? .followApp
         windowArrangement = try values.decodeIfPresent(EditorWindowArrangement.self, forKey: .windowArrangement) ?? .tabs
+        opensFileSidebar = try values.decodeIfPresent(Bool.self, forKey: .opensFileSidebar) ?? false
+        includesGeneratedProjectFolders = try values.decodeIfPresent(Bool.self, forKey: .includesGeneratedProjectFolders) ?? false
+        showsWorkingGitChanges = try values.decodeIfPresent(Bool.self, forKey: .showsWorkingGitChanges) ?? false
+        linksComparisonScrolling = try values.decodeIfPresent(Bool.self, forKey: .linksComparisonScrolling) ?? true
         indentation = try values.decodeIfPresent(EditorIndentationPreferences.self, forKey: .indentation) ?? .legacy
         indentsJSONBlocks = try values.decodeIfPresent(Bool.self, forKey: .indentsJSONBlocks) ?? true
+        indentsCodeBlocks = try values.decodeIfPresent(Bool.self, forKey: .indentsCodeBlocks) ?? true
         completesJSONBrackets = try values.decodeIfPresent(Bool.self, forKey: .completesJSONBrackets) ?? true
+        completesCodeBrackets = try values.decodeIfPresent(Bool.self, forKey: .completesCodeBrackets) ?? false
         backspaceUnindents = try values.decodeIfPresent(Bool.self, forKey: .backspaceUnindents) ?? true
         detectsLanguageWithoutExtension = try values.decodeIfPresent(Bool.self, forKey: .detectsLanguageWithoutExtension) ?? true
         openingIndicator = try values.decodeIfPresent(EditorOpeningIndicator.self, forKey: .openingIndicator) ?? .subtle

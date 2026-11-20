@@ -82,6 +82,24 @@ private func collect(_ session: SearchSession) async -> ([SearchMatch], SearchCo
     #expect(throws: SearchValidationError.self) { try SearchRequest(filename: "x", filenameExtension: ".txt") }
 }
 
+@Test func localNavigationInitialsStayInsideTheExplicitSearchGrammar() async throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    let exact = try fixture.file("EHT.swift")
+    let abbreviated = try fixture.file("Nested/EditorHTTPTrace.swift")
+    _ = try fixture.file("ContainsOnlyBody.txt", body: "EditorHTTPTrace")
+    _ = try fixture.file(".git/EditorHTTPTrace.swift")
+    let scope = try SearchScope(root: fixture.root, showHidden: true, excludesGitMetadata: true)
+    let request = try SearchRequest(filename: "eht", filenameMatch: .navigation, kind: .file)
+    let (matches, coverage) = await collect(LocalMetadataSearch().start(request: request, scope: scope))
+    #expect(Set(matches.map(\.entry.url)) == [exact, abbreviated])
+    #expect(coverage?.completion == .completed && coverage?.boundaryCounts[.excluded] == 1)
+    #expect(request.filenameNavigationRank(for: exact.lastPathComponent) == .stem)
+    #expect(request.filenameNavigationRank(for: abbreviated.lastPathComponent) == .initials)
+    let (indexed, indexedCoverage) = await collect(SpotlightMetadataSearch().start(request: request, scope: scope))
+    #expect(indexed.isEmpty && indexedCoverage?.completion == .failed)
+}
+
 @Test func scopeRejectsGlobalRootsAndLexicalEscapes() throws {
     let root = URL(fileURLWithPath: "/generated/folder")
     let scope = try SearchScope(root: root, excludedSubroots: [root.appendingPathComponent("excluded")])
@@ -96,6 +114,23 @@ private func collect(_ session: SearchSession) async -> ([SearchMatch], SearchCo
     #expect(throws: SearchValidationError.self) { try SearchScope(root: root, excludedSubroots: [URL(fileURLWithPath: "/outside")]) }
     #expect(MetadataObservation.isCredentialLocation(URL(fileURLWithPath: "/generated/.SSH/id")))
     #expect(MetadataObservation.isCredentialLocation(URL(fileURLWithPath: "/generated/KEYCHAINS/item")))
+}
+
+@Test func confinedTextScopeRetainsAllExclusions() throws {
+    let root = URL(fileURLWithPath: "/generated/Project", isDirectory: true)
+    let scope = try SearchScope(root: root, excludedSubroots: [root.appendingPathComponent("Sources/Private Output")],
+        excludesGitMetadata: true, excludesSensitiveText: true, excludedDescendantNames: ["node_modules"])
+    #expect(try scope.confined(toRelativeFolder: "") == scope)
+    let narrower = try scope.confined(toRelativeFolder: "sources/")
+    #expect(narrower.root.path == root.appendingPathComponent("sources").path)
+    #expect(narrower.permits(narrower.root.appendingPathComponent("Allowed.swift")))
+    #expect(!narrower.permits(narrower.root.appendingPathComponent("PRIVATE OUTPUT/Generated.swift")))
+    #expect(!narrower.permits(narrower.root.appendingPathComponent("node_modules/Source.swift")))
+    for rejected in ["/Outside", "../Outside", "Sources//Nested", "Sources/./Nested", ".git/objects", "NODE_MODULES/.cache", ".hidden"] {
+        #expect(throws: SearchValidationError.invalidScope) { try scope.confined(toRelativeFolder: rejected) }
+    }
+    let visibleHidden = try SearchScope(root: root, showHidden: true, excludesSensitiveText: true)
+    #expect(throws: SearchValidationError.invalidScope) { try visibleHidden.confined(toRelativeFolder: ".env/Inside") }
 }
 
 @Test func recursiveSearchMatchesFilenameWithoutReadingBodyOrChangingFileDates() async throws {
@@ -142,6 +177,59 @@ private func collect(_ session: SearchSession) async -> ([SearchMatch], SearchCo
     #expect(result.1?.boundaryCounts[.credentialLocation] == 1)
     #expect(result.1?.boundaryCounts[.excluded] == 1)
     #expect(result.1?.isComplete == false)
+}
+
+@Test func projectSearchExcludesGitMetadataEvenWhenHiddenFilesAreShown() async throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    let editable = try fixture.file("Sources/.match.json")
+    _ = try fixture.file(".git/match.txt")
+    _ = try fixture.file("Module/.GIT/match.txt")
+    let scope = try SearchScope(root: fixture.root, showHidden: true, excludesGitMetadata: true)
+    let search = LocalMetadataSearch()
+    let result = await collect(search.start(request: try SearchRequest(filename: "match", kind: .file), scope: scope))
+    await search.cancelAndDrain()
+    #expect(result.0.map(\.entry.url) == [editable])
+    #expect(result.1?.boundaryCounts[.excluded] == 2)
+    #expect(throws: SearchValidationError.self) {
+        _ = try SearchScope(root: fixture.root.appendingPathComponent("Module/.GIT"), excludesGitMetadata: true)
+    }
+}
+
+@Test func projectTextCandidatesCountOnlySupportedNamesAndSafeLocations() async throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    for name in ["00.bin", "01.txt.zip", "02.cache", ".env.local.txt", ".gitconfig", ".git/03.txt", "secrets/04.txt"] {
+        _ = try fixture.file(name)
+    }
+    let makefile = try fixture.file("source/Makefile")
+    let document = try fixture.file("source/README.TXT")
+    let dependency = try fixture.file("source/Node_Modules/example.txt")
+    _ = try fixture.file(".build/generated.txt")
+    let filenames = try SearchRequest.FilenameAllowlist(names: ["makefile", ".gitconfig"], extensions: ["txt"])
+    let request = try SearchRequest(filename: "", kind: .file, filenameAllowlist: filenames)
+    let exclusions: Set<String> = ["node_modules", ".build"]
+    let scope = try SearchScope(root: fixture.root, showHidden: true, excludesSensitiveText: true,
+                                excludedDescendantNames: exclusions)
+    let search = LocalMetadataSearch()
+    let result = await collect(search.start(request: request, scope: scope, policy: .init(maximumResults: 3)))
+    await search.cancelAndDrain()
+    #expect(Set(result.0.map(\.entry.url)) == [makefile, document])
+    #expect(result.1?.completion == .completed)
+    let explicitScope = try SearchScope(root: dependency.deletingLastPathComponent(), showHidden: true, excludesSensitiveText: true,
+                                        excludedDescendantNames: exclusions)
+    let explicit = await collect(search.start(request: request, scope: explicitScope))
+    await search.cancelAndDrain()
+    #expect(explicit.0.map(\.entry.url) == [dependency])
+    #expect(throws: SearchValidationError.self) {
+        _ = try SearchScope(root: fixture.root, excludedDescendantNames: ["Sources/node_modules"])
+    }
+    #expect(throws: SearchValidationError.self) {
+        _ = try SearchRequest.FilenameAllowlist(names: ["source/makefile"], extensions: ["txt"])
+    }
+    #expect(throws: SearchValidationError.self) {
+        _ = try SearchScope(root: fixture.root.appendingPathComponent(".git"), excludesSensitiveText: true)
+    }
 }
 
 @Test func rootSymlinkIsRejectedRatherThanFollowed() async throws {

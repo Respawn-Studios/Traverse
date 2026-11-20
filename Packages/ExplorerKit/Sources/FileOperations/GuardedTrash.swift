@@ -68,7 +68,7 @@ extension RecoverableFileOperations {
 }
 
 /// Thread policy must surround synchronous work, never an async suspension.
-internal func withoutMaterialization<T>(_ action: () throws -> T) throws -> T {
+package func withoutMaterialization<T>(_ action: () throws -> T) throws -> T {
     let previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
     guard previous >= 0 else { throw FileOperationFailure.unsupported }
     defer { _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous) }

@@ -1,3 +1,4 @@
+import ExplorerCore
 import Foundation
 
 public enum OperationProgressPhase: String, Sendable {
@@ -58,7 +59,7 @@ internal final class OperationProgressReporter: @unchecked Sendable {
     private var terminal = false
     private var nativeCodes: [OperationProgressPhase: Set<Int32>] = [:]
     private let diagnosticSequence: ProgressSequence
-    private var lastEmission = -Double.infinity
+    private var progressCadence = ProgressCadence(interval: 0.1)
     private var samples: [(Double, Int64)] = []
     init(jobID: UUID = UUID(), callback: (@Sendable (OperationProgress) -> Void)?) {
         self.jobID = jobID; self.callback = callback; sequence = ProgressSequence(); diagnosticSequence = ProgressSequence()
@@ -172,8 +173,7 @@ internal final class OperationProgressReporter: @unchecked Sendable {
     }
     private func emit(force: Bool) {
         let now = ProcessInfo.processInfo.systemUptime
-        guard force || now - lastEmission >= 0.1 else { return }
-        lastEmission = now
+        guard progressCadence.shouldPublish(at: now, immediately: force) else { return }
         var speed: Double?
         if phase == .copying {
             samples.append((now, bytes)); samples.removeAll { now - $0.0 > 3 }

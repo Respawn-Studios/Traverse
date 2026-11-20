@@ -68,7 +68,8 @@ private final class SidebarMenuTrackingReceipt {
 extension UIVerification {
     /// Measures the actual outline group rows, including the native disclosure
     /// control and rendered label. App-owned rendering excludes compositor Glass.
-    static func verifySidebarLayout(_ browser: BrowserViewController, output: URL) async throws {
+    static func verifySidebarLayout(_ browser: BrowserViewController, output: URL,
+                                    checkFolderPointerFeedback: Bool = true) async throws {
         guard browser.isVerificationSession, let window = browser.view.window else {
             throw Failure(message: "Sidebar verification requires an owned native session")
         }
@@ -147,7 +148,9 @@ extension UIVerification {
                 failures.append("\(group.title) disclosure/label alignment exceeds 2 points")
             }
         }
-        let pointer = try await verifySidebarPointerFeedback(browser, output: output)
+        let pointer = if checkFolderPointerFeedback {
+            try await verifySidebarPointerFeedback(browser, output: output)
+        } else { ["observed": false, "reason": "Folder groups collapsed"] as [String: Any] }
         let rememberedHover = try verifyRememberedSidebarHover()
         let report: [String: Any] = ["passed": failures.isEmpty, "rows": rows, "failures": failures,
             "pointerFeedback": pointer,

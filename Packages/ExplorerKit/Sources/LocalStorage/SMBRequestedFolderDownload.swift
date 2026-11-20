@@ -1,25 +1,5 @@
 import Foundation
-import FileOperations
 
-@_spi(Qualification) public final class SMBReceivedFolderDownload: Sendable {
-    private let tree: RemoteDownloadedTree
-    public var id: UUID { tree.id }
-    public var logicalBytes: UInt64 { tree.manifest.logicalBytes }
-    init(_ tree: RemoteDownloadedTree) { self.tree = tree }
-    public func preparePublication(using operations: RecoverableFileOperations, parent: URL, name: String,
-        observing destination: FileOperationSelection,
-        publicQuarantineTreeV16: Bool = false) async throws -> ReceivedDirectoryPlan {
-        try await tree.preparePublication(using: operations, parent: parent, name: name,
-            observing: destination, publicQuarantineTreeV16: publicQuarantineTreeV16)
-    }
-    public func finishPublication(_ result: RecoverableOperationResult) async -> Bool {
-        if result.recordID != nil, result.result.disposition == .succeeded {
-            do { try await tree.removeAfterDrain(); return true } catch {}
-        }
-        await tree.abandon(); return false
-    }
-    public func retainForReview() async { await tree.abandon() }
-}
 
 final class SMBFolderPreparationAttempt: @unchecked Sendable {
     let selection: SMBFolderDownloadSelection

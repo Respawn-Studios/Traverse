@@ -23,13 +23,15 @@ enum EditorOpeningSupport {
         .init(fileExtension: "csv", title: "Comma-separated text"),
         .init(fileExtension: "cts", title: "TypeScript"),
         .init(fileExtension: "cxx", title: "C++ source"),
+        .init(fileExtension: "editorconfig", title: "EditorConfig", filenames: [".editorconfig"]),
+        .init(fileExtension: "go", title: "Go source"),
         .init(fileExtension: "h", title: "C / Objective-C header"),
         .init(fileExtension: "hh", title: "C++ header"),
         .init(fileExtension: "hpp", title: "C++ header"),
         .init(fileExtension: "htm", title: "HTML source"),
         .init(fileExtension: "html", title: "HTML source"),
         .init(fileExtension: "hxx", title: "C++ header"),
-        .init(fileExtension: "ini", title: "Configuration"),
+        .init(fileExtension: "ini", title: "INI configuration"),
         .init(fileExtension: "js", title: "JavaScript"),
         .init(fileExtension: "json", title: "JSON"),
         .init(fileExtension: "jsonc", title: "JSON with comments"),
@@ -68,6 +70,13 @@ enum EditorOpeningSupport {
         .init(fileExtension: "readme", title: "Plain documentation", filenames: ["README", "LICENSE", "LICENCE", "NOTICE", "AUTHORS", "CHANGELOG", "COPYING"])
     ]
     static let extensions = Set(fileTypes.map(\.fileExtension))
+
+    static func additionalTypes(in preferences: EditorPreferences) -> [FileType] {
+        preferences.openingRules.map(\.fileExtension).filter { !extensions.contains($0) }.sorted().map { key in
+            .init(fileExtension: key, title: ".\(key) files")
+        }
+    }
+
     /// A finite name family shares the existing file-type preference key. No
     /// content read, wildcard execution or stored-rule migration is involved.
     static func key(forFilename name: String) -> String? {
@@ -79,5 +88,14 @@ enum EditorOpeningSupport {
     }
     static func recommendedTarget(for key: String) -> EditorOpeningTarget {
         extensions.contains(key) ? .traverse : .systemDefault
+    }
+
+    static func syntax(for key: String?) -> TextSyntaxLanguage {
+        switch key {
+        case "dockerfile": .dockerfile
+        case "makefile": .makefile
+        case "shellprofile", "env": .shell
+        default: .inferred(extension: key ?? "")
+        }
     }
 }

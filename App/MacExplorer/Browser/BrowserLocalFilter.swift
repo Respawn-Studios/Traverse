@@ -110,6 +110,7 @@ final class BrowserLocalFilterController: NSObject, NSPopoverDelegate {
         requestedPaneWidth = paneWidth
         applyAllocation()
     }
+    var preferredLayoutWidth: CGFloat { preferredWidth.constant }
     private func applyAllocation() {
         guard let browser else { return }
         let desired = prefersCompact || requestedPaneWidth < Self.compactThreshold

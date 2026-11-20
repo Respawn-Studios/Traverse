@@ -68,15 +68,18 @@ enum PaneTransferFeature {
 
     init(browser: BrowserViewController) { self.browser = browser }
 
-    var canRequest: Bool {
+    var canRequest: Bool { !eligiblePeers().isEmpty }
+    func copyDestination(in pane: UUID) -> LocalPaneDestination? { eligiblePeers().first { $0.pane == pane } }
+
+    private func eligiblePeers() -> [Peer] {
         guard PaneTransferFeature.available, menu == nil, let browser,
             browser.canAdmitTransfer, browser.recoverableFileOperations != nil,
             (1...1_024).contains(browser.selectedItemCount),
             !(browser.view.window?.firstResponder is NSTextView),
             let workspace = browser.workspace, !workspace.isClosing,
             workspace.browsers[browser.paneID] === browser
-        else { return false }
-        return !peers(in: workspace, from: browser).isEmpty
+        else { return [] }
+        return peers(in: workspace, from: browser)
     }
 
     var canUploadFilesToSMBPane: Bool {
@@ -176,21 +179,23 @@ enum PaneTransferFeature {
         else if let peer = smb.first(where: { $0.pane == selected }), let source = smbSource { admitSMB(source, to: peer) }
     }
 
-    func request(move: Bool) {
-        guard canRequest, let browser, let workspace = browser.workspace,
+    @discardableResult
+    func request(move: Bool, to pane: UUID? = nil) -> Bool {
+        let options = eligiblePeers()
+        guard !options.isEmpty, let browser,
             let engine = browser.recoverableFileOperations,
             let directory = browser.location.directoryURL
-        else { return }
+        else { return false }
         let sources = browser.orderedSelectedURLs(upTo: 1_025)
         guard (1...1_024).contains(sources.count), Set(sources).count == sources.count,
             sources.allSatisfy({ $0.isFileURL && BrowserLocation.directory($0.deletingLastPathComponent()) == .directory(directory) })
-        else { return }
+        else { return false }
         let intent = Intent(tab: browser.activeID, visit: browser.sessionID, directory: directory,
-            sources: sources, peers: peers(in: workspace, from: browser), move: move, engine: engine,
+            sources: sources, peers: pane.map { id in options.filter { $0.pane == id } } ?? options, move: move, engine: engine,
             metadata: browser.settings.transferMetadata.policy,
             execution: move ? .standard : browser.settings.copyExecutionRequest)
-        guard let first = intent.peers.first else { return }
-        if intent.peers.count == 1 { admit(intent, to: first); return }
+        guard let first = intent.peers.first else { return false }
+        if intent.peers.count == 1 { return admit(intent, to: first) }
 
         let offered = NSMenu(title: move ? "Move to Pane" : "Copy to Pane")
         offered.autoenablesItems = false
@@ -211,8 +216,8 @@ enum PaneTransferFeature {
         let selected = chosen
         menu = nil
         chosen = nil
-        guard let peer = intent.peers.first(where: { $0.pane == selected }) else { return }
-        admit(intent, to: peer)
+        guard let peer = intent.peers.first(where: { $0.pane == selected }) else { return false }
+        return admit(intent, to: peer)
     }
 
     private func peers(in workspace: BrowserWorkspaceController, from source: BrowserViewController) -> [Peer] {
@@ -220,7 +225,8 @@ enum PaneTransferFeature {
         return LocalPaneDestination.available(from: source, excluding: current)
     }
 
-    private func admit(_ intent: Intent, to peer: Peer) {
+    @discardableResult
+    private func admit(_ intent: Intent, to peer: Peer) -> Bool {
         guard canRequest, let browser, let workspace = browser.workspace,
             browser.activeID == intent.tab, browser.sessionID == intent.visit,
             browser.location.directoryURL == intent.directory,
@@ -231,13 +237,14 @@ enum PaneTransferFeature {
             })
         else {
             browser?.status.stringValue = "The selection or destination pane changed. Choose the transfer again."
-            return
+            return false
         }
         let id = browser.operationCoordinator.transfers.enqueue(sources: intent.sources, destination: peer.directory,
             move: intent.move, title: intent.move ? "Moving to another pane…" : "Copying to another pane…",
             origin: browser, engine: intent.engine, metadataPolicy: intent.metadata, copyExecution: intent.execution)
         browser.status.stringValue = id == nil ? "The transfer queue is full or another command is active."
             : "\(intent.move ? "Move" : "Copy") to \(peer.directory.lastPathComponent) added to the queue."
+        return id != nil
     }
 
     private func present(_ menu: NSMenu, browser: BrowserViewController) {

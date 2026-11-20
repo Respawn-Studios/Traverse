@@ -26,6 +26,7 @@ struct EditorFindMatches: Sendable, CustomStringConvertible, CustomDebugStringCo
     let text: String
     let query: String
     let options: EditorFindOptions
+    let selection: NSRange?
     let ranges: [NSRange]
     let isComplete: Bool
     let highlightRanges: [NSRange]
@@ -33,8 +34,9 @@ struct EditorFindMatches: Sendable, CustomStringConvertible, CustomDebugStringCo
     var description: String { "<editor find observation>" }
     var debugDescription: String { description }
 
-    init(text: String, query: String, options: EditorFindOptions, ranges: [NSRange], isComplete: Bool) {
+    init(text: String, query: String, options: EditorFindOptions, ranges: [NSRange], isComplete: Bool, selection: NSRange? = nil) {
         self.text = text; self.query = query; self.options = options
+        self.selection = selection
         self.ranges = ranges; self.isComplete = isComplete
         // Prepare adjacent fills on the same background lane as matching.
         // A dense run must not create one drawing operation per character.
@@ -78,7 +80,7 @@ struct EditorFindReplacement: Sendable, CustomStringConvertible, CustomDebugStri
     let original: String
     let value: TextDocumentValue
     let count: Int
-    let selection: NSRange
+    let edit: EditorIndentationReplacement
     var description: String { "<editor find replacement>" }
     var debugDescription: String { description }
 }
@@ -97,7 +99,34 @@ enum EditorFindPlan {
     // Nonoverlapping, nonempty matches cannot outnumber the bounded input bytes.
     static let maximumMatches = TextDocumentValue.maximumBytes
 
-    static func search(text: String, query: String, options: EditorFindOptions,
+    static func excerpt(for range: NSRange, in source: NSString, lines: EditorLineIndex)
+        -> (line: Int, text: String, highlight: NSRange?)? {
+        guard range.location >= 0, range.location <= source.length, range.length >= 0,
+              range.length <= source.length - range.location,
+              let location = lines.location(at: range.location), let start = lines.start(ofLine: location.line) else { return nil }
+        let end = lines.start(ofLine: location.line + 1).map { max(start, $0 - 1) } ?? source.length
+        var from = max(start, range.location - 60), to = min(end, range.location + min(range.length, 80) + 80)
+        // A snippet keeps the source line short and complete at its Unicode edges.
+        if from > 0, from < source.length, (0xDC00...0xDFFF).contains(source.character(at: from)) { from -= 1 }
+        if to > 0, to < source.length, (0xDC00...0xDFFF).contains(source.character(at: to)) { to += 1 }
+        let prefix = from > start ? "…" : ""
+        let raw = source.substring(with: .init(location: from, length: max(0, to - from)))
+        let content = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var highlight: NSRange?
+        if !content.isEmpty {
+            let visible = (raw as NSString).range(of: content, options: .literal)
+            if visible.location != NSNotFound {
+                let absolute = NSRange(location: from + visible.location, length: visible.length)
+                let overlap = NSIntersectionRange(absolute, range)
+                if overlap.length > 0 {
+                    highlight = NSRange(location: prefix.utf16.count + overlap.location - absolute.location, length: overlap.length)
+                }
+            }
+        }
+        return (location.line, prefix + content + (to < end ? "…" : ""), highlight)
+    }
+
+    static func search(text: String, query: String, options: EditorFindOptions, within selection: NSRange? = nil,
                        matchLimit: Int = maximumMatches,
                        cancelled: @Sendable () -> Bool = { false }) -> EditorFindSearchResult {
         guard text.utf8.count <= TextDocumentValue.maximumBytes else { return .refused(.documentTooLarge) }
@@ -105,43 +134,60 @@ enum EditorFindPlan {
         guard matchLimit > 0, matchLimit <= maximumMatches else { return .refused(.invalidRanges) }
         if cancelled() { return .refused(.cancelled) }
         let source = text as NSString
-        guard !query.isEmpty else {
-            return .matches(.init(text: text, query: query, options: options, ranges: [], isComplete: true))
-        }
+        guard let scope = searchRange(selection, in: source) else { return .refused(.invalidRanges) }
+        do {
+            let outcome = try matchingRanges(in: source, query: query, options: options, scopes: [scope],
+                limit: matchLimit, cancelled: cancelled)
+            return .matches(.init(text: text, query: query, options: options, ranges: outcome.ranges,
+                isComplete: outcome.complete, selection: selection))
+        } catch { return .refused(error) }
+    }
+
+    /// Reuse Unicode, word-boundary and result-limit rules when a review
+    /// admits several separate line ranges of a single captured text.
+    static func matchingRanges(in source: NSString, query: String, options: EditorFindOptions, scopes: [NSRange],
+                               limit: Int, cancelled: @Sendable () -> Bool) throws(EditorFindFailure)
+        -> (ranges: [NSRange], complete: Bool) {
+        guard !query.isEmpty else { return ([], true) }
+        guard query.utf8.count <= maximumQueryBytes else { throw .queryTooLong }
+        guard (1...maximumMatches).contains(limit) else { throw .invalidRanges }
         let compare: String.CompareOptions = options.matchesCase ? [] : [.caseInsensitive]
-        var cursor = 0
+        let needsStart = options.matchMode == .startsWord || options.matchMode == .wholeWord
+        let needsEnd = options.matchMode == .endsWord || options.matchMode == .wholeWord
         var ranges: [NSRange] = []
-        ranges.reserveCapacity(min(256, matchLimit))
-        var iterations = 0
-        while cursor < source.length {
-            if iterations % 256 == 0 && cancelled() { return .refused(.cancelled) }
-            iterations += 1
-            let found = source.range(of: query, options: compare,
-                                     range: .init(location: cursor, length: source.length - cursor))
-            if found.location == NSNotFound { break }
-            guard found.length > 0, found.location >= cursor,
-                  found.location <= source.length,
-                  found.length <= source.length - found.location,
-                  scalarBoundary(found.location, in: source),
-                  scalarBoundary(NSMaxRange(found), in: source) else { return .refused(.invalidRanges) }
-            cursor = NSMaxRange(found)
-            let needsStart = options.matchMode == .startsWord || options.matchMode == .wholeWord
-            let needsEnd = options.matchMode == .endsWord || options.matchMode == .wholeWord
-            if (needsStart && wordBefore(found.location, in: source)) || (needsEnd && wordAt(cursor, in: source)) {
-                // A rejected candidate is not an accepted nonoverlapping match.
-                // Advancing to its end would skip a later valid overlapping one.
-                let first = source.character(at: found.location)
-                cursor = found.location + ((0xD800...0xDBFF).contains(first) ? 2 : 1)
-                continue
+        ranges.reserveCapacity(min(256, limit))
+        var iterations = 0, priorEnd = 0
+        for scope in scopes {
+            guard scope.location >= priorEnd, scope.location <= source.length,
+                  scope.length >= 0, scope.length <= source.length - scope.location,
+                  scalarBoundary(scope.location, in: source), scalarBoundary(NSMaxRange(scope), in: source) else {
+                throw .invalidRanges
             }
-            if ranges.count == matchLimit {
-                return .matches(.init(text: text, query: query, options: options,
-                                      ranges: ranges, isComplete: false))
+            let upperBound = NSMaxRange(scope)
+            priorEnd = upperBound
+            var cursor = scope.location
+            while cursor < upperBound {
+                if iterations % 256 == 0 && cancelled() { throw .cancelled }
+                iterations += 1
+                let found = source.range(of: query, options: compare,
+                    range: .init(location: cursor, length: upperBound - cursor))
+                if found.location == NSNotFound { break }
+                guard found.length > 0, found.location >= cursor, found.location <= upperBound,
+                      found.length <= upperBound - found.location, scalarBoundary(found.location, in: source),
+                      scalarBoundary(NSMaxRange(found), in: source) else { throw .invalidRanges }
+                cursor = NSMaxRange(found)
+                if (needsStart && wordBefore(found.location, in: source)) || (needsEnd && wordAt(cursor, in: source)) {
+                    // Rejected candidates must not skip overlapping words.
+                    let first = source.character(at: found.location)
+                    cursor = found.location + ((0xD800...0xDBFF).contains(first) ? 2 : 1)
+                    continue
+                }
+                if ranges.count == limit { return (ranges, false) }
+                ranges.append(found)
             }
-            ranges.append(found)
         }
-        if cancelled() { return .refused(.cancelled) }
-        return .matches(.init(text: text, query: query, options: options, ranges: ranges, isComplete: true))
+        if cancelled() { throw .cancelled }
+        return (ranges, true)
     }
 
     static func replace(_ matches: EditorFindMatches, with supplied: String,
@@ -152,6 +198,8 @@ enum EditorFindPlan {
               matches.ranges.count <= maximumMatches else { return .refused(.documentTooLarge) }
         if cancelled() { return .refused(.cancelled) }
         let source = matches.text as NSString
+        guard let scope = searchRange(matches.selection, in: source) else { return .refused(.invalidRanges) }
+        let upperBound = NSMaxRange(scope)
         let ranges: [NSRange]
         if let index {
             guard matches.ranges.indices.contains(index) else { return .refused(.invalidRanges) }
@@ -160,11 +208,11 @@ enum EditorFindPlan {
         guard !ranges.isEmpty else { return .unchanged }
         guard supplied.utf8.count <= TextDocumentValue.maximumBytes else { return .refused(.documentTooLarge) }
         let replacement = supplied.replacingOccurrences(of: "\r\n", with: "\n")
-        var end = 0, removedBytes = 0
+        var end = scope.location, removedBytes = 0
         for (ordinal, range) in ranges.enumerated() {
             if ordinal % 256 == 0 && cancelled() { return .refused(.cancelled) }
             guard range.location >= end, range.length > 0,
-                  range.location <= source.length, range.length <= source.length - range.location,
+                  range.location <= upperBound, range.length <= upperBound - range.location,
                   scalarBoundary(range.location, in: source), scalarBoundary(NSMaxRange(range), in: source) else {
                 return .refused(.invalidRanges)
             }
@@ -194,11 +242,29 @@ enum EditorFindPlan {
         guard !proposed.utf16.elementsEqual(matches.text.utf16) else { return .unchanged }
         do {
             let value = try TextDocumentValue.edited(proposed, format: format)
-            return .replace(.init(original: matches.text, value: value, count: ranges.count,
-                                  selection: .init(location: ranges[0].location,
-                                                   length: replacement.utf16.count)))
+            let first = ranges[0].location
+            let span = NSRange(location: first, length: end - first)
+            let selection = NSRange(location: first, length: replacement.utf16.count)
+            let edit: EditorIndentationReplacement
+            if Range(span, in: matches.text) != nil, value.text.utf16.elementsEqual(proposed.utf16) {
+                let inserted = NSRange(location: first, length: value.utf16Count - first - (source.length - end))
+                edit = .init(range: span, text: (value.text as NSString).substring(with: inserted), selection: selection)
+            } else {
+                // A scalar match can split a composed character. The native
+                // edit admission can still use the validated whole value.
+                edit = .init(range: .init(location: 0, length: source.length), text: value.text, selection: selection)
+            }
+            return .replace(.init(original: matches.text, value: value, count: ranges.count, edit: edit))
         } catch let reason as TextDocumentFailure { return .invalidText(reason) }
         catch { return .refused(.invalidRanges) }
+    }
+
+    private static func searchRange(_ selection: NSRange?, in source: NSString) -> NSRange? {
+        guard let selection else { return .init(location: 0, length: source.length) }
+        guard selection.location >= 0, selection.length > 0, selection.location <= source.length,
+              selection.length <= source.length - selection.location, scalarBoundary(selection.location, in: source),
+              scalarBoundary(NSMaxRange(selection), in: source) else { return nil }
+        return selection
     }
 
     private static func scalarBoundary(_ offset: Int, in source: NSString) -> Bool {

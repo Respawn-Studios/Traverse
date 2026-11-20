@@ -234,10 +234,12 @@ import Foundation
         var windows: [NSWindow] = [preferences]
         var stage = "startup", passed = false
         var observations: [[String: Any]] = []
+        var capturedClips: [String] = []
         var alphaSamples: [CGFloat] = []
         var alphaSampleTimes: [TimeInterval] = []
         defer {
             try? JSONSerialization.data(withJSONObject: ["passed": passed, "stage": stage, "windows": observations,
+                "capturedClips": capturedClips,
                 "nativeWindowAlpha": windows.map { $0.alphaValue },
                 "lastOpeningAlphaSamples": alphaSamples,
                 "lastOpeningSampleTimes": alphaSampleTimes,
@@ -257,6 +259,7 @@ import Foundation
             ("TAR Browser", { tar.showWindow(nil); tar.window?.makeKeyAndOrderFront(nil); return tar.window }),
             ("Drives", { drives.show(settings: settings); return drives.window })
         ]
+        let recordedWindows = ["Settings": "settings", "What's New": "whats-new", "Analyzer": "analyzer"]
         do {
             NSApplication.shared.activate(ignoringOtherApps: true)
             for mode in BrowserMotionMode.allCases {
@@ -308,9 +311,14 @@ import Foundation
                         window.performClose(nil)
                     }
                     var closingAlpha: CGFloat?
-                    let closingDeadline = CACurrentMediaTime() + 1
+                    let closingBegan = CACurrentMediaTime()
+                    let closingDeadline = closingBegan + 1
+                    var closingAlphas: [CGFloat] = [], closingSampleTimes: [Double] = []
                     while window.isVisible && CACurrentMediaTime() < closingDeadline {
-                        if window.alphaValue > 0 && window.alphaValue < 1 { closingAlpha = window.alphaValue }
+                        let alpha = window.alphaValue
+                        if alpha > 0 && alpha < 1 { closingAlpha = alpha }
+                        closingAlphas.append(alpha)
+                        closingSampleTimes.append(CACurrentMediaTime() - closingBegan)
                         try await Task.sleep(for: .milliseconds(10))
                     }
                     try UIVerification.require(!expected || closingAlpha != nil,
@@ -321,7 +329,12 @@ import Foundation
                     observations.append(["window": name, "mode": mode.rawValue,
                         "entrance": entrance, "openingIntermediateAlpha": openingAlpha,
                         "openingAlphaSamples": alphaSamples, "openingSampleTimes": alphaSampleTimes,
-                        "closingIntermediateAlpha": closingAlpha ?? 1, "userCloseFade": closing, "framePreserved": true])
+                        "closingIntermediateAlpha": closingAlpha ?? 1, "closingAlphaSamples": closingAlphas,
+                        "closingSampleTimes": closingSampleTimes, "userCloseFade": closing, "framePreserved": true])
+                    if let label = recordedWindows[name], mode == .full || name == "Settings" {
+                        stage = name + "/" + mode.rawValue + "/rendered"
+                        capturedClips += try await captureRetainedLifecycle(root: root, label: "lifecycle-\(label)-\(mode.rawValue)", show: show)
+                    }
                 }
             }
             stage = "hidden-entrance-policy-change"
@@ -370,6 +383,54 @@ import Foundation
             throw error
         }
     }
+
+    private static func captureRetainedLifecycle(root: URL, label: String, show: () -> NSWindow?) async throws -> [String] {
+        guard let window = show() else { throw Failure.presentation }
+        try await wait { window.alphaValue == 1 && window.isVisible && window.occlusionState.contains(.visible) }
+        let originalFrame = window.frame
+        if originalFrame.width > 1152 || originalFrame.height > 800 {
+            // This is the generated review viewport, with the same recorder
+            // cap used elsewhere. The ordinary initial frame is untouched.
+            window.setFrame(.init(origin: originalFrame.origin,
+                size: .init(width: min(1152, originalFrame.width), height: min(800, originalFrame.height))), display: true)
+        }
+        let frame = window.frame
+        let originalTitle = window.title
+        window.title = "Tool window · generated review · " + label
+        let backdrop = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        backdrop.title = "Tool backdrop · generated review · " + label
+        backdrop.backgroundColor = .systemTeal
+        backdrop.isOpaque = true; backdrop.ignoresMouseEvents = true
+        backdrop.isReleasedWhenClosed = false; backdrop.isRestorable = false
+        backdrop.order(.above, relativeTo: window.windowNumber)
+        defer { backdrop.close(); window.title = originalTitle; window.setFrame(originalFrame, display: false) }
+
+        // Start with the generated cover already in front. Reopening the exact
+        // retained, now ordered-out window exercises its normal Show path
+        // while the recorder stays restricted to these same two window IDs.
+        let opening = label + "-open", closing = label + "-close"
+        let sampling = NativeMotionRecorder.Sampling.diagnostic(for: window)
+        _ = try await NativeMotionRecorder.record(window: window, over: backdrop, root: root,
+            label: opening, sampling: sampling, includingChildWindows: false) {
+            // Only the Show action is under review. Suppress the test's own
+            // outgoing utility-window snapshot before reopening the same ID.
+            let animation = window.animationBehavior
+            window.animationBehavior = .none
+            window.orderOut(nil)
+            window.animationBehavior = animation
+            try UIVerification.require(show() === window, "Reopen replaced the recorded tool window")
+        }
+        try UIVerification.require(window.frame == frame && window.alphaValue == 1 && window.isVisible,
+            "Rendered reopen did not preserve and settle the tool window")
+        backdrop.order(.below, relativeTo: window.windowNumber)
+        window.title = "Tool window · generated review · " + label
+        _ = try await NativeMotionRecorder.record(window: window, over: backdrop, root: root,
+            label: closing, sampling: sampling, includingChildWindows: false) { window.performClose(nil) }
+        try UIVerification.require(!window.isVisible && !ToolWindowCloseMotion.isClosing(window),
+            "Rendered close did not settle")
+        return [opening, closing]
+    }
+
     private static func verifyPropertiesDiscardClose(root: URL, settings: BrowserSettings,
                                                     onStage: (String) -> Void) async throws {
         let names = ApplicationPrivateNames(directory: root.appendingPathComponent("state/close-names"), settings: settings)

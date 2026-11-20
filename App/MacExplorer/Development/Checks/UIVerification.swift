@@ -13,6 +13,127 @@ import FileOperations
 enum UIVerification {
     struct Failure: Error { let message: String }
     private static var captureBytesWritten = 0
+    private static var rowEventNumber = 1_000_000
+    @MainActor private final class ClickReceipt { var received = false }
+
+    /// Populate an already-owned Git fixture. The generated repository runs
+    /// with no user configuration, template hooks or network transport.
+    nonisolated static func generateGit(in root: URL, _ arguments: [String], expectedStatus: Int32 = 0) throws {
+        var project = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { project.deleteLastPathComponent() }
+        guard root.path.hasPrefix(project.appendingPathComponent(".build").path + "/"),
+              root.path == root.standardizedFileURL.path, root.resolvingSymlinksInPath().path == root.path else {
+            throw Failure(message: "A generated Git fixture must be under this repository’s build directory")
+        }
+        let tool = Process()
+        tool.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        tool.currentDirectoryURL = root
+        tool.arguments = ["-c", "user.name=Generated", "-c", "user.email=fixture@example.invalid",
+                          "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "gc.auto=0"] + arguments
+        tool.environment = ["PATH": "/usr/bin:/bin", "LANG": "C", "GIT_CONFIG_GLOBAL": "/dev/null",
+                            "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"]
+        tool.standardInput = FileHandle.nullDevice
+        tool.standardOutput = FileHandle.nullDevice
+        tool.standardError = FileHandle.nullDevice
+        try tool.run()
+        tool.waitUntilExit()
+        guard tool.terminationReason == .exit, tool.terminationStatus == expectedStatus else {
+            throw Failure(message: "Could not build the generated Git fixture")
+        }
+    }
+
+    static func nativeTables(in root: NSView?) -> [NSTableView] {
+        guard let root else { return [] }
+        if let table = root as? NSTableView { return [table] }
+        return root.subviews.flatMap { nativeTables(in: $0) }
+    }
+
+    static func menuItem(_ path: String...) -> NSMenuItem? {
+        var menu = NSApp.mainMenu
+        var item: NSMenuItem?
+        for name in path {
+            item = menu?.item(withTitle: name)
+            menu = item?.submenu
+        }
+        return item
+    }
+
+    static func completeNameSelection(in parent: NSWindow, text: String, mode: NameSelectionPrompt.Mode,
+                                      cancel: Bool = false) async throws {
+        try await waitUntil("Select by Name attached sheet") { parent.attachedSheet?.firstResponder is NSTextView }
+        guard let sheet = parent.attachedSheet, let editor = sheet.firstResponder as? NSTextView,
+              let content = sheet.contentView else { throw Failure(message: "Select by Name did not focus its native field") }
+        let controls = WorkspaceNetworkVerification.descendants(content)
+        guard let modeControl = controls.compactMap({ $0 as? NSPopUpButton }).first,
+              let apply = controls.compactMap({ $0 as? NSButton }).first(where: { $0.title == "Apply" }),
+              let dismiss = controls.compactMap({ $0 as? NSButton }).first(where: { $0.title == "Cancel" }) else {
+            throw Failure(message: "Select by Name controls are unavailable")
+        }
+        try require(!apply.isEnabled, "An empty pattern enabled Apply")
+        modeControl.selectItem(at: mode.rawValue)
+        editor.insertText(text, replacementRange: editor.selectedRange())
+        try require(apply.isEnabled, "Ordinary native input did not enable Apply")
+        if cancel { dismiss.performClick(nil) }
+        else { sheet.sendEvent(key("\r", code: 36, flags: [], window: sheet)) }
+    }
+
+    /// Own-process native event dispatch, with no global pointer injection.
+    /// Posting the complete pair keeps AppKit's current-event/tracking state
+    /// coherent; direct mouseDown plus a queued mouseUp does not establish it.
+    static func clickRow(_ row: Int, in table: NSTableView, modifiers: NSEvent.ModifierFlags = []) async throws {
+        guard ProcessInfo.processInfo.arguments.contains("--verify-ui"),
+              row >= 0, row < table.numberOfRows, let window = table.window, window.isVisible else {
+            throw Failure(message: "Native row click requires its visible generated window")
+        }
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        let focusDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while !NSApp.isActive || !window.isKeyWindow {
+            try require(window.isVisible && ProcessInfo.processInfo.systemUptime < focusDeadline,
+                "Generated row window could not acquire native focus")
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        table.scrollRowToVisible(row); window.contentView?.layoutSubtreeIfNeeded()
+        let local = NSPoint(x: min(80, table.bounds.midX), y: table.rect(ofRow: row).midY)
+        try require(table.row(at: local) == row && table.visibleRect.contains(local), "Generated row is outside its native viewport")
+        let point = table.convert(local, to: nil), number = window.windowNumber
+        rowEventNumber += 2
+        let downNumber = rowEventNumber, upNumber = rowEventNumber + 1
+        let receipt = ClickReceipt()
+        // Tracking controls may consume mouseUp inside mouseDown. A queued
+        // private barrier is observed after both events return to the app loop.
+        guard let monitor = NSEvent.addLocalMonitorForEvents(matching: .applicationDefined, handler: { event in
+            guard event.windowNumber == number && event.subtype.rawValue == 0x5452
+                && event.data1 == upNumber else { return event }
+            MainActor.assumeIsolated {
+                receipt.received = true
+            }
+            return nil
+        }) else { throw Failure(message: "Generated row click could not establish its native receipt") }
+        defer { NSEvent.removeMonitor(monitor) }
+        func event(_ type: NSEvent.EventType, _ eventNumber: Int) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: number, context: nil,
+                eventNumber: eventNumber, clickCount: 1, pressure: 1) else {
+                throw Failure(message: "Generated row click event unavailable")
+            }
+            return event
+        }
+        let down = try event(.leftMouseDown, downNumber), up = try event(.leftMouseUp, upNumber)
+        guard let barrier = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: number, context: nil,
+            subtype: 0x5452, data1: upNumber, data2: 0) else {
+            throw Failure(message: "Generated row click barrier unavailable")
+        }
+        NSApp.postEvent(down, atStart: false)
+        NSApp.postEvent(up, atStart: false)
+        NSApp.postEvent(barrier, atStart: false)
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while !receipt.received {
+            try require(window.isVisible && ProcessInfo.processInfo.systemUptime < deadline,
+                "Generated row click did not finish native dispatch")
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
 
     /// Explicit legacy scan checks use an existing generated review profile,
     /// never the ordinary app's shared user cache or an unindexed pool.
@@ -111,6 +232,47 @@ enum UIVerification {
     static func settled(_ browser: BrowserViewController) async throws {
         try await waitUntil("Directory session") { !browser.isLoading && browser.orderingTask == nil }
         browser.view.layoutSubtreeIfNeeded()
+    }
+
+    static func verifyDiffSearch(in review: NSWindow, workspace: BrowserWorkspaceController,
+                                          query: String, expectedPath: String, files: Int,
+                                 expectedSide: EditorComparisonPlan.Side = .current) async throws {
+        try await waitUntil("Review owns Find Across Diffs") {
+            review.isKeyWindow && menuItem("View", "Find Across Diffs…")?.target === review.windowController
+        }
+        let chord = key("F", code: 3, flags: [.command, .shift], window: review)
+        try require(NSApp.mainMenu?.performKeyEquivalent(with: chord) == true,
+            "Review did not route Find Across Diffs")
+        try await waitUntil("The review opens the comparison with its exact file list") {
+            workspace.textComparisonWindow?.window?.isKeyWindow == true && workspace.textComparisonWindow?.fileCount == files
+                && workspace.textComparisonWindow?.preparing == false
+        }
+        guard let diff = workspace.textComparisonWindow, let window = diff.window else {
+            throw Failure(message: "Missing Diff search window")
+        }
+        try require(diff.diffSearch.visible, "Git opened a comparison without its requested search")
+        try await waitUntil("The prepared diff search owns its native field editor") {
+            guard let view = window.contentView, let field = WorkspaceNetworkVerification.descendants(view).compactMap({ $0 as? NSSearchField })
+                .first(where: { $0.identifier?.rawValue == "diff-search-query" }), let editor = field.currentEditor() else { return false }
+            return window.firstResponder === editor && field.isEnabled
+        }
+        for letter in query { window.sendEvent(key(String(letter), code: 0, flags: [], window: window)) }
+        try await waitUntil("The typed Diff query reached the native field") { diff.diffSearch.query == query }
+        window.sendEvent(key("\r", code: 36, flags: [], window: window))
+        try await waitUntil("The search returns one exact match across the visible pairs") {
+            diff.diffSearch.report?.checked == files && diff.diffSearch.report?.hits.count == 1
+                && diff.diffSearch.selectedHit?.name == expectedPath && diff.diffSearch.selectedHit?.side == expectedSide
+        }
+        window.sendEvent(key("\r", code: 36, flags: [], window: window))
+        try await waitUntil("Diff search opens the precise selection") {
+            let text = expectedSide == .before ? diff.beforeSurface.textView : diff.currentSurface.textView
+            guard !diff.preparing, diff.labels.source == expectedPath, window.firstResponder === text else { return false }
+            let source = text.string as NSString
+            let selection = text.selectedRange()
+            return selection.location != NSNotFound && NSMaxRange(selection) <= source.length && source.substring(with: selection) == query
+        }
+        await diff.closeAndDrain()
+        review.makeKeyAndOrderFront(nil)
     }
 
     static func waitUntil(_ description: String, condition: () -> Bool) async throws {

@@ -11,6 +11,7 @@ final class PaneHostView: NSView {
     var isSplit = false { didSet { updateFocus() } }
     private let focusOutline = PaneFocusOutlineView()
     var showsFocusOutline: Bool { !focusOutline.isHidden }
+    var focusForeground: NSView { focusOutline }
     var focusPreferences = PaneFocusPreferences() { didSet { focusOutline.preferences = focusPreferences } }
     private let snap = PaneSnapOutlineView()
     private(set) var proposedEdge: PaneDropEdge?

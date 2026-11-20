@@ -9,20 +9,29 @@ import LocalStorage
 final class NativeDriveJobStore: @unchecked Sendable {
     enum Failure: Error { case unavailable, invalid, unresolved, changed }
     struct Snapshot: Sendable { let record: APFSVolumeFormatJobRecord?; let bytes: Data? }
+    enum RecordingOwner: Sendable {
+        case generated(APFSVolumeFormatGeneratedOwner)
+        case ordinary(APFSVolumeFormatImageOwner)
+    }
     struct Recording: APFSVolumeFormatRecording {
         let store: NativeDriveJobStore
-        let owner: APFSVolumeFormatGeneratedOwner
+        let owner: RecordingOwner
         let jobID: UUID
         let attachmentCurrent: @Sendable () -> Bool
+        let completionPolicy: APFSVolumeFormatCompletionPolicy
         func ownerStillCurrent() -> Bool {
             NativeDriveJobStore.currentBackingFile(owner) && attachmentCurrent()
         }
         func recordIntent(_ snapshot: APFSVolumeFormatSnapshot) async throws {
-            try await store.recordIntent(snapshot, owner: owner, jobID: jobID)
+            try await store.recordIntent(snapshot, owner: owner, jobID: jobID,
+                                         completionPolicy: completionPolicy)
         }
         func recordSubmitted() async throws { try await store.recordSubmitted(jobID: jobID) }
         func recordTerminal(_ terminal: APFSVolumeFormatRecoveryTerminal) async throws {
-            try await store.recordTerminal(terminal, jobID: jobID)
+            if case .observedNativeCompletion = terminal {
+                guard completionPolicy == .sourceQualification, ownerStillCurrent() else { throw Failure.changed }
+            }
+            try await store.recordTerminal(terminal, jobID: jobID, attachmentCurrent: attachmentCurrent)
         }
     }
 
@@ -50,8 +59,27 @@ final class NativeDriveJobStore: @unchecked Sendable {
                      rootPreparation: parent, leafPreparation: leaf)
     }
     func recording(owner: APFSVolumeFormatGeneratedOwner,
+                   attachmentCurrent: @escaping @Sendable () -> Bool,
+                   completionPolicy: APFSVolumeFormatCompletionPolicy = .provisional) -> Recording {
+        .init(store: self, owner: .generated(owner), jobID: UUID(), attachmentCurrent: attachmentCurrent,
+              completionPolicy: completionPolicy)
+    }
+    func recording(ordinaryImageOwner: APFSVolumeFormatImageOwner,
                    attachmentCurrent: @escaping @Sendable () -> Bool) -> Recording {
-        .init(store: self, owner: owner, jobID: UUID(), attachmentCurrent: attachmentCurrent)
+        .init(store: self, owner: .ordinary(ordinaryImageOwner), jobID: UUID(),
+              attachmentCurrent: attachmentCurrent, completionPolicy: .sourceQualification)
+    }
+
+    private static func currentBackingFile(_ owner: RecordingOwner) -> Bool {
+        switch owner {
+        case .generated(let generated): currentBackingFile(generated)
+        case .ordinary(let ordinary): APFSAttachedImageWitness.backingFileCurrent(ordinary)
+        }
+    }
+    private static func currentBackingFile(_ record: APFSVolumeFormatJobRecord) -> Bool {
+        if let owner = record.owner { return currentBackingFile(owner) }
+        if let owner = record.ordinaryImageOwner { return APFSAttachedImageWitness.backingFileCurrent(owner) }
+        return false
     }
 
     private static func currentBackingFile(_ owner: APFSVolumeFormatGeneratedOwner) -> Bool {
@@ -96,7 +124,8 @@ final class NativeDriveJobStore: @unchecked Sendable {
     func load() async throws -> Snapshot { try await perform { try self.read() } }
 
     private func recordIntent(_ snapshot: APFSVolumeFormatSnapshot,
-                              owner: APFSVolumeFormatGeneratedOwner, jobID: UUID) async throws {
+                              owner: RecordingOwner, jobID: UUID,
+                              completionPolicy: APFSVolumeFormatCompletionPolicy) async throws {
         guard snapshot.validate(), Self.currentBackingFile(owner) else { throw Failure.invalid }
         let baseline = try await load()
         guard baseline.record?.isUnresolved != true else { throw Failure.unresolved }
@@ -110,8 +139,17 @@ final class NativeDriveJobStore: @unchecked Sendable {
             guard let lease = try self.file(strict: false).acquireMutationLease(create: true) else { throw Failure.unavailable }
             self.lease = lease
             do {
-                let record = APFSVolumeFormatJobRecord(id: jobID, owner: owner,
-                    snapshot: snapshot, phase: .intent)
+                let record: APFSVolumeFormatJobRecord
+                switch owner {
+                case .generated(let generated):
+                    record = APFSVolumeFormatJobRecord(id: jobID, owner: generated,
+                        snapshot: snapshot, phase: .intent,
+                        version: completionPolicy == .sourceQualification ? 2 : 1)
+                case .ordinary(let ordinary):
+                    guard completionPolicy == .sourceQualification else { throw Failure.invalid }
+                    record = APFSVolumeFormatJobRecord(id: jobID, ordinaryImageOwner: ordinary,
+                        snapshot: snapshot, phase: .intent)
+                }
                 try self.write(record, replacing: before)
                 try lease.validate(); self.active = jobID
             } catch {
@@ -132,7 +170,8 @@ final class NativeDriveJobStore: @unchecked Sendable {
             } catch { self.failedWrite = true; throw error }
         }
     }
-    private func recordTerminal(_ terminal: APFSVolumeFormatRecoveryTerminal, jobID: UUID) async throws {
+    private func recordTerminal(_ terminal: APFSVolumeFormatRecoveryTerminal, jobID: UUID,
+                                attachmentCurrent: @escaping @Sendable () -> Bool) async throws {
         try await perform {
             guard self.active == jobID, let lease = self.lease else { throw Failure.unresolved }
             defer { self.active = nil; self.lease = nil }
@@ -147,11 +186,19 @@ final class NativeDriveJobStore: @unchecked Sendable {
                     guard record.phase == .intent else { throw Failure.changed }
                     record.phase = .notSubmitted
                 case let .compatibleReplacement(replacement):
-                    guard record.phase == .submitted, replacement != record.snapshot.targetID,
-                          Self.currentBackingFile(record.owner) else { throw Failure.changed }
+                    guard record.version < 3, record.phase == .submitted,
+                          replacement != record.snapshot.targetID,
+                          Self.currentBackingFile(record) else { throw Failure.changed }
                     // Backend APFS identity is only provisional; target and
                     // sibling marker witnesses have not been verified here.
                     record.phase = .compatibleReplacement; record.replacementID = replacement
+                case let .observedNativeCompletion(completion):
+                    guard (record.version == 2 || record.version == 3), record.phase == .submitted,
+                          completion.validates(record.snapshot),
+                          Self.currentBackingFile(record), attachmentCurrent() else { throw Failure.changed }
+                    record.phase = .observedNativeCompletion
+                    record.replacementID = completion.replacementID
+                    record.nativeCompletion = completion
                 case .uncertain: record.phase = .uncertain
                 }
                 try self.write(record, replacing: before)

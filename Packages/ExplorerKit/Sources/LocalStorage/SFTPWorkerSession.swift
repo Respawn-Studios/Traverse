@@ -453,6 +453,13 @@ struct SFTPWorkerAdmissionFailure: Error, Sendable {
     /// Includes setup helpers which have not yet crossed into a browser tab.
     public static func pauseAndDrainOwned() async -> Bool { await SFTPProcessAdmission.shared.pauseAndDrain() }
     public static func resumeAdmissions() { SFTPProcessAdmission.shared.resume() }
+    #if DEBUG && !SFTP_PARENT_STANDALONE
+    static func generatedExpiredCloseProbe(child: pid_t, descriptor: Int32, activity: FileActivityGate) throws
+        -> @Sendable () async -> SFTPWorkerClose {
+        let owner = try SFTPProcessOwner.generatedExpiredCloseProbe(child: child, descriptor: descriptor, activity: activity)
+        return { await owner.close() }
+    }
+    #endif
     private func perform<T: Sendable>(_ work: @escaping @Sendable (SFTPProcessOwner) throws -> T) async throws -> T {
         try await owner.perform(work)
     }
@@ -713,6 +720,7 @@ private final class SFTPProcessOwner: @unchecked Sendable {
     private var inputSequence: UInt64 = 0, startedProtocol = false
     private var stopAt: TimeInterval?, request: UUID?, completed: UUID?
     private var eof = false, status: Int32?, contained = false, valid = true
+    private var sentKill = false
     private var childIdentityUncertain = false
     private var terminal: SFTPWorkerTerminal?, verified: SFTPVerifiedHost?
     private var jumpVerified: SFTPVerifiedHost?, jumpAuthenticated = false, jumpIdentity: SFTPHostKey?
@@ -2142,7 +2150,7 @@ private final class SFTPProcessOwner: @unchecked Sendable {
         }
     }
     private func reap() {
-        guard child > 0, status == nil else { return }; var value: Int32 = 0
+        guard child > 0, status == nil, !childIdentityUncertain else { return }; var value: Int32 = 0
         let found = waitpid(child, &value, WNOHANG)
         switch SFTPChildWait.observe(expected: child, found: found, status: value, error: errno) {
         case .pending: break
@@ -2183,6 +2191,41 @@ private final class SFTPProcessOwner: @unchecked Sendable {
         }
         reap(); if eof { throw SFTPSessionFailure.exited }; return nil
     }
+    #if DEBUG && !SFTP_PARENT_STANDALONE
+    fileprivate static func generatedExpiredCloseProbe(child: pid_t, descriptor: Int32, activity: FileActivityGate) throws
+        -> SFTPProcessOwner {
+        let owner = try SFTPProcessOwner(peer: .init(host: "generated.example", port: 22,
+            numericHost: "127.0.0.1", scopeID: 0, bundle: Bundle.main.bundleURL), activity: activity, pool: nil)
+        let lease = try activity.begin()
+        try SFTPProcessAdmission.shared.reserve(owner, paged: false)
+        owner.lock.withLock {
+            owner.child = child
+            owner.descriptor = descriptor
+            owner.lease = lease
+            owner.stopAt = ProcessInfo.processInfo.systemUptime - 4
+        }
+        return owner
+    }
+    #endif
+    private func observeClosingTransport(pollMilliseconds: Int32) {
+        guard !eof else { return }
+        if valid {
+            do { _ = try nextEvent(pollMilliseconds: pollMilliseconds) }
+            catch { valid = false; buffer.removeAll(keepingCapacity: false) }
+        } else {
+            let fd = lock.withLock { descriptor }
+            guard fd >= 0 else { return }
+            var bytes = [UInt8](repeating: 0, count: 16384)
+            let count = Darwin.read(fd, &bytes, bytes.count)
+            if count == 0 { eof = true }
+            #if DEBUG && !SFTP_PARENT_STANDALONE
+            if count > 0 { SFTPGeneratedBackendObservation.shared.protocolReceived() }
+            #endif
+            #if DEBUG && TRAVERSE_GATEB_NATIVE_QUALIFICATION
+            if count > 0 { lock.withLock { gateBPositiveReceives += 1 } }
+            #endif
+        }
+    }
     func close() async -> SFTPWorkerClose {
         await withCheckedContinuation { continuation in queue.async { continuation.resume(returning: self.finish()) } }
     }
@@ -2190,33 +2233,25 @@ private final class SFTPProcessOwner: @unchecked Sendable {
         stop()
         // Include time queued behind the active RPC. Repeated close/finish
         // calls never restart Stop grace or extend an already-ended lifetime.
-        let began = lock.withLock { stopAt ?? ProcessInfo.processInfo.systemUptime }; var killed = false
+        let began = lock.withLock { stopAt ?? ProcessInfo.processInfo.systemUptime }
         // The worker may spend500ms ending an SSH task after an in-flight
         // challenge is cancelled. Its parent must not kill it at that same
         // boundary, before terminal/writer evidence can be delivered.
         let gracefulSeconds: TimeInterval = mode.allowsInteractiveAuthentication ? 1.25 : 0.5
-        while child > 0 && (status == nil || !eof) {
+        reap()
+        while child > 0 && !childIdentityUncertain && (status == nil || !eof) {
             let elapsed = ProcessInfo.processInfo.systemUptime - began
-            if childIdentityUncertain { break } // Never signal a PID after ownership becomes uncertain.
+            guard elapsed <= 3 else { break }
             if elapsed > gracefulSeconds && status == nil && !contained { contained = true; _ = kill(child, SIGTERM) }
-            if elapsed > 1.5 && status == nil && !killed { killed = true; _ = kill(child, SIGKILL) }
-            if elapsed > 3 { break }
-            if valid {
-                do { _ = try nextEvent() } catch { valid = false; buffer.removeAll(keepingCapacity: false) }
-            } else {
-                let fd = lock.withLock { descriptor }; var bytes = [UInt8](repeating: 0, count: 16384)
-                if fd >= 0 {
-                    let n = Darwin.read(fd, &bytes, bytes.count)
-                    if n == 0 { eof = true }
-                    #if DEBUG && !SFTP_PARENT_STANDALONE
-                    if n > 0 { SFTPGeneratedBackendObservation.shared.protocolReceived() }
-                    #endif
-                    #if DEBUG && TRAVERSE_GATEB_NATIVE_QUALIFICATION
-                    if n > 0 { lock.withLock { gateBPositiveReceives += 1 } }
-                    #endif
-                }
-                usleep(1000)
-            }
+            if elapsed > 1.5 && status == nil && !sentKill { sentKill = true; _ = kill(child, SIGKILL) }
+            if eof || !valid { usleep(1000) }
+            observeClosingTransport(pollMilliseconds: 20)
+            reap()
+        }
+        // A close may arrive after the signal deadline, with terminal bytes or
+        // EOF already readable. Take bounded, nonblocking observations only.
+        for _ in 0..<16 where child > 0 && !eof && !childIdentityUncertain {
+            observeClosingTransport(pollMilliseconds: 0)
             reap()
         }
         if child == 0 || status != nil && eof {

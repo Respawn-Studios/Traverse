@@ -467,13 +467,17 @@ import FileOperations
                 model.rememberPassword = model.rememberServer; model.password = password
                 connections += 1; try require(connections <= (foldersOnly || creatingOnly || directoryActions || movingOnly || copyingOnly || editingOnly || downloadingOnly ? 1 : 2), "Authentication ceiling")
                 model.connect()
-                if editingOnly {
+                if RemoteTextEditorFeature.smbAvailable {
                     try await wait { form.window?.attachedSheet != nil || !model.busy }
-                    guard let sheet = form.window?.attachedSheet, let content = sheet.contentView,
-                          let enable = buttons(content).first(where: { $0.title == "Enable Editing" }) else {
+                    if let content = form.window?.attachedSheet?.contentView {
+                        let choice = editingOnly ? "Enable Editing" : "Browse Without Editing"
+                        guard let button = buttons(content).first(where: { $0.title == choice }) else {
+                            throw UIVerification.Failure(message: "Unexpected confirmation during generated SMB Connect")
+                        }
+                        button.performClick(nil)
+                    } else if editingOnly {
                         throw UIVerification.Failure(message: "First SMB Edit setup did not offer explicit consent")
                     }
-                    enable.performClick(nil)
                 }
                 try await wait { !model.busy }
                 try require(model.connected && !model.rememberingIncomplete, "Real Connect or remembering failed")

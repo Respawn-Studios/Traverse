@@ -533,11 +533,14 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                                 observing selection: FileOperationSelection? = nil,
                                 metadataPolicy: TransferMetadataPolicy = .strict,
                                 copyExecution: CopyExecutionRequest = .standard,
+                                requireVacantDestination: Bool = false,
                                 progress: (@Sendable (OperationProgress) -> Void)? = nil) async throws -> TransferPlan {
         let reporter = OperationProgressReporter(callback: progress)
         do {
             let plan = try await worker(progress: reporter) { cancellation in
-                try self.prepare(sources: sources, destination: destinationDirectory, move: move, observing: selection, metadataPolicy: metadataPolicy, copyExecution: copyExecution, cancellation: cancellation)
+                try self.prepare(sources: sources, destination: destinationDirectory, move: move, observing: selection,
+                    metadataPolicy: metadataPolicy, copyExecution: copyExecution,
+                    requireVacantDestination: requireVacantDestination, cancellation: cancellation)
             }
             reporter.flush(); return plan
         } catch { reporter.finish(success: false); throw error }
@@ -1429,7 +1432,8 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     }
 
     private func prepare(sources: [URL], destination: URL, move: Bool, observing selection: FileOperationSelection?, metadataPolicy: TransferMetadataPolicy,
-                         copyExecution: CopyExecutionRequest = .standard, cancellation: OperationCancellation) throws -> TransferPlan {
+                         copyExecution: CopyExecutionRequest = .standard, requireVacantDestination: Bool = false,
+                         cancellation: OperationCancellation) throws -> TransferPlan {
         guard !sources.isEmpty, sources.count <= OperationJournal.maximumInputs else { throw FileOperationFailure.invalidRequest }
         #if DEBUG
         try validateGeneratedResponsivenessCapability(sources: sources, destination: destination,
@@ -1440,9 +1444,11 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         let protection = try HistoryProtection(directory, cancellation: cancellation, protecting: protectedLocations)
         let target = try DirectoryAnchor(destination)
         try protection.requireDirectory(target)
+        hooks.afterTransferDestinationObservation?()
+        if !move { try CopyDestinationFilesystem.requireVerifiedStagingDestination(in: target, forceFATRefusal: hooks.forceFATCopyDestinationRefusal) }
         var conflicts: [TransferConflict] = []
         var count = 0
-        func entry(_ source: URL, _ destination: URL, _ depth: Int) throws -> TransferEntry {
+        func entry(_ source: URL, in destinationParent: DirectoryAnchor, depth: Int) throws -> TransferEntry {
             try cancellation.check(); count += 1
             guard depth < OperationLimits.maximumDepth, count <= OperationLimits.maximumNodes else { throw FileOperationFailure.unsupported }
             try validateName(source.lastPathComponent)
@@ -1451,11 +1457,20 @@ public final class RecoverableFileOperations: @unchecked Sendable {
             let sourceSnapshot = try EntrySnapshot(parent: parent.fd, name: source.lastPathComponent)
             try protection.requireEntry(parent: parent, name: source.lastPathComponent, snapshot: sourceSnapshot)
             guard [S_IFREG, S_IFDIR, S_IFLNK].contains(sourceSnapshot.type), sourceSnapshot.device == parent.identity.device else { throw FileOperationFailure.unsupported }
-            let destinationParent = try DirectoryAnchor(destination.deletingLastPathComponent(), resolve: false)
+            let destination = destinationParent.url.appendingPathComponent(source.lastPathComponent)
+            if CopyDestinationFilesystem.requiresStaging(move: move, sourceDevice: sourceSnapshot.device,
+                destinationDevice: destinationParent.identity.device,
+                forceCrossVolumeForTest: hooks.forceCrossVolumeMoveFATRefusal?() == true) {
+                try CopyDestinationFilesystem.requireVerifiedStagingDestination(in: destinationParent,
+                    forceFATRefusal: hooks.forceFATCopyDestinationRefusal)
+            }
             guard (!move || source != destination), !destination.path.hasPrefix(source.path + "/") else { throw FileOperationFailure.invalidRequest }
             let destinationSnapshot: EntrySnapshot?
             do { destinationSnapshot = try EntrySnapshot(parent: destinationParent.fd, name: destination.lastPathComponent) }
             catch FileOperationFailure.notFound { destinationSnapshot = nil }
+            // With no occupied name, the ordinary plan retains an absent-name
+            // expectation through validation and exclusive publication.
+            if requireVacantDestination, destinationSnapshot != nil { throw FileOperationFailure.conflict }
             let id = UUID()
             var children: [TransferEntry]?
             let protectedDestination = try protection.protects(parent: destinationParent,
@@ -1469,13 +1484,16 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 conflict.destinationHistoryProtected = protectedDestination
                 conflicts.append(conflict)
                 if canMerge {
+                    let mergedDestination = try DirectoryAnchor(destination, resolve: false)
+                    guard mergedDestination.identity.sameObject(as: existing) else { throw FileOperationFailure.destinationChanged }
                     let anchor = try DirectoryAnchor(source, resolve: false)
                     let fd = openat(anchor.fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                     guard fd >= 0 else { throw posixFailure() }
                     defer { close(fd) }
                     children = try childNames(in: fd, cancellation: cancellation, limit: OperationLimits.maximumNodes - count).map {
-                        try entry(source.appendingPathComponent($0), destination.appendingPathComponent($0), depth + 1)
+                        try entry(source.appendingPathComponent($0), in: mergedDestination, depth: depth + 1)
                     }
+                    try mergedDestination.validate()
                 }
             } else if protectedDestination { throw FileOperationFailure.operationHistoryProtected }
             return TransferEntry(id: id, source: source, destination: destination, sourceIdentity: sourceSnapshot,
@@ -1487,7 +1505,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
             let name = source.lastPathComponent
             let folded = fpathconf(target.fd, _PC_CASE_SENSITIVE) == 1 ? name : name.folding(options: .caseInsensitive, locale: Locale(identifier: "en_US_POSIX"))
             guard names.insert(folded).inserted else { throw FileOperationFailure.invalidRequest }
-            let value = try entry(source, target.url.appendingPathComponent(name), 0)
+            let value = try entry(source, in: target, depth: 0)
             cancellation.progress?.advance(items: 1)
             return value
         }
@@ -1500,10 +1518,13 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     guard identity == entry.sourceIdentity else { throw FileOperationFailure.sourceChanged }
                 } else if url.path == target.url.path {
                     guard identity.sameObject(as: target.identity) else { throw FileOperationFailure.destinationChanged }
+                } else if let entry = entries.first(where: { $0.source.deletingLastPathComponent().path == url.path }) {
+                    guard identity.sameObject(as: entry.sourceParent) else { throw FileOperationFailure.sourceChanged }
                 } else { throw FileOperationFailure.invalidRequest }
             }
         }
         try validateCopyExecutionSession(locations: entries.flatMap { [$0.source, $0.destination] })
+        try target.validate()
         let reporter = cancellation.progress ?? OperationProgressReporter(callback: nil)
         var plan = TransferPlan(jobID: reporter.jobID, progressReporter: reporter, conflicts: conflicts, sources: entries.map(\.source), destinationDirectory: target.url, isMove: move, metadataPolicy: metadataPolicy, entries: entries)
         if move { plan.moveReservation = MoveRecordReservation(owner: continuationSession) }
@@ -1617,6 +1638,11 @@ public final class RecoverableFileOperations: @unchecked Sendable {
             let known = Set(plan.conflicts.map(\.id))
             guard resolutions.keys.allSatisfy(known.contains) else { throw FileOperationFailure.invalidRequest }
             let destinationAnchor = try DirectoryAnchor(plan.destinationDirectory, resolve: false)
+            if plan.continuation == nil, let expected = plan.entries.first?.destinationParent,
+               !destinationAnchor.identity.sameObject(as: expected) {
+                throw FileOperationFailure.destinationChanged
+            }
+            if !plan.isMove { try CopyDestinationFilesystem.requireVerifiedStagingDestination(in: destinationAnchor, forceFATRefusal: hooks.forceFATCopyDestinationRefusal) }
             let caseSensitive = fpathconf(destinationAnchor.fd, _PC_CASE_SENSITIVE) == 1
             var reservedDestinations = Set<String>()
             var keptBoth = Set<UUID>()
@@ -1661,6 +1687,18 @@ public final class RecoverableFileOperations: @unchecked Sendable {
             entries = try plan.entries.flatMap { try flatten($0, root: $0) }
             outcomes = resolvedOutcomes
             resolved = true
+            // Reopen every resolved destination parent before journal creation.
+            // A cross-volume Move uses the same staged descriptor copy as Copy;
+            // an ordinary same-volume rename does not need this FAT gate.
+            for entry in entries {
+                let parent = try openTransferDestinationParent(entry)
+                if CopyDestinationFilesystem.requiresStaging(move: plan.isMove,
+                    sourceDevice: entry.sourceIdentity.device, destinationDevice: parent.identity.device,
+                    forceCrossVolumeForTest: hooks.forceCrossVolumeMoveFATRefusal?() == true) {
+                    try CopyDestinationFilesystem.requireVerifiedStagingDestination(in: parent,
+                        forceFATRefusal: hooks.forceFATCopyDestinationRefusal)
+                }
+            }
             if !entries.isEmpty || !mergedContainers.isEmpty || !(plan.continuation?.records.isEmpty ?? true) {
                 journal = try OperationJournal(directory, hooks: hooks.journalHooks, cancellation: cancellation)
                 try journal?.validateWritableCatalog()
@@ -1749,7 +1787,13 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     guard unit.source.matches(try ContinuationGuard.observe(entry.source, cancellation: cancellation, budget: TraversalBudget())) else {
                         throw FileOperationFailure.sourceChanged
                     }
-                    let destinationParent = try DirectoryAnchor(entry.destination.deletingLastPathComponent(), resolve: false)
+                    let destinationParent = try openTransferDestinationParent(entry)
+                    if CopyDestinationFilesystem.requiresStaging(move: plan.isMove,
+                        sourceDevice: original.identity.device, destinationDevice: destinationParent.identity.device,
+                        forceCrossVolumeForTest: hooks.forceCrossVolumeMoveFATRefusal?() == true) {
+                        try CopyDestinationFilesystem.requireVerifiedStagingDestination(in: destinationParent,
+                            forceFATRefusal: hooks.forceFATCopyDestinationRefusal)
+                    }
                     let sameVolumeMove = plan.isMove && original.identity.device == destinationParent.identity.device
                     // A plain same-volume rename needs no staging or retained original.
                     let area = try (!sameVolumeMove || entry.destinationIdentity != nil)
@@ -1821,10 +1865,13 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     if entry.destinationIdentity != nil {
                         guard let area else { throw FileOperationFailure.invalidRequest }
                         try renameStep(entry.destination, area.url.appendingPathComponent("displaced"), expectedIdentity: entry.destinationIdentity,
-                            expectedGuard: unit.destination, guardFailure: .destinationChanged, record: record, journal: store, cancellation: segment, protection: protection)
+                            expectedGuard: unit.destination, guardFailure: .destinationChanged,
+                            expectedSourceParent: entry.destinationParent, expectedDestinationParent: area.identity,
+                            record: record, journal: store, cancellation: segment, protection: protection)
                     }
                     try renameStep(payload, entry.destination, expectedTree: payloadTree,
-                        expectedGuard: sameVolumeMove ? unit.source : nil, record: record, journal: store, cancellation: segment, protection: protection)
+                        expectedGuard: sameVolumeMove ? unit.source : nil, expectedDestinationParent: entry.destinationParent,
+                        record: record, journal: store, cancellation: segment, protection: protection)
                     if plan.isMove && !sameVolumeMove {
                         // Native publication may add a root security mark. Its saved
                         // after-image, rather than the staged image, guards retention.
@@ -1925,13 +1972,18 @@ public final class RecoverableFileOperations: @unchecked Sendable {
 
     private func validate(_ entry: TransferEntry) throws {
         let source = try DirectoryAnchor(entry.source.deletingLastPathComponent(), resolve: false)
-        let destination = try DirectoryAnchor(entry.destination.deletingLastPathComponent(), resolve: false)
+        let destination = try openTransferDestinationParent(entry)
         guard source.identity.sameObject(as: entry.sourceParent),
               try EntrySnapshot(parent: source.fd, name: entry.source.lastPathComponent) == entry.sourceIdentity else { throw FileOperationFailure.sourceChanged }
-        guard destination.identity.sameObject(as: entry.destinationParent) else { throw FileOperationFailure.destinationChanged }
         if let expected = entry.destinationIdentity {
             guard try EntrySnapshot(parent: destination.fd, name: entry.destination.lastPathComponent) == expected else { throw FileOperationFailure.destinationChanged }
         } else { try requireAbsent(entry.destination.lastPathComponent, in: destination.fd) }
+    }
+
+    private func openTransferDestinationParent(_ entry: TransferEntry) throws -> DirectoryAnchor {
+        let parent = try DirectoryAnchor(entry.destination.deletingLastPathComponent(), resolve: false)
+        guard parent.identity.sameObject(as: entry.destinationParent) else { throw FileOperationFailure.destinationChanged }
+        return parent
     }
 
     internal func recoveryArea(in parent: DirectoryAnchor, record: JournalEditSession, journal: OperationJournal) throws -> DirectoryAnchor {
@@ -1941,6 +1993,9 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         try parent.validate()
         guard mkdirat(parent.fd, name, 0o700) == 0 else { throw posixFailure() }
         let anchor = try DirectoryAnchor(url, resolve: false)
+        guard try EntrySnapshot(parent: parent.fd, name: name).sameObject(as: anchor.identity) else {
+            throw FileOperationFailure.destinationChanged
+        }
         try record.bindPersistentVolume(in: anchor)
         let fd = openat(anchor.fd, ".mac-explorer-recovery-v1", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw posixFailure() }
@@ -1955,6 +2010,8 @@ public final class RecoverableFileOperations: @unchecked Sendable {
     internal func renameStep(_ source: URL, _ destination: URL, expectedIdentity: EntrySnapshot? = nil, expectedTree: VerifiedTree? = nil,
                             expectedQuarantines: [String: Data]? = nil,
                             expectedGuard: ContinuationGuard? = nil, guardFailure: FileOperationFailure = .sourceChanged,
+                            expectedSourceParent: EntrySnapshot? = nil,
+                            expectedDestinationParent: EntrySnapshot? = nil,
                             record: JournalEditSession, journal: OperationJournal,
                             cancellation: OperationCancellation, protection: HistoryProtection? = nil,
                             osManagedSecurityV1: Bool = false,
@@ -1980,6 +2037,10 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 || publicTARExtractionMarkRequired == true)
         let from = try DirectoryAnchor(source.deletingLastPathComponent(), resolve: false)
         let to = try DirectoryAnchor(destination.deletingLastPathComponent(), resolve: false)
+        if let expectedSourceParent, !from.identity.sameObject(as: expectedSourceParent) { throw guardFailure }
+        if let expectedDestinationParent, !to.identity.sameObject(as: expectedDestinationParent) {
+            throw FileOperationFailure.destinationChanged
+        }
         let beforeSecurity = NativeRenameSecurityProjection()
         let origin = NativeProcessSecurityOrigin.current
         let before: VerifiedTree
@@ -2209,6 +2270,7 @@ public final class RecoverableFileOperations: @unchecked Sendable {
         }
         var store: OperationJournal?
         var outcomes: [FileOperationOutcome] = []
+        var unconfirmedItem: Int?
         var failureStage = "source-observation"
         do {
             guard !sources.isEmpty, sources.count <= OperationJournal.maximumInputs else { throw FileOperationFailure.invalidRequest }
@@ -2324,9 +2386,10 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                     })
                 guard let item = result.items.first else { throw FileOperationFailure.recoveryUncertain }
                 outcomes.append(item)
+                if item.status == .succeeded { unconfirmedItem = outcomes.count - 1 }
                 let known = ([item.destination].compactMap { $0 } + item.recoveryURLs)
-                try record.appendNewLocations(known)
                 failureStage = "record-native-result"
+                try record.appendNewLocations(known)
                 remember(record) // Keep the native returned location even when its durable save fails.
                 try journal.save(record); remember(record)
                 guard item.status == .succeeded, let destination = item.destination else { throw FileOperationFailure.recoveryUncertain }
@@ -2384,10 +2447,18 @@ public final class RecoverableFileOperations: @unchecked Sendable {
                 }
                 failureStage = "record-validated-result"
                 try journal.save(record); remember(record)
+                unconfirmedItem = nil
             }
             failureStage = "record-completion"
             record.setState("committed"); try journal.save(record); remember(record)
         } catch {
+            if let unconfirmedItem {
+                let item = outcomes[unconfirmedItem]
+                var locations = item.recoveryURLs
+                if let returned = item.destination, !locations.contains(returned) { locations.append(returned) }
+                outcomes[unconfirmedItem] = FileOperationOutcome(source: item.source, destination: item.destination,
+                    status: .failed(.recoveryUncertain), recoveryURLs: locations)
+            }
             if let record = activeSession, let checkpoint = activeCheckpoint, let store {
                 do {
                     try record.restore(checkpoint)
@@ -2466,6 +2537,12 @@ public final class RecoverableFileOperations: @unchecked Sendable {
 }
 
 internal struct RecoveryHooks: Sendable {
+    /// Generated tests may force a refusal on APFS to exercise both boundaries;
+    /// production still checks the native filesystem before this hook.
+    var forceFATCopyDestinationRefusal: (@Sendable () -> Bool)?
+    /// Test-only extra crossing signal; never makes a real crossing look local.
+    var forceCrossVolumeMoveFATRefusal: (@Sendable () -> Bool)?
+    var afterTransferDestinationObservation: (@Sendable () -> Void)?
     var selectionGroup = SelectionGroupHooks()
     var textEditor = TextEditorHooksV2()
     var archiveProduction = ArchiveProductionHooks()

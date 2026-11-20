@@ -293,7 +293,8 @@ import LocalStorage
         return "One selected ZIP file uses the same Extract review, refuses its occupied sibling name, publishes exact bytes directly without a wrapper folder, reveals the selected output and Undoes only that verified file"
     }
     private static func interruptedRestore(source: URL, browser: BrowserViewController,
-                                           engine: RecoverableFileOperations, root: URL) async throws -> [String] {
+                                           engine: RecoverableFileOperations, root: URL,
+                                           checkpoint: GeneratedZIPRetainedCheckpoint) async throws -> [String] {
         let before = try await Task.detached { try Data(contentsOf: source) }.value
         browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.focusBrowserContent()
         browser.openSelection(nil)
@@ -313,6 +314,7 @@ import LocalStorage
             !creation.model.isPreparing && !creation.model.previewIsPendingForVerification
         }
         try need(creation.model.canCreate, "archive-editor-recovery-plan: " + creation.model.notice)
+        try need(checkpoint.armNextUpdate(), "archive-editor-recovery-checkpoint-already-armed")
         creation.model.create()
         try await wait("archive-editor-recovery-checkpoint") {
             creation.model.outcome != nil && !creation.model.isRunning && browser.operationTask == nil
@@ -322,7 +324,7 @@ import LocalStorage
         }
         let originalAbsent = await Task.detached { !FileManager.default.fileExists(atPath: source.path) }.value
         let record = try await engine.recoveryRecords().records.first { $0.id == id }
-        try need(GeneratedZIPRetainedCheckpoint.shared.hasStopped && originalAbsent
+        try need(checkpoint.hasStopped && originalAbsent
             && outcome.result.disposition != .succeeded && record?.canRestoreOriginalZIP == true
             && record?.canRecover == false, "archive-editor-recovery-safe-first-step")
         creation.model.viewResults()
@@ -363,9 +365,10 @@ import LocalStorage
         try await wait("archive-editor-recovery-return-listing") {
             !browser.isLoading && browser.rowsByURL[source] != nil
         }
-        return ["A deliberate third native ZIP update stops after its durably qualified original move; the real Restore Original ZIP confirmation cancels without mutation, then restores the exact original through the ordinary browser owner"]
+        return ["The selected native ZIP update stops after its durably qualified original move; the real Restore Original ZIP confirmation cancels without mutation, then restores the exact original through the ordinary browser owner"]
     }
-    static func check(root: URL, browser: BrowserViewController, sources: [URL]) async throws -> [String] {
+    static func check(root: URL, browser: BrowserViewController, sources: [URL],
+                      zipRecoveryCheckpoint: GeneratedZIPRetainedCheckpoint?) async throws -> [String] {
         guard let engine = browser.recoverableFileOperations, sources.count == 2,
               sources.allSatisfy({ $0.path.hasPrefix(root.appendingPathComponent("source").path + "/") }),
               let parent = sources.first?.deletingLastPathComponent() else { throw Failure(stage: "archive-editor-generated-scope") }
@@ -533,8 +536,9 @@ import LocalStorage
                 try await Task.detached {
                     try JSONEncoder().encode(packet).write(to: root.appendingPathComponent("evidence/tar-editor-cold-pending.json"), options: .withoutOverwriting)
                 }.value
-            } else if ProcessInfo.processInfo.arguments.contains("--interrupt-native-original-update") {
-                checks += try await interruptedRestore(source: source, browser: browser, engine: engine, root: root)
+            } else if let zipRecoveryCheckpoint {
+                checks += try await interruptedRestore(source: source, browser: browser, engine: engine, root: root,
+                    checkpoint: zipRecoveryCheckpoint)
             } else {
                 checks.append(try await createFile(source: source, browser: browser, cold: cold, root: root))
                 checks.append(try await extractFile(source: source, member: sources[0], expected: first, browser: browser, root: root))

@@ -27,9 +27,10 @@ import FileOperations
     var message = "Retained version · read only"
     var uncertainDestinations: [URL] = [], copyRecords: [UUID] = []
     lazy var preparation = EditorPreparationOwner { [weak self] input, result in
-        guard let self, case .presentation(_, let generation, _, _, _, _) = input,
-              case .presentation(let value, let syntax, let lines, _) = result else { return }
-        _ = window.surface.present(value, syntax: syntax, lines: lines, for: generation)
+        guard let self, case .presentation(let request) = input,
+              case .presentation(let prepared) = result else { return }
+        let generation = request.generation
+        _ = window.surface.present(prepared, for: generation)
     }
     init(contents: TextDocumentValue, viewed: RemoteRetainedTextView? = nil, settings: BrowserSettings,
          locationContext: EditorLocationContext? = nil,
@@ -148,9 +149,10 @@ import FileOperations
                 waiter?.resume(); waiter = nil
             } else {
                 preparation = EditorPreparationOwner { [weak self] input, result in
-                    guard let self, case .presentation(_, let generation, _, _, _, _) = input,
-                          case .presentation(let value, let syntax, let lines, _) = result else { return }
-                    _ = self.window.surface.present(value, syntax: syntax, lines: lines, for: generation)
+                    guard let self, case .presentation(let request) = input,
+                          case .presentation(let prepared) = result else { return }
+                    let generation = request.generation
+                    _ = self.window.surface.present(prepared, for: generation)
                 }
                 window.reopenAfterFailedClose()
                 message = "Review remains open; local closure is not confirmed. The retained text stays owned."

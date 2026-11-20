@@ -18,19 +18,19 @@ enum GeneratedSignedReviewAdmission {
         return integer
     }
 
-    private static func lowerHexDigest(_ text: String) -> Bool {
+    static func exactDigest(_ text: String) -> Bool {
         text.utf8.count == 64 && text.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
 
-    private static func privateJSON(_ url: URL) -> ([String: Any], stat, Data)? {
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    private static func ownedJSON(_ url: URL, privateMode: Bool = true) -> ([String: Any], stat, Data)? {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var before = stat()
         guard fstat(descriptor, &before) == 0,
               before.st_mode & S_IFMT == S_IFREG,
               before.st_uid == geteuid(), before.st_nlink == 1,
-              before.st_mode & 0o7777 == 0o600,
+              privateMode ? before.st_mode & 0o7777 == 0o600 : before.st_mode & 0o022 == 0,
               before.st_size >= 0, before.st_size <= 4096 else { return nil }
         var data = Data(), buffer = [UInt8](repeating: 0, count: 4097)
         while true {
@@ -50,20 +50,28 @@ enum GeneratedSignedReviewAdmission {
 
     /// Read an exact role's bounded scope before its one-use consumption. The
     /// caller must bind these selected fields to that same consumed scope.
-    static func privateFields(_ url: URL) -> [String: Any]? { privateJSON(url)?.0 }
+    static func privateFields(_ url: URL) -> [String: Any]? { ownedJSON(url)?.0 }
+
+    #if DEBUG
+    static func generatedFixtureFields(_ url: URL) -> [String: Any]? {
+        ownedJSON(url, privateMode: false)?.0
+    }
+    #endif
 
     /// The host issues one attempt after sealing a signed artifact and exact
     /// scope. A failed launch consumes that attempt before AppKit is created.
     static func consume(caseID: String, bundleID: String, caseRoot: URL, phase: String,
                         prefix: String, packet: String,
+                        pinnedDigests: [String] = [],
                         scopeValid: ([String: Any]) -> Bool) -> Bool {
         let evidence = caseRoot.appendingPathComponent("evidence", isDirectory: true)
         guard ownedDirectory(evidence, privateMode: true) else { return false }
         let pending = evidence.appendingPathComponent(prefix + phase + "-permit.json")
         let consumed = evidence.appendingPathComponent(prefix + phase + "-consumed.json")
-        guard let (fields, before, _) = privateJSON(pending),
+        guard let (fields, before, _) = ownedJSON(pending),
               Set(fields.keys) == Set(["packet", "case", "phase", "bundleIdentifier", "caseRoot",
-                                       "artifactTreeSHA256", "scopeSHA256", "expiresUTC", "attempt"]),
+                                       "artifactTreeSHA256", "scopeSHA256", "expiresUTC", "attempt"])
+                                       .union(pinnedDigests),
               fields["packet"] as? String == packet,
               fields["case"] as? String == caseID,
               fields["phase"] as? String == phase,
@@ -72,17 +80,21 @@ enum GeneratedSignedReviewAdmission {
               exactInteger(fields["attempt"]) == 1,
               let artifactHash = fields["artifactTreeSHA256"] as? String,
               let scopeHash = fields["scopeSHA256"] as? String,
-              lowerHexDigest(artifactHash), lowerHexDigest(scopeHash),
+              exactDigest(artifactHash), exactDigest(scopeHash),
               let expires = fields["expiresUTC"] as? String,
               let deadline = ISO8601DateFormatter().date(from: expires), Date() <= deadline else { return false }
         let scopePath = evidence.appendingPathComponent("runtime-scope.json")
-        guard let (scope, _, scopeData) = privateJSON(scopePath),
+        guard let (scope, _, scopeData) = ownedJSON(scopePath),
               SHA256.hash(data: scopeData).map({ String(format: "%02x", $0) }).joined() == scopeHash,
               scope["case"] as? String == caseID,
               scope["bundleIdentifier"] as? String == bundleID,
               scope["caseRoot"] as? String == caseRoot.path,
               scope["artifactTreeSHA256"] as? String == artifactHash,
               scope["expiresUTC"] as? String == expires,
+              pinnedDigests.allSatisfy({ key in
+                  guard let permitDigest = fields[key] as? String else { return false }
+                  return exactDigest(permitDigest) && scope[key] as? String == permitDigest
+              }),
               scopeValid(scope),
               link(pending.path, consumed.path) == 0 else { return false }
         var linked = stat()

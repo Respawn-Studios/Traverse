@@ -4,7 +4,7 @@ import DiskArbitration
 import ExplorerCore
 import Foundation
 import IOKit
-import LocalStorage
+@_spi(Qualification) import LocalStorage
 
 #if DEBUG || TRAVERSE_DRIVE_IMAGE_QA
 struct GeneratedAPFSReceipt: Decodable, Sendable {
@@ -89,10 +89,15 @@ enum GeneratedAPFSFormatVerification {
                     "A prior or unreadable native Format job blocks generated APFS mutation")
         let owner = UUID()
         try require(operations.begin(owner: owner), "Generated APFS work gate is occupied")
-        let activity: any Sendable
+        var activity: (any Sendable)?
         do { activity = try ApplicationFileActivity.beginOperation() }
         catch { operations.finish(owner: owner); throw error }
-        defer { withExtendedLifetime(activity) {}; operations.finish(owner: owner) }
+        var addOwnerHeld = true
+        defer {
+            withExtendedLifetime(activity) {}
+            activity = nil
+            if addOwnerHeld { operations.finish(owner: owner) }
+        }
         let evidence = try APFSFormatEvidence(output: output)
         let addedName = "Traverse-Format-" + receipt.jobID.uuidString
         try evidence.write(["phase": "intent", "request": "one-apfs-volume-add", "imageInode": receipt.imageInode,
@@ -127,6 +132,23 @@ enum GeneratedAPFSFormatVerification {
         let formatSeal = try APFSFormatImageSeal(root: fixture, receipt: receipt, original: originalLeaf, target: targetLeaf)
         let markerBefore = try await createFormatTargetMarker(target, receipt: receipt, fixture: fixture)
         let mountedBefore = try await mountedDeviceIDs(excluding: target.url)
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        if let selected = GeneratedDriveImageReview.selection, selected.caseMode == .ordinaryV3 {
+            // The ordinary model's inspection and barrier reject an active Add
+            // owner. The native Add has returned and discovery/markers settled.
+            withExtendedLifetime(activity) {}
+            activity = nil
+            operations.finish(owner: owner)
+            addOwnerHeld = false
+            try require(operations.activeOwner == nil && ApplicationFileActivity.gate.activeCount == 0,
+                        "Generated Add owner or activity remained before ordinary Format review")
+            return try await warmOrdinaryV3(operations: operations, drives: drives,
+                initial: initial, target: target, receipt: receipt, fixture: fixture,
+                evidence: evidence, originalMarker: originalMarker, originalLeaf: originalLeaf,
+                formatSeal: formatSeal, targetMarker: markerBefore, mountedBefore: mountedBefore,
+                addedName: addedName, addedID: added.id)
+        }
+        #endif
         let format = APFSVolumeFormat()
         let plan = try await format.prepare(target)
         try require(plan.name == addedName && plan.selected == target && plan.siblingNames == [sibling.name],
@@ -139,6 +161,13 @@ enum GeneratedAPFSFormatVerification {
         try require(!drives.generatedFormatJobIsAdmissible(owner: generatedOwner),
                     "An issued Format recorder left a second request admitted")
         try require(recording.ownerStillCurrent(), "Generated APFS Format job owner is stale")
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        try require(recording.completionPolicy == .sourceQualification,
+                    "Signed image review did not select observed-native-v2 recording")
+        #else
+        try require(recording.completionPolicy == .provisional,
+                    "Development image review changed its provisional recording policy")
+        #endif
         try evidence.write(["phase": "intent", "request": "one-apfs-volume-erase", "imageInode": receipt.imageInode,
                             "siblingUUID": initial.volumeUUID!.uuidString, "targetUUID": added.id.uuidString,
                             "targetMarkerInode": markerBefore.inode], leaf: "apfs-format-intent.json")
@@ -152,11 +181,22 @@ enum GeneratedAPFSFormatVerification {
                             "failure": formatted.failure.map { String(describing: $0) } ?? "none",
                             "status": formatted.toolExitStatus.map { Int($0) } as Any? ?? NSNull(),
                             "diskutilErrorCode": formatted.diskutilErrorCode as Any? ?? NSNull(),
+                            "nativeCompletionReturned": formatted.nativeCompletion != nil,
                             "submissionReceipt": evidence.submittedRecorded], leaf: "apfs-format-terminal.json")
         await drives.reloadNativeDriveJobAfterRecording()
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        try require(!formatted.submitted || drives.nativeDriveJobReady
+                    && drives.nativeDriveJobIssue.isEmpty
+                    && !drives.generatedFormatJobIsAdmissible(owner: generatedOwner),
+                    "A completed signed Format job reopened the one-visit recorder gate")
+        try require(drives.generatedFormatRecording(owner: generatedOwner,
+                    attachmentCurrent: { formatSeal.imageAndOuterCurrent() }) == nil,
+                    "A second signed Format recorder was issued in one visit")
+        #else
         try require(!formatted.submitted || !drives.generatedFormatJobIsAdmissible(owner: generatedOwner)
                     && !drives.nativeDriveJobIssue.isEmpty,
                     "A submitted unresolved Format job remained clean in its warm coordinator")
+        #endif
         try require(!formatted.submitted || evidence.submittedRecorded,
                     "Generated APFS Format submission receipt was not durable")
         guard let newVolume = formatted.formatted else {
@@ -166,11 +206,23 @@ enum GeneratedAPFSFormatVerification {
                     && newVolume.name == addedName && formatted.toolExitStatus == 0,
                     "Generated APFS Format postcondition was not established")
         let durable = try await recording.store.load()
-        try require(durable.record?.id == recording.jobID
-                    && durable.record?.phase == .compatibleReplacement
-                    && durable.record?.replacementID == newVolume.id
-                    && durable.record?.isUnresolved == true,
+        guard let savedJob = durable.record, savedJob.id == recording.jobID,
+              savedJob.replacementID == newVolume.id else {
+            throw GeneratedAPFSFormatFailure(message: "Generated APFS Format durable job identity changed")
+        }
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        try require(savedJob.version == 2 && savedJob.phase == .observedNativeCompletion
+                    && savedJob.isUnresolved == false && savedJob.validate()
+                    && formatted.nativeCompletion != nil
+                    && savedJob.nativeCompletion == formatted.nativeCompletion
+                    && savedJob.nativeCompletion?.validates(savedJob.snapshot) == true,
+                    "Signed APFS Format lacks its exact durable native completion")
+        #else
+        try require(savedJob.version == 1 && savedJob.phase == .compatibleReplacement
+                    && savedJob.isUnresolved == true && savedJob.nativeCompletion == nil
+                    && formatted.nativeCompletion == nil,
                     "Generated APFS Format result lacks an unresolved durable job")
+        #endif
         try await until("Formatted two-member discovery") {
             let members = drives.volumes.filter { $0.group == receipt.outerMediaID && $0.volumeUUID != nil }
             return members.count == 2 && members.contains(where: { $0.volumeUUID == newVolume.id && $0.url != nil })
@@ -194,37 +246,202 @@ enum GeneratedAPFSFormatVerification {
         let afterSeal = try APFSFormatImageSeal(root: fixture, receipt: receipt, original: originalLeaf, target: currentLeaf)
         try require(afterSeal.current() && afterSeal.outer == formatSeal.outer,
                     "Formatted APFS target is not bound to the original image")
-        try evidence.write(["passed": true, "submitted": true, "jobID": recording.jobID.uuidString,
+        var finalEvidence: [String: Any] = ["passed": true, "submitted": true, "jobID": recording.jobID.uuidString,
                             "siblingUUID": initial.volumeUUID!.uuidString,
                             "siblingDevice": originalLeaf.device, "siblingMarkerInode": originalMarker.inode,
                             "formattedUUID": newVolume.id.uuidString,
                             "formattedName": newVolume.name, "outerDevice": "/dev/" + afterSeal.outer,
                             "siblingMarkerPreserved": true, "targetMarkerRemoved": true,
-                            "unrelatedMountsUnchanged": true], leaf: "apfs-format-result.json")
+                            "unrelatedMountsUnchanged": true]
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        finalEvidence["completionContract"] = GeneratedDriveImageReview.completionContract
+        finalEvidence["jobVersion"] = savedJob.version
+        finalEvidence["nativeCompletionObserved"] = savedJob.nativeCompletion != nil
+        #endif
+        try evidence.write(finalEvidence, leaf: "apfs-format-result.json")
         return ["One owned generated APFS image and exact original member passed launch-boundary checks",
                 "One Add and one Format drained; exact sibling survived and target marker disappeared",
                 "Fresh native target and unrelated mounted identities reconciled without retry"]
     }
 
-    /// A second process must read the unresolved job from disk. This route has
-    /// no Add/Format call and cannot obtain a recorder while that job remains.
+    #if TRAVERSE_DRIVE_IMAGE_QA
+    /// Exercise the ordinary App model and v3 job slot for only the member
+    /// returned by this signed visit's Add. Confirmation is programmatic here;
+    /// the role has no browser sheet or physical typing gesture to claim.
+    private static func warmOrdinaryV3(operations: ApplicationOperationCoordinator,
+                                      drives: ApplicationVolumeCoordinator,
+                                      initial: ManagedVolume, target: ManagedVolume,
+                                      receipt: GeneratedAPFSReceipt, fixture: URL,
+                                      evidence: APFSFormatEvidence,
+                                      originalMarker: MarkerIdentity,
+                                      originalLeaf: APFSFormatImageSeal.Leaf,
+                                      formatSeal: APFSFormatImageSeal,
+                                      targetMarker: MarkerIdentity,
+                                      mountedBefore: Set<MountID>,
+                                      addedName: String, addedID: UUID) async throws -> [String] {
+        guard let selected = GeneratedDriveImageReview.selection,
+              selected.caseMode == .ordinaryV3, selected.phase == .warm,
+              !NativeAPFSFormatFeature.ordinaryEnabled else {
+            throw GeneratedAPFSFormatFailure(message: "Ordinary v3 signed case is unavailable")
+        }
+        try require(operations.activeOwner == nil && ApplicationFileActivity.gate.activeCount == 0,
+                    "Add still owns operation activity before Format model review")
+        let identity = GeneratedDriveImageReview.FormatReceiptIdentity(
+            version: receipt.version, jobID: receipt.jobID,
+            fixtureDevice: receipt.fixtureDevice, fixtureInode: receipt.fixtureInode,
+            imageDevice: receipt.imageDevice, imageInode: receipt.imageInode,
+            originalMediaID: receipt.mediaID, outerMediaID: receipt.outerMediaID,
+            outerDevice: formatSeal.outer)
+        try require(GeneratedDriveImageReview.armSignedFormatTarget(selection: selected,
+            receipt: identity, addedID: addedID, target: target,
+            current: { formatSeal.current() }),
+            "Signed v3 target was not exactly admitted")
+        let model = ApplicationAPFSVolumeFormat()
+        model.configure(target: target, operations: operations, changed: {},
+                        signedSubmitted: { evidence.recordSubmission() })
+        defer { model.dismiss() }
+        try require(model.canReview && drives.canReviewOrdinaryFormat(target),
+                    "Signed v3 target did not enter the ordinary review gate")
+        model.review()
+        await model.drain()
+        guard let plan = model.plan else {
+            throw GeneratedAPFSFormatFailure(message: "Ordinary Format model did not prepare the attached image")
+        }
+        try require(plan.name == addedName && plan.selected == target
+                    && plan.siblingNames == [initial.name],
+                    "Ordinary Format model reviewed a different APFS member")
+        model.confirmedName = addedName
+        try require(model.canSubmit, "Ordinary Format model did not bind exact confirmation")
+        try evidence.write(["phase": "intent", "request": "one-apfs-volume-erase",
+                            "model": "ordinary-v3", "imageInode": receipt.imageInode,
+                            "siblingUUID": initial.volumeUUID!.uuidString,
+                            "targetUUID": addedID.uuidString,
+                            "targetMarkerInode": targetMarker.inode], leaf: "apfs-format-intent.json")
+        model.format()
+        await model.drain()
+        let completed = model.result
+        try evidence.write(["submitted": completed?.submitted ?? false,
+                            "formattedUUID": completed?.formatted?.id.uuidString ?? "none",
+                            "failure": completed?.failure.map { String(describing: $0) } ?? "none",
+                            "status": completed?.toolExitStatus.map { Int($0) } as Any? ?? NSNull(),
+                            "diskutilErrorCode": completed?.diskutilErrorCode as Any? ?? NSNull(),
+                            "nativeCompletionReturned": completed?.nativeCompletion != nil,
+                            "submissionReceipt": evidence.submittedRecorded],
+                           leaf: "apfs-format-terminal.json")
+        guard let completed, let newVolume = completed.formatted else {
+            throw GeneratedAPFSFormatFailure(message: "Ordinary v3 Format model did not reconcile a member")
+        }
+        try require(completed.submitted && completed.failure == nil && evidence.submittedRecorded
+                    && newVolume.id != addedID && newVolume.name == addedName
+                    && completed.toolExitStatus == 0 && completed.nativeCompletion != nil,
+                    "Ordinary v3 Format postcondition or submitted receipt is missing")
+        guard let store = NativeDriveJobStore.applicationStore() else {
+            throw GeneratedAPFSFormatFailure(message: "Ordinary v3 durable job store is unavailable")
+        }
+        let durable = try await store.load()
+        guard let saved = durable.record, let owner = saved.ordinaryImageOwner else {
+            throw GeneratedAPFSFormatFailure(message: "Ordinary v3 job is not durably saved")
+        }
+        try require(saved.version == 3 && saved.owner == nil
+                    && saved.phase == .observedNativeCompletion && !saved.isUnresolved
+                    && saved.validate() && saved.snapshot.targetID == addedID
+                    && saved.replacementID == newVolume.id
+                    && saved.nativeCompletion == completed.nativeCompletion
+                    && saved.nativeCompletion?.validates(saved.snapshot) == true
+                    && GeneratedDriveImageReview.signedFormatTargetClaimed(owner: owner)
+                    && drives.nativeDriveJobReady && drives.nativeDriveJobIssue.isEmpty
+                    && !drives.canReviewOrdinaryFormat(target),
+                    "Ordinary v3 Format did not finish in the exact one-use job slot")
+        try await until("Ordinary formatted two-member discovery") {
+            let members = drives.volumes.filter { $0.group == receipt.outerMediaID && $0.volumeUUID != nil }
+            return members.count == 2 && members.contains(where: { $0.volumeUUID == newVolume.id && $0.url != nil })
+        }
+        let currentSibling = try await observed(drives) {
+            $0.volumeUUID == initial.volumeUUID && $0.group == receipt.outerMediaID
+        }
+        let currentTarget = try await observed(drives) {
+            $0.volumeUUID == newVolume.id && $0.group == receipt.outerMediaID
+        }
+        let siblingMarkerAfter = try await verifyMarker(currentSibling, receipt: receipt)
+        try require(currentSibling.mediaID == initial.mediaID
+                    && currentSibling.url == initial.url
+                    && currentSibling.fileSystemID == initial.fileSystemID
+                    && currentSibling.name == initial.name
+                    && siblingMarkerAfter == originalMarker,
+                    "Ordinary v3 Format changed the original sibling or marker")
+        try require(newVolume.mountPoint?.standardizedFileURL == currentTarget.url?.standardizedFileURL
+                    && currentTarget.name == addedName && currentTarget.deviceKind == .diskImage,
+                    "Ordinary v3 formatted target is not the expected mounted member")
+        try await requireFormatTargetMarkerAbsent(currentTarget, fixture: fixture)
+        try require(formatSeal.imageAndOuterCurrent(),
+                    "Ordinary v3 backing image or outer attachment changed")
+        let mountedAfter = try await mountedDeviceIDs(excluding: currentTarget.url)
+        try require(mountedBefore == mountedAfter, "Other mounted devices changed during ordinary v3 Format")
+        let currentInspection = try await VolumeLifecycle.shared.inspect(currentTarget)
+        let currentLeaf = try APFSFormatImageSeal.Leaf(currentTarget, currentInspection)
+        let afterSeal = try APFSFormatImageSeal(root: fixture, receipt: receipt,
+                                                original: originalLeaf, target: currentLeaf)
+        try require(afterSeal.current() && afterSeal.outer == formatSeal.outer,
+                    "Ordinary v3 target is not bound to the original generated image")
+        try evidence.write(["passed": true, "submitted": true,
+                            "model": "ApplicationAPFSVolumeFormat", "typedGestureClaimed": false,
+                            "ordinaryEnabled": false, "jobID": saved.id.uuidString,
+                            "jobVersion": saved.version,
+                            "completionContract": selected.formatCompletionContract,
+                            "nativeCompletionObserved": true,
+                            "siblingUUID": initial.volumeUUID!.uuidString,
+                            "siblingDevice": originalLeaf.device,
+                            "siblingMarkerInode": originalMarker.inode,
+                            "formattedUUID": newVolume.id.uuidString,
+                            "formattedName": newVolume.name,
+                            "outerDevice": "/dev/" + afterSeal.outer,
+                            "siblingMarkerPreserved": true,
+                            "targetMarkerRemoved": true,
+                            "unrelatedMountsUnchanged": true],
+                           leaf: "apfs-format-result.json")
+        return ["Exact generated Add owner released before ordinary App model inspection and barrier",
+                "One-use v3 App model Format completed with native result and durable completion",
+                "Original sibling, target marker and unrelated mounts reconciled independently"]
+    }
+    #endif
+
+    /// A second process reads the exact saved job from disk. The signed v2
+    /// visit observes completion without gaining any mutation capability;
+    /// Development preserves its unresolved v1 recovery comparison.
     static func cold(drives: ApplicationVolumeCoordinator, initial: ManagedVolume,
                                        receipt: GeneratedAPFSReceipt, fixture: URL, output: URL) async throws -> [String] {
         guard !receipt.startsUnmounted, initial.deviceKind == .diskImage, let siblingID = initial.volumeUUID else {
             throw GeneratedAPFSFormatFailure(message: "Cold Format review requires the mounted generated sibling")
         }
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        if GeneratedDriveImageReview.selection?.caseMode == .ordinaryV3 {
+            return try await coldOrdinaryV3(drives: drives, initial: initial,
+                                            receipt: receipt, fixture: fixture, output: output)
+        }
+        #endif
         let owner = formatOwner(receipt: receipt, fixture: fixture)
         guard owner.validate(), let store = NativeDriveJobStore.applicationStore() else {
             throw GeneratedAPFSFormatFailure(message: "Cold Format durable job store is unavailable")
         }
         let before = try await store.load()
         guard let record = before.record, let replacementID = record.replacementID,
-              record.owner == owner, record.phase == .compatibleReplacement, record.isUnresolved,
+              record.owner == owner,
               record.snapshot.targetID != siblingID, replacementID != siblingID,
               record.snapshot.members.count == 2,
               record.snapshot.members.contains(where: { $0.uuid == siblingID && $0.name == initial.name }) else {
-            throw GeneratedAPFSFormatFailure(message: "Cold Format job is not the exact unresolved generated request")
+            throw GeneratedAPFSFormatFailure(message: "Cold Format job is not the exact generated request")
         }
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        try require(record.version == 2 && record.phase == .observedNativeCompletion
+                    && !record.isUnresolved && record.validate()
+                    && record.nativeCompletion?.replacementID == replacementID
+                    && record.nativeCompletion?.validates(record.snapshot) == true,
+                    "Cold signed Format job lacks its durable native completion")
+        #else
+        try require(record.version == 1 && record.phase == .compatibleReplacement
+                    && record.isUnresolved && record.nativeCompletion == nil,
+                    "Cold Development Format job is not the unresolved v1 request")
+        #endif
         let siblingMarker = try await verifyMarker(initial, receipt: receipt)
         let siblingInspection = try await VolumeLifecycle.shared.inspect(initial)
         let siblingLeaf = try APFSFormatImageSeal.Leaf(initial, siblingInspection)
@@ -243,23 +460,132 @@ enum GeneratedAPFSFormatVerification {
         try await requireFormatTargetMarkerAbsent(target, fixture: fixture)
 
         await drives.waitForNativeDriveJobLoad()
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        try require(drives.nativeDriveJobReady && drives.nativeDriveJobIssue.isEmpty
+                    && ProductCapabilities.Feature.allCases.allSatisfy({ !AppFeatureAvailability.allows($0) }),
+                    "Cold signed Format visit gained a mutation capability")
+        #else
         try require(!drives.nativeDriveJobReady && !drives.nativeDriveJobIssue.isEmpty,
                     "Cold unresolved Format job did not close coordinator admission")
+        #endif
         try require(!drives.generatedFormatJobIsAdmissible(owner: owner),
-                    "Cold unresolved Format job reopened the recorder gate")
+                    "Cold Format visit opened the recorder gate")
         let compatible = try await store.inspectUnresolvedCompatibleReplacement(owner: owner,
             backend: APFSVolumeFormat(), ownerStillCurrent: { seal.current() })
         let after = try await store.load()
         try require(after.bytes == before.bytes && after.record == record && seal.current()
-                    && !drives.nativeDriveJobReady && !drives.generatedFormatJobIsAdmissible(owner: owner),
+                    && !drives.generatedFormatJobIsAdmissible(owner: owner),
                     "Cold Format inspection changed the job or reopened admission")
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        let siblingMarkerFinal = try await verifyMarker(initial, receipt: receipt)
+        try require(!compatible && ProductCapabilities.Feature.allCases.allSatisfy({ !AppFeatureAvailability.allows($0) })
+                    && siblingMarkerFinal == siblingMarkerAfter,
+                    "Cold signed Format inspection changed marker or admitted a capability")
+        try await requireFormatTargetMarkerAbsent(target, fixture: fixture)
+        let result: [String: Any] = ["passed": true, "jobID": record.id.uuidString,
+            "completionContract": GeneratedDriveImageReview.completionContract,
+            "resolvedNativeCompletion": true, "admissionHeld": true,
+            "recordUnchanged": true, "unresolvedPromotion": false,
+            "allMutationCapabilitiesHeld": true, "siblingMarkerPreserved": true,
+            "targetMarkerAbsent": true]
+        try APFSFormatEvidence(output: output).write(result, leaf: "apfs-format-cold-result.json")
+        return ["Separate read-only signed visit loaded the exact v2 native completion without mutation authority",
+                "Sibling and target markers reconciled independently; cold inspection left the durable record unchanged"]
+        #else
+        try require(!drives.nativeDriveJobReady, "Cold unresolved Format job became clean")
         let result: [String: Any] = ["passed": true, "jobID": record.id.uuidString,
             "unresolved": true, "admissionHeld": true, "recordUnchanged": true,
             "compatibleInspection": compatible]
         try APFSFormatEvidence(output: output).write(result, leaf: "apfs-format-cold-result.json")
         return ["Separate read-only app launch loaded the exact unresolved generated Format job",
                 "Coordinator held the recorder gate and inspection preserved the durable record"]
+        #endif
     }
+
+    #if TRAVERSE_DRIVE_IMAGE_QA
+    /// Cold v3 reads the exact ordinary image owner and completed slot. It
+    /// performs no recovery promotion, recorder creation or native mutation.
+    private static func coldOrdinaryV3(drives: ApplicationVolumeCoordinator,
+                                       initial: ManagedVolume, receipt: GeneratedAPFSReceipt,
+                                       fixture: URL, output: URL) async throws -> [String] {
+        guard let selected = GeneratedDriveImageReview.selection,
+              selected.caseMode == .ordinaryV3, selected.phase == .cold,
+              let siblingID = initial.volumeUUID,
+              let store = NativeDriveJobStore.applicationStore(),
+              !NativeAPFSFormatFeature.ordinaryEnabled else {
+            throw GeneratedAPFSFormatFailure(message: "Cold v3 signed image review is unavailable")
+        }
+        let before = try await store.load()
+        guard let record = before.record, let owner = record.ordinaryImageOwner,
+              let replacementID = record.replacementID else {
+            throw GeneratedAPFSFormatFailure(message: "Cold v3 ordinary job is absent")
+        }
+        try require(record.version == 3 && record.owner == nil
+                    && record.phase == .observedNativeCompletion && !record.isUnresolved
+                    && record.validate() && owner.validate()
+                    && owner.imagePath == fixture.appendingPathComponent("fixture.dmg").path
+                    && owner.parentDevice == receipt.fixtureDevice
+                    && owner.parentInode == receipt.fixtureInode
+                    && owner.imageDevice == receipt.imageDevice
+                    && owner.imageInode == receipt.imageInode
+                    && owner.imageBytes == (1 << 30)
+                    && owner.ownerUID == geteuid()
+                    && owner.outerMediaID == receipt.outerMediaID
+                    && APFSAttachedImageWitness.backingFileCurrent(owner)
+                    && record.snapshot.targetID != siblingID
+                    && replacementID != siblingID
+                    && record.snapshot.members.count == 2
+                    && record.snapshot.members.contains(where: {
+                        $0.uuid == siblingID && $0.name == initial.name
+                    })
+                    && record.nativeCompletion?.replacementID == replacementID
+                    && record.nativeCompletion?.validates(record.snapshot) == true,
+                    "Cold v3 job is not the exact completed generated image request")
+        let siblingMarker = try await verifyMarker(initial, receipt: receipt)
+        let siblingInspection = try await VolumeLifecycle.shared.inspect(initial)
+        let siblingLeaf = try APFSFormatImageSeal.Leaf(initial, siblingInspection)
+        let target = try await observed(drives) {
+            $0.volumeUUID == replacementID && $0.group == receipt.outerMediaID && $0.url != nil
+        }
+        let members = drives.volumes.filter { $0.group == receipt.outerMediaID && $0.volumeUUID != nil }
+        try require(members.count == 2
+                    && Set(members.compactMap(\.volumeUUID)) == Set([siblingID, replacementID]),
+                    "Cold v3 image graph is not the exact two-member container")
+        let targetInspection = try await VolumeLifecycle.shared.inspect(target)
+        let targetLeaf = try APFSFormatImageSeal.Leaf(target, targetInspection)
+        let seal = try APFSFormatImageSeal(root: fixture, receipt: receipt,
+                                            original: siblingLeaf, target: targetLeaf)
+        let siblingMarkerAfter = try await verifyMarker(initial, receipt: receipt)
+        try require(seal.current() && seal.outer == owner.outerDevice
+                    && siblingMarker == siblingMarkerAfter,
+                    "Cold v3 image or sibling marker changed")
+        try await requireFormatTargetMarkerAbsent(target, fixture: fixture)
+        await drives.waitForNativeDriveJobLoad()
+        try require(drives.nativeDriveJobReady && drives.nativeDriveJobIssue.isEmpty
+                    && ProductCapabilities.Feature.allCases.allSatisfy({ !AppFeatureAvailability.allows($0) })
+                    && !GeneratedDriveImageReview.signedFormatTargetAvailable(target)
+                    && !drives.canReviewOrdinaryFormat(target)
+                    && !drives.generatedFormatJobIsAdmissible(owner: formatOwner(receipt: receipt,
+                                                                                 fixture: fixture)),
+                    "Cold v3 visit gained a Format or other mutation admission")
+        let after = try await store.load()
+        let siblingMarkerFinal = try await verifyMarker(initial, receipt: receipt)
+        try require(after.bytes == before.bytes && after.record == record
+                    && seal.current() && siblingMarkerFinal == siblingMarkerAfter,
+                    "Cold v3 read changed the durable job or image")
+        try await requireFormatTargetMarkerAbsent(target, fixture: fixture)
+        try APFSFormatEvidence(output: output).write([
+            "passed": true, "jobID": record.id.uuidString,
+            "completionContract": selected.formatCompletionContract,
+            "jobVersion": 3, "resolvedNativeCompletion": true,
+            "admissionHeld": true, "recordUnchanged": true,
+            "unresolvedPromotion": false, "allMutationCapabilitiesHeld": true,
+            "siblingMarkerPreserved": true, "targetMarkerAbsent": true,
+            "ordinaryEnabled": false], leaf: "apfs-format-cold-result.json")
+        return ["Cold signed visit loaded exact v3 ordinary image completion without mutation authority",
+                "Sibling and target markers reconciled; durable job bytes remained unchanged"]
+    }
+    #endif
 
     private static func formatOwner(receipt: GeneratedAPFSReceipt, fixture: URL) -> APFSVolumeFormatGeneratedOwner {
         APFSVolumeFormatGeneratedOwner(fixtureID: receipt.jobID,
@@ -397,25 +723,22 @@ private struct APFSFormatImageSeal: Sendable {
 
     init(root: URL, receipt: GeneratedAPFSReceipt, original: Leaf, target: Leaf? = nil) throws {
         self.root = root; self.receipt = receipt; self.original = original; self.target = target
-        guard let attachment = Self.attachment(root: root),
-              let entities = attachment["system-entities"] as? [[String: Any]],
-              let first = entities.first?["dev-entry"] as? String,
-              first.range(of: #"\A/dev/disk[0-9]+\z"#, options: .regularExpression) != nil else {
+        guard let attachment = Self.attachment(root: root) else {
             throw GeneratedAPFSFormatFailure(message: "Generated image attachment is unavailable")
         }
-        outer = String(first.dropFirst(5))
+        outer = attachment.outer
         guard current() else { throw GeneratedAPFSFormatFailure(message: "Generated image ownership changed before review") }
     }
 
     /// Called synchronously by the backend on its utility queue immediately
     /// before Process.run, after its own fresh selected-container observation.
     func current() -> Bool {
-        guard imageAndOuterCurrent(), let session = DASessionCreate(kCFAllocatorDefault),
+        guard imageAndOuterCurrent(requireTarget: true), let session = DASessionCreate(kCFAllocatorDefault),
               Self.matches(original, session: session) else { return false }
         return target.map { Self.matches($0, session: session) } ?? true
     }
 
-    func imageAndOuterCurrent() -> Bool {
+    func imageAndOuterCurrent(requireTarget: Bool = false) -> Bool {
         var fixture = stat(), image = stat()
         let file = root.appendingPathComponent("fixture.dmg")
         guard apfsOwnerMarkerCurrent(root: root, jobID: receipt.jobID),
@@ -426,9 +749,8 @@ private struct APFSFormatImageSeal: Sendable {
               image.st_uid == geteuid(), image.st_nlink == 1, image.st_size == (1 << 30),
               Int64(image.st_dev) == receipt.imageDevice, image.st_ino == receipt.imageInode,
               let attachment = Self.attachment(root: root),
-              let entities = attachment["system-entities"] as? [[String: Any]],
-              entities.first?["dev-entry"] as? String == "/dev/" + outer,
-              entities.contains(where: { $0["dev-entry"] as? String == "/dev/" + original.device }),
+              attachment.outer == outer, attachment.devices.contains(original.device),
+              !requireTarget || (target.map { attachment.devices.contains($0.device) } ?? true),
               let session = DASessionCreate(kCFAllocatorDefault),
               let disk = outer.withCString({ DADiskCreateFromBSDName(kCFAllocatorDefault, session, $0) }),
               Self.mediaID(disk) == receipt.outerMediaID else { return false }
@@ -462,52 +784,8 @@ private struct APFSFormatImageSeal: Sendable {
         return IORegistryEntryGetRegistryEntryID(media, &value) == KERN_SUCCESS ? value : nil
     }
 
-    private static func attachment(root: URL) -> [String: Any]? {
-        guard let data = readOnlyPlist("/usr/bin/hdiutil", ["info", "-plist"]),
-              let value = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
-              let images = value["images"] as? [[String: Any]] else { return nil }
-        let matches = images.filter { $0["image-path"] as? String == root.appendingPathComponent("fixture.dmg").path }
-        guard matches.count == 1, matches[0]["owner-uid"] as? Int == Int(geteuid()) else { return nil }
-        return matches[0]
-    }
-
-    /// Read-only hdiutil output stays in memory and is bounded. A hung inquiry
-    /// can be signalled; mutation children are never sent through this path.
-    private static func readOnlyPlist(_ executable: String, _ arguments: [String]) -> Data? {
-        let child = Process(), pipe = Pipe()
-        child.executableURL = URL(fileURLWithPath: executable)
-        child.arguments = arguments
-        child.environment = ["LANG": "C", "LC_ALL": "C"]
-        child.standardInput = FileHandle.nullDevice
-        child.standardOutput = pipe
-        child.standardError = FileHandle.nullDevice
-        do { try child.run() } catch { return nil }
-        let descriptor = pipe.fileHandleForReading.fileDescriptor
-        var bytes = Data(), eof = false
-        let deadline = ProcessInfo.processInfo.systemUptime + 20
-        while !eof && ProcessInfo.processInfo.systemUptime < deadline {
-            var request = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-            let ready = Darwin.poll(&request, 1, 100)
-            if ready < 0 { if errno == EINTR { continue }; break }
-            if ready == 0 { continue }
-            guard request.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 else { continue }
-            var buffer = [UInt8](repeating: 0, count: 16_384)
-            let count = Darwin.read(descriptor, &buffer, buffer.count)
-            if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
-            if count < 0 { break }
-            if count == 0 { eof = true; break }
-            if bytes.count + count > (2 << 20) { break }
-            bytes.append(contentsOf: buffer.prefix(count))
-        }
-        if !eof && child.isRunning {
-            child.terminate()
-            let stopDeadline = ProcessInfo.processInfo.systemUptime + 2
-            while child.isRunning && ProcessInfo.processInfo.systemUptime < stopDeadline { usleep(10_000) }
-            if child.isRunning { Darwin.kill(child.processIdentifier, SIGKILL) }
-        }
-        try? pipe.fileHandleForReading.close()
-        child.waitUntilExit()
-        return eof && child.terminationReason == .exit && child.terminationStatus == 0 ? bytes : nil
+    private static func attachment(root: URL) -> (outer: String, devices: Set<String>)? {
+        try? APFSAttachedImageWitness.observeSealedFixtureAttachment(root.appendingPathComponent("fixture.dmg"))
     }
 }
 

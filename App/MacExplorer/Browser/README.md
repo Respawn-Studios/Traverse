@@ -4,6 +4,17 @@ BrowserViewController.swift is the controller entry. BrowserViews.swift and File
 
 BrowserSidebarNameView.swift owns click/hold/drag on existing labels. The sidebar layout adapter/coordinator retains ordering, expansion and native insertion feedback; it never moves filesystem items. Category disclosures use AppKit’s native controls.
 
+`WorkspaceDividerControls` presents the native hover buttons beside the resize
+target. It asks `BrowserWorkspaceController` for the current adjacent panes
+and available actions. The controller changes the pane layout, carries the tabs
+and focus, and routes Copy through the ordinary transfer queue. Matching-folder
+links use `WorkspaceFolderNavigation` and follow their tabs through a swap.
+`WorkspacePaneTransition` uses the same bounded foreground capture and settled
+handoff for switching sides or direction. The native layout owns the final
+view geometry. Use `dev.py native-check pane-motion` for rendered transitions
+and `dev.py verify-ui --check-substantial --count 160` for the connected
+commands, layout limits and copy/Undo behavior.
+
 Local **New Folder** uses the ordinary recoverable creation owner immediately,
 then selects the new folder and offers its existing inline filename editor.
 **New Folder…** retains the explicit name dialog. `BrowserInlineRename` keeps
@@ -76,6 +87,11 @@ or refreshing saved locations reads no password and starts no connection.
 `RemoteDownloadBatchResults` share destination selection, progress, local
 publication and exact per-file Undo while retaining concrete SMB/SFTP session
 and receipt types. Per-protocol transfer authority stays in LocalStorage.
+
+`LocalPaneDestination` presents the same native pane choice for files, groups
+and folders. `BrowserRemoteFolderDownload` shares the folder review, local
+publication and Undo. Its concrete SMB and SFTP bindings hold the selected
+manifest, receive capability and release action for the same server session.
 
 `BrowserSFTPFileActions` and the existing remote menu adapter supply concrete
 New Folder, file/folder Rename and explicit permanent file/empty-folder Delete. They reuse the

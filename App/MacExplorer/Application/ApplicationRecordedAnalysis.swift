@@ -2,6 +2,20 @@ import Foundation
 import ExplorerCore
 @_spi(ApplicationOwnership) import StorageAnalysis
 
+struct RecentAnalysis: Identifiable, Sendable {
+    enum Result: Equatable, Sendable { case complete, partial }
+    let id: UUID
+    let root: URL
+    let observedThrough: Date
+    let result: Result
+    let policy: AnalysisMetadataPolicy
+}
+
+enum RecentAnalysisInventory: Sendable {
+    case ready([RecentAnalysis])
+    case loading, disabled, busy, unavailable, needsAttention
+}
+
 /// App composition for dated, metadata-only results. The existing analysis
 /// coordinator still owns its one scan, progress stream and foreground demand.
 /// This owner retains catalogs and joins their actual presentation consumers.
@@ -50,6 +64,35 @@ final class ApplicationRecordedAnalysis {
             activityGate: ApplicationFileActivity.gate, accessProvider: ApplicationRecordedAnalysisAccess())
         directory = storage.directory
     }
+
+    /// Passive inventory contains display hints only; it grants no source access.
+    func inspectRecent() async -> RecentAnalysisInventory {
+        guard let owner, quitReceipt == nil else { return .unavailable }
+        switch await owner.inspectRecorded() {
+        case .ready(let records):
+            return .ready(records.compactMap { record in
+                guard !record.isStartupPair, let root = record.recordedSingleRoot else { return nil }
+                let result: RecentAnalysis.Result = switch record.status {
+                case .complete: record.coverage.hasGaps ? .partial : .complete
+                case .partial: .partial
+                }
+                return RecentAnalysis(id: record.catalogID, root: root,
+                    observedThrough: record.observedThrough,
+                    result: result,
+                    policy: record.metadataPolicy)
+            }.sorted { $0.observedThrough > $1.observedThrough })
+        case .unavailable(.busy): return .busy
+        case .unavailable: return .unavailable
+        case .needsAttention: return .needsAttention
+        }
+    }
+
+    #if DEBUG
+    func recentOwnerStateForVerification() async -> String {
+        let snapshot = await owner?.ownershipSnapshot()
+        return "quit-\(quitReceipt != nil)-index-\(snapshot?.indexKnown ?? false)-fenced-\(snapshot?.admissionsFenced ?? false)-views-\(snapshot?.queryViews ?? -1)"
+    }
+    #endif
 
     func begin(root: URL, retainingAccess: any Sendable,
                policy: AnalysisMetadataPolicy, using access: FolderAccessController,
@@ -151,10 +194,17 @@ final class ApplicationRecordedAnalysis {
         }
     }
 
-    func open(root: URL, policy: AnalysisMetadataPolicy,
+    func open(root: URL, policy: AnalysisMetadataPolicy, expectedCatalogID: UUID? = nil,
               using access: FolderAccessController, reportsIssue: Bool = true) async -> Prepared? {
         if reportsIssue { lastOpenIssue = nil }
-        guard let owner, quitReceipt == nil else { return nil }
+        guard let owner else {
+            if reportsIssue { lastOpenIssue = .unavailable }
+            return nil
+        }
+        guard quitReceipt == nil else {
+            if reportsIssue { lastOpenIssue = .busy }
+            return nil
+        }
         await drainReleasedCatalogs()
         return await ApplicationRecordedAnalysisAccess.withFolder(root, using: access) {
             guard !Task.isCancelled else { return nil }
@@ -165,10 +215,14 @@ final class ApplicationRecordedAnalysis {
                 if reportsIssue { lastOpenIssue = issue }; return nil
             }
             guard let record = records.last(where: {
-                      !$0.isStartupPair && $0.metadataPolicy == policy
+                      (expectedCatalogID == nil || $0.catalogID == expectedCatalogID)
+                          && !$0.isStartupPair && $0.metadataPolicy == policy
                           && $0.recordedSingleRoot?.standardizedFileURL.path.utf8
                               .elementsEqual(root.standardizedFileURL.path.utf8) == true
-                  }) else { return nil }
+                  }) else {
+                if reportsIssue && expectedCatalogID != nil { lastOpenIssue = .changed }
+                return nil
+            }
             let presentation: RecordedAnalysisPresentation
             switch await owner.openRecorded(record.catalogID) {
             case .ready(let value): presentation = value

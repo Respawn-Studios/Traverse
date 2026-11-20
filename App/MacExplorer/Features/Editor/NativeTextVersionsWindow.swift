@@ -19,6 +19,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     var showOperationResults: (UUID) -> Bool
     var allowsRetirement = true
     var confirmUndoSection: ((NSWindow, LocalTextCheckpointReview) async -> Bool)? = nil
+    var gitReview: ((URL) async -> GitReviewAccess?)? = nil
 }
 
 /// An attached, bounded version review. Opening lists metadata; selecting a
@@ -29,10 +30,13 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     NSTableViewDataSource, NSTableViewDelegate {
     private let files: LocalEditorFileSession
     private let actions: EditorVersionInteractions
+    private let settings: BrowserSettings
     private let table = NSTableView()
     private let details = NSTextView()
     private let status = NSTextField(wrappingLabelWithString: "Loading saved changes…")
     private let attempts = NSPopUpButton()
+    private let compareButton = NSButton(title: "Compare Versions…", target: nil, action: nil)
+    private let compareGitButton = NSButton(title: "Compare with Git Revision…", target: nil, action: nil)
     private let undoButton = NSButton(title: "Undo Saved Change…", target: nil, action: nil)
     private let copyButton = NSButton(title: "Copy Both Versions…", target: nil, action: nil)
     private let retireButton = NSButton(title: "Move Versions to Trash…", target: nil, action: nil)
@@ -56,12 +60,15 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     private var dates: [UUID: Date] = [:]
     private var otherRecord: OperationRecoveryRecord?
     private var selected: LocalTextRevisionInspection?
+    private var selectedRepository: GitReviewAccess?
+    private var comparison: EditorComparisonWindow?
     #if DEBUG
     // Observations only. Verification selects the actual NSTableView row.
     var recordIDsForVerification: [UUID] { records.map(\.recordID) }
     var selectedRecordIDForVerification: UUID? { selected?.recordID }
     var hasPendingWorkForVerification: Bool { worker != nil }
     var resultsAffinityIDForVerification: UUID? { resultsAffinityID }
+    var comparisonForVerification: EditorComparisonWindow? { comparison }
     #endif
     private var resultsAffinityID: UUID?
     private var next: UUID?
@@ -71,9 +78,10 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     private var closing = false
     private var rowFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
 
-    init(files: LocalEditorFileSession, publication: EditorUnresolvedPublication? = nil, interactions: EditorVersionInteractions,
+    init(files: LocalEditorFileSession, publication: EditorUnresolvedPublication? = nil, settings: BrowserSettings,
+         interactions: EditorVersionInteractions,
          installChrome: (NSWindow) -> Void) {
-        self.files = files; actions = interactions
+        self.files = files; self.settings = settings; actions = interactions
         let window = ToolWindowChrome.makePanel(title: "Saved Versions",
             size: .init(width: 900, height: 700), minimumSize: .init(width: 720, height: 600))
         super.init(window: window); window.delegate = self
@@ -118,9 +126,12 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
         status.maximumNumberOfLines = 3; status.textColor = .secondaryLabelColor
         attempts.target = self; attempts.action = #selector(attemptChanged)
         attempts.setAccessibilityLabel("Saved or Undo attempt")
-        for button in [undoButton, copyButton, retireButton, resultsButton, earlierButton, refreshButton, stopButton, doneButton, sectionButton, previousCopiesButton, nextCopiesButton] {
+        for button in [compareButton, compareGitButton, undoButton, copyButton, retireButton, resultsButton, earlierButton, refreshButton, stopButton, doneButton, sectionButton, previousCopiesButton, nextCopiesButton] {
             button.target = self; button.bezelStyle = .rounded
         }
+        compareButton.action = #selector(compareVersions)
+        compareGitButton.action = #selector(compareWithGit)
+        compareGitButton.isHidden = true
         undoButton.action = #selector(undoChange); copyButton.action = #selector(copyVersions)
         retireButton.action = #selector(retireVersions); resultsButton.action = #selector(viewResults)
         retireButton.isHidden = !actions.allowsRetirement || !NativeLocalProtectionPolicy.editorVersionRetirementAvailable
@@ -133,6 +144,8 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
         stopButton.action = #selector(stop); doneButton.action = #selector(done)
         let actionRow = NSStackView(views: [undoButton, copyButton, retireButton])
         actionRow.orientation = .horizontal; actionRow.spacing = 8
+        let versionRow = NSStackView(views: [attempts, compareButton, compareGitButton]); versionRow.spacing = 8
+        versionRow.alignment = .centerY
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let bottom = NSStackView(views: [earlierButton, refreshButton, resultsButton, spacer, stopButton, doneButton])
         bottom.orientation = .horizontal; bottom.spacing = 8
@@ -141,7 +154,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
         copyPager.orientation = .horizontal; copyPager.spacing = 8
         let sectionRow = NSStackView(views: [sectionButton, capacityLabel])
         sectionRow.orientation = .horizontal; sectionRow.alignment = .centerY; sectionRow.spacing = 12
-        let layout = NSStackView(views: [intro, publicationNotice, scroll, detailsScroll, copyPager, attempts, actionRow, sectionRow, status, bottom])
+        let layout = NSStackView(views: [intro, publicationNotice, scroll, detailsScroll, copyPager, versionRow, actionRow, sectionRow, status, bottom])
         layout.orientation = .vertical; layout.alignment = .leading; layout.spacing = 12
         layout.translatesAutoresizingMaskIntoConstraints = false
         let content = window.contentView!
@@ -165,7 +178,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
             var frame = header.frame; frame.size.height = ceil(28 * scale); header.frame = frame
         }
         details.font = .monospacedSystemFont(ofSize: 12 * scale, weight: .regular)
-        let requiredWidth = max(720, max(bottom.fittingSize.width, actionRow.fittingSize.width) + 36)
+        let requiredWidth = max(720, max(bottom.fittingSize.width, actionRow.fittingSize.width, versionRow.fittingSize.width) + 36)
         window.contentMinSize = .init(width: requiredWidth, height: max(600, layout.fittingSize.height + 32))
         refreshControls()
     }
@@ -204,7 +217,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
 
     private func load(after cursor: UUID?, focus: UUID?) {
         guard worker == nil else { return }
-        status.stringValue = "Loading saved changes…"; selected = nil; resultsAffinityID = nil
+        status.stringValue = "Loading saved changes…"; selected = nil; selectedRepository = nil; resultsAffinityID = nil
         sectionPreparationAvailable = false
         worker = Task { [weak self] in
             guard let self else { return }
@@ -273,7 +286,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     }
     private func inspectSelection() {
         guard worker == nil else { return }
-        selected = nil; attempts.removeAllItems(); resultsAffinityID = nil
+        selected = nil; selectedRepository = nil; attempts.removeAllItems(); resultsAffinityID = nil
         exportPage = nil; exportCursor = nil; earlierExportCursors = []
         let row = table.selectedRow
         guard row >= 0 else { refreshControls(); return }
@@ -295,10 +308,12 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
                 let exports: LocalTextRecoveryExportPage?
                 do { exports = try await self.files.recoveryExportPage(id) }
                 catch { exports = nil }
+                let repository = await self.gitRepository(for: value)
                 try Task.checkCancellation()
                 guard self.table.selectedRow == row,
                       (row < self.records.count ? self.records[row].recordID : self.singleRecordID) == id else { return }
                 self.selected = value
+                self.selectedRepository = repository
                 self.table.reloadData(forRowIndexes: .init(integer: row), columnIndexes: .init(integersIn: 0..<self.table.tableColumns.count))
                 self.attempts.addItems(withTitles: value.attempts.enumerated().map { index, attempt in
                     (attempt.direction == .forward ? "Save" : "Undo") + " attempt \(index + 1)"
@@ -315,6 +330,101 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     @objc private func reloadList() { load(after: nil, focus: selected?.recordID) }
     @objc private func earlier() { if let next { load(after: next, focus: nil) } }
     @objc private func attemptChanged() { refreshControls() }
+    private var selectedAttempt: LocalTextRevisionAttemptInspection? {
+        guard let selected, selected.attempts.indices.contains(attempts.indexOfSelectedItem) else { return nil }
+        return selected.attempts[attempts.indexOfSelectedItem]
+    }
+
+    private func gitRepository(for version: LocalTextRevisionInspection) async -> GitReviewAccess? {
+        guard settings.showsGitControls, version.metadataIsDurable, version.retention == .retained,
+              version.attempts.contains(where: { $0.beforeVersionAvailable || $0.submittedVersionAvailable }),
+              let repo = await actions.gitReview?(version.targetURL), repo.location.filePath(for: version.targetURL) != nil else { return nil }
+        return repo
+    }
+
+    @objc private func compareVersions() {
+        guard compareButton.isEnabled, let review = selected, let attempt = selectedAttempt, let parent = window else { return }
+        let isSave = attempt.direction == .forward
+        let filename = review.targetURL.lastPathComponent
+        let language = TextSyntaxLanguage.inferred(extension: EditorOpeningSupport.key(forFilename: filename) ?? "")
+        let labels = EditorComparisonWindow.Labels(title: "Compare Saved Versions", source: filename,
+            left: isSave ? "Before Save" : "Before Undo", right: isSave ? "Submitted Text" : "Restore Target",
+            detail: "Read-only versions retained for the selected " + (isSave ? "Save." : "Undo."), refresh: "Refresh")
+        presentComparison(labels, in: parent) { owner in
+            let pair = try await owner.inspect { try await owner.files.compareRevision(review.recordID, attempt: attempt.attemptID) }
+            return .init(documents: pair, leftLanguage: language, rightLanguage: language)
+        }
+    }
+
+    @objc private func compareWithGit() {
+        guard settings.showsGitControls, compareGitButton.isEnabled, let review = selected, let attempt = selectedAttempt,
+              let access = selectedRepository, let path = access.location.filePath(for: review.targetURL), let parent = window else { return }
+        let isSave = attempt.direction == .forward
+        let before = isSave ? "Before Save" : "Before Undo"
+        let submitted = isSave ? "Submitted Text" : "Restore Target"
+        let language = TextSyntaxLanguage.inferred(extension: EditorOpeningSupport.key(forFilename: path.name) ?? "")
+        status.stringValue = "Reading local Git revisions…"
+        worker = Task { [weak self] in
+            guard let self else { return }
+            defer { worker = nil; refreshControls() }
+            do {
+                let catalog = try await access.catalog()
+                try Task.checkCancellation()
+                let earlier = GitFileRevisionSheet<LocalTextRecoveryVersion>.Command(title: "Compare " + before, intent: .before)
+                let later = GitFileRevisionSheet<LocalTextRecoveryVersion>.Command(title: "Compare " + submitted, intent: .submitted)
+                let sheet = GitFileRevisionSheet(filename: path.name, choices: GitRevisionOption.choices(catalog),
+                    primary: attempt.submittedVersionAvailable ? later : earlier,
+                    alternate: attempt.submittedVersionAvailable && attempt.beforeVersionAvailable ? earlier : nil)
+                guard let choice = await sheet.choose(in: parent) else {
+                    status.stringValue = "Choose a retained version to review."
+                    return
+                }
+                let version = try await access.version(path: path, at: choice.revision.revision)
+                try Task.checkCancellation()
+                guard !closing, parent.isVisible, settings.showsGitControls, let git = version.editorTextSource else {
+                    status.stringValue = "The selected Git path is unavailable for text comparison."
+                    return
+                }
+                let labels = EditorComparisonWindow.Labels(title: "Compare Saved Version with Git", source: path.display,
+                    left: git.label, right: choice.intent == .before ? before : submitted,
+                    detail: "A pinned Git revision and the selected retained version.", refresh: "Refresh")
+                status.stringValue = "Selected saved change remains open."
+                presentComparison(labels, in: parent) { owner in
+                    let value = try await owner.inspect {
+                        try await owner.files.readRevision(review.recordID, attempt: attempt.attemptID, version: choice.intent)
+                    }
+                    let saved = EditorComparisonCapture.Side(text: value.text, format: value.format, language: language)
+                    return .init(left: try await access.committedSide(git.member), right: saved)
+                }
+            } catch { status.stringValue = GitReviewAccess.message(for: error) }
+        }
+        refreshControls()
+    }
+
+    private func presentComparison(_ labels: EditorComparisonWindow.Labels, in parent: NSWindow,
+                                   capture: @escaping @MainActor (NativeTextVersionsWindow) async throws -> EditorComparisonCapture) {
+        let viewer = EditorComparisonWindow(relativeTo: parent, settings: settings,
+            pointSize: CGFloat(settings.editorPreferences.basePointSize) * settings.interfaceSize.scale, labels: labels) { [weak self] in
+            guard let self, !closing else { throw CancellationError() }
+            return try await capture(self)
+        }
+        comparison = viewer
+        viewer.didClose = { [weak self] in self?.comparison = nil; self?.refreshControls() }
+        refreshControls()
+        viewer.present()
+    }
+
+    private func inspect<Value: Sendable>(_ read: @MainActor () async throws -> Value) async throws -> Value {
+        do {
+            let permit = try actions.acquireInspection()
+            defer { actions.finishInspection(permit) }
+            return try await read()
+        } catch is CancellationError { throw CancellationError() }
+        catch EditorFileSessionFailure.busy {
+            throw EditorComparisonLoadFailure.unavailable("Wait for the current Saved Versions request, then refresh.")
+        } catch { throw EditorComparisonLoadFailure.unavailable("The selected retained text could not be verified.") }
+    }
+
     @objc private func viewResults() {
         if let resultsAffinityID, !actions.showOperationResults(resultsAffinityID) {
             status.stringValue = "Results are unavailable while the file browser is busy. The selected change and its recorded locations remain here. Try again after the current work finishes."
@@ -329,6 +439,15 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     private func finish() {
         guard !closing, worker == nil else { return }
         closing = true
+        if let comparison {
+            worker = Task { [self] in
+                await comparison.closeAndDrain()
+                worker = nil; finishSheet()
+            }
+            refreshControls()
+        } else { finishSheet() }
+    }
+    private func finishSheet() {
         if let window { window.sheetParent?.endSheet(window); window.close() }
         let completion = finished; finished = nil; completion?.resume()
     }
@@ -337,7 +456,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
     private func refreshAfterMutation(_ id: UUID, reportedDetails: String = "") async {
         let outcome = status.stringValue
         defer { status.stringValue = outcome }
-        selected = nil; attempts.removeAllItems(); exportPage = nil; exportCursor = nil; earlierExportCursors = []
+        selected = nil; selectedRepository = nil; attempts.removeAllItems(); exportPage = nil; exportCursor = nil; earlierExportCursors = []
         records = []; dates = [:]; next = nil; singleRecordID = nil; otherRecord = nil
         capacity = nil; sectionPreparationAvailable = false; capacityLabel.stringValue = ""
         details.string = (reportedDetails.isEmpty ? "" : reportedDetails + "\n\n") + "Refreshing recorded versions…"
@@ -350,6 +469,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
             guard value.metadataIsDurable else { throw FileOperationFailure.recoveryUncertain }
             try Task.checkCancellation()
             let exports = try? await files.recoveryExportPage(id)
+            let repository = await gitRepository(for: value)
             if files.selectedHistoricalRecordID == nil {
                 capacity = try? await files.writeCapacity()
                 if actions.confirmUndoSection != nil {
@@ -360,7 +480,7 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
             records = page?.records ?? []; next = page?.nextRecordID
             dates = Dictionary(uniqueKeysWithValues: records.map { ($0.recordID, $0.createdAt) })
             singleRecordID = files.selectedHistoricalRecordID ?? (records.contains { $0.recordID == id } ? nil : id)
-            selected = value; exportPage = exports
+            selected = value; selectedRepository = repository; exportPage = exports
             attempts.addItems(withTitles: value.attempts.enumerated().map { index, attempt in
                 (attempt.direction == .forward ? "Save" : "Undo") + " attempt \(index + 1)"
                     + (attempt.preparationAborted ? " · Stopped before file change" : "")
@@ -578,9 +698,12 @@ struct EditorGrantedDirectory: Sendable, CustomStringConvertible, CustomDebugStr
         doneButton.isEnabled = !busy; stopButton.isHidden = !busy
         let unresolvedSection = files.sectionNeedsReview
         undoButton.isEnabled = !busy && !unresolvedSection && selected?.canUndo == true
-        let index = attempts.indexOfSelectedItem
-        let available = selected.map { index >= 0 && index < $0.attempts.count
-            && $0.attempts[index].beforeVersionAvailable && $0.attempts[index].submittedVersionAvailable } ?? false
+        let available = selectedAttempt.map { $0.beforeVersionAvailable && $0.submittedVersionAvailable } ?? false
+        compareButton.isEnabled = !busy && !closing && comparison == nil && available
+            && selected?.metadataIsDurable == true && selected?.retention == .retained
+        compareGitButton.isHidden = selectedRepository == nil || !settings.showsGitControls
+        compareGitButton.isEnabled = !compareGitButton.isHidden && !busy && !closing && comparison == nil
+            && selectedAttempt.map { $0.beforeVersionAvailable || $0.submittedVersionAvailable } == true
         copyButton.isEnabled = !busy && !unresolvedSection && available
         let retirementStateAllows = selected.map { value in
             let eligible: [LocalTextRevisionState] = [.committed, .undone, .notApplied]

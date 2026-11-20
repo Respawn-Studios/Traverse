@@ -23,14 +23,18 @@ final class ApplicationLocalTextEditors {
         let access: FolderAccessController
         let settings: BrowserSettings
         let engine: RecoverableFileOperations
-        init(browser: BrowserViewController, engine: RecoverableFileOperations) {
-            self.browser = browser; access = browser.folderAccess; settings = browser.settings; self.engine = engine
+        let fileSystem: LocalFileSystem
+        init(browser: BrowserViewController, engine: RecoverableFileOperations, access: FolderAccessController? = nil) {
+            self.browser = browser; self.access = access ?? browser.folderAccess
+            settings = browser.settings; self.engine = engine
+            fileSystem = browser.fileSystem
         }
     }
     private let coordinator = ApplicationOperationCoordinator.shared
     private var documents: [UUID: Entry] = [:]
     private var opening: [UUID: Task<Void, Never>] = [:]
     private var openingURLs = Set<URL>()
+    private let openFilesChanged = PassthroughSubject<Void, Never>()
     private var historicalReviews: [UUID: Task<Void, Never>] = [:]
     private var reviewControllers: [UUID: NativeTextVersionsWindow] = [:]
     private var reviewDrainFailures: [UUID: LocalEditorFileSession] = [:]
@@ -197,13 +201,33 @@ final class ApplicationLocalTextEditors {
     }
     #if DEBUG
     func documentForVerification(at url: URL) -> LocalTextDocumentController? {
-        documents.values.first { $0.document.currentURL.standardizedFileURL == url.standardizedFileURL }?.document
+        openDocument(at: url)
     }
     var waitingMutationsForVerification: Int { mutationAdmission.waitingCount }
     var reviewingTerminationForVerification: Bool { reviewingTermination }
     var pendingHistoricalReviewsForVerification: Int { historicalReviews.count }
     var afterHistoricalAccessForVerification: (() async -> Void)?
     #endif
+
+    private func openDocument(at url: URL) -> LocalTextDocumentController? {
+        let canonical = url.standardizedFileURL
+        return documents.values.first { $0.document.currentURL.standardizedFileURL == canonical }?.document
+    }
+
+    func reviewSource(for url: URL) -> GitLocalFileReview {
+        .init(url: url, hasDraft: { [weak self] in self?.openDocument(at: url)?.canCaptureDraft == true },
+            captureDraft: { [weak self] in self?.openDocument(at: url)?.captureDraft() })
+    }
+
+    /// Bind a comparison to the existing document even if this path later
+    /// closes and opens in a different editor. Refresh reads that same buffer.
+    func capturedEditorSource(for url: URL) -> (@MainActor () -> EditorComparisonCapture.Side?)? {
+        guard let document = openDocument(at: url), document.canCaptureCurrentText else { return nil }
+        return { [weak document] in
+            guard let document, document.currentURL.standardizedFileURL == url.standardizedFileURL else { return nil }
+            return document.captureCurrentText()
+        }
+    }
 
     /// Admit the complete explicit selection before reserving any new document.
     /// Each file still opens through its existing concrete access/Save owner.
@@ -221,27 +245,49 @@ final class ApplicationLocalTextEditors {
     }
 
     func open(_ url: URL, from browser: BrowserViewController) {
+        guard !browser.isBrowserSuspended, let engine = browser.recoverableFileOperations else { return }
+        open(url, context: Context(browser: browser, engine: engine), parent: browser.view.window) { [weak browser] message in
+            browser?.status.stringValue = message
+        }
+    }
+
+    func open(_ selection: LocalTextOpenSelection, from browser: BrowserViewController,
+              in parent: NSWindow, repository: GitRepositoryLocation? = nil, access: FolderAccessController? = nil,
+              report: (String) -> Void) {
+        guard !browser.isBrowserSuspended, let engine = browser.recoverableFileOperations else { return }
+        open(selection.url, context: Context(browser: browser, engine: engine, access: access), parent: parent,
+             repository: repository, matching: selection, report: report)
+    }
+
+    private func open(_ url: URL, context: Context, parent: NSWindow?, visit: EditorSidebarVisit? = nil,
+                      jump: EditorFileJump? = nil, repository: GitRepositoryLocation? = nil,
+                      matching selection: LocalTextOpenSelection? = nil, report: (String) -> Void) {
         guard LocalTextEditorFeature.ordinaryEnabled, !reviewingTermination, !terminationPrepared, url.isFileURL,
-              !browser.isBrowserSuspended, let engine = browser.recoverableFileOperations else { return }
+              parent?.attachedSheet == nil else { return }
         let canonical = url.standardizedFileURL
-        if let existing = documents.values.first(where: { $0.document.currentURL.standardizedFileURL == canonical }) {
-            existing.document.window.showWindow(nil); existing.document.window.window?.makeKeyAndOrderFront(nil); return
+        if let existing = openDocument(at: canonical) {
+            let controller = existing.window
+            let native = controller.window
+            if native?.isMiniaturized == true { native?.deminiaturize(nil) }
+            if let native { native.tabGroup?.selectedWindow = native }
+            controller.showWindow(nil); native?.makeKeyAndOrderFront(nil)
+            if let jump { existing.revealFileJump(jump) }
+            return
         }
         guard !openingURLs.contains(canonical) else { return }
         guard documentReservationCount + ApplicationRemoteTextEditors.shared.allTextReservationCount < 4 else {
-            browser.status.stringValue = "Close another editor to open this file. Up to four text documents can be open at once."
+            report("Close another editor to open this file. Up to four text documents can be open at once.")
             return
         }
         bindAdmissionSignalsIfNeeded()
-        let ticket = UUID(), context = Context(browser: browser, engine: engine)
+        let ticket = UUID()
         openingURLs.insert(canonical)
-        opening[ticket] = Task { [weak self, weak browser] in
+        opening[ticket] = Task { [weak self, weak parent] in
             guard let self else { return }
             defer { self.opening.removeValue(forKey: ticket); self.openingURLs.remove(canonical) }
-            guard let browser else { return }
-            let access = await browser.accessLifetime(for: [url])
-            guard !Task.isCancelled, !self.reviewingTermination else { return }
-            let files = LocalEditorFileSession(engine: engine, retaining: access)
+            let access = await context.access.retainAccess(for: [url])
+            guard !Task.isCancelled, !self.reviewingTermination, !self.terminationPrepared else { return }
+            let files = LocalEditorFileSession(engine: context.engine, retaining: access)
             let document = LocalTextDocumentController(url: url, files: files,
                 interactions: self.interactions(context), installChrome: { native in
                     native.isRestorable = false
@@ -257,20 +303,95 @@ final class ApplicationLocalTextEditors {
             }
             self.documents[document.id] = .init(document: document, context: context,
                 preferencesObservation: preferencesObservation)
+            self.installFileSidebar(on: document, context: context, visit: visit, repository: repository)
             self.installDiagnostics(on: document)
-            document.didClose = { [weak self] id in self?.documents.removeValue(forKey: id) }
-            document.didChangeURL = { [weak self] _, _ in
+            document.didClose = { [weak self] id in
+                self?.documents.removeValue(forKey: id)
+                self?.openFilesChanged.send()
+            }
+            document.didChangeURL = { [weak self, weak document] _, url in
+                document?.window.fileSidebar?.files?.documentChanged(to: url)
+                self?.openFilesChanged.send()
                 for browser in self?.coordinator.liveBrowsers ?? [] where !browser.isBrowserSuspended {
                     browser.inspectOperationRecovery()
                 }
             }
             if let native = document.window.window {
-                self.position(native, relativeTo: browser.view.window)
+                self.position(native, relativeTo: parent)
                 InterfaceMetrics.setFont(document.window.surface.textView,
                     base: .monospacedSystemFont(ofSize: CGFloat(context.settings.editorPreferences.basePointSize), weight: .regular))
                 InterfacePresentation.shared.register(document.window.surface)
             }
-            document.showAndOpen()
+            document.showAndOpen(jump: jump, matching: selection)
+            openFilesChanged.send()
+        }
+    }
+
+    private func installFileSidebar(on document: LocalTextDocumentController, context: Context, visit: EditorSidebarVisit?,
+                                    repository confirmedRepository: GitRepositoryLocation?) {
+        guard let presentation = document.window.fileSidebar else { return }
+        let repository: GitRepositoryLocation?
+        if let confirmedRepository { repository = confirmedRepository }
+        else if let browser = context.browser, browser.gitControls.isAvailable,
+           browser.location.directoryURL?.standardizedFileURL == document.currentURL.deletingLastPathComponent().standardizedFileURL {
+            repository = browser.gitControls.repository
+        } else { repository = nil }
+        let files = EditorFileSidebar(document: document.currentURL, fileSystem: context.fileSystem,
+            access: context.access, settings: context.settings, visit: visit, repository: repository,
+            openChanges: openFilesChanged.eraseToAnyPublisher(),
+            openFiles: { [weak self] in self?.openFileList() ?? [] }) { [weak self, weak document] url, jump, selection in
+                guard let self, let document, !document.isClosed, let native = document.window.window,
+                      native.isKeyWindow else { return }
+                self.open(url, context: context, parent: native, visit: document.window.fileSidebar?.visit, jump: jump,
+                    matching: selection, report: document.window.reportNavigation)
+            }
+        files.onHistory = { [weak document] url in
+            document?.window.openGitHistory(for: url, fileSystem: context.fileSystem, access: context.access, settings: context.settings)
+        }
+        files.onGitIndexAction = { [weak document] action in
+            document?.editGitIndex(action, fileSystem: context.fileSystem, access: context.access, settings: context.settings)
+        }
+        files.onFolderReview = { [weak document] url, mode in
+            guard let document, let workspace = context.browser?.workspace, !workspace.isClosing else {
+                document?.window.reportNavigation("The browser workspace for this editor is unavailable.")
+                return
+            }
+            document.window.openGitFolderReview(for: url, mode: mode, fileSystem: context.fileSystem,
+                access: context.access, settings: context.settings, workspace: workspace)
+        }
+        files.onRevision = { [weak self, weak document] url, intent in
+            document?.window.chooseGitRevision(for: url, intent: intent, fileSystem: context.fileSystem,
+                                               access: context.access, settings: context.settings) {
+                [weak self] in self?.openDocument(at: url)?.captureCurrentText()
+            }
+        }
+        files.onWorktree = { [weak self, weak document] url in
+            guard let document else { return }
+            document.window.chooseGitWorktree(for: url, fileSystem: context.fileSystem, access: context.access,
+                settings: context.settings, capture: { [weak document] in
+                    guard let document, document.currentURL == url else { return nil }
+                    return document.captureCurrentText()
+                }, open: { [weak self, weak document] file, parent, origin in
+                    guard let self, let document, !document.isClosed, parent.isKeyWindow else { return }
+                    let current = document.window.fileSidebar?.visit
+                    let visit = current.map { EditorSidebarVisit(shown: $0.shown, width: $0.width, folder: file.repository.root, mode: $0.mode) }
+                    open(file.url, context: context, parent: parent, visit: visit,
+                         jump: .init(destination: nil, origin: origin), repository: file.repository, matching: file.selection,
+                         report: document.window.reportNavigation)
+                })
+        }
+        document.window.onEditedChanged = { [weak self] in self?.openFilesChanged.send() }
+        presentation.install(files, settings: context.settings, visit: visit)
+        document.window.gitLineReview = .init(editor: document.window, fileSystem: context.fileSystem,
+            folders: context.access, settings: context.settings)
+    }
+
+    private func openFileList() -> [EditorOpenFile] {
+        documents.values.map {
+            EditorOpenFile(url: $0.document.currentURL, isEdited: $0.document.isDirty)
+        }.sorted {
+            let ordering = $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent)
+            return ordering == .orderedSame ? $0.url.path < $1.url.path : ordering == .orderedAscending
         }
     }
 
@@ -305,7 +426,7 @@ final class ApplicationLocalTextEditors {
                   let host, host.isVisible, host.attachedSheet == nil,
                   host !== browser.recoveryWindow?.window || browser.recoveryWindow?.isClosed == false else { return }
             let files = LocalEditorFileSession(engine: engine, retaining: access, selectedHistoricalRecordID: record.id)
-            let review = NativeTextVersionsWindow(files: files, interactions: self.versionInteractions(context),
+            let review = NativeTextVersionsWindow(files: files, settings: context.settings, interactions: self.versionInteractions(context),
                 installChrome: { native in
                     native.isRestorable = false; ToolWindowChrome.install(in: native, settings: context.settings)
                 })
@@ -480,7 +601,7 @@ final class ApplicationLocalTextEditors {
             reviewVersions: { [weak self] document, record in
                 guard let self, let parent = document.window.window else { return }
                 let review = NativeTextVersionsWindow(files: document.files, publication: document.unresolvedPublication,
-                    interactions: self.versionInteractions(context), installChrome: { native in
+                    settings: context.settings, interactions: self.versionInteractions(context), installChrome: { native in
                         native.isRestorable = false
                         ToolWindowChrome.install(in: native, settings: context.settings)
                     })
@@ -531,6 +652,11 @@ final class ApplicationLocalTextEditors {
                 }
                 return await Self.confirm(in: native, title: "Start a new Undo section?",
                     message: message, action: "Start New Section")
+            }, gitReview: { url in
+                guard context.settings.showsGitControls,
+                      let checkout = try? await GitReviewAccess.discover(in: url.deletingLastPathComponent(),
+                        fileSystem: context.fileSystem, access: context.access) else { return nil }
+                return GitReviewAccess(location: checkout.location, fileSystem: context.fileSystem, access: context.access)
             })
     }
 

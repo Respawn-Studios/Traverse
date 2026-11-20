@@ -23,30 +23,55 @@ final class WorkspacePaneTransition: NSView {
         let dropFrame: NSRect?
         let edge: PaneDropEdge
     }
+    struct Rearrangement {
+        enum Kind: Equatable { case swap, direction }
+
+        let kind: Kind
+        let sides: [UUID]
+        let foregroundSide: UUID
+        let axis: PaneSplitAxis
+        let bounds: NSRect
+    }
     var origin: Origin?
     var arrivingPaneID: UUID?
+    var rearrangement: Rearrangement?
     var mode = BrowserMotionMode.full
     private(set) var frames: [UUID: Frame] = [:]
+    #if DEBUG
+    private(set) var capturedForVerification = Set<UUID>()
+    #endif
     private var masks: [(CALayer, CAShapeLayer)] = []
+    private var incomingFades: [CALayer] = []
+    private static let incomingFadeKey = "traverse.paneRearrangementIncoming"
     private var completion: (() -> Void)?
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func isAccessibilityElement() -> Bool { false }
 
-    func capture(_ hosts: [UUID: PaneHostView], in parent: NSView, foreground: (UUID) -> [NSView]) {
+    func capture<View: NSView>(_ hosts: [UUID: View], in parent: NSView, foreground: (UUID) -> [NSView]) {
+        // Only the panes taking part consume image memory. A wide workspace
+        // can still animate a smaller nested split at native resolution.
         guard mode != .off, parent.window?.isVisible == true, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-              parent.bounds.width * parent.bounds.height * pow(parent.window?.backingScaleFactor ?? 1, 2) <= 8_000_000 else { return }
+              NativeForegroundSnapshot.fits(hosts.values.map(\.bounds.size), scale: parent.window?.backingScaleFactor ?? 1) else { return }
         for (id, host) in hosts {
             guard let image = NativeForegroundSnapshot.capture(in: host, views: foreground(id)) else { continue }
             frames[id] = Frame(rect: host.convert(host.bounds, to: parent), image: image)
+            #if DEBUG
+            capturedForVerification.insert(id)
+            #endif
         }
     }
 
-    func play(to hosts: [UUID: PaneHostView], in parent: NSView, completion: @escaping () -> Void) {
+    func play(to hosts: [UUID: PaneHostView], in parent: NSView, rearrangementTargets: [UUID: NSView] = [:],
+              liveRearrangementForeground: [NSView] = [], completion: @escaping () -> Void) {
         guard mode != .off, !frames.isEmpty, parent.window?.isVisible == true,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { completion(); return }
         self.completion = completion
         frame = parent.bounds; autoresizingMask = [.width, .height]
         wantsLayer = true; layer?.isOpaque = false; layer?.backgroundColor = NSColor.clear.cgColor
+        if let rearrangement {
+            playRearrangement(rearrangement, to: rearrangementTargets, in: parent, liveForeground: liveRearrangementForeground)
+            return
+        }
         let final = hosts.mapValues { $0.convert($0.bounds, to: parent) }
         let closing = frames.keys.contains { hosts[$0] == nil }
         let duration = mode.paneDuration(closing: closing)
@@ -58,12 +83,8 @@ final class WorkspacePaneTransition: NSView {
         // reveal from the tab/drop position; neither path scales live text.
         var targets: [(PaneTransitionClip, NSRect)] = []
         for (id, from) in frames {
-            let clip = PaneTransitionClip(frame: from.rect)
-            clip.wantsLayer = true; clip.layer?.masksToBounds = true
-            clip.layer?.isOpaque = false; clip.layer?.backgroundColor = NSColor.clear.cgColor
-            let image = NSImageView(frame: NSRect(origin: .zero, size: from.rect.size))
-            image.image = from.image; image.imageScaling = .scaleNone; image.imageAlignment = .alignTopLeft
-            clip.addSubview(image); addSubview(clip)
+            let clip = makePicture(from, at: from.rect)
+            addSubview(clip)
             if let destination = final[id] { targets.append((clip, destination)) }
             else {
                 let survivor = final.values.max { a, b in
@@ -106,6 +127,99 @@ final class WorkspacePaneTransition: NSView {
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated { self?.finish() }
         })
+    }
+
+    private func makePicture(_ sample: Frame, at rect: NSRect) -> PaneTransitionClip {
+        let clip = PaneTransitionClip(frame: rect)
+        clip.wantsLayer = true
+        clip.layer?.masksToBounds = true
+        clip.layer?.isOpaque = false
+        let image = NSImageView(frame: NSRect(origin: .zero, size: sample.rect.size))
+        image.image = sample.image
+        image.imageScaling = .scaleNone
+        image.imageAlignment = .alignTopLeft
+        clip.addSubview(image)
+        return clip
+    }
+
+    private func playRearrangement(_ rearrangement: Rearrangement, to destinations: [UUID: NSView],
+                                   in parent: NSView, liveForeground: [NSView]) {
+        guard rearrangement.sides.count == 2,
+              rearrangement.sides.allSatisfy({ frames[$0] != nil && destinations[$0] != nil }) else {
+            finish()
+            return
+        }
+        let full = mode == .full
+        let duration = mode.paneDuration(closing: false)
+        let stage = PaneTransitionClip(frame: rearrangement.bounds)
+        stage.wantsLayer = true
+        stage.layer?.masksToBounds = true
+        addSubview(stage)
+        parent.addSubview(self, positioned: .above, relativeTo: nil)
+        let order = rearrangement.sides.filter { $0 != rearrangement.foregroundSide } + [rearrangement.foregroundSide]
+        var targets: [(PaneTransitionClip, NSRect)] = []
+        for id in order {
+            guard let sample = frames[id], let target = destinations[id] else { continue }
+            let clip = makePicture(sample, at: stage.convert(sample.rect, from: parent))
+            stage.addSubview(clip)
+            if full {
+                let direction: CGFloat = id == rearrangement.sides.first ? 1 : -1
+                let arc = rearrangement.kind == .swap ? direction : 0
+                animateCard(clip, axis: rearrangement.axis, direction: arc, duration: duration)
+                targets.append((clip, target.convert(target.bounds, to: stage)))
+            }
+            if full, let layer = clip.layer {
+                layer.opacity = 0
+                layer.add(keyframes("opacity", values: [1, 0.96, 0.9, 0],
+                    at: [0, 0.25, 0.70, 1], duration: duration), forKey: "paneRearrangementOutgoing")
+            }
+        }
+        // Fade the live foreground in as the moving snapshots reach it.
+        // Glass and AppKit responders stay in the settled hierarchy.
+        for view in liveForeground where !view.isHiddenOrHasHiddenAncestor {
+            guard let layer = view.layer else { continue }
+            layer.add(keyframes("opacity", values: [0, 0, layer.opacity],
+                at: [0, full ? 0.67 : 0.15, 1], duration: duration), forKey: Self.incomingFadeKey)
+            incomingFades.append(layer)
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.24, 0.1, 0.24, 1)
+            for (clip, destination) in targets { clip.animator().frame = destination }
+            if !full { stage.animator().alphaValue = 0 }
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated { self?.finish() }
+        })
+    }
+
+    private func animateCard(_ clip: NSView, axis: PaneSplitAxis, direction: CGFloat, duration: TimeInterval) {
+        guard let layer = clip.layer else { return }
+        if direction != 0 {
+            let distance = min(42, (axis == .columns ? clip.bounds.height : clip.bounds.width) * 0.10)
+            let offset = axis == .columns ? "transform.translation.y" : "transform.translation.x"
+            layer.add(keyframes(offset, values: [0, direction * distance, 0], at: [0, 0.47, 1], duration: duration),
+                      forKey: "paneSwapArc")
+            layer.add(keyframes("transform.rotation.z", values: [0, direction * 0.063, 0],
+                                at: [0, 0.47, 1], duration: duration), forKey: "paneSwapTilt")
+        }
+        var color = NSColor.clear.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let background = NSColor.windowBackgroundColor
+            color = (background.blended(withFraction: 0.12, of: .labelColor) ?? background)
+                .withAlphaComponent(0.72).cgColor
+        }
+        layer.add(keyframes("backgroundColor", values: [NSColor.clear.cgColor, color, color, NSColor.clear.cgColor],
+                            at: [0, 0.19, 0.72, 1], duration: duration), forKey: "paneRearrangementPlate")
+        layer.add(keyframes("cornerRadius", values: [0, 12, 12, 0], at: [0, 0.19, 0.72, 1], duration: duration),
+                  forKey: "paneRearrangementCorners")
+    }
+
+    private func keyframes(_ path: String, values: [Any], at times: [NSNumber], duration: TimeInterval) -> CAKeyframeAnimation {
+        let animation = CAKeyframeAnimation(keyPath: path)
+        animation.values = values
+        animation.keyTimes = times
+        animation.duration = duration
+        return animation
     }
 
     /// Four quadratic segments in every keyframe make interpolation continuous.
@@ -191,8 +305,10 @@ final class WorkspacePaneTransition: NSView {
             if layer.mask === mask { layer.mask = nil }
         }
         CATransaction.commit(); masks.removeAll()
+        for layer in incomingFades { layer.removeAnimation(forKey: Self.incomingFadeKey) }
+        incomingFades.removeAll()
         layer?.removeAllAnimations()
-        removeFromSuperview(); subviews.forEach { $0.removeFromSuperview() }; frames.removeAll(); origin = nil
+        removeFromSuperview(); subviews.forEach { $0.removeFromSuperview() }; frames.removeAll(); origin = nil; rearrangement = nil
         let action = completion; completion = nil; action?()
     }
 }

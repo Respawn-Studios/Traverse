@@ -33,17 +33,30 @@ extension BrowserViewController: NSTableViewDataSource, NSTableViewDelegate {
         cell.textField?.textColor = key == "name" ? .labelColor : .secondaryLabelColor
         cell.textField?.alignment = key == "size" ? .right : .left
         let isCut = cutURLs.contains(entry.url)
-        (cell as? FileNameCellView)?.showCutMarker(isCut)
-        cell.toolTip = (key == "name" ? (metadataSearch.isShowingResults ? entry.url.path : entry.name) : text) + (isCut ? " — Cut: ready to move when pasted" : "")
-        if metadataSearch.isShowingResults, key == "name" { cell.toolTip = entry.url.path + "\n" + metadataSearch.savedNames.reason(entry.url) }
-        if key == "name", entry.kind == .directory, settings.folderSummariesEnabled, !metadataSearch.isShowingResults {
-            cell.toolTip = nil // The progressive summary owns this folder's hover presentation.
+        if let name = cell as? FileNameCellView { decorateFilenameCell(name, for: entry, opening: opening, cut: isCut) }
+        else {
+            cell.toolTip = text + (isCut ? " · Cut: ready to move when pasted" : "")
+            cell.setAccessibilityHelp(nil)
+            cell.setAccessibilityLabel(text + (isCut ? ", cut, ready to move" : ""))
         }
-        if let explanation = opening.explanation { cell.toolTip = (cell.toolTip ?? text) + "\n" + explanation }
-        cell.setAccessibilityHelp(opening.explanation)
-        cell.setAccessibilityLabel(text + (isCut ? ", cut, ready to move" : "") + (opening.explanation.map { ", " + $0 } ?? ""))
         cell.alphaValue = isCut ? 0.5 : 1
         return cell
+    }
+
+    func decorateFilenameCell(_ cell: FileNameCellView, for entry: FileEntry, opening: FileOpeningAppearance, cut: Bool) {
+        let git = gitControls.badge(for: entry)
+        cell.showCutMarker(cut); cell.showGitBadge(git)
+        let details = ([cut ? "Cut: ready to move when pasted" : nil, opening.explanation].compactMap { $0 }) + (git?.details ?? [])
+        let text = cell.textField?.stringValue ?? entry.name
+        if metadataSearch.isShowingResults {
+            cell.toolTip = ([entry.url.path, metadataSearch.savedNames.reason(entry.url)] + details).joined(separator: "\n")
+        } else if entry.kind == .directory, settings.folderSummariesEnabled {
+            cell.toolTip = opening.explanation.map { text + "\n" + $0 }
+        } else {
+            cell.toolTip = ([entry.name] + details).joined(separator: "\n")
+        }
+        cell.setAccessibilityHelp(opening.explanation)
+        cell.setAccessibilityLabel(([text] + details).joined(separator: ", "))
     }
 
     static let dateFormatter: DateFormatter = {

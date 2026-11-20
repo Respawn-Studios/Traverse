@@ -39,11 +39,13 @@ deeper into the current app.
 
 ### Less tidying, more doing
 
-Better batch organization, saved workspaces, selection tools and previews.
-Folder comparison is high on our list, followed by synchronization where you
-can see exactly which direction changes will travel. We'd also like richer
-transfer queues, bandwidth controls and pause/resume where the connection
-supports it.
+In development builds, you can compare two folders from one selection or
+from neighboring panes. Open a difference, check the bytes, and review the
+exact selection before copying missing files across. Inside a local Git checkout,
+compare folder trees from two revisions, see what’s staged, and stage or unstage
+one block of a text diff. Better batch organization, selection tools and richer
+queues are on the list, with bandwidth and pause controls where the connection
+supports them.
 
 ### Archives without the detour
 
@@ -51,16 +53,18 @@ More writable formats, deeper folder and member editing, and direct actions
 for the things people do most often. The aim is simple: working on a file in an
 archive should feel as ordinary as working on a file in a folder.
 
-The next direct build brings the shared workbench and editor to plain, gzip and
-bzip2 TARs. Their creation, member changes and Undo after restart have passed
-signed checks; the downloadable release still needs its final app checks.
+Version 0.3.0 brought the shared workbench and editor to plain, gzip and bzip2
+TARs, including creation, member changes, Finder exports and Undo after restart.
+Next comes a smoother keyboard and clipboard journey across archive windows.
 XZ and other formats are further down the list.
 
 ### A lightweight editor that earns its place
 
-Richer language support, smarter editing conveniences and better remote editing.
-We want it to be the editor you happily use for a quick fix, without turning
-Traverse into a giant IDE.
+The editor in development builds has a project tree, a list of open buffers and
+a document outline. Jump to a file by name, then compare the draft with a saved
+version or browse its Git history across a rename. We’d love to keep adding
+language smarts and bring more of these review tools to remote editing. The goal
+is an editor you’re happy to open for a quick fix or leave open for an afternoon.
 
 ### Know your drives
 
@@ -69,15 +73,19 @@ benchmark results, and health information for more drives and enclosures.
 Useful charts should help you spot a change, rather than make you decipher a
 wall of numbers.
 
-The current development work adds a mixed benchmark suite, latency charts and
-comparisons. APFS work includes Add Volume for disk images and a formatting
+Quick Mix, latency charts and matched comparisons arrived in 0.3.0. Current work
+makes those distributions easier to read and brings saved analyses into Drives.
+APFS work includes Add Volume for disk images and a formatting
 backend being checked on generated images. Normal formatting controls and
 physical-drive changes are still ahead; Disk Utility remains the handoff.
 
 ## Further down the trail
 
 - **Your storage, wherever you keep it.** Cloud providers alongside open-source
-  and self-hosted services, with the same familiar workspace.
+  and self-hosted services, with the same familiar workspace. We want to start
+  with folders you choose from macOS, including iCloud Drive and folders made
+  available by installed sync apps. A file that still needs downloading should
+  look different from one that's ready to use.
 - **Your devices, closer together.** Better NAS and network discovery, plus
   native iPhone, iPad and Android companion apps for easy nearby transfers.
   Something with the ease of AirDrop, across more of your devices.

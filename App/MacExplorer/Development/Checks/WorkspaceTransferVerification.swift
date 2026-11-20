@@ -98,6 +98,28 @@ enum WorkspaceTransferVerification {
         // injected admission only. No native mouse/Finder delivery is claimed.
         workspace.activate(left)
         select([movable], in: left)
+        let divider = workspace.layout.rootID
+        let clipboardBeforeCopy = board.changeCount
+        try require(workspace.canPerformDividerAction(.copy, split: divider), "Adjacent local destination did not admit divider Copy")
+        try WorkspaceNavigationVerification.pressDivider(.copy, split: divider, in: workspace)
+        try await waitUntil("Divider Copy refreshes only the adjacent destination") { right.rowsByURL[moved] != nil && settled(right) }
+        let exactCopy = await Task.detached {
+            (try? Data(contentsOf: movable)) == movableBytes && (try? Data(contentsOf: moved)) == movableBytes
+        }.value
+        try require(exactCopy && board.changeCount == clipboardBeforeCopy && workspace.activeBrowser === left
+            && left.selectedURLs == [movable],
+            "Divider Copy changed the source, selection, clipboard or active pane")
+        try await waitUntil("Divider Copy has a native Undo") { left.canUndoFileOperation }
+        left.undoFileOperation(nil)
+        await left.operationPreparationTask?.value
+        await left.operationTask?.value
+        try await waitUntil("Divider Copy Undo refreshes the adjacent view") { right.rowsByURL[moved] == nil && settled(right) }
+        let exactUndo = await Task.detached {
+            (try? Data(contentsOf: movable)) == movableBytes && !FileManager().fileExists(atPath: moved.path)
+        }.value
+        try require(exactUndo, "Divider Copy Undo changed its source or kept the created file")
+        checks.append("Divider Copy uses the normal local transfer queue and exact neighboring pane; its visible copy and Undo preserve source, clipboard and focus")
+        select([movable], in: left)
         left.dragDrop.selectionDidChange(); right.dragDrop.selectionDidChange()
         try await waitUntil("Cross-pane source/target observation") {
             left.dragDrop.verificationState.readySource && right.dragDrop.verificationState.readyTargets > 0
@@ -242,9 +264,10 @@ enum WorkspaceTransferVerification {
         right.pasteFileURLs(nil)
         try await waitUntil("Real move conflict review") { promptEntered && right.operationCoordinator.transfers.state.active != nil }
         workspace.activate(left)
-        try require(workspace.operationBrowser === right && workspace.operationButton.presentation != nil
-                    && !workspace.operationButton.isHidden && left.hasPendingFileOperation,
-                    "Global operation ring lost its actual owner when command focus changed")
+        try await waitUntil("Global operation ring belongs to the new queue origin after changing command focus") {
+            workspace.operationBrowser === right && workspace.operationButton.presentation != nil
+                && !workspace.operationButton.isHidden && left.hasPendingFileOperation
+        }
         left.focusBrowserContent()
         left.cycleBrowserFocus(backward: false)
         try require(window.firstResponder === left.clipboardStatus,
@@ -255,8 +278,12 @@ enum WorkspaceTransferVerification {
         try require(workspace.canChangePaneLayout, "Accepted queue work incorrectly blocked independent pane management")
         releaseConflict = true
         try await waitUntil("Actual cross-pane move completion", seconds: 25) { !right.operationCoordinator.transfers.hasOutstandingWork && right.operationPreparationTask == nil && right.lastOperationResult != nil }
+        try await waitUntil("Shared progress ring completed its queued presentation") {
+            workspace.operationButton.isHidden && workspace.operationButton.presentation == nil
+        }
+        let responderType = window.firstResponder.map { String(describing: type(of: $0)) } ?? "none"
         try require(window.firstResponder === left.activeFileView,
-                    "Completing the shared progress ring left keyboard focus in a hidden control")
+                    "Shared progress ring retired without returning focus to the active pane (responder: \(responderType), active pane: \(workspace.activeBrowser === left), key window: \(window.isKeyWindow))")
         let moveOutcomePreserved = try await Task.detached {
             let destinationData = try Data(contentsOf: moved)
             let originalConflict = try Data(contentsOf: conflicting)

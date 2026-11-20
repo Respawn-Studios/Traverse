@@ -14,6 +14,32 @@ final class BrowserOperationHistory {
     var continuation: TransferContinuation?
     var moveClipboard: MoveClipboardContext?
     var recoveryRecordID: UUID?
+    var recoveryRecords: [OperationRecoveryRecord] = []
+    var refusedRecoveryEntries: [URL] = []
+    var recoveryNextCursor: UUID?
+    var recoveryUnfinishedCount = 0
+    var recoveryHistoryReadiness: OperationHistoryReadiness = .absent
+    var recoveryInspectionTask: Task<Void, Never>?
+    private var recoveryInspectionID: UUID?
+    private(set) var recoveryInspectionOwner: UUID?
+
+    func beginRecoveryInspection(_ id: UUID, owner: UUID) {
+        recoveryInspectionTask?.cancel()
+        recoveryInspectionID = id; recoveryInspectionOwner = owner
+    }
+
+    @discardableResult
+    func finishRecoveryInspection(_ id: UUID) -> Bool {
+        guard recoveryInspectionID == id else { return false }
+        recoveryInspectionTask = nil
+        recoveryInspectionID = nil; recoveryInspectionOwner = nil
+        return true
+    }
+
+    func cancelRecoveryInspection(owner: UUID) {
+        guard recoveryInspectionOwner == owner else { return }
+        recoveryInspectionTask?.cancel()
+    }
 }
 
 @MainActor
@@ -122,9 +148,17 @@ extension BrowserWorkspaceController {
         #if DEBUG
         queueSharedRendersForVerification += 1
         #endif
-        if browser.operationPresentation != nil { operationBrowser = browser }
-        else if operationBrowser == nil || operationBrowser?.isBrowserSuspended == true {
-            operationBrowser = primaryBrowser.operationCoordinator.transfers.presentation != nil ? activeBrowser : nil
+        let transfers = primaryBrowser.operationCoordinator.transfers
+        if browser.operationPresentation != nil {
+            operationBrowser = browser
+        } else if operationBrowser?.operationPresentation == nil {
+            if transfers.presentation == nil {
+                operationBrowser = nil
+            } else if let origin = transfers.activeOrigin, browsers[origin.paneID] === origin, !origin.isBrowserSuspended {
+                operationBrowser = origin
+            } else if operationBrowser == nil || operationBrowser?.isBrowserSuspended == true {
+                operationBrowser = activeBrowser
+            }
         }
         let owner = operationBrowser
         operationButton.presentation = owner?.displayedOperationPresentation
@@ -158,9 +192,16 @@ extension BrowserWorkspaceController {
         for browser in browsers.values { browser.resumeBrowser() }
         queuePresentation?.schedule()
         if !sessionReady { begin() }
+        else { refreshRecoveryViews() }
     }
 
     func refreshRecoveryViews() {
-        for browser in browsers.values where !browser.isBrowserSuspended { browser.inspectOperationRecovery() }
+        primaryBrowser.inspectOperationRecovery()
+    }
+
+    func refreshRecoveryPresentations() {
+        for browser in browsers.values where !browser.isBrowserSuspended {
+            browser.refreshRecoveryPresentation()
+        }
     }
 }

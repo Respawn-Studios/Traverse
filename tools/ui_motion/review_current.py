@@ -22,7 +22,13 @@ def main():
     parser.add_argument('cases', nargs='+')
     parser.add_argument('--review-id', default='current')
     parser.add_argument('--forensic', action='store_true', help='Decode a failed Settings, analysis or Help capture for diagnosis; never marks acceptance.')
+    parser.add_argument('--diagnostic-region', type=int, nargs=4, metavar=('X', 'Y', 'WIDTH', 'HEIGHT'),
+                        help='Inspect one retained Settings window crop in movie pixels; diagnostic only, never acceptance.')
     args = parser.parse_args()
+    if args.diagnostic_region and (len(args.cases) != 1 or args.forensic
+            or min(args.diagnostic_region[:2]) < 0 or min(args.diagnostic_region[2:]) < 1
+            or max(args.diagnostic_region) > 2048):
+        raise ValueError('Choose one bounded Settings crop without failed-capture recovery')
     if not 1 <= len(args.cases) <= 8 or len(set(args.cases)) != len(args.cases):
         raise ValueError('Choose one to eight distinct generated recordings')
     if not 1 <= len(args.review_id) <= 24 or any(
@@ -49,6 +55,7 @@ def main():
     previous = json.loads(receipt.read_text()) if receipt.exists() else {}
     reuse = binary.is_file() and previous.get('sourceSHA256') == frozen \
         and previous.get('binarySHA256') == digest(binary)
+    forensic_only = args.forensic or args.diagnostic_region is not None
     report = dict(passed=False, offlineDecodeOnly=True, screenRequests=0,
                   synthesizedFrames=0, sourceSHA256=frozen, decoderReused=reuse, clips=[])
     result = dev.local_directory('ui-motion/reviews') / (dev.stamp() + '.json')
@@ -69,6 +76,8 @@ def main():
             root = next(root for root in roots if root.is_dir())
             marker = json.loads((root / 'reservation.json').read_bytes())
             flags = ['--assert-no-black', '--assert-smooth-pages']
+            if args.diagnostic_region:
+                flags = ['--diagnostic-region', ','.join(map(str, args.diagnostic_region))]
             if args.forensic:
                 action = marker.get('action')
                 forensic_flags = {'settings-sidebar-v1': '--forensic-settings',
@@ -86,11 +95,13 @@ def main():
             report['clips'].append(dict(case=token, observations=rows, log=str(log.relative_to(REPO))))
         if digest(source) != frozen:
             raise RuntimeError('Frame decoder source changed during review')
-        report['passed'] = not args.forensic
-        report['forensicOnly'] = args.forensic
+        report['passed'] = not forensic_only
+        report['forensicOnly'] = forensic_only
+        if args.diagnostic_region:
+            report['diagnosticRegion'] = args.diagnostic_region
     finally:
         result.write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps(dict(passed=report['passed'], forensicOnly=args.forensic, decodedCases=len(args.cases), decoderReused=reuse,
+    print(json.dumps(dict(passed=report['passed'], forensicOnly=forensic_only, decodedCases=len(args.cases), decoderReused=reuse,
                           decodedFrames=sum(row['decodedFrames'] for value in report['clips']
                                             for row in value['observations']), report=str(result))))
 

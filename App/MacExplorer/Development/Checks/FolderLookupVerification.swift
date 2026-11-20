@@ -111,7 +111,7 @@ enum FolderLookupVerification {
         try await Task.detached {
             try Data().write(to: external.appendingPathComponent("Arrived while drafting.txt"), options: .withoutOverwriting)
         }.value
-        try await UIVerification.waitUntil("Real folder change during search draft") { browser.directoryRefreshPending }
+        try await UIVerification.waitUntil("Real folder change during search draft") { browser.directoryRefreshPending == .observedChange }
         try await Task.sleep(for: .milliseconds(260))
         try UIVerification.require(browser.sessionID == draftVisit && !search.view.isHidden
             && search.queryField.stringValue == "Visible" && !search.hasActiveSession,

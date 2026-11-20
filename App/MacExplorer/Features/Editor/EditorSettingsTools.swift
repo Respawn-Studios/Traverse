@@ -13,13 +13,16 @@ struct EditorSettingsTools: View {
     @State private var pendingApplicationExtension: String?
     @State private var choosingApplication = false
     @State private var notice = ""
-    let searchQuery: String
+    @Environment(\.settingsSearchPresentation) private var search
     private var preferences: Binding<EditorPreferences> {
         Binding(get: { settings.editorPreferences }, set: { value in settings.updateEditorPreferences(value) })
     }
-    private var extraExtensions: [String] {
-        settings.editorPreferences.openingRules.map(\.fileExtension)
-            .filter { !EditorOpeningSupport.extensions.contains($0) }.sorted()
+    private var additionalTypes: [EditorOpeningSupport.FileType] {
+        EditorOpeningSupport.additionalTypes(in: settings.editorPreferences)
+    }
+    private var revealsAdditionalType: Bool {
+        guard let key = search.revealed?.id.key else { return false }
+        return key == "Additional File Types" || additionalTypes.contains { SettingsSearchCatalog.openingKey(for: $0) == key }
     }
     private func openingSelection(for key: String) -> Binding<Int> {
         Binding(get: {
@@ -38,7 +41,8 @@ struct EditorSettingsTools: View {
         pendingApplicationExtension = key; choosingApplication = true
     }
     private func openingRow(_ type: EditorOpeningSupport.FileType) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let builtIn = EditorOpeningSupport.extensions.contains(type.fileExtension)
+        return VStack(alignment: .leading, spacing: 4) {
             LabeledContent {
                 Picker("Open \(type.title)", selection: openingSelection(for: type.fileExtension)) {
                     Text("Traverse Editor").tag(0)
@@ -46,14 +50,16 @@ struct EditorSettingsTools: View {
                     Text("Custom App…").tag(2)
                 }
                 .labelsHidden()
-                .accessibilityLabel("Open \(type.title): \(type.matchLabel)")
+                .accessibilityLabel(builtIn ? "Open \(type.title) (\(type.matchLabel))" : "Open \(type.title)")
                 .accessibilityIdentifier("EditorOpening-" + type.fileExtension)
                 .frame(minWidth: 130, idealWidth: 175, maxWidth: 220)
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(type.title)
-                    Text(type.matchLabel).interfaceFont(.caption).foregroundStyle(.secondary)
-                        .lineLimit(2).help(type.matchLabel)
+                    if builtIn {
+                        Text(type.matchLabel).interfaceFont(.caption).foregroundStyle(.secondary)
+                            .lineLimit(2).help(type.matchLabel)
+                    }
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -68,6 +74,7 @@ struct EditorSettingsTools: View {
                 }
             }
         }
+        .settingsSearchAnchor(SettingsSearchCatalog.openingKey(for: type))
         .contextMenu {
             Button("Use Recommended Choice") {
                 var value = settings.editorPreferences
@@ -88,11 +95,11 @@ struct EditorSettingsTools: View {
     var body: some View {
         Form {
             Section("Drives") {
-                Toggle("Live SMART readings while Drives is visible", isOn: Binding(get: {
+                settingToggle("Live SMART readings while Drives is visible", isOn: Binding(get: {
                     DriveHealthFeature.liveUpdatesAvailable && settings.driveHealthLiveUpdatesSelected
                 }, set: { settings.setDriveHealthLiveUpdates($0) }))
                     .disabled(!DriveHealthFeature.liveUpdatesAvailable)
-                Picker("Update readings every", selection: $settings.driveHealthIntervalSeconds) {
+                settingPicker("Update readings every", selection: $settings.driveHealthIntervalSeconds) {
                     ForEach([1, 2, 5, 10, 30, 60], id: \.self) { Text("\($0) second\($0 == 1 ? "" : "s")").tag($0) }
                 }.disabled(!DriveHealthFeature.liveUpdatesAvailable)
                 Text(DriveHealthFeature.liveUpdatesAvailable
@@ -106,28 +113,47 @@ struct EditorSettingsTools: View {
                 Section { Text(settings.preferencesPersistenceStatus).interfaceFont(.caption).foregroundStyle(.secondary) }
             }
             Section {
-                DisclosureGroup(isExpanded: $defaultsExpanded) {
-                    Picker("Open documents in", selection: preferences.windowArrangement) {
+                DisclosureGroup(isExpanded: expanded($defaultsExpanded, for: "Editor Defaults")) {
+                    settingPicker("Open documents in", selection: preferences.windowArrangement) {
                         ForEach(EditorWindowArrangement.allCases) { Text($0.title).tag($0) }
                     }
                     Text("Choose how new documents open. Local files and each server connection have their own tabs. You can drag a tab out to use a separate window.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Toggle("Wrap lines", isOn: preferences.wrapsLines)
-                    Toggle("Show line numbers", isOn: preferences.showsLineNumbers)
-                    Picker("Text size", selection: preferences.basePointSize) {
+                    settingToggle("Show the Files sidebar in new local editors", isOn: preferences.opensFileSidebar)
+                    settingToggle("Include generated folders in project searches", isOn: preferences.includesGeneratedProjectFolders)
+                        .help("Includes node_modules, .build, DerivedData, .venv and __pycache__. The hidden files preference also applies.")
+                    settingToggle("Highlight on-disk changes in Git projects", isOn: preferences.showsWorkingGitChanges)
+                        .disabled(!settings.showsGitControls)
+                    Text("Checks whether the visible files’ bytes differ from the Git index. Files up to 1 MiB are eligible.")
+                        .interfaceFont(.caption).foregroundStyle(.secondary)
+                    settingToggle("Wrap lines", isOn: preferences.wrapsLines)
+                    settingToggle("Show line numbers", isOn: preferences.showsLineNumbers)
+                    settingToggle("Show indent guides", isOn: preferences.showsIndentGuides)
+                    settingToggle("Highlight matching brackets", isOn: preferences.showsMatchingBrackets)
+                    settingToggle("Show whitespace marks", isOn: preferences.showsWhitespaceMarks)
+                        .help("Make spaces, tabs and line breaks visible in the editor and text comparisons.")
+                    settingToggle("Mark unsaved lines", isOn: preferences.showsUnsavedLineChanges)
+                    settingToggle("Show scope while scrolling", isOn: preferences.showsScrollContext)
+                        .help("Show the active heading or supported code block beside the file path.")
+                    settingToggle("Link scrolling in new text comparisons", isOn: preferences.linksComparisonScrolling)
+                    settingPicker("Text size", selection: preferences.basePointSize) {
                         ForEach(11...22, id: \.self) { Text("\($0) pt").tag($0) }
                     }
-                    Picker("Indent width", selection: preferences.indentation.columns) {
+                    settingPicker("Indent width", selection: preferences.indentation.columns) {
                         ForEach([2, 4, 8], id: \.self) { Text("\($0) columns").tag($0) }
                     }
-                    Picker("Indent using", selection: preferences.indentation.insertion) {
+                    settingPicker("Indent using", selection: preferences.indentation.insertion) {
                         Text("Spaces").tag(EditorIndentationPreferences.Insertion.spaces)
                         Text("Tabs").tag(EditorIndentationPreferences.Insertion.tabs)
                     }
-                    Toggle("Continue line indentation", isOn: preferences.indentation.continuesIndentation)
-                    Toggle("Backspace removes one indent level", isOn: preferences.backspaceUnindents)
-                    Toggle("Indent JSON blocks on Return", isOn: preferences.indentsJSONBlocks)
-                    Toggle("Complete JSON brackets", isOn: preferences.completesJSONBrackets)
+                    settingToggle("Continue line indentation", isOn: preferences.indentation.continuesIndentation)
+                    settingToggle("Backspace removes one indent level", isOn: preferences.backspaceUnindents)
+                    settingToggle("Indent code blocks on Return", isOn: preferences.indentsCodeBlocks)
+                        .help("Swift, Rust, JavaScript, TypeScript, C-family and CSS braces, and Python suite headers")
+                    settingToggle("Indent JSON blocks on Return", isOn: preferences.indentsJSONBlocks)
+                    settingToggle("Complete JSON brackets", isOn: preferences.completesJSONBrackets)
+                    settingToggle("Complete code brackets", isOn: preferences.completesCodeBrackets)
+                        .help("Complete parentheses, brackets and braces in supported code when the editor can identify the context.")
                     Text("Existing tabs use the chosen width. Continue line indentation keeps the current line’s spaces and tabs. JSON block indentation independently adds an inner line after a JSON or JSONC brace or bracket.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     Text("Complete JSON brackets inserts matching braces and brackets in JSON and JSONC. Type the matching close to move past it, or press Backspace inside an empty new pair to remove both.")
@@ -139,21 +165,21 @@ struct EditorSettingsTools: View {
                 } label: { Text("Editor Defaults").interfaceFont(.headline) }
             }
             Section {
-                DisclosureGroup(isExpanded: $syntaxExpanded) {
-                    Picker("Editor theme", selection: preferences.theme) {
+                DisclosureGroup(isExpanded: expanded($syntaxExpanded, for: "Syntax & Theme")) {
+                    settingPicker("Editor theme", selection: preferences.theme) {
                         ForEach(EditorTheme.allCases) { Text($0.title).tag($0) }
                     }
-                    Picker("Syntax colors", selection: preferences.palette) {
+                    settingPicker("Syntax colors", selection: preferences.palette) {
                         ForEach(EditorSyntaxPalette.allCases) { Text($0.title).tag($0) }
                     }
-                    Picker("Default syntax", selection: preferences.defaultLanguage) {
+                    settingPicker("Default syntax", selection: preferences.defaultLanguage) {
                         Text("Automatic").tag(Optional<TextSyntaxLanguage>.none)
                         ForEach(TextSyntaxLanguage.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
                     }
-                    Toggle("Detect language in files without an extension", isOn: preferences.detectsLanguageWithoutExtension)
+                    settingToggle("Detect language in files without an extension", isOn: preferences.detectsLanguageWithoutExtension)
                     Text("Recognize clear JSON, HTML, XML and script headers while editing. Your selected language always takes priority. This changes syntax and editing conveniences, and keeps the filename you chose.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Picker("Find highlight", selection: preferences.findHighlightColor) {
+                    settingPicker("Find highlight", selection: preferences.findHighlightColor) {
                         ForEach(EditorFindHighlightColor.allCases) { Text($0.title).tag($0) }
                     }
                     Text("Find match")
@@ -171,14 +197,13 @@ struct EditorSettingsTools: View {
                 } label: { Text("Syntax & Theme").interfaceFont(.headline) }
             }
             Section {
-                DisclosureGroup(isExpanded: $openingExpanded) {
+                DisclosureGroup(isExpanded: expanded($openingExpanded, for: "Open Files With")) {
                     Text("Supported text files open in Traverse by default. Choose a different app for any type below.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     ForEach(EditorOpeningSupport.fileTypes) { openingRow($0) }
-                    DisclosureGroup(isExpanded: $extraTypesExpanded) {
-                        ForEach(extraExtensions, id: \.self) { key in
-                            openingRow(.init(fileExtension: key, title: "Text file"))
-                        }
+                    DisclosureGroup(isExpanded: Binding(get: { extraTypesExpanded || revealsAdditionalType },
+                        set: { extraTypesExpanded = $0 })) {
+                        ForEach(additionalTypes, content: openingRow)
                         HStack {
                             TextField("Extension, without a dot", text: $addedExtension)
                                 .onChange(of: addedExtension) { _, value in
@@ -187,16 +212,25 @@ struct EditorSettingsTools: View {
                             Button("Add") { addType() }
                                 .disabled(EditorPreferences.extensionKey(addedExtension) == nil)
                         }
-                    } label: { Text("Additional File Types") }
-                    Picker("File icons", selection: preferences.openingIndicator) {
+                    } label: { Text("Additional File Types").settingsSearchAnchor("Additional File Types") }
+                    settingPicker("File icons", selection: preferences.openingIndicator) {
                         ForEach(EditorOpeningIndicator.allCases) { Text($0.title).tag($0) }
                     }
                     Text("Icon indicators show your opening choice inside Traverse. Files are checked when opened. Open in Default App always uses macOS’s choice; these settings do not change Finder.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     if !notice.isEmpty { Text(notice).interfaceFont(.caption).foregroundStyle(.secondary) }
-                } label: { Text("Open Files With").interfaceFont(.headline) }
+                } label: { Text("Open Files With").interfaceFont(.headline).settingsSearchAnchor("Open Files With") }
             }
         }.formStyle(.grouped)
+            .onChange(of: search.revealed, initial: true) { _, entry in
+                if revealsAdditionalType { extraTypesExpanded = true }
+                switch entry?.section {
+                case "Editor Defaults": defaultsExpanded = true
+                case "Syntax & Theme": syntaxExpanded = true
+                case "Open Files With": openingExpanded = true
+                default: break
+                }
+            }
         .fileImporter(isPresented: $choosingApplication, allowedContentTypes: [.applicationBundle], allowsMultipleSelection: false) { result in
             let key = pendingApplicationExtension; pendingApplicationExtension = nil
             guard let key else { return }
@@ -210,15 +244,11 @@ struct EditorSettingsTools: View {
         }
         .fileDialogDefaultDirectory(URL(fileURLWithPath: "/Applications", isDirectory: true))
         .fileDialogConfirmationLabel("Choose Application")
-        .onAppear { revealSearchCategory() }
-        .onChange(of: searchQuery) { _, _ in revealSearchCategory() }
     }
-    private func revealSearchCategory() {
-        let query = SettingsSearchCatalog.normalizedWords(searchQuery).joined(separator: " ")
-        if ["open", "extension", "file type", "app"].contains(where: query.contains) { openingExpanded = true }
-        if ["indent", "outdent", "backspace", "tab", "spaces", "newline", "return", "bracket", "brace", "wrap"].contains(where: query.contains) {
-            defaultsExpanded = true
-        }
+
+    private func expanded(_ value: Binding<Bool>, for section: String) -> Binding<Bool> {
+        Binding(get: { value.wrappedValue || search.revealed?.section == section },
+                set: { value.wrappedValue = $0 })
     }
     private func addType() {
         guard let key = EditorPreferences.extensionKey(addedExtension) else { return }

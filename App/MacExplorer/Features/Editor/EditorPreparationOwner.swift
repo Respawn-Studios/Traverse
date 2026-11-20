@@ -17,30 +17,59 @@ struct TextCopyCapture: Sendable, CustomStringConvertible, CustomDebugStringConv
     var debugDescription: String { description }
 }
 
+struct EditorPresentationRequest: Sendable {
+    let ticket: TextEditTicket?
+    let generation: UUID
+    let text: String
+    let format: TextDocumentFormat
+    let language: TextSyntaxLanguage
+    let detectsLanguage: Bool
+    let baseline: EditorSavedTextBaseline?
+}
+
 enum EditorPreparationInput: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    case presentation(ticket: TextEditTicket?, surfaceGeneration: UUID, text: String,
-                      format: TextDocumentFormat, language: TextSyntaxLanguage,
-                      detectsLanguage: Bool = false)
+    case presentation(EditorPresentationRequest)
     case save(capture: TextSaveCapture, text: String)
     case copy(capture: TextCopyCapture, text: String)
     var description: String { "<editor preparation request>" }
     var debugDescription: String { description }
+
+    static func presentation(ticket: TextEditTicket?, surfaceGeneration: UUID, text: String,
+                             format: TextDocumentFormat, language: TextSyntaxLanguage,
+                             detectsLanguage: Bool = false,
+                             baseline: EditorSavedTextBaseline? = nil) -> Self {
+        .presentation(.init(ticket: ticket, generation: surfaceGeneration, text: text, format: format,
+            language: language, detectsLanguage: detectsLanguage, baseline: baseline))
+    }
 
     // Both explicit publication intents occupy the same immutable slot. The
     // existing name remains compatible with ordinary Save callers.
     var isSave: Bool { switch self { case .save, .copy: true; case .presentation: false } }
     var captureID: UUID? { switch self { case .save(let capture, _): capture.id; case .copy(let capture, _): capture.id; case .presentation: nil } }
     var text: String {
-        switch self { case .presentation(_, _, let text, _, _, _), .save(_, let text), .copy(_, let text): text }
+        switch self { case .presentation(let request): request.text; case .save(_, let text), .copy(_, let text): text }
     }
     var format: TextDocumentFormat {
-        switch self { case .presentation(_, _, _, let format, _, _): format; case .save(let capture, _): capture.format; case .copy(let capture, _): capture.format }
+        switch self { case .presentation(let request): request.format; case .save(let capture, _): capture.format; case .copy(let capture, _): capture.format }
     }
 }
 
+struct EditorPreparedPresentation: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let value: TextDocumentValue
+    let syntax: TextSyntaxResult
+    let lines: EditorLineIndex
+    let detectedLanguage: TextSyntaxLanguage?
+    let syntaxLanguage: TextSyntaxLanguage
+    let outline: EditorDocumentOutline
+    let bracketMatches: EditorDelimiterWalk.MatchIndex?
+    let unsavedLines: EditorUnsavedLineChanges?
+    let conflicts: EditorConflictMarkers
+    var description: String { "<prepared editor presentation>" }
+    var debugDescription: String { description }
+}
+
 enum EditorPreparationResult: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    case presentation(TextDocumentValue, TextSyntaxResult, EditorLineIndex,
-                      detectedLanguage: TextSyntaxLanguage? = nil)
+    case presentation(EditorPreparedPresentation)
     case save(TextDocumentValue)
     case copy(TextDocumentValue)
     case invalid(TextDocumentFailure)
@@ -145,14 +174,26 @@ final class EditorPreparationOwner {
         switch input {
         case .save: return .save(value)
         case .copy: return .copy(value)
-        case .presentation(_, _, _, _, let language, let detectsLanguage):
+        case .presentation(let request):
             let lines = EditorLineIndex(value.text)
             guard !cancellation.isCancelled else { return .cancelled }
-            let detected = detectsLanguage && language == .plain
+            let detected = request.detectsLanguage && request.language == .plain
                 ? TextSyntaxLanguage.detected(in: value.text, cancelled: { cancellation.isCancelled }) : nil
             guard !cancellation.isCancelled else { return .cancelled }
-            let syntax = TextSyntax.color(value, language: detected ?? language, cancelled: { cancellation.isCancelled })
-            return cancellation.isCancelled ? .cancelled : .presentation(value, syntax, lines, detectedLanguage: detected)
+            let selectedLanguage = detected ?? request.language
+            let syntax = TextSyntax.color(value, language: selectedLanguage, cancelled: { cancellation.isCancelled })
+            guard !cancellation.isCancelled else { return .cancelled }
+            let delimiters = EditorBracketNavigation.supports(selectedLanguage)
+                ? EditorDelimiterWalk.capture(in: value.text, syntax: syntax, cancelled: { cancellation.isCancelled }) : nil
+            let outline = EditorDocumentOutline.prepare(text: value.text, syntax: syntax,
+                language: selectedLanguage, lines: lines, preparedDelimiters: delimiters, cancelled: { cancellation.isCancelled })
+            let marks = request.baseline.flatMap { baseline in
+                try? EditorTextComparison.unsavedLines(from: baseline, to: value.text, index: lines, cancelled: { cancellation.isCancelled })
+            }
+            let conflicts = EditorConflictMarkers.scan(value.text, index: lines, cancelled: { cancellation.isCancelled })
+            return cancellation.isCancelled ? .cancelled : .presentation(.init(value: value, syntax: syntax,
+                lines: lines, detectedLanguage: detected, syntaxLanguage: selectedLanguage,
+                outline: outline, bracketMatches: delimiters?.matches, unsavedLines: marks, conflicts: conflicts))
         }
     }
 
@@ -190,10 +231,12 @@ final class EditorPreparationOwner {
         case .copy(let value):
             guard case .copy = input, value.format == input.format else { return .invalid(.invalidReceipt) }
             return result
-        case .presentation(let value, _, let lines, let detected):
-            guard case .presentation(_, _, _, _, let requested, let allowsDetection) = input,
-                  value.format == input.format, lines.matches(value.text),
-                  detected == nil || allowsDetection && requested == .plain else { return .invalid(.invalidReceipt) }
+        case .presentation(let prepared):
+            guard case .presentation(let request) = input,
+                  prepared.value.format == input.format, prepared.lines.matches(prepared.value.text),
+                  prepared.syntaxLanguage == (prepared.detectedLanguage ?? request.language),
+                  prepared.unsavedLines.map({ $0.baselineID == request.baseline?.id }) ?? true,
+                  prepared.detectedLanguage == nil || request.detectsLanguage && request.language == .plain else { return .invalid(.invalidReceipt) }
             return result
         case .invalid, .cancelled: return result
         }

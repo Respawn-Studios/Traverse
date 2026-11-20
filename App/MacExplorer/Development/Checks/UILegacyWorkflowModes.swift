@@ -20,7 +20,10 @@ import StorageAnalysis
                 guard let declared = ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"] else {
                     throw Failure(message: "Focused workflow fixture root is not configured")
                 }
-                if args.contains("--check-analysis") {
+                if args.contains("--check-git") {
+                    state.checks += try await WorkspaceNavigationVerification.run(in: URL(fileURLWithPath: declared),
+                        gitOnly: true, gitIndexOnly: args.contains("--git-index-only")).checks
+                } else if args.contains("--check-analysis") {
                     if ProcessInfo.processInfo.environment["MAC_EXPLORER_ANALYSIS_SCALE_ONLY"] == "1" {
                         state.checks += try await StorageAnalysisScaleVerification.run(coordinator: .shared, output: output)
                     } else {
@@ -50,7 +53,8 @@ import StorageAnalysis
                 }
                 try requireControlledWindowsHidden("focused workflow checks")
                 try require(before == (try await Task.detached { try fixtureSnapshot(root) }.value), "Focused checks changed original listing fixture")
-                let mode = args.contains("--check-analysis") ? "storage-analysis" : args.contains("--check-address") ? "address-completion" : args.contains("--check-drag-tracking") ? "drag-tracking-regression" : args.contains("--check-queue") ? "queue-regression" : args.contains("--check-tabs") ? "tabs-regression" : args.contains("--check-polish") ? "daily-polish-regression" : args.contains("--qualify-search-index") ? "live-search-index" : args.contains("--profile-rename") ? "rename-profile" : "rename-regression"
+                let gitMode = args.contains("--git-index-only") ? "git-index" : "git-review"
+                let mode = args.contains("--check-git") ? gitMode : args.contains("--check-analysis") ? "storage-analysis" : args.contains("--check-address") ? "address-completion" : args.contains("--check-drag-tracking") ? "drag-tracking-regression" : args.contains("--check-queue") ? "queue-regression" : args.contains("--check-tabs") ? "tabs-regression" : args.contains("--check-polish") ? "daily-polish-regression" : args.contains("--qualify-search-index") ? "live-search-index" : args.contains("--profile-rename") ? "rename-profile" : "rename-regression"
                 let report: [String: Any] = ["passed": true, "mode": mode, "checks": state.checks,
                     "notExercised": ["Owner physical pointer/keyboard delivery", "Personal-file mutation"]]
                 try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("ui-verification.json"), options: .withoutOverwriting)
@@ -124,8 +128,11 @@ import StorageAnalysis
                 state.checks += try await SearchFoundationVerification.run(in: testRoot)
                 try requireControlledWindowsHidden("substantial workflows")
                 try require(before == (try await Task.detached { try fixtureSnapshot(root) }.value), "Substantial checks changed original listing fixture")
-                let report: [String: Any] = ["passed": true, "mode": args.contains("--offscreen") ? "substantial-controlled" : "substantial-foreground",
-                    "checks": state.checks, "notExercised": ["Personal-file or Mac-wide index query", "New protected-folder consent", "Native preview of personal files", "WindowServer material transmission", "Physical edge drag by a human"]]
+                let offscreen = args.contains("--offscreen")
+                var limits = ["Personal-file or Mac-wide index query", "New protected-folder consent", "Native preview of personal files", "WindowServer material transmission", "Physical edge drag by a human"]
+                if offscreen { limits.append("Native address editing in an ordered window") }
+                let report: [String: Any] = ["passed": true, "mode": offscreen ? "substantial-controlled" : "substantial-foreground",
+                    "checks": state.checks, "notExercised": limits]
                 try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("ui-verification.json"), options: .withoutOverwriting)
                 NSApplication.shared.terminate(nil)
                 return true

@@ -70,6 +70,7 @@ final class NavigationGlassSurface: NSView {
 
     private let radius: CGFloat
     private let opaqueColor: NSColor
+    private let embedsContentInGlass: Bool
     private let notifications: NotificationCenter
     private var materialView: NSView?
     private var backdropView: NSVisualEffectView?
@@ -77,12 +78,14 @@ final class NavigationGlassSurface: NSView {
     private(set) var isUsingOpaqueSurface = false
 
     init(contentView: NSView, cornerRadius: CGFloat = 0, isGlassEnabled: Bool = true, usesWindowBackdrop: Bool = true,
+         embedsContentInGlass: Bool = true,
          opaqueColor: NSColor = .controlBackgroundColor) {
         self.contentView = contentView
         self.radius = max(0, cornerRadius)
         self.isGlassEnabled = isGlassEnabled
         self.usesWindowBackdrop = usesWindowBackdrop
         self.opaqueColor = opaqueColor
+        self.embedsContentInGlass = embedsContentInGlass
         notifications = NSWorkspace.shared.notificationCenter
         super.init(frame: .zero)
         rebuildMaterial()
@@ -119,9 +122,10 @@ final class NavigationGlassSurface: NSView {
             reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
             increaseContrast: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast)
         let material: NSView
-        var nativeContentLayout = false
+        let contentParent: NSView?
         if isUsingOpaqueSurface {
             material = OpaqueNavigationMaterial(color: opaqueColor)
+            contentParent = material
         } else if #available(macOS 26.0, *) {
             if usesWindowBackdrop {
                 let backdrop = NSVisualEffectView()
@@ -142,15 +146,25 @@ final class NavigationGlassSurface: NSView {
             glass.style = .regular
             glass.cornerRadius = radius
             contentView.translatesAutoresizingMaskIntoConstraints = false
-            glass.contentView = contentView
+            if embedsContentInGlass {
+                glass.contentView = contentView
+                contentParent = nil
+            } else {
+                // Window-sized tools keep their live forms on the window's
+                // palette while the native glass backdrop changes appearance.
+                #if compiler(>=6.4)
+                if #available(macOS 27.0, *) { glass.effectIsInteractive = false }
+                #endif
+                contentParent = self
+            }
             material = glass
-            nativeContentLayout = true
         } else {
             let visual = NSVisualEffectView()
             visual.material = .headerView
             visual.blendingMode = usesWindowBackdrop ? .behindWindow : .withinWindow
             visual.state = .followsWindowActiveState
             material = visual
+            contentParent = material
         }
 
         material.translatesAutoresizingMaskIntoConstraints = false
@@ -161,16 +175,15 @@ final class NavigationGlassSurface: NSView {
             material.topAnchor.constraint(equalTo: topAnchor),
             material.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
-        // NSGlassEffectView owns both the embedding and its Auto Layout geometry.
-        // Never move its content into an arbitrary sibling/subview hierarchy.
-        if !nativeContentLayout {
-            material.addSubview(contentView)
+        // NSGlassEffectView owns layout when it embeds its content view.
+        if let parent = contentParent {
+            parent.addSubview(contentView)
             contentView.translatesAutoresizingMaskIntoConstraints = false
             contentConstraints = [
-                contentView.leadingAnchor.constraint(equalTo: material.leadingAnchor),
-                contentView.trailingAnchor.constraint(equalTo: material.trailingAnchor),
-                contentView.topAnchor.constraint(equalTo: material.topAnchor),
-                contentView.bottomAnchor.constraint(equalTo: material.bottomAnchor)
+                contentView.leadingAnchor.constraint(equalTo: parent.leadingAnchor),
+                contentView.trailingAnchor.constraint(equalTo: parent.trailingAnchor),
+                contentView.topAnchor.constraint(equalTo: parent.topAnchor),
+                contentView.bottomAnchor.constraint(equalTo: parent.bottomAnchor)
             ]
             NSLayoutConstraint.activate(contentConstraints)
         }

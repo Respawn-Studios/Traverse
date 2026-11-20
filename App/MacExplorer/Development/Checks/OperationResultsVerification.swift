@@ -49,6 +49,17 @@ extension UIVerification {
         try require(changedView.visibleItems.count == 3
             && changedView.visibleItems.contains(where: { $0.source == moved.source }),
                     "Attention filter hides the item that changed during an uncertain operation")
+        let returned = fixture.appendingPathComponent("Returned.txt")
+        let unconfirmed = FileOperationOutcome(source: parent.appendingPathComponent("Returned.txt"),
+            destination: returned, status: .failed(.recoveryUncertain), recoveryURLs: [returned])
+        let mixedTrash = FileOperationResult(items: [moved, unconfirmed, uncertainJob], cancellationRequested: false)
+        let trashDescription = OperationResultDescription(result: mixedTrash)
+        try require(trashDescription.summary.contains("1 of 2 items completed")
+            && trashDescription.summary.contains("1 needs review")
+            && trashDescription.itemTitle(moved) == "Completed"
+            && trashDescription.itemTitle(unconfirmed) == "Needs review"
+            && trashDescription.itemDetails(unconfirmed).contains(returned.path),
+            "An unconfirmed Trash return obscured the verified row or its own recorded destination")
         let normalDescription = OperationResultDescription(result: report)
         try require(normalDescription.itemTitle(moved) == "Completed"
             && normalDescription.itemDetails(moved).hasPrefix("Completed.")
@@ -124,6 +135,24 @@ extension UIVerification {
         try require(fallback == fixture, "Missing result item did not resolve to its nearest available parent")
         filter.performClick(nil)
         try require(view.visibleItems.count == 4, "All-results view truncates successful or skipped results")
+        guard let resultTable = nativeTables(in: view).first,
+              let completedRow = view.visibleItems.firstIndex(where: { $0.source == moved.source }) else {
+            throw Failure(message: "The native result identity is unavailable")
+        }
+        copy.performClick(nil)
+        try require(resultTable.selectedRow == view.visibleItems.firstIndex(where: { $0.source == pending.source })
+            && copied?.contains("This transfer unit was not attempted") == true,
+            "Showing all results silently changed the selected item")
+        resultTable.selectRowIndexes(IndexSet(integer: completedRow), byExtendingSelection: false)
+        filter.performClick(nil)
+        try require(view.visibleItems.count == 2 && resultTable.selectedRow == -1
+            && !copy.isEnabled && !source.isEnabled && !destination.isEnabled,
+            "Filtering a selected completed result silently chose another item")
+        filter.performClick(nil)
+        let completedView = OperationResultsView(result: .init(items: [moved], cancellationRequested: false)) { _ in }
+        try require(button("Show only items needing attention", in: completedView)?.isHidden != false
+            && completedView.visibleItems.count == 1,
+            "A fully completed result offered an empty attention filter")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 410),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Generated operation results"
@@ -189,6 +218,7 @@ extension UIVerification {
                 "Uncertain job results count only selected transfer items and keep changed-but-unconfirmed rows visible without claiming completion",
                 "Explicit recovery action context describes existing-copy/Undo evidence and completion honestly, preserves failed review details, and resets on newer queue or ordinary results",
                 "Native result table filters attention/all outcomes, copies selected untruncated details and reveals captured locations with honest missing-parent fallback",
+                "Changing the results filter retains the exact selected item while it remains visible and clears its actions if it disappears. Completed-only results hide the unused filter.",
                 "Bounded result-location lookup rechecks live-host authority after controlled access and lookup suspension and rejects stale reveal delivery"]
     }
 }

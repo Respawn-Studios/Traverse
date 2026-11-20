@@ -10,6 +10,15 @@ import CoreVideo
         var checkpoint="scope"
         do {
             let args=CommandLine.arguments
+            let diagnosticRegion: CGRect?
+            if let index = args.firstIndex(of: "--diagnostic-region") {
+                guard args.indices.contains(index + 1) else { throw Failure.scope }
+                let tokens = args[index + 1].components(separatedBy: ",")
+                let parts = tokens.compactMap { Int($0) }
+                guard tokens.count == 4, parts.count == 4, parts.allSatisfy({ (0...2048).contains($0) }),
+                      parts[2] > 0, parts[3] > 0 else { throw Failure.scope }
+                diagnosticRegion = CGRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+            } else { diagnosticRegion = nil }
             let suffix=args.firstIndex(of:"--review-id").flatMap{args.indices.contains($0+1) ? args[$0+1] : nil} ?? "timing"
             guard !suffix.isEmpty,suffix.utf8.count<=24,suffix.utf8.allSatisfy({(97...122).contains($0)||(48...57).contains($0)||$0==45})else{throw Failure.scope}
             guard args.count >= 2, let id=UUID(uuidString:args[1]),id.uuidString==args[1] else { throw Failure.scope }
@@ -36,6 +45,7 @@ import CoreVideo
                 "settings-sidebar-v1":"native-settings-sidebar.json",
                 "help-form-motion-v1":"native-help-motion.json",
                 "native-analysis-persistence":"persistence-reopen-result.json",
+                "native-storage-chart-integration":"native.json",
                 "native-sidebar-layout":"sidebar-layout-result.json",
                 "native-sftp-download-batch":"native-download-batch.json",
                 "smb-selected-download-group-native":"native-smb-download.json",
@@ -50,8 +60,28 @@ import CoreVideo
                 let captureAction=marker["action"]as?String, let report=reports[captureAction],
                 developmentExists || ["traverse-command-finder", "traverse-native-help-diagnostics"].contains(captureAction),
                 let native=try JSONSerialization.jsonObject(with:Data(contentsOf:root.appendingPathComponent(["traverse-command-finder", "traverse-native-help-diagnostics"].contains(captureAction) ? report : "evidence/"+report)))as?[String:Any] else { throw Failure.scope }
+            let analyzerNavigation = captureAction == "native-storage-chart-integration"
+            let windowLifecycle = captureAction == "motion-audit" && native["surface"] as? String == "window-lifecycle"
             var clips=native["clips"]as?[[String:Any]] ?? []
-            if native["clips"] == nil {
+            if analyzerNavigation {
+                let labels = ["analyzer-folders", "analyzer-drill", "analyzer-back"]
+                guard marker["packet"] as? String == "traverse-development-v1",
+                      native["properties_viewport_stable"] as? Bool == true, native["generated_scans"] as? Int == 1,
+                      let motionClips = native["motionClips"] as? [[String: Any]], motionClips.count == labels.count,
+                      motionClips.compactMap({ $0["label"] as? String }) == labels,
+                      motionClips.allSatisfy({ $0["fieldOwnerVerified"] as? Bool == true }) else { throw Failure.scope }
+                clips = motionClips
+            } else if windowLifecycle {
+                let labels = ["settings-full", "whats-new-full", "analyzer-full", "settings-reduced", "settings-off"].flatMap {
+                    ["lifecycle-\($0)-open", "lifecycle-\($0)-close"]
+                }
+                guard marker["packet"] as? String == "traverse-development-v1",
+                      let additional = native["additionalChecks"] as? [String: Any],
+                      let lifecycle = additional["windowLifecycle"] as? [String: Any],
+                      lifecycle["passed"] as? Bool == true, lifecycle["stage"] as? String == "completed",
+                      lifecycle["capturedClips"] as? [String] == labels else { throw Failure.scope }
+                clips = labels.map { ["label": $0] }
+            } else if native["clips"] == nil {
                 if captureAction == "traverse-native-help-diagnostics" {
                     guard native["realOSGrants"]as?Int == 0, native["networkRequests"]as?Int == 0,
                           native["actualRecoveryOpensRecordedOperationLogs"]as?Bool == true else { throw Failure.scope }
@@ -66,8 +96,14 @@ import CoreVideo
                     let comparisonLabels = ["editor-comparison-stack", "editor-comparison-pair"]
                     clips = comparisonLabels.contains { FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/\($0).mov").path) }
                         ? comparisonLabels.map { ["label": $0] } : []
-                    if FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/editor-open-search-entrance.mov").path) {
-                        clips.append(["label": "editor-open-search-entrance"])
+                    for label in ["editor-open-search-entrance", "editor-sidebar-open", "editor-sidebar-close", "editor-outline-mode"] {
+                        if FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/\(label).mov").path) {
+                            clips.append(["label": label])
+                        }
+                    }
+                    if marker["editorComparisonOnly"] as? Bool == true,
+                       FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/editor-unified-context.mov").path) {
+                        clips.append(["label": "editor-unified-context"])
                     }
                     guard !clips.isEmpty else { throw Failure.scope }
                 } else {
@@ -78,8 +114,16 @@ import CoreVideo
             let includesBenchmarkNavigation = captureAction == "motion-audit"
                 && native["surface"] as? String == "tools"
                 && (native["additionalChecks"] as? [String: Any])?["deviceRootBenchmarkNavigation"] as? Bool == true
-            guard clips.count <= (includesBenchmarkNavigation ? 13 : 12) else { throw Failure.scope }
-            let forensic = args.contains("--forensic-settings") || args.contains("--forensic-analysis") || args.contains("--forensic-help")
+            let directionLabels = Set(["pane-stack", "pane-side-by-side"])
+            let paneDirectionCount = captureAction == "motion-audit" && native["surface"] as? String == "pane-motion"
+                && marker["packet"] as? String == "traverse-development-v1"
+                ? Set(clips.compactMap { $0["label"] as? String }).intersection(directionLabels).count : 0
+            guard clips.count <= (includesBenchmarkNavigation ? 13 : 12) + paneDirectionCount else { throw Failure.scope }
+            let failedCapture = args.contains("--forensic-settings") || args.contains("--forensic-analysis") || args.contains("--forensic-help")
+            let forensic = failedCapture || diagnosticRegion != nil
+            if diagnosticRegion != nil {
+                guard !failedCapture, captureAction == "settings-sidebar-v1", native["passed"] as? Bool == true else { throw Failure.scope }
+            }
             guard native["passed"]as?Bool == true || (forensic && ["settings-sidebar-v1", "native-analysis-persistence", "help-form-motion-v1"].contains(captureAction)) else { throw Failure.scope }
             if captureAction == "smb-selected-download-ordinary-native" {
                 let labels = clips.compactMap { $0["label"] as? String }
@@ -88,7 +132,7 @@ import CoreVideo
                       labels == ["smb-move-destination"]
                         || labels == ["smb-move-destination", "smb-copy-destination"] else { throw Failure.scope }
             }
-            if forensic {
+            if failedCapture {
                 guard (args.contains("--forensic-settings") && captureAction == "settings-sidebar-v1"
                     || args.contains("--forensic-analysis") && captureAction == "native-analysis-persistence"
                     || args.contains("--forensic-help") && captureAction == "help-form-motion-v1"),
@@ -114,7 +158,7 @@ import CoreVideo
             for clip in clips {
                 guard let label=clip["label"]as?String,label.utf8.allSatisfy({(97...122).contains($0)||(48...57).contains($0)||$0==45})else{throw Failure.scope}
                 let metadataName: String
-                if ["settings-sidebar-v1", "native-sidebar-layout", "help-form-motion-v1", "native-analysis-persistence", "native-sftp-download-batch", "smb-selected-download-group-native", "native-sftp-drop-upload", "native-drive-benchmark", "native-editor-preferences", "remote-item-properties"].contains(captureAction) {
+                if analyzerNavigation || windowLifecycle || ["settings-sidebar-v1", "native-sidebar-layout", "help-form-motion-v1", "native-analysis-persistence", "native-sftp-download-batch", "smb-selected-download-group-native", "native-sftp-drop-upload", "native-drive-benchmark", "native-editor-preferences", "remote-item-properties"].contains(captureAction) {
                     metadataName = label + ".capture.json"
                 } else if captureAction == "smb-folder-download-native" {
                     metadataName = "smb-folder-motion.json"
@@ -144,7 +188,7 @@ import CoreVideo
                     let scale=scaled ? min(1,1152/sourceWidth,800/sourceHeight) : 1
                     guard abs((sourceWidth*scale).rounded(.down)-Double(width))<=2,
                           abs((sourceHeight*scale).rounded(.down)-Double(height))<=2,
-                          (forensic || recorded.allSatisfy({ frame in
+                          (failedCapture || recorded.allSatisfy({ frame in
                             guard let w=frame["contentWidth"],let h=frame["contentHeight"],let x=frame["contentX"],let y=frame["contentY"]else{return false}
                             return abs(w-Double(width))<=2 && abs(h-Double(height))<=2 && abs(x)<=2 && abs(y)<=2
                           })),native["surface"]as?String != "filters" || clip["fieldOwnerVerified"]as?Bool == true else{throw Failure.geometry}
@@ -171,12 +215,13 @@ import CoreVideo
                 // retain full-window arrays. One actual delivered frame can
                 // satisfy several nominal targets when delivery skips ahead.
                 let driveSelectionDetail = captureAction == "motion-audit" && label == "tool-drive-selection"
+                let interfaceSizeDetail = captureAction == "native-drive-benchmark" && label == "drive-benchmark-comparison-size"
                 let folderSizeDetail = captureAction == "remote-item-properties" && label.hasPrefix("remote-folder-size-")
-                let detailEnabled=folderSizeDetail || driveSelectionDetail || ["inline-archive-native","plain-tar-native","native-zip-rename-copy","tar-preview-native","selection-group-native","settings-sidebar-v1","native-sidebar-layout","help-form-motion-v1","traverse-native-help-diagnostics","native-analysis-persistence","native-sftp-drop-upload","native-editor-preferences","smb-selected-download-ordinary-native"].contains(captureAction)
-                let detailTargets:[Double]=folderSizeDetail ? [0.280,0.360,0.450,0.600] : driveSelectionDetail ? [0.008,0.020,0.035,0.260,0.500,0.540,0.650] : ["settings-sidebar-v1", "native-sidebar-layout", "help-form-motion-v1","traverse-native-help-diagnostics","native-analysis-persistence"].contains(captureAction)
+                let detailEnabled=analyzerNavigation || folderSizeDetail || driveSelectionDetail || interfaceSizeDetail || ["inline-archive-native","plain-tar-native","native-zip-rename-copy","tar-preview-native","selection-group-native","settings-sidebar-v1","native-sidebar-layout","help-form-motion-v1","traverse-native-help-diagnostics","native-analysis-persistence","native-sftp-drop-upload","native-editor-preferences","smb-selected-download-ordinary-native"].contains(captureAction)
+                let detailTargets:[Double]=interfaceSizeDetail ? [0.035,0.070,0.140,0.260,0.360,0.480,0.600] : folderSizeDetail ? [0.280,0.360,0.450,0.600] : driveSelectionDetail ? [0.008,0.020,0.035,0.260,0.500,0.540,0.650] : ["settings-sidebar-v1", "native-sidebar-layout", "help-form-motion-v1","traverse-native-help-diagnostics","native-analysis-persistence"].contains(captureAction)
                     ? [0.008,0.016,0.035,0.070,0.140,0.260]
                     : detailEnabled ? [0.035,0.070,0.140,0.260]:[]
-                let maximumDetailFrames = driveSelectionDetail ? 7 : ["settings-sidebar-v1", "native-sidebar-layout", "help-form-motion-v1","traverse-native-help-diagnostics","native-analysis-persistence"].contains(captureAction) ? 6 : 4
+                let maximumDetailFrames = driveSelectionDetail || interfaceSizeDetail ? 7 : ["settings-sidebar-v1", "native-sidebar-layout", "help-form-motion-v1","traverse-native-help-diagnostics","native-analysis-persistence"].contains(captureAction) ? 6 : 4
                 var nextDetail=0,detailFrames=[[String:Any]]()
                 checkpoint="decode \(label)"
                 var movieStart:Double?;var decoded=0;var visualSamples:[[Double]]=[];var settledImage:CGImage?
@@ -190,6 +235,9 @@ import CoreVideo
                         while nextDetail<detailTargets.count,relative>=detailTargets[nextDetail]{dueTargets.append(detailTargets[nextDetail]);nextDetail+=1}
                         CVPixelBufferLockBaseAddress(buffer,.readOnly);defer{CVPixelBufferUnlockBaseAddress(buffer,.readOnly)}
                         let width=CVPixelBufferGetWidth(buffer),height=CVPixelBufferGetHeight(buffer),stride=CVPixelBufferGetBytesPerRow(buffer)
+                        if let diagnosticRegion {
+                            guard CGRect(x: 0, y: 0, width: width, height: height).contains(diagnosticRegion) else { throw Failure.geometry }
+                        }
                         guard width <= (captureAction != "motion-audit" ? 1280 : 1152),height<=800,width*height<=1152*800,
                             let base=CVPixelBufferGetBaseAddress(buffer),let context=CGContext(data:base,width:width,height:height,bitsPerComponent:8,bytesPerRow:stride,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGBitmapInfo.byteOrder32Little.rawValue|CGImageAlphaInfo.premultipliedFirst.rawValue),context.makeImage() != nil else{throw Failure.pixels}
                         let retainedImage: CGImage?
@@ -224,7 +272,13 @@ import CoreVideo
                             if relative >= -0.025 && relative<=0.30,let part=retainedImage?.cropping(to:region.integral){fieldPictures.append((relative,try thumbnail(part,width:480,height:58)))}
                         }
                         var grid:[Double]=[];let bytes=base.assumingMemoryBound(to:UInt8.self);var sy=60
-                        while sy<height-20{var sx=20;while sx<width-20{let i=sy*stride+sx*4;grid.append((0.2126*Double(bytes[i+2])+0.7152*Double(bytes[i+1])+0.0722*Double(bytes[i]))/255);sx+=8};sy+=8}
+                        while sy<height-20{var sx=20;while sx<width-20{
+                            if diagnosticRegion.map({ $0.contains(CGPoint(x: sx, y: sy)) }) ?? true {
+                                let i=sy*stride+sx*4;grid.append((0.2126*Double(bytes[i+2])+0.7152*Double(bytes[i+1])+0.0722*Double(bytes[i]))/255)
+                            }
+                            sx+=8
+                        };sy+=8}
+                        guard !grid.isEmpty else { throw Failure.geometry }
                         visualSamples.append(grid)
                         values.append(row)
                         if relative >= -0.025 && relative<=0.25 {if let retainedImage{pictures.append((relative,try thumbnail(retainedImage,width:240,height:181)))}}
@@ -287,7 +341,11 @@ import CoreVideo
                 results.append(summary)
             }
             let abrupt=results.contains{$0["pageStepApplicable"]as?Bool==true && ($0["largestContentProgressStep"]as?Double ?? 0)>0.30}
-            let result:[String:Any]=["passed":!forensic && !results.contains{$0["blackSpike"]as?Bool==true},"smoothPageStepsPassed":!forensic && !abrupt,"forensicOnly":forensic,"nativeQualificationPassed":native["passed"]as?Bool==true,"allDeliveredFramesDecoded":true,"clips":results,"synthesizedFrames":0,"veryDarkRGBThreshold":48,"algorithmRevision":7]
+            var result:[String:Any]=["passed":!forensic && !results.contains{$0["blackSpike"]as?Bool==true},"smoothPageStepsPassed":!forensic && !abrupt,"forensicOnly":forensic,"nativeQualificationPassed":native["passed"]as?Bool==true,"allDeliveredFramesDecoded":true,"clips":results,"synthesizedFrames":0,"veryDarkRGBThreshold":48,"algorithmRevision":7]
+            if let diagnosticRegion {
+                result["diagnosticRegion"] = [diagnosticRegion.minX, diagnosticRegion.minY, diagnosticRegion.width, diagnosticRegion.height]
+                result["regionAssessment"] = "Caller-selected crop; original whole-window result unchanged"
+            }
             try JSONSerialization.data(withJSONObject:result,options:[.prettyPrinted,.sortedKeys]).write(to:root.appendingPathComponent("evidence/dense-review-\(suffix).json"),options:.withoutOverwriting)
             let compact=results.map{value in value.filter{$0.key != "perFrame"}}
             print(String(decoding:try JSONSerialization.data(withJSONObject:compact,options:[.sortedKeys]),as:UTF8.self))

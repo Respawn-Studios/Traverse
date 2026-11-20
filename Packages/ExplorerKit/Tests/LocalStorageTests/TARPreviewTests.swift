@@ -79,6 +79,37 @@ struct TARPreviewTests {
         await session.close(); await reader.drain()
     }
 
+    @Test func textComparisonReadsExactlyTwoMembersFromTheSameObservedTAR() async throws {
+        let before = Data("generated before\r\n".utf8)
+        let after = Data("generated after\n".utf8)
+        let original = try TARReaderTestFixture.member("Before.txt", body: before)
+            + TARReaderTestFixture.member("After.txt", body: after)
+            + TARReaderTestFixture.member("Binary.bin", body: Data([0, 1, 2]))
+            + Data(repeating: 0, count: 1024)
+        let source = try TARReaderTestFixture.write(original)
+        let reader = TARArchiveReader()
+        let session = try await reader.open(source)
+        let left = try await selection(session, "Before.txt")
+        let right = try await selection(session, "After.txt")
+        let binary = try await selection(session, "Binary.bin")
+        let comparison = try await reader.readTextComparison(left: left, right: right)
+        #expect(comparison.left.encoded == before && comparison.right.encoded == after)
+        #expect(comparison.left.text == "generated before\n" && comparison.right.text == "generated after\n")
+        await #expect(throws: TARTextPreviewFailure.unsupported) {
+            try await reader.readTextComparison(left: left, right: left)
+        }
+        await #expect(throws: TARTextPreviewFailure.notText) {
+            try await reader.readTextComparison(left: left, right: binary)
+        }
+        #expect(try Data(contentsOf: source) == original)
+        try original.write(to: source, options: .atomic)
+        await #expect(throws: TARArchiveFailure.changed) {
+            try await reader.readTextComparison(left: left, right: right)
+        }
+        await session.close(); await reader.drain()
+    }
+
+
     @Test func oversizedAndUnsafeTextRefuseWithoutTruncation() async throws {
         let trace = TARReadTestProbe(), reader = TARArchiveReader(probe: trace.probe)
         let session = try await reader.open(source())

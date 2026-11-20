@@ -131,7 +131,8 @@ private final class SpotlightRunner: @unchecked Sendable {
         state.onCancel { [self, queue] in queue.async { self.stop() } }
         // An empty global query is not a useful first search and must not become
         // a system-wide wildcard scan as a side effect of entering search mode.
-        guard !request.filename.isEmpty else { state.finish(.failed); stop(); return }
+        // Initials have no reliable literal Spotlight prefilter.
+        guard !request.filename.isEmpty, request.filenameMatch != .navigation else { state.finish(.failed); stop(); return }
         if let selectedScope { roots = [selectedScope.root] }
         else {
         let keys: Set<URLResourceKey> = [.volumeIsLocalKey, .volumeIsInternalKey]

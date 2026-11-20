@@ -153,6 +153,7 @@ extension BrowserViewController {
         guard isArchiveLocation else { return nil }
         switch action {
         case #selector(openSelection(_:)): return currentArchive?.canOpen == true
+        case #selector(showQuickLook(_:)): return currentArchive?.canPreview == true
         case #selector(renameSelection(_:)): return currentArchive?.canRenameInCopy == true
         case #selector(duplicateSelection(_:)): return canDuplicateSelection
         case #selector(showProperties(_:)), #selector(copyPath(_:)), #selector(copyNames(_:)):
@@ -170,7 +171,7 @@ extension BrowserViewController {
              #selector(moveCopiedFiles(_:)), #selector(pasteWithOptions(_:)), #selector(pasteIntoSelection(_:)),
              #selector(copyToOtherPane(_:)), #selector(moveToOtherPane(_:)),
              #selector(uploadToSFTPPane(_:)), #selector(openWithSelection(_:)), #selector(shareSelection(_:)), #selector(sendViaAirDrop(_:)),
-             #selector(showQuickLook(_:)), #selector(revealInFinder(_:)),
+             #selector(revealInFinder(_:)),
              #selector(editPrivateNames(_:)), #selector(openSelectionInNewTab(_:)), #selector(openContainingFolder(_:)),
              #selector(browseZIP(_:)), #selector(extractArchive(_:)), #selector(extractArchiveDirect(_:)),
              #selector(createZIP(_:)), #selector(compressSelection(_:)), #selector(batchRenameSelection(_:)),

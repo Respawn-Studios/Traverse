@@ -63,6 +63,25 @@ public final class TARArchiveReader: @unchecked Sendable {
                 }
         }
     }
+
+    /// Uses the checked preview reader for both selections, including its
+    /// retained compressed-source and metadata validation when applicable.
+    public func readTextComparison(left: TARTextPreviewSelection, right: TARTextPreviewSelection,
+                                   retaining lifetime: (any Sendable)? = nil) async throws -> TextComparisonDocuments {
+        guard left.binding.source == right.binding.source, left.binding.stamp == right.binding.stamp,
+              left.binding.witness == right.binding.witness,
+              left.record.ordinal != right.record.ordinal else { throw TARTextPreviewFailure.unsupported }
+        return try await perform(retaining: lifetime) { [self] cancellation in
+            func checkedText(_ selection: TARTextPreviewSelection) throws -> TextDocumentValue {
+                try TARTextPreviewReader.readChecked(selection, excluding: excludedRoots, limits: limits,
+                    previewLimits: previewLimits, check: cancellation.check, probe: probe) { bytes, check in
+                    _ = try TARTextPreview.decode(bytes, check: check)
+                    return try .original(bytes)
+                }
+            }
+            return .init(left: try checkedText(left), right: try checkedText(right))
+        }
+    }
     public func openTextForEdit(_ selection: TARTextPreviewSelection,
         retaining lifetime: (any Sendable)? = nil) async throws -> TARTextEditDocument {
         return try await perform(retaining: lifetime) { cancellation in

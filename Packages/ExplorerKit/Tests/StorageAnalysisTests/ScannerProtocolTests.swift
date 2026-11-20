@@ -7,6 +7,41 @@ struct ScannerProtocolTests {
     private let root = AnalysisObjectIdentity(device: 1, inode: 2)
 
     private func decoder() -> ScannerProtocolDecoder { .init(session: session, root: root) }
+
+    @Test func sharedWorkerPipeReadsRawAndFramedOutputThroughExit() throws {
+        let worker = URL(fileURLWithPath: "/usr/bin/printf")
+        let arguments = ["%s\\n", "one", "two"]
+        let raw = ScannerProcessControl()
+        let rawPipes = try ScannerWorkerProcess.launch(workerURL: worker, descriptors: [], arguments: arguments, control: raw)
+        let bytes = try ScannerWorkerProcess.collect(pipes: rawPipes, control: raw)
+        #expect(String(decoding: bytes, as: UTF8.self) == "one\ntwo\n")
+        raw.finished()
+        let framed = ScannerProcessControl()
+        let framedPipes = try ScannerWorkerProcess.launch(workerURL: worker, descriptors: [], arguments: arguments, control: framed)
+        var lines: [String] = []
+        let status = try ScannerWorkerProcess.drain(pipes: framedPipes, control: framed, deadline: 2) {
+            lines.append(String(decoding: $0, as: UTF8.self))
+        }
+        #expect(status == 0 && lines == ["one", "two"])
+        framed.finished()
+    }
+
+    @Test func rejectedWorkerFrameStopsDeliveryAndReapsTheOwnedChild() throws {
+        let control = ScannerProcessControl()
+        let pipes = try ScannerWorkerProcess.launch(workerURL: URL(fileURLWithPath: "/bin/sh"), descriptors: [],
+            arguments: ["-c", "printf '%s\\n' reject another; exec /bin/sleep 5"], control: control)
+        var delivered = 0, rejections = 0
+        #expect(throws: StorageScanFailure.invalidOutput) {
+            try ScannerWorkerProcess.drain(pipes: pipes, control: control, deadline: 2,
+                onRejected: { _ in rejections += 1 }) { _ in
+                    delivered += 1
+                    throw StorageScanFailure.invalidOutput
+                }
+        }
+        #expect(control.cancelled && delivered == 1 && rejections == 1)
+        control.finished()
+    }
+
     private func frame(_ kind: String, seq: Int, _ fields: [String: Any] = [:]) throws -> Data {
         var value = fields
         value["schema"] = 2; value["kind"] = kind

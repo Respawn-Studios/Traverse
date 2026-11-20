@@ -16,6 +16,12 @@ lifetimes and must not be replaced with a second scanner or index in a view.
 | `StorageAnalysisPolicy.swift`, `Startup*.swift` | Privacy policy, startup-root facts and explicit access boundaries |
 | `AnalysisModels.swift`, `StorageAnalysisAccumulator.swift` | Pure accounting/reference values described below |
 
+Prepare fallible scan inputs before launching the worker. The shared
+`ScannerWorkerProcess` loop drains both pipes and reaps the owned child even
+after decoding fails. The caller still owns admission, access and what counts
+as valid output. Raw topology inquiries and framed scanner results have
+separate byte limits and validation rules.
+
 The ordinary app can retain at most two explicit analyses in the existing bounded
 pool and reopen their dated metadata across sessions. It does not silently scan
 on cold display, claim that a saved result is current, or use recorded paths as

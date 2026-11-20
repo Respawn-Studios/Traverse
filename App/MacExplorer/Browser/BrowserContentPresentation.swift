@@ -27,6 +27,7 @@ extension BrowserViewController {
 
     func configureFileIconPresentation() {
         iconBrowser.openingAppearanceForEntry = { [weak self] entry in self?.fileOpeningAppearance(entry) ?? .ordinary }
+        iconBrowser.gitBadgeForEntry = { [weak self] entry in self?.gitControls.badge(for: entry) }
         iconBrowser.onAccessibleActivation = { [weak self] in self?.prepareAccessibleBrowsingInteraction() ?? false }
         let collection = iconBrowser.collectionView
         collection.onOpen = { [weak self] in self?.openSelection(nil) }
@@ -100,6 +101,7 @@ extension BrowserViewController {
         }
         activeFileScrollView.layoutSubtreeIfNeeded()
         if let scrollOffset { restoreFileScrollOffset(scrollOffset) }
+        gitControls.updateBadges()
     }
 
     func refreshFilePresentation(selection: Set<URL>, scrollOffset: Double? = nil) {
@@ -141,6 +143,19 @@ extension BrowserViewController {
     func revealFile(_ url: URL) {
         if usesFileIcons { iconBrowser.reveal(url) }
         else if let row = rowsByURL[url] { table.scrollRowToVisible(row) }
+    }
+
+    func fileViewsForRenameMotion() -> [(URL, NSView)] {
+        activeFileView.layoutSubtreeIfNeeded()
+        if usesFileIcons {
+            return iconBrowser.visibleItems.prefix(128).compactMap { item in item.entry.map { ($0.url, item.view) } }
+        }
+        let rows = table.rows(in: table.visibleRect)
+        guard rows.location != NSNotFound, displayedEntries.indices.contains(rows.location) else { return [] }
+        let end = min(displayedEntries.count, rows.location + min(rows.length, 128))
+        return (rows.location..<end).compactMap { row in
+            table.rowView(atRow: row, makeIfNecessary: true).map { (displayedEntries[row].url, $0) }
+        }
     }
 
     /// Native picker geometry stays bound to the currently presented surface.

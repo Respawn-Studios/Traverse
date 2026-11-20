@@ -48,8 +48,6 @@ import AppKit
         query.stringValue = ""; updateMatches()
         CommandDiscoveryPresentation.position(panel, relativeTo: parent)
         panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(query)
-        CommandDiscoveryPresentation.animateEntrance(panel,
-            motion: owner.commandDiscoverySettings?.motion ?? InterfacePresentation.shared.motion)
     }
 
     func updateMatches() {
@@ -89,7 +87,7 @@ import AppKit
         case #selector(NSResponder.moveDown(_:)): moveSelection(1); return true
         case #selector(NSResponder.moveUp(_:)): moveSelection(-1); return true
         case #selector(NSResponder.insertNewline(_:)): activateSelection(nil); return true
-        case #selector(NSResponder.cancelOperation(_:)): dismiss(restoringFocus: true); return true
+        case #selector(NSResponder.cancelOperation(_:)): window?.performClose(nil); return true
         default: return false
         }
     }
@@ -123,11 +121,12 @@ import AppKit
             && owner.canDiscoverCommands && owner.surface.generation == generation
             && owner.surface.textView.selectedRanges == selection
     }
-    func dismiss(restoringFocus: Bool) {
+    func dismiss(restoringFocus: Bool, nativeCloseInProgress: Bool = false) {
         guard !dismissing else { return }
         dismissing = true
         let parent = sourceWindow, responder = sourceResponder, wasKey = window?.isKeyWindow == true
-        window?.delegate = nil; window?.orderOut(nil); window?.close(); window = nil
+        CommandDiscoveryPresentation.retire(window, nativeCloseInProgress: nativeCloseInProgress)
+        window = nil
         closeObservation = nil; query.stringValue = ""; matches = []; catalog = []; table.reloadData()
         generation = nil; selection = []; sourceWindow = nil; sourceResponder = nil
         if restoringFocus, wasKey, let parent, parent.isVisible, parent.attachedSheet == nil,
@@ -137,7 +136,7 @@ import AppKit
         }
         dismissing = false
     }
-    func windowWillClose(_ notification: Notification) { dismiss(restoringFocus: true) }
+    func windowWillClose(_ notification: Notification) { dismiss(restoringFocus: true, nativeCloseInProgress: true) }
     func windowDidResignKey(_ notification: Notification) { dismiss(restoringFocus: false) }
     func numberOfRows(in tableView: NSTableView) -> Int { matches.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -161,6 +160,8 @@ import AppKit
         switch item.keyEquivalent {
         case String(UnicodeScalar(NSUpArrowFunctionKey)!): key = "↑"
         case String(UnicodeScalar(NSDownArrowFunctionKey)!): key = "↓"
+        case String(UnicodeScalar(NSLeftArrowFunctionKey)!): key = "←"
+        case String(UnicodeScalar(NSRightArrowFunctionKey)!): key = "→"
         case "\t": key = "⇥"
         default: key = item.keyEquivalent.uppercased()
         }

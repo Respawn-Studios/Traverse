@@ -58,7 +58,9 @@ enum InterfaceSizingVerification {
             "legacyDefault": true, "actualNativeRowsAndFonts": true, "selectionRetained": true,
             "repeatedResetWithoutDrift": true, "bitmapZoom": false, "preview": preview]
     }
-    private static func preview(settings: BrowserSettings, root: URL) async throws -> [String: Any] {
+    /// Reused by the admitted native Settings role and the existing sizing flow.
+    static func preview(settings: BrowserSettings, root: URL) async throws -> [String: Any] {
+        let originalSize = settings.interfaceSize, originalMotion = settings.motion
         var stacked = true
         let content = InterfaceSizePicker(settings: settings, onArrangementChanged: { stacked = $0 }).padding(22)
         let host = InterfaceHostingController(rootView: content)
@@ -69,7 +71,10 @@ enum InterfaceSizingVerification {
         ToolWindowChrome.install(in: window, settings: settings)
         window.setContentSize(.init(width: 720, height: 570))
         window.center(); window.makeKeyAndOrderFront(nil)
-        defer { window.close() }
+        defer {
+            window.close()
+            settings.interfaceSize = originalSize; settings.motion = originalMotion
+        }
         settings.interfaceSize = .standard
         try await Task.sleep(for: .milliseconds(350))
         try UIVerification.require(!stacked, "The wide standard preview did not use A: window \(window.frame.width), host \(host.view.bounds.width), scale \(InterfaceMetrics.scale)")
@@ -77,7 +82,9 @@ enum InterfaceSizingVerification {
             if let value = view as? NSSlider { return value }
             return view.subviews.lazy.compactMap { slider(in: $0) }.first
         }
-        let originalSlider = slider(in: host.view)
+        guard let originalSlider = slider(in: host.view) else {
+            throw UIVerification.Failure(message: "The initial native preview slider is missing")
+        }
         var recordings: [String: NativeMotionRecorder.Report] = [:]
         for mode in BrowserMotionMode.allCases {
             settings.motion.mode = mode; settings.interfaceSize = .standard
@@ -104,12 +111,18 @@ enum InterfaceSizingVerification {
             } else { change(); try await Task.sleep(for: .milliseconds(400)) }
             try UIVerification.require(stacked && settings.interfaceSize.percent == 150,
                 "A larger live preview did not stack or its native slider lost the binding")
-            if let originalSlider {
-                try UIVerification.require(slider(in: host.view) === originalSlider && window.firstResponder === originalSlider,
-                    "Adaptive reflow recreated the slider or stole keyboard focus")
-            }
+            try UIVerification.require(slider(in: host.view) === originalSlider && window.firstResponder === originalSlider,
+                "Adaptive reflow recreated the slider or stole keyboard focus")
             try UIVerification.require(slider(in: host.view)?.accessibilityIdentifier() == "interface-size-slider" && responder === window.firstResponder,
                 "Adaptive reflow lost the accessible slider or its native responder")
+            window.setContentSize(.init(width: 960, height: 570))
+            try await Task.sleep(for: .milliseconds(350))
+            try UIVerification.require(!stacked && slider(in: host.view) === originalSlider && window.firstResponder === originalSlider,
+                "Width-only column reflow lost its arrangement, slider or focus")
+            window.setContentSize(.init(width: 720, height: 570))
+            try await Task.sleep(for: .milliseconds(350))
+            try UIVerification.require(stacked && slider(in: host.view) === originalSlider && window.firstResponder === originalSlider,
+                "Width-only row reflow lost its arrangement, slider or focus")
         }
         try await GlassVerification.captureOwnedWindow(window, to: root.appendingPathComponent("evidence/readability-150.png"))
         settings.interfaceSize = .standard
@@ -120,7 +133,8 @@ enum InterfaceSizingVerification {
             try JSONEncoder().encode(recordings).write(to: root.appendingPathComponent("evidence/motion.json"), options: .withoutOverwriting)
         }
         return ["passed": true, "columnAndStacked": true, "nativeSliderExercised": true,
-            "accessibleControlAndResponderRetained": true, "motionModes": 3, "recordedClips": recordings.count]
+            "accessibleControlAndResponderRetained": true, "widthOnlyReflow": true,
+            "motionModes": 3, "recordedClips": recordings.count]
     }
 }
 #endif

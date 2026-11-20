@@ -1,5 +1,6 @@
 import Darwin
 import ExplorerCore
+@_spi(ApplicationOwnership) import FileOperations
 import Foundation
 
 enum SearchOpenValidation: Sendable, Equatable {
@@ -18,9 +19,13 @@ enum SearchOpenValidation: Sendable, Equatable {
     }
 }
 
-/// Validates an Open candidate without reading a file body. It proves current
-/// kind/size/mtime observations, not persistent original-object identity. The
-/// later NSWorkspace path handoff still has a final-syscall race.
+struct SearchOpenObservation: Sendable {
+    let validation: SearchOpenValidation
+    var textSelection: LocalTextOpenSelection? = nil
+}
+
+/// Validate current kind, size and modification time without reading a body.
+/// The in-app editor can also recheck the same parent and file observations.
 final class SearchResultOpenReader: @unchecked Sendable {
     private let queue: OperationQueue
     private let lock = NSLock()
@@ -29,7 +34,7 @@ final class SearchResultOpenReader: @unchecked Sendable {
     private struct Work: Sendable {
         let entry: FileEntry
         let cancellation: Cancellation
-        let continuation: CheckedContinuation<SearchOpenValidation, Never>
+        let continuation: CheckedContinuation<SearchOpenObservation, Never>
     }
     private final class Cancellation: @unchecked Sendable {
         private let lock = NSLock()
@@ -45,6 +50,9 @@ final class SearchResultOpenReader: @unchecked Sendable {
         queue.qualityOfService = .userInitiated
     }
     func validate(_ entry: FileEntry) async -> SearchOpenValidation {
+        await observe(entry).validation
+    }
+    func observe(_ entry: FileEntry) async -> SearchOpenObservation {
         let cancellation = Cancellation()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -57,7 +65,7 @@ final class SearchResultOpenReader: @unchecked Sendable {
                     }
                     return replaced
                 }
-                replaced?.continuation.resume(returning: .cancelled)
+                replaced?.continuation.resume(returning: .init(validation: .cancelled))
             }
         } onCancel: { cancellation.cancel() }
     }
@@ -68,16 +76,19 @@ final class SearchResultOpenReader: @unchecked Sendable {
             if work == nil { scheduled = false }
             return work
         }) {
+            var selection: LocalTextOpenSelection?
             let result: SearchOpenValidation
             do {
                 let activity = try ApplicationFileActivity.gate.begin()
                 defer { withExtendedLifetime(activity) {} }
-                result = work.cancellation.cancelled ? .cancelled : Self.observe(work.entry, cancellation: work.cancellation)
+                result = work.cancellation.cancelled ? .cancelled :
+                    Self.verify(work.entry, cancellation: work.cancellation, selection: &selection)
             } catch { result = .unavailable }
-            work.continuation.resume(returning: result)
+            work.continuation.resume(returning: .init(validation: result, textSelection: selection))
         }
     }
-    private static func observe(_ entry: FileEntry, cancellation: Cancellation) -> SearchOpenValidation {
+    private static func verify(_ entry: FileEntry, cancellation: Cancellation,
+                               selection: inout LocalTextOpenSelection?) -> SearchOpenValidation {
         let url = entry.url
         guard url.isFileURL, url.path.hasPrefix("/"), url.path == url.standardizedFileURL.path,
               (url.host == nil || url.host == "" || url.host == "localhost"),
@@ -132,6 +143,11 @@ final class SearchResultOpenReader: @unchecked Sendable {
         guard fcntl(descriptor, F_GETPATH, &bytes) == 0 else { return .unavailable }
         let currentPath = String(decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
         guard currentPath == entry.url.deletingLastPathComponent().path else { return .changed }
+        if entry.kind == .file {
+            var parent = stat()
+            guard fstat(descriptor, &parent) == 0 else { return failure(errno) }
+            selection = LocalTextOpenSelection(observedURL: url, parent: parent, file: rechecked)
+        }
         return .ready
     }
     private static func same(_ left: stat, _ right: stat) -> Bool {

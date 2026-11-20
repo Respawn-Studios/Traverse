@@ -9,7 +9,12 @@ private final class StorageChartQueryHold: @unchecked Sendable {
     let release = DispatchSemaphore(value: 0)
     var entered: Bool { lock.withLock { reached } }
     func pause() {
-        lock.withLock { reached = true }
+        let first = lock.withLock {
+            guard !reached else { return false }
+            reached = true
+            return true
+        }
+        guard first else { return }
         _ = release.wait(timeout: .now() + 30)
     }
 }
@@ -38,6 +43,44 @@ enum StorageChartIntegrationVerification {
             if let scroll = propertiesScroll(in: child) { return scroll }
         }
         return nil
+    }
+    @MainActor private final class ScrollTrace {
+        let origin: NSPoint
+        private(set) var maximumDrift: CGFloat = 0
+        init(_ clip: NSClipView) { origin = clip.bounds.origin }
+        func sample(_ clip: NSClipView) {
+            var expected = clip.bounds
+            expected.origin = origin
+            let achievableY = clip.constrainBoundsRect(expected).origin.y
+            maximumDrift = max(maximumDrift, abs(clip.bounds.origin.y - achievableY))
+        }
+    }
+    private static func recordNavigation(root: URL, label: String, surface: StorageDimensionalChartView,
+                                         window: NSWindow, action: @MainActor () -> Void) async throws -> [String: Any] {
+        guard let scroll = surface.enclosingScrollView else {
+            throw UIVerification.Failure(message: "Analyzer chart scroll view unavailable")
+        }
+        let clip = scroll.contentView
+        clip.scroll(to: .init(x: clip.bounds.origin.x, y: 24))
+        scroll.reflectScrolledClipView(clip)
+        try require(abs(clip.bounds.origin.y) >= 20, "Analyzer chart fixture did not establish a scrolled viewport")
+        let postsChanges = clip.postsBoundsChangedNotifications
+        clip.postsBoundsChangedNotifications = true
+        defer { clip.postsBoundsChangedNotifications = postsChanges }
+        let trace = ScrollTrace(clip)
+        let chartTop = surface.convert(surface.bounds, to: nil).maxY
+        let observation = BrowserNotificationObservation(name: NSView.boundsDidChangeNotification, object: clip) { [weak clip] _ in
+            MainActor.assumeIsolated { if let clip { trace.sample(clip) } }
+        }
+        let report = try await NativeMotionRecorder.record(window: window, root: root, label: label,
+            sampling: .diagnostic(for: window), action: action)
+        withExtendedLifetime(observation) { trace.sample(clip) }
+        var entry = DevelopmentMotionVerification.clip(label, report: report, field: surface, window: window)
+        entry["scrollOffsetBefore"] = trace.origin.y
+        entry["scrollOffsetAfter"] = clip.bounds.origin.y
+        entry["maximumFeasibleOffsetDrift"] = trace.maximumDrift
+        entry["chartTopShift"] = abs(surface.convert(surface.bounds, to: nil).maxY - chartTop)
+        return entry
     }
     private static func verifyPendingGroup(_ name: String, result: StorageAnalysisResult,
                                            drill: StorageBreakdownChartModel, surface: StorageDimensionalChartView,
@@ -69,6 +112,29 @@ enum StorageChartIntegrationVerification {
         try require(surface.window === window && surface.bounds.size == chartSize && sourceAccesses() == initialAccesses
             && result.queryWorkerLaunchCountForQualification == initialWorkers + 1,
             "\(name) changed chart geometry, reacquired the source, or did not use one stored query")
+    }
+    private static func verifyMetricDuringFirstDrill(_ result: StorageAnalysisResult,
+                                                     drill: StorageBreakdownChartModel) async throws {
+        try require(drill.levels.isEmpty && result.activeReaderCount == 0, "Metric fixture needs the unqueried root")
+        let hold = StorageChartQueryHold()
+        let workers = result.queryWorkerLaunchCountForQualification
+        try result.installQueryReleaseHookForQualification { hold.pause() }
+        defer {
+            hold.release.signal()
+            if result.activeReaderCount == 0 { try? result.installQueryReleaseHookForQualification(nil) }
+        }
+        drill.open(.steamLibraries, title: "Steam & games")
+        try await wait("First drill did not reach its held result") { hold.entered && drill.loading }
+        drill.setMetric(.allForkAllocated)
+        hold.release.signal()
+        try await wait("Latest size metric did not settle") { !drill.loading && result.activeReaderCount == 0 }
+        try require(drill.levels.count == 1 && drill.current?.target == .steamLibraries
+            && drill.current?.value.rankingMetric == .allForkAllocated,
+            "Changing size while opening a slice lost the selection or kept the previous metric")
+        try require(result.queryWorkerLaunchCountForQualification == workers + 2,
+            "Changing size while opening a slice did not use exactly the old and replacement queries")
+        drill.reset()
+        drill.setMetric(.dataLogical)
     }
     private static func boundaryControls() throws {
         func frame(_ index: Int, _ bytes: UInt64?) -> StorageChartSlice {
@@ -115,7 +181,9 @@ enum StorageChartIntegrationVerification {
             "Review generated accounting changed")
         print("MAC_EXPLORER_CHART_INTEGRATION_REVIEW_READY"); fflush(stdout)
     }
-    static func run(path: String, captureEvidence: Bool = true, layoutExplanations: Bool = false, applicationLayouts: Bool = false) async throws -> [String: Any] {
+    static func run(path: String, captureEvidence: Bool = true, layoutExplanations: Bool = false,
+                    applicationLayouts: Bool = false, recordMotion: Bool = false,
+                    largeInterface: Bool = false) async throws -> [String: Any] {
         let began = ProcessInfo.processInfo.systemUptime
         var repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         for _ in 0..<3 { repository.deleteLastPathComponent() }
@@ -151,11 +219,16 @@ enum StorageChartIntegrationVerification {
                 && token.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }, "Generated Steam root required")
             nativeCase = nil
         }
+        try require(!recordMotion || nativeCase != nil, "Analyzer motion needs the generated native case")
         try boundaryControls()
         let captures = nativeCase?.appendingPathComponent("evidence")
             ?? repository.appendingPathComponent(".build/b06-analyzer/evidence-extension-20261018")
         let preference = try await StorageChartPreferenceVerification.run(evidence: captures)
         let settings = preference.settings
+        if largeInterface {
+            settings.interfaceSize = .init(150)
+            settings.appearance = .light
+        }
         StorageChartIntegration.startAtStorageRolesForQualification = true
         StorageDimensionalChartProbe.enabled = true
         StorageChartIntegration.appearance.choose(.tilted)
@@ -167,6 +240,7 @@ enum StorageChartIntegrationVerification {
             ?? repository.appendingPathComponent(".build/b06-analyzer/full-scope-stores-20261018"),
             sessionByteLimit: 64 << 20, preserveAfterClose: true)
         let coordinator = ApplicationStorageAnalysis.shared
+        if largeInterface { coordinator.configureScopePreferences(settings) }
         if nativeCase != nil {
             coordinator.enablePagedForQualification(storage: storage,
                 workerURL: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/storage-scanner-worker"))
@@ -331,7 +405,7 @@ enum StorageChartIntegrationVerification {
         properties.model.openFullAnalysis()
         try await wait("Same-result full analysis handoff") { coordinator.toolWindow?.pagedReadyForVerification == true }
         guard let tool = coordinator.toolWindow, let window = tool.window else { throw StorageScanFailure.invalidOutput }
-        window.setContentSize(.init(width: 960, height: 800)); window.makeKeyAndOrderFront(nil)
+        window.setContentSize(.init(width: 960, height: recordMotion ? 710 : 800)); window.makeKeyAndOrderFront(nil)
         if tool.compactBreakdownForVerification { tool.expandBreakdownButton.performClick(nil) }
         try await wait("Full analysis chart unavailable") { StorageDimensionalChartProbe.latest?.window === window }
         guard let full = StorageDimensionalChartProbe.latest else { throw StorageScanFailure.invalidOutput }
@@ -341,6 +415,26 @@ enum StorageChartIntegrationVerification {
             && full.frames.first?.slices == handoffRoot && !drill.canBrowse,
             "Handoff changed result, targets, colors, acquired access or retained Properties query authority")
         let fullDrill = tool.chartDrillForVerification
+        try await verifyMetricDuringFirstDrill(result, drill: fullDrill)
+        try await settled(full, depth: 1)
+        var motionClips = [[String: Any]]()
+        if recordMotion, let nativeCase {
+            window.title = "Storage Analysis · generated review · chart navigation"
+            motionClips.append(try await recordNavigation(root: nativeCase, label: "analyzer-folders", surface: full, window: window) {
+                StorageChartIntegration.groupSelectionForQualification.send((result.id, "Folders"))
+            })
+            try await wait("Full analysis Folders did not settle") { full.frames.first?.id == "folder-0" && !fullDrill.loading }
+            StorageChartIntegration.groupSelectionForQualification.send((result.id, "Purpose"))
+            try await wait("Full analysis Purpose did not settle") { full.frames.first?.slices.first?.id == "steam" && !fullDrill.loading }
+            motionClips.append(try await recordNavigation(root: nativeCase, label: "analyzer-drill", surface: full, window: window) {
+                full.activateForQualification(.slice(0))
+            })
+            try await settled(full, depth: 2)
+            motionClips.append(try await recordNavigation(root: nativeCase, label: "analyzer-back", surface: full, window: window) {
+                full.activateForQualification(.ancestor(0))
+            })
+            try await settled(full, depth: 1)
+        }
         full.activateForQualification(.slice(0))
         try await wait("Full analysis stored drill") { fullDrill.levels.count == 1 && !fullDrill.loading }
         try await settled(full, depth: 2)
@@ -433,10 +527,12 @@ enum StorageChartIntegrationVerification {
                     "actual Properties first Folders and App Libraries queries", "stable Properties chart and scroll viewport",
                     "cached Folders and App Libraries roots without new readers", "superseded query cannot replace cached folder root",
                     "native stored drill, Back and ancestor navigation", "same-result full-analysis handoff",
+                    "pending slice selection uses the latest size metric",
                     "shared style and persisted preference without rescan", "explicit Other and Application Layouts partition",
                     "capacity display preserves chart and result", "close and reader drain"],
                 "captures": captureEvidence ? [propertyCapture.lastPathComponent, fullCapture.lastPathComponent,
                     accountingCapture.lastPathComponent, applicationCapture.lastPathComponent] : [],
+                "motionClips": motionClips,
                 "generated_scans": 1, "ordinary_dimensional_chart": true,
                 "ordinary_classification_revision": result.classificationRevision.rawValue,
                 "layout_explanation_capability": layouts != nil,
@@ -444,6 +540,7 @@ enum StorageChartIntegrationVerification {
                 "properties_first_groups": true, "properties_viewport_stable": true,
                 "cached_root_stale_query_rejected": true,
                 "initial_group": "Storage Roles (qualification only)",
+                "interfacePercent": settings.interfaceSize.percent,
                 "gate_active": ApplicationFileActivity.gate.activeCount,
                 "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began]
             try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])

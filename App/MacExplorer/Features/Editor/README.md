@@ -30,7 +30,7 @@ an attached sheet; reopening a managed document preserves the user's frame/group
 This adds no document slots, connection sharing, automatic reconnection, body
 indexing or replacement policy.
 
-`RemoteTextSnapshotController` is the current-server read-only
+`NativeTextSnapshotController` supplies the shared read-only
 view. Its closed SMB/SFTP presentation label reuses the same window; a label
 never admits a body read or writing capability. The ordinary remote-properties
 flow checks both labels, disabled Save/export and close/drain. SMB's off-default
@@ -143,8 +143,9 @@ byte limits and off-main line-command preparation remain authoritative.
 The command finder searches nested menu categories too, so searching “surround”
 finds these actions without expanding the submenu. This adopts the familiar
 [editor surrounding-pair interaction](https://code.visualstudio.com/api/language-extensions/language-configuration-guide#autosurrounding)
-as an explicit native action; automatic language-specific pairing remains the
-separate JSON/JSONC preference.
+as an explicit native action. Editor Defaults has independent preferences for
+automatic JSON and code bracket completion. Both use the bounded syntax walk
+for context and the editor's native Undo.
 
 ## Find in Open Editors
 
@@ -164,23 +165,52 @@ operation or Save authority. Closing joins pending work before document release.
 
 The search scope is the already-open buffers; it does not scan a folder.
 
+File → Compare with Open Editor uses the same native list to choose a second
+buffer by name or source location. The chooser holds weak references and
+captured generations. An explicit Return captures both eligible buffers on the
+main actor, including unsaved text and each document's encoding format. The
+shared diff prepares the comparison off-main. Refresh resolves the same owners
+and source labels and retains the earlier review if either becomes unavailable.
+
+## Project navigation
+
+`EditorFileSidebar` shares one native outline for project folders, open editors
+and document symbols. `EditorProjectFileSearch` presents file names, text hits and
+declarations in the same keyboard-driven picker. File lookup uses metadata.
+`EditorProjectTextSearch` reads supported text in bounded batches only after an
+explicit query. Result navigation verifies the current file or draft before
+moving the caret. Outline, declaration search and local name completion share
+the editor's prepared syntax and source positions.
+
 ## Compare Changes
 
-Working source adds File → Compare Changes and command discovery for local,
-SFTP and ZIP editors. One read-only native window compares the last successfully
-loaded/saved text with a captured current buffer. Previous/Next Change (F7 and
-Shift-F7), original line positions, explicit Refresh Snapshot and paired panes
+File → Compare Changes compares the last successfully loaded or saved text with
+a captured editable local, remote or archive buffer. Previous and Next Change
+(Command-F7 and F7), original line positions, explicit Refresh Snapshot and panes
 that stack at narrow/enlarged sizes keep each version identifiable. A refreshed
-comparison still does not query the file/server or confirm an uncertain Save.
+comparison uses the current buffer and its saved baseline.
 
-`EditorTextComparison` computes exact byte-distinct line matches off the main
-actor, within the existing document bound. It caps the fine-grained direction
-matrix at1MiB and groups large rewrites honestly instead of retaining unbounded
-diff work. `EditorComparisonWindow` reuses native text surfaces, common chrome,
-adaptive columns and text preferences. `EditorMenuOwnership` hands menus between
-editors/comparisons without stale window callbacks restoring the wrong commands.
-Comparison has no file access, Save, merge, retry, draft storage or diagnostic
-text output. Parent close joins actual computation and clears both buffers.
+`EditorTextComparison` maps byte-distinct text to line and grapheme identities
+off the main actor. ExplorerCore's `TextAlignment` compares those identities
+within a 1 MiB direction matrix and tries a bounded Myers frontier for sparse
+line edits beyond that grid. The viewer groups changes when neither pass
+finishes within its budget. Find Across Diffs, linked scrolling and unsaved
+line marks share the same alignment. Check it without a native build using
+`python3 -B tools/dev.py check unit --filter TextAlignmentTests`.
+`EditorComparisonWindow` reuses native text
+surfaces, common chrome, adaptive columns and text preferences. Editors and
+comparison windows use `ToolWindowMenuOwnership` to keep commands with the
+focused window.
+**Apply Selected Change to Editor** sends one exact change back to its live
+editor. The editor rechecks the captured generation and the old text and
+owns the edit, its Undo and any later Save. Parent close joins pending comparison
+work and clears both buffers.
+
+Git's working-folder and staged reviews reuse this window for selected-block
+actions. `GitComparisonWindow` binds the displayed file and both text versions
+to `GitIndexEditFlow`. The confirmed action refreshes the Git review and leaves
+open buffers alone. Use `python3 -B tools/dev.py check section git-index` for
+the existing package tests and native check.
 
 The native text surface uses contiguous TextKit layout. The earlier opt-in
 noncontiguous mode can stall first-responder layout when a second document joins
@@ -285,7 +315,7 @@ and sheets/inactive editors cannot dispatch a Save. No new preference is stored.
   Bracket keys use the same bounded lexical prefix as Return, with at most
   64 tracked closes per view; ordinary characters add no prefix scan or copy.
   No body reads, Save or format changes are added.
-- Edit → Format JSON(Option-Shift-F) and Compact JSON use the same bounded
+- Edit → JSON → Format JSON (Option-Shift-F) and Compact JSON use the same bounded
   off-main command preparation and native one-edit Undo/Redo path. Foundation
   checks the input, but original token bytes supply the output: duplicate keys,
   key order, string escapes and numeric spellings stay intact. Indented output
@@ -297,11 +327,11 @@ and sheets/inactive editors cannot dispatch a Save. No new preference is stored.
   syntax view but emits original tokens, without constructing a replacement
   object graph. Strict JSON still refuses comments. Both modes use the existing
   one-edit Undo/Redo and never Save or change file associations automatically.
-- Edit → Toggle Line Comment (Command-/) uses the current syntax and the existing
+- Edit → Lines → Toggle Line Comment (Command-/) uses the current syntax and the existing
   bounded in-memory command/Undo owner. It preserves indentation and blank selected
   lines, adds/removes one layer, and disables itself for strict JSON and syntaxes
   without qualified line comments. This is an explicit buffer edit, never a Save.
-- Edit → Sort Lines Ascending/Descending naturally sorts the selected complete
+- Edit → Lines → Sort Lines Ascending/Descending naturally sorts the selected complete
   lines, preserving equal-key order, spelling and surrounding text. A lone caret
   does not sort the document. Trim Trailing Whitespace explicitly removes only
   spaces/tabs at line ends throughout the current document; indentation,

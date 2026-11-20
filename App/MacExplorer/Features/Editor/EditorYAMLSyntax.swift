@@ -69,6 +69,11 @@ enum EditorYAMLSyntax {
                 try c.advance(); lineStart = true; continue
             }
             if EditorLexicalCursor.horizontal(unit) { try c.advance(); continue }
+            if start == lineOffset, flowDepth == 0, unit == 45 || unit == 46,
+               c.at(start + 1, unit), c.at(start + 2, unit),
+               start + 3 == c.units.count || EditorLexicalCursor.white(c.units[start + 3]) {
+                try c.advance(3); try c.emit(start, .keyword); continue
+            }
             if unit == 35 && (start == 0 || EditorLexicalCursor.white(c.units[start - 1])) {
                 while c.index < c.units.count && !c.at(c.index, 10) { try c.advance() }
                 try c.emit(start, .comment); continue

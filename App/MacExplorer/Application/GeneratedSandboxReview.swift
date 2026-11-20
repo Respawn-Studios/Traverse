@@ -762,19 +762,32 @@ enum GeneratedSandboxReview {
 /// Reuses the existing native ZIP checkpoint for one complete generated
 /// Save/Restore flow. Normal app compositions never select this callback.
 final class GeneratedZIPRetainedCheckpoint: @unchecked Sendable {
-    static let shared = GeneratedZIPRetainedCheckpoint()
+    static let shared = GeneratedZIPRetainedCheckpoint(updatesBeforeInterruption: 3)
     private let lock = NSLock()
-    private var retained = 0
-    private init() {}
+    private var remaining: Int?
 
+    init(updatesBeforeInterruption: Int? = nil) { remaining = updatesBeforeInterruption }
+
+    #if DEBUG
+    /// The ordinary editor check explicitly selects its interrupted mutation.
+    /// Earlier successful saves and close checks can share the same engine.
+    func armNextUpdate() -> Bool {
+        lock.withLock {
+            guard remaining == nil else { return false }
+            remaining = 1
+            return true
+        }
+    }
+    #endif
     func afterRetainedOriginal() throws {
         let stop = lock.withLock {
-            retained = min(3, retained + 1)
-            return retained == 3
+            guard let remaining else { return false }
+            self.remaining = max(0, remaining - 1)
+            return self.remaining == 0
         }
         if stop { throw FileOperationFailure.ioFailure }
     }
-    var hasStopped: Bool { lock.withLock { retained == 3 } }
+    var hasStopped: Bool { lock.withLock { remaining == 0 } }
 }
 #endif
 

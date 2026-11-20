@@ -24,6 +24,8 @@ RELEASE_INPUTS.update({
     'Distribution/LicenseSupplements/index.json',
     'Distribution/LicenseSupplements/russh-0.65.1/LICENSE.txt',
     'Distribution/LicenseSupplements/russh-0.65.1/PUBLISHED-COPYRIGHT-HEADERS.txt',
+    'Distribution/LicenseSupplements/russh-0.65.2/LICENSE.txt',
+    'Distribution/LicenseSupplements/russh-0.65.2/PUBLISHED-COPYRIGHT-HEADERS.txt',
     'Distribution/LicenseSupplements/russh-cryptovec-0.62.0/LICENSE.txt',
     'Distribution/LicenseSupplements/russh-cryptovec-0.62.0/PUBLISHED-COPYRIGHT-HEADERS.txt',
     'Distribution/LicenseSupplements/russh-util-0.52.0/LICENSE-2.0.txt',

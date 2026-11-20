@@ -517,7 +517,7 @@ extension BrowserViewController {
                 self.lastOperationResult = result
                 self.lastTransferContinuation = nil
                 self.continuationMoveClipboard = nil
-                self.finishOperationPresentation()
+                self.finishOperationPresentation(result: result)
                 self.consumeMoveClipboard(moveClipboard, after: result)
                 self.refreshDirectoryAfterOperation(result, initiatingTab: initiatingTab, visit: initiatingVisit,
                                                     createdFolderRename: createdFolderRename)
@@ -533,6 +533,8 @@ extension BrowserViewController {
     /// Current rows stay visible during the read; they grant no new authority.
     func refreshDirectoryAfterOperation(_ result: FileOperationResult, initiatingTab: UUID, visit: UUID,
                                         createdFolderRename: UUID? = nil) {
+        var refreshed: BrowserViewController?
+        defer { operationCoordinator.reloadLocalDirectories(affectedBy: result, excluding: refreshed) }
         guard activeID == initiatingTab, sessionID == visit, let parent = location.directoryURL else { return }
         let destinations = result.items.compactMap { $0.status == .succeeded ? $0.destination : nil }
         let rename = inlineRename.prepareCreatedFolderRefresh(createdFolderRename, result: result)
@@ -541,6 +543,7 @@ extension BrowserViewController {
         }
         tabs[activeIndex].state.scrollOffset = currentScrollOffset
         loadLocation(preservingVisibleRows: true, createdFolderRename: rename)
+        refreshed = self
     }
 
     func consumeMoveClipboard(_ clipboard: MoveClipboardContext?, after result: FileOperationResult) {
@@ -552,7 +555,8 @@ extension BrowserViewController {
         reloadFileRows(preserving: selectedURLs)
     }
 
-    func finishOperationPresentation() {
+    func finishOperationPresentation(result: FileOperationResult? = nil) {
+        inlineRename.operationFinished(result)
         completedOperationDiagnosticTrace = operationDiagnosticTrace
         operationDiagnosticTrace = nil
         operationTask = nil

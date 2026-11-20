@@ -24,9 +24,9 @@ marquee, delayed name-click Rename and native Cut/Copy/Paste routing. Concrete
 rows and sessions retain their callbacks and operation admission; the table
 does not read remote data or grant file authority.
 
-NativeWindowMenu.swift shares standard Minimize/Zoom, tab controls and the
-AppKit-managed window list. EditorMenuOwnership hands off the main, Window and
-Help menus together and restores the browser's exact menu owners on return.
+`NativeWindowMenu` shares Minimize, Zoom, tab controls and the AppKit window
+list. `ToolWindowMenuOwnership` registers the main, Window and Help menus for
+the focused tool and restores the browser's exact menu owners on return.
 AppKit populates and maintains the registered Window menu automatically;
 features do not enumerate extra windows, maintain a second list or replace
 native activation actions.
@@ -37,8 +37,10 @@ stay in the concrete connection session; the shared view never writes files.
 
 ToolPageNavigation.swift supplies the native source-list rows and shared sidebar
 spacing used by Settings, Help and Drives. Keep feature selections in their
-existing owners. NativeContextMenu.swift projects existing commands into short,
-relevant groups; it does not grant a capability or replace the menubar catalog.
+existing owners. Owners that can refuse a row change supply its admission check.
+That check, and native field validation, keep the highlight on the current page.
+NativeContextMenu.swift projects existing commands into short, relevant groups;
+it does not grant a capability or replace the menubar catalog.
 ToolWindowCloseMotion.swift is an opt-in exit after a feature accepts a user
 close. Pending work and editor/discard decisions stay with their feature owner;
 programmatic closure and actual work draining remain native.
@@ -70,13 +72,30 @@ that write files, stored queries or history. Each feature still owns context,
 focus, menu validation, dispatch and dismissal.
 
 AdaptiveToolColumns.swift keeps the same child views during column/row changes.
-Its first measured width is adopted without animation; only later genuine
-reflows follow the shared Full/Reduced/Off policy. This avoids new panels
-animating from an unmeasured narrow arrangement. Tool-page replacement can use
+Its first measurement and a changed interface scale adopt the measured layout
+and parent callback without a second reflow animation; interface sizing already
+owns that transition. Width-only reflows keep the same children and follow the
+shared Full/Reduced/Off timing policy, also used by editor comparison heights.
+This avoids new panels animating from an unmeasured narrow arrangement.
+Tool-page replacement can use
 the existing native compositor crossfade without animating text geometry.
 Use one main effect for each change. A comparison that scrolls into place should
 use that scroll as its transition; keep page fades for changes in place so
 moving labels stay readable.
+
+Interface sizing settles the current page before revealing the resized layout.
+Appearance and motion changes settle those same page hosts. Settings, Help and
+Drives keep the incoming native form and retire the outgoing form immediately
+when a preference change interrupts a fade. Live forms and compositor page
+fades share the same timing and respect Reduce Motion. ToolContentMotion
+recognizes its own compositor animations by a private marker at
+`kCATransition`. Native form hosts settle only their own AppKit opacity
+properties, so unrelated animations can finish.
+
+Window-sized tools place their forms above a real AppKit Glass backdrop on
+macOS 26 and later. The form stays on the window's current appearance during
+a theme change. Small navigation controls can still embed content inside the
+glass effect and follow its adaptive appearance.
 
 FileKindText.swift and FileOpeningSymbol.swift share filename-kind labels and
 finite native-opening image variants across local/server rows. Cues follow the

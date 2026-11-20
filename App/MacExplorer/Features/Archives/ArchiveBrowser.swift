@@ -136,6 +136,8 @@ enum ArchiveOrderingActivation {
     var embeddedUp: (() -> Void)?
     var embeddedIsPresented: (() -> Bool)?
     private var permitsEmbeddedAction: Bool { embeddedIsPresented?() ?? true }
+    var allowsVisibleNameSelection: Bool { permitsEmbeddedAction && viewIsCurrent && !showsStop && !suspended && !closed }
+    func reportNameSelection(_ message: String) { notice = message }
     var embeddedScrollOffset: Double = 0
     private struct EmbeddedPresentation {
         let location: ArchiveLocation
@@ -230,17 +232,51 @@ enum ArchiveOrderingActivation {
               !browser.isBrowserSuspended else { return }
         browser.showItemProperties(.archive(member), relativeTo: parent)
     }
-    func canPreviewSelection(_ ids: Set<ZIPItemID>) -> Bool {
+    private var canReviewMemberText: Bool {
         ZIPTextPreviewFeature.available && permitsEmbeddedAction && !closed && !suspended && !isLoading && !isChecking && !isPreparingSelection
-            && viewIsCurrent && !isPaging && !isQueryPending && ids.count == 1 && !ApplicationFileActivity.gate.isClosed
+            && viewIsCurrent && !isPaging && !isQueryPending && !ApplicationFileActivity.gate.isClosed
+    }
+    func canPreviewSelection(_ ids: Set<ZIPItemID>) -> Bool {
+        canReviewMemberText && ids.count == 1
             && visibleItems.contains(where: { ids.contains($0.id) && $0.kind == .file })
     }
     func previewSelected() { previewSelection(selection) }
     var canEditSelectedText: Bool { canEditTextSelection(selection) }
     func canEditTextSelection(_ ids: Set<ZIPItemID>) -> Bool {
         lastRequest?.browser?.canOpenZIPTextEditor == true && canPreviewSelection(ids)
-            && visibleItems.contains { ids.contains($0.id) && !$0.isEncrypted && !ArchiveImagePreview.supportsFilename($0.name)
-                && ($0.method == 0 || $0.method == 8) && $0.logicalBytes <= ZIPTextPreview.maximumUTF8Bytes }
+            && visibleItems.contains { ids.contains($0.id) && supportsTextReview($0) }
+    }
+    private func supportsTextReview(_ item: ZIPArchiveItem) -> Bool {
+        item.kind == .file && !item.isEncrypted && !ArchiveImagePreview.supportsFilename(item.name)
+            && (item.method == 0 || item.method == 8) && item.logicalBytes <= ZIPTextPreview.maximumUTF8Bytes
+    }
+    var canCompareSelectedText: Bool { comparisonPair != nil }
+    private var comparisonPair: (ZIPArchiveItem, ZIPArchiveItem)? {
+        guard canReviewMemberText, selection.count == 2, lastRequest?.browser?.workspace != nil else { return nil }
+        let candidates = visibleItems.filter { selection.contains($0.id) }
+        guard candidates.count == 2, candidates.allSatisfy(supportsTextReview) else { return nil }
+        return (candidates[0], candidates[1])
+    }
+    func compareSelectedText(relativeTo parent: NSWindow?) {
+        guard let (left, right) = comparisonPair, let session, let source, let parent,
+              let browser = lastRequest?.browser, !browser.isBrowserSuspended else { return }
+        let token = generation, pageToken = pageGeneration, captured = selection
+        isPreparingSelection = true
+        selectionWork = Task { [self, reader] in
+            defer { selectionWork = nil; isPreparingSelection = false }
+            do {
+                let first = try await session.selectionForTextPreview(left.id)
+                let second = try await session.selectionForTextPreview(right.id)
+                guard permitsEmbeddedAction, !Task.isCancelled, !closed, !suspended,
+                      token == generation, pageToken == pageGeneration, selection == captured,
+                      parent.isKeyWindow, !browser.isBrowserSuspended else { return }
+                ArchiveTextReview.show(source: source, left: left.path, right: right.path, from: browser, relativeTo: parent) {
+                    try await reader.readTextComparison(left: first, right: second, retaining: $0)
+                }
+            } catch {
+                if !closed, !Task.isCancelled, token == generation { notice = ArchiveTextPreviewOwner.message(error) }
+            }
+        }
     }
     func editSelectedText() { editTextSelection(selection) }
     func editTextSelection(_ ids: Set<ZIPItemID>) {
@@ -709,6 +745,14 @@ enum ArchiveOrderingActivation {
         }
         return ZIPArchiveOrder(field, descending: !state.ascending)
     }
+    /// Moving a tab changes its UI/access owner without reopening its catalog.
+    func rebindEmbedded(source: URL, to browser: BrowserViewController) {
+        guard !closed, embeddedIsPresented != nil, self.source == source else { return }
+        lastRequest?.browser = browser
+        desired?.browser = browser
+        window = browser.viewIfLoaded?.window
+    }
+
     /// Value-only tab restoration obtains fresh catalog authority on a source
     /// change. Re-presenting a visit never appends private archive history.
     func presentEmbedded(_ location: ArchiveLocation, state: ArchiveBrowseState, from browser: BrowserViewController) {
@@ -1093,6 +1137,7 @@ enum ArchiveOrderingActivation {
 private struct ArchiveBrowserView: View {
     @ObservedObject var model: ArchiveBrowserModel
     @ObservedObject var settings: BrowserSettings
+    let clipboard: ArchiveWindowClipboard
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -1192,7 +1237,7 @@ private struct ArchiveBrowserView: View {
                     Spacer()
                 }.interfaceFont(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 10)
             }
-            ArchiveRowsView(model: model, settings: settings).frame(minHeight: 240)
+            ArchiveRowsView(model: model, settings: settings, clipboard: clipboard).frame(minHeight: 240)
             Divider()
             HStack {
                 if model.page != nil || model.searchPage != nil {
@@ -1217,67 +1262,25 @@ private struct ArchiveBrowserView: View {
     }
 }
 
-/// Draw only the live text/caret; the stable SwiftUI surround owns its glass
-/// surface, avoiding native bezel crossfades when search scope/results change.
-private struct ArchiveNameQueryField: NSViewRepresentable {
-    @Binding var text: String
-    let global: Bool
-    let onSubmit: () -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text, onSubmit: onSubmit) }
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
-        field.isBezeled = false; field.isBordered = false; field.drawsBackground = false
-        field.font = .systemFont(ofSize: 13); field.focusRingType = .exterior
-        field.delegate = context.coordinator; field.identifier = .init("archive-name-query")
-        field.setAccessibilityIdentifier("archive-name-query"); field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        return field
-    }
-    func updateNSView(_ field: NSTextField, context: Context) {
-        context.coordinator.text = $text; context.coordinator.onSubmit = onSubmit
-        if field.stringValue != text { field.stringValue = text }
-        field.placeholderString = global ? "Search archive names" : "Filter this folder"
-        field.setAccessibilityLabel(global ? "Search archive names" : "Filter this folder")
-    }
-    final class Coordinator: NSObject, NSTextFieldDelegate {
-        var text: Binding<String>, onSubmit: () -> Void
-        init(text: Binding<String>, onSubmit: @escaping () -> Void) { self.text = text; self.onSubmit = onSubmit }
-        func controlTextDidChange(_ notification: Notification) {
-            if let field = notification.object as? NSTextField { text.wrappedValue = field.stringValue }
-        }
-        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) { onSubmit(); return true }
-            if commandSelector == #selector(NSResponder.cancelOperation(_:)) { text.wrappedValue = ""; onSubmit(); return true }
-            return false
-        }
-    }
-}
-
-@MainActor private final class ArchiveBrowserWindow: ArchiveKeyboardWindow {
-    var focusArchiveSearch: (() -> Void)?
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           event.charactersIgnoringModifiers?.lowercased() == "f" {
-            focusArchiveSearch?(); return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-}
-
 @MainActor final class ArchiveBrowserWindowController: NSWindowController, NSWindowDelegate {
     let model: ArchiveBrowserModel
+    let clipboard: ArchiveWindowClipboard
     var onClose: (() -> Void)?
     init(model: ArchiveBrowserModel) {
         self.model = model
-        let window = ArchiveBrowserWindow(contentViewController: InterfaceHostingController(rootView: ArchiveBrowserView(model: model, settings: model.settings)))
+        clipboard = ArchiveWindowClipboard(zip: model)
+        let window = ArchiveKeyboardWindow(contentViewController: InterfaceHostingController(rootView: ArchiveBrowserView(model: model, settings: model.settings, clipboard: clipboard)))
+        window.shortcutSettings = model.settings
         window.focusArchiveSearch = { [weak model] in model?.focusNameSearch() }
         window.title = "Archive"; window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.setContentSize(.init(width: 980, height: 650)); window.minSize = .init(width: 820, height: 580)
         window.isReleasedWhenClosed = false; window.tabbingMode = .disallowed
         super.init(window: window); window.delegate = self; model.window = window
+        clipboard.window = window
         ToolWindowChrome.install(in: window, settings: model.settings)
     }
     required init?(coder: NSCoder) { nil }
-    func windowWillClose(_ notification: Notification) { onClose?() }
+    func windowWillClose(_ notification: Notification) { clipboard.retire(); onClose?() }
 }
 
 @MainActor final class ApplicationZIPBrowser {
@@ -1303,6 +1306,7 @@ private struct ArchiveNameQueryField: NSViewRepresentable {
             }
             controller = created
         }
+        controller?.clipboard.attach(to: browser)
         controller?.model.open(url, from: browser)
         if controller?.window?.isVisible != true {
             if browser.isControlledVerification { controller?.window?.setFrameOrigin(.init(x: -12000, y: -12000)) }
@@ -1325,7 +1329,7 @@ private struct ArchiveNameQueryField: NSViewRepresentable {
     var selectedArchiveURL:URL? {selectedZIPURL ?? selectedTARURL}
     var selectedZIPURL: URL? {
         guard ArchiveBrowseActivation.available, orderedSelectedURLs.count == 1, !isBrowserSuspended, !isReadOnlyFileSession,
-              let url = orderedSelectedURLs.first, ["zip", "jar", "cbz", "epub"].contains(url.pathExtension.lowercased()),
+              let url = orderedSelectedURLs.first, ArchiveFilename(url.lastPathComponent)?.kind.isTAR == false,
               let row = rowsByURL[url], displayedEntries.indices.contains(row), displayedEntries[row].kind == .file else { return nil }
         return url
     }

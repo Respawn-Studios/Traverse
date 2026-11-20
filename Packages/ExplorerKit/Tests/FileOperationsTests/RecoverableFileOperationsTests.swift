@@ -23,6 +23,14 @@ private struct RecoveryFixture {
         try Data(text.utf8).write(to: url, options: .withoutOverwriting)
         return url
     }
+    // The existing-verified-paths policy produces an older journal entry for
+    // a group containing a directory in both Debug and Release.
+    func legacyTrashFolder(_ name: String) throws -> URL {
+        let folder = source.appendingPathComponent(name, isDirectory: true)
+        try FileManager().createDirectory(at: folder, withIntermediateDirectories: false)
+        _ = try file("member.txt", in: folder)
+        return folder
+    }
     func service(_ hooks: RecoveryHooks = RecoveryHooks()) -> RecoverableFileOperations {
         RecoverableFileOperations(journalDirectory: journal, hooks: hooks)
     }
@@ -312,17 +320,18 @@ private func setGeneratedTrashAttribute(_ bytes: Data, name: String, at url: URL
     let fixture = try RecoveryFixture(); defer { fixture.remove() }
     let context = try GeneratedOwnedTrashContext(fixture)
     let source = try fixture.file("older.txt", text: "generated older source")
+    let folder = try fixture.legacyTrashFolder("older-folder")
     let target = fixture.destination.appendingPathComponent("older.txt")
     let forward = context.service()
     #expect(await forward.upgradeLocalTextHistory().status == .succeeded)
-    let moved = await forward.perform(.trash(sources: [source]))
+    let moved = await forward.perform(.trash(sources: [source, folder]))
     #expect(moved.result.disposition == .succeeded)
     let recordID = try #require(moved.recordID)
     let held = RecoverableFileOperations(journalDirectory: context.journal, protecting: [context.state],
                                           nativeTrashPolicy: .held)
     let inspection = try await held.inspectExistingHistory()
-    #expect(inspection.records.contains { $0.id == recordID })
-    #expect(inspection.records.first(where: { $0.id == recordID })?.nativeRegularFileTrashContract == false)
+    let saved = try #require(inspection.records.first { $0.id == recordID })
+    #expect(!saved.nativeRegularFileTrashContract && !saved.nativeDirectoryTrashContract)
     #expect((await held.undo(recordID: recordID)).result.disposition != .succeeded)
     #expect((await held.recover(recordID: recordID)).result.disposition != .succeeded)
     #expect((await held.cleanupRecovery(recordID: recordID)).result.disposition != .succeeded)
@@ -340,6 +349,7 @@ private func setGeneratedTrashAttribute(_ bytes: Data, name: String, at url: URL
         catch { }
     }
     #expect(try Data(contentsOf: target) == Data("generated older source".utf8))
+    #expect(try Data(contentsOf: fixture.destination.appendingPathComponent("older-folder/member.txt")) == Data("original".utf8))
     #expect(!FileManager.default.fileExists(atPath: source.path))
     #expect(try OperationJournal(context.journal).inspectRecord(recordID)?.state == "committed")
 }
@@ -448,9 +458,10 @@ private final class GeneratedPostRenameSaveFault: @unchecked Sendable {
     let fixture = try RecoveryFixture(); defer { fixture.remove() }
     let context = try GeneratedOwnedTrashContext(fixture)
     let file = try fixture.file("changed", text: "generated original")
+    let folder = try fixture.legacyTrashFolder("unchanged")
     let service = context.service()
     #expect(await service.upgradeLocalTextHistory().status == .succeeded)
-    let moved = await service.perform(.trash(sources: [file]))
+    let moved = await service.perform(.trash(sources: [file, folder]))
     let id = try #require(moved.recordID)
     let plan = try await service.prepareOwnedTrashDeletion(recordID: id)
     let returned = fixture.destination.appendingPathComponent("changed")
@@ -512,28 +523,24 @@ private final class GeneratedPostRenameSaveFault: @unchecked Sendable {
 @Test func ownedTrashProtectedReturnedLocationRefusesBeforeUndoInvalidation() async throws {
     let fixture = try RecoveryFixture(); defer { fixture.remove() }
     let context = try GeneratedOwnedTrashContext(fixture)
-    let file = try fixture.file("protected")
+    let folder = try fixture.legacyTrashFolder("protected")
     let state = context.state
     let legacy = LocalFileOperations(trash: { source in
         let returned = state.appendingPathComponent("returned-protected")
         try FileManager.default.moveItem(at: source, to: returned)
         return returned
     })
-    var olderHooks = RecoveryHooks()
-    #if DEBUG
-    olderHooks.nativeTrashQualificationMode = .strict
-    #endif
-    let service = RecoverableFileOperations(journalDirectory: context.journal, hooks: olderHooks,
+    let service = RecoverableFileOperations(journalDirectory: context.journal, hooks: RecoveryHooks(),
                                             legacy: legacy, protecting: [context.state])
     #expect(await service.upgradeLocalTextHistory().status == .succeeded)
-    let moved = await service.perform(.trash(sources: [file]))
+    let moved = await service.perform(.trash(sources: [folder]))
     #expect(moved.result.disposition == .succeeded)
     let id = try #require(moved.recordID)
     let plan = try await service.prepareOwnedTrashDeletion(recordID: id)
     let outcome = await service.permanentlyDeleteOwnedTrash(plan)
     #expect(outcome.result.disposition != .succeeded)
     #expect(try OperationJournal(context.journal).inspectRecord(id)?.version == 3)
-    #expect(FileManager.default.fileExists(atPath: state.appendingPathComponent("returned-protected").path))
+    #expect(try Data(contentsOf: state.appendingPathComponent("returned-protected/member.txt")) == Data("original".utf8))
 }
 
 @Test func ownedTrashWholeJobRestoreRefusesOccupiedOriginalWithoutDeletingEitherItem() async throws {
@@ -557,7 +564,7 @@ private final class GeneratedPostRenameSaveFault: @unchecked Sendable {
     let fixture = try RecoveryFixture(); defer { fixture.remove() }
     let context = try GeneratedOwnedTrashContext(fixture)
     let first = try fixture.file("first")
-    let second = try fixture.file("second")
+    let second = try fixture.legacyTrashFolder("second")
     let entered = DispatchSemaphore(value: 0)
     let release = DispatchSemaphore(value: 0)
     var hooks = RecoveryHooks()
@@ -588,7 +595,7 @@ private final class GeneratedPostRenameSaveFault: @unchecked Sendable {
     #expect(record.version == 8 && record.state == "trashDeleteReview")
     #expect(record.ownedTrash?.confirmedCount == 1 && record.ownedTrash?.retainedCount == 1)
     #expect(!FileManager.default.fileExists(atPath: context.destination.appendingPathComponent("first").path))
-    #expect(FileManager.default.fileExists(atPath: context.destination.appendingPathComponent("second").path))
+    #expect(try Data(contentsOf: context.destination.appendingPathComponent("second/member.txt")) == Data("original".utf8))
     let cold = try await context.coldService().inspectOwnedTrash()
     #expect(cold.groups.first?.reviewRequired == true)
 }
@@ -665,7 +672,8 @@ private final class GeneratedPostRenameSaveFault: @unchecked Sendable {
     let service = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: hooks, legacy: legacy)
     let result = await service.perform(.trash(sources: [source]), progress: { _ in })
     #expect(findings.snapshot.contains(.complete(nativeChanged: [.quarantine], osAccessAttributeChanged: true)))
-    #expect(result.result.disposition == .partial)
+    #expect(result.result.disposition == .failed)
+    #expect(result.result.items.first?.status == .failed(.recoveryUncertain))
     let id = try #require(result.recordID)
     #expect(try OperationJournal(fixture.journal).inspectRecord(id)?.state == "needsReview")
     #expect(!FileManager.default.fileExists(atPath: source.path))
@@ -1051,7 +1059,8 @@ private final class GeneratedPostRenameSaveFault: @unchecked Sendable {
     let service = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: hooks, legacy: legacy,
                                             nativeTrashDirectoryAdmission: .additiveRootOnlyCandidate)
     let result = await service.perform(.trash(sources: [first, second]))
-    #expect(result.result.disposition == .partial)
+    #expect(result.result.disposition == .failed)
+    #expect(result.result.items.first?.status == .failed(.recoveryUncertain))
     #expect(result.result.items.filter { $0.role == .transfer }.count == 2)
     #expect(result.result.items.filter { $0.role == .job }.count == 1)
     #expect(result.result.items.last?.status == .notStarted)
@@ -1131,7 +1140,8 @@ private final class GeneratedPostRenameSaveFault: @unchecked Sendable {
         let service = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: hooks, legacy: legacy,
                                                 nativeTrashDirectoryAdmission: .additiveRootOnlyCandidate)
         let result = await service.perform(.trash(sources: [source]))
-        #expect(result.result.disposition == .partial)
+        #expect(result.result.disposition == .failed)
+        #expect(result.result.items.first?.status == .failed(.recoveryUncertain))
         let id = try #require(result.recordID)
         let record = try #require(try OperationJournal(fixture.journal).inspectRecord(id))
         #expect(record.state == "needsReview" && record.steps.isEmpty)
@@ -1705,6 +1715,40 @@ func recoveryCrashQualificationWorker() async throws {
     #expect(try FileManager().contentsOfDirectory(atPath: fixture.destination.path).isEmpty)
 }
 
+@Test(arguments: [false, true])
+func plannedDestinationCannotBeReboundAfterOpening(move: Bool) async throws {
+    let fixture = try RecoveryFixture(); defer { fixture.remove() }
+    let source = try fixture.file("one")
+    let selected = try await fixture.service().observeDirectory(fixture.destination)
+    let held = fixture.root.appendingPathComponent("held-destination")
+    let service = fixture.service(RecoveryHooks(afterTransferDestinationObservation: {
+        try! FileManager().moveItem(at: fixture.destination, to: held)
+        try! FileManager().createDirectory(at: fixture.destination, withIntermediateDirectories: false)
+    }))
+    let request: FileOperationRequest = move ? .move(sources: [source], destinationDirectory: fixture.destination)
+        : .copy(sources: [source], destinationDirectory: fixture.destination)
+    let result = await service.perform(request, observing: selected)
+    #expect(result.result.items.map(\.status) == [.failed(.destinationChanged), .notStarted])
+    #expect(try String(contentsOf: source, encoding: .utf8) == "original")
+    #expect(try FileManager().contentsOfDirectory(atPath: fixture.destination.path).isEmpty)
+    #expect(try FileManager().contentsOfDirectory(atPath: held.path).isEmpty)
+}
+
+@Test func sameVolumeMoveRefusesDetachedDestinationAtPublication() async throws {
+    let fixture = try RecoveryFixture(); defer { fixture.remove() }
+    let source = try fixture.file("one")
+    let held = fixture.root.appendingPathComponent("held-destination")
+    let service = fixture.service(RecoveryHooks(beforeRename: {
+        try! FileManager().moveItem(at: fixture.destination, to: held)
+        try! FileManager().createDirectory(at: fixture.destination, withIntermediateDirectories: false)
+    }))
+    let result = await service.perform(.move(sources: [source], destinationDirectory: fixture.destination))
+    #expect(result.result.items.map(\.status) == [.failed(.destinationChanged)])
+    #expect(try String(contentsOf: source, encoding: .utf8) == "original")
+    #expect(try FileManager().contentsOfDirectory(atPath: fixture.destination.path).isEmpty)
+    #expect(try FileManager().contentsOfDirectory(atPath: held.path).isEmpty)
+}
+
 @Test func journalLatestSymlinkAndFIFOAreRefusedWithoutOpeningTargets() async throws {
     for fifo in [false, true] {
         let fixture = try RecoveryFixture(); defer { fixture.remove() }
@@ -1853,7 +1897,8 @@ private func waitForRecoveryGate(_ gate: DispatchSemaphore) async -> Bool {
     })
     let service = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: RecoveryHooks(), legacy: legacy)
     let result = await service.perform(.trash(sources: [source]))
-    #expect(result.result.disposition == .partial)
+    #expect(result.result.disposition == .failed)
+    #expect(result.result.items.first?.status == .failed(.recoveryUncertain))
     let cold = RecoverableFileOperations(journalDirectory: fixture.journal)
     let record = try #require(try await cold.inspectExistingHistory().records.first)
     #expect(record.state == "needsReview")
@@ -2522,7 +2567,7 @@ func nativeTrashExistingQuarantineTransitionRefusesUnrelatedChanges(_ variant: S
     let service = RecoverableFileOperations(journalDirectory: fixture.journal,
                                             hooks: RecoveryHooks(), legacy: legacy)
     let result = await service.perform(.trash(sources: [source]))
-    #expect(result.result.disposition == .partial)
+    #expect(result.result.disposition == .failed)
     let id = try #require(result.recordID)
     let record = try #require(try OperationJournal(fixture.journal).inspectRecord(id))
     #expect(record.state == "needsReview")
@@ -2602,7 +2647,7 @@ func nativeTrashExistingQuarantineTransitionRefusesUnrelatedChanges(_ variant: S
     })
     let service = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: RecoveryHooks(), legacy: legacy)
     let result = await service.perform(.trash(sources: [source]))
-    #expect(result.result.disposition == .partial)
+    #expect(result.result.disposition == .failed)
     let record = try #require(try await service.recoveryRecords().records.first)
     #expect(record.state == "needsReview")
     #expect(!record.canUndo)
@@ -2704,7 +2749,7 @@ private final class NativeTrashObservationCounter: @unchecked Sendable {
         })
         let service = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: hooks, legacy: legacy)
         let result = await service.perform(.trash(sources: [source]))
-        #expect(result.result.disposition == .partial)
+        #expect(result.result.disposition == .failed)
         let record = try #require(try await service.recoveryRecords().records.first)
         #expect(record.state == "needsReview")
         #expect(!record.canUndo)
@@ -2728,7 +2773,7 @@ private final class NativeTrashObservationCounter: @unchecked Sendable {
     })
     let service = RecoverableFileOperations(journalDirectory: fixture.journal, hooks: hooks, legacy: legacy)
     let result = await service.perform(.trash(sources: [source]))
-    #expect(result.result.disposition == .partial)
+    #expect(result.result.disposition == .failed)
     #expect(counter.count == 3)
     #expect(result.result.items.last?.status == .failed(.sourceChanged))
     #expect(FileManager().fileExists(atPath: target.path))

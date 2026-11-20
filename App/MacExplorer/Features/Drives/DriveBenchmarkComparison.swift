@@ -22,10 +22,37 @@ struct DriveBenchmarkComparison {
     }
     let selected: DriveBenchmarkRun, reference: DriveBenchmarkRun
     let write: Phase, read: Phase
+    var isSameVolume: Bool { selected.fileSystemID == reference.fileSystemID }
 
-    init?(selected: DriveBenchmarkRun, reference: DriveBenchmarkRun) {
+    var copySummary: String { "Traverse file benchmark comparison\n\n" + summaryDetails }
+
+    fileprivate var summaryDetails: String {
+        let random = selected.result.workload == .random4K
+        let workload = random ? "Random 4 KiB" : "Sequential"
+        let count = FileSizeText.string(selected.result.bytesWritten)
+        let unit = random ? "IOPS" : "MB/s"
+        return [
+            "\(workload) · \(count)",
+            "Phase\tSelected (\(unit))\tReference (\(unit))\tSelected P95 (ms)\tReference P95 (ms)",
+            row("Write and flush", phase: write, random: random),
+            row("Read and verify", phase: read, random: random)
+        ].joined(separator: "\n")
+    }
+
+    private func row(_ label: String, phase: Phase, random: Bool) -> String {
+        [label, number(random ? phase.selectedIOPS : phase.selectedRate, decimals: 1),
+         number(random ? phase.referenceIOPS : phase.referenceRate, decimals: 1),
+         number(phase.selectedP95, decimals: 3), number(phase.referenceP95, decimals: 3)].joined(separator: "\t")
+    }
+
+    private func number(_ value: Double?, decimals: Int) -> String {
+        guard let value, value.isFinite, value >= 0 else { return "Unavailable" }
+        return value.formatted(.number.grouping(.never).precision(.fractionLength(decimals)))
+    }
+
+    init?(selected: DriveBenchmarkRun, reference: DriveBenchmarkRun, acrossVolumes: Bool = false) {
         let current = selected.result, prior = reference.result
-        guard selected.id != reference.id, selected.fileSystemID == reference.fileSystemID,
+        guard selected.id != reference.id, acrossVolumes || selected.fileSystemID == reference.fileSystemID,
               current.outcome == .completed, prior.outcome == .completed,
               current.workload == prior.workload, current.blockBytes == prior.blockBytes,
               current.bytesWritten > 0, current.bytesRead > 0,
@@ -64,7 +91,12 @@ struct DriveBenchmarkSuiteComparison {
     let sequential: DriveBenchmarkComparison
     let random4K: DriveBenchmarkComparison
 
-    init?(selected: DriveBenchmarkSuite, reference: DriveBenchmarkSuite) {
+    var copySummary: String {
+        ["Traverse Quick Mix file benchmark comparison", sequential.summaryDetails, random4K.summaryDetails]
+            .joined(separator: "\n\n")
+    }
+
+    init?(selected: DriveBenchmarkSuite, reference: DriveBenchmarkSuite, acrossVolumes: Bool = false) {
         guard let selectedID = selected.sequential.suiteID,
               let referenceID = reference.sequential.suiteID,
               selectedID != referenceID,
@@ -76,8 +108,8 @@ struct DriveBenchmarkSuiteComparison {
               reference.sequential.result.workload == .sequential,
               selectedRandom.result.workload == .random4K,
               referenceRandom.result.workload == .random4K,
-              let sequential = DriveBenchmarkComparison(selected: selected.sequential, reference: reference.sequential),
-              let random4K = DriveBenchmarkComparison(selected: selectedRandom, reference: referenceRandom) else { return nil }
+              let sequential = DriveBenchmarkComparison(selected: selected.sequential, reference: reference.sequential, acrossVolumes: acrossVolumes),
+              let random4K = DriveBenchmarkComparison(selected: selectedRandom, reference: referenceRandom, acrossVolumes: acrossVolumes) else { return nil }
         self.selected = selected
         self.reference = reference
         self.sequential = sequential

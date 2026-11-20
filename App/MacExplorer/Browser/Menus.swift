@@ -1,8 +1,10 @@
 import AppKit
+import ExplorerCore
 
 @MainActor
 enum BrowserMenus {
     enum Kind: String { case file = "File", view = "View", go = "Go", settings = "Settings", help = "Help" }
+    static let gitSectionIdentifier = NSUserInterfaceItemIdentifier("browser-git-section")
 
     static func item(_ title: String, _ action: Selector, key: String = "",
                      modifiers: NSEvent.ModifierFlags = .command, target: AnyObject?) -> NSMenuItem {
@@ -12,11 +14,13 @@ enum BrowserMenus {
         return item
     }
 
-    private static func addSection(_ title: String, to menu: NSMenu, build: (NSMenu) -> Void) {
+    static func addSection(_ title: String, to menu: NSMenu, identifier: NSUserInterfaceItemIdentifier? = nil,
+                           build: (NSMenu) -> Void) {
         let section = NSMenu(title: title)
         build(section)
         guard !section.items.isEmpty else { return }
         let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        entry.identifier = identifier
         entry.submenu = section
         menu.addItem(entry)
     }
@@ -38,6 +42,24 @@ enum BrowserMenus {
         return entry
     }
 
+    static func gitReviewItems(target: BrowserViewController) -> [NSMenuItem] {
+        [item("Browse Git Worktrees…", #selector(BrowserViewController.browseGitWorktrees(_:)), target: target),
+         item("Compare Git Revisions…", #selector(BrowserViewController.compareGitRevisions(_:)), target: target),
+         item("Compare Working Folder…", #selector(BrowserViewController.compareGitWorkingFolder(_:)), target: target),
+         item("Review Staged Changes…", #selector(BrowserViewController.reviewStagedChanges(_:)), target: target),
+         item("Git Folder History…", #selector(BrowserViewController.showGitFolderHistory(_:)), target: target),
+         item("Compare File Across Revisions…", #selector(BrowserViewController.compareSelectedGitFileRevisions(_:)), target: target),
+         item("Compare Working File with Revision…", #selector(BrowserViewController.compareSelectedGitWorkingFile(_:)), target: target),
+         item("Git File History…", #selector(BrowserViewController.showGitFileHistory(_:)), target: target)]
+            + gitIndexItems(target: target)
+    }
+
+    private static func gitIndexItems(target: BrowserViewController) -> [NSMenuItem] {
+        [BrowserCommand.stageGitFile, .unstageGitFile].map {
+            item($0.title + "…", $0.selector, target: target)
+        }
+    }
+
     static func menu(_ kind: Kind, target: BrowserViewController) -> NSMenu {
         let menu = NSMenu(title: kind.rawValue)
         switch kind {
@@ -56,7 +78,14 @@ enum BrowserMenus {
             menu.addItem(item("Open Selection", #selector(BrowserViewController.openSelection(_:)), key: String(UnicodeScalar(0xF701)!), target: target))
             menu.addItem(item("Open in Default App", #selector(BrowserViewController.openSelectedFileInDefaultApp(_:)), target: target))
             menu.addItem(openWithItem(target: target))
-            menu.addItem(item("Compare Files", #selector(BrowserViewController.compareSelectedFiles(_:)), target: target))
+            addSection("Compare", to: menu) { section in
+                section.addItem(item(target.textComparisonTitle, #selector(BrowserViewController.compareTextFiles(_:)), target: target))
+                section.addItem(item("Compare Folders…", #selector(BrowserViewController.compareFolders(_:)), target: target))
+                section.addItem(item("Compare Files", #selector(BrowserViewController.compareSelectedFiles(_:)), target: target))
+            }
+            addSection("Git", to: menu, identifier: gitSectionIdentifier) { section in
+                gitReviewItems(target: target).forEach(section.addItem)
+            }
             if LocalTextEditorFeature.ordinaryEnabled || RemoteTextEditorFeature.available {
                 menu.addItem(item("Edit in Traverse", #selector(BrowserViewController.editTextInTraverse(_:)), target: target))
             }
@@ -145,6 +174,12 @@ enum BrowserMenus {
             menu.addItem(item("Split Pane Below", #selector(BrowserViewController.splitPaneBelow(_:)), target: target))
             menu.addItem(item("Close Pane (Keep Tabs)", #selector(BrowserViewController.closePane(_:)), target: target))
             menu.addItem(item("Focus Next Pane", #selector(BrowserViewController.focusOtherPane(_:)), key: "\t", modifiers: [.command, .option], target: target))
+            menu.addItem(item(WorkspaceDividerAction.swap.title, #selector(BrowserViewController.swapPaneSides(_:)), target: target))
+            menu.addItem(item(WorkspaceDividerAction.balance.title, #selector(BrowserViewController.balancePaneSizes(_:)), target: target))
+            menu.addItem(item(WorkspaceDividerAction.rotate.title, #selector(BrowserViewController.rotatePaneSplit(_:)), target: target))
+            menu.addItem(item(WorkspaceDividerAction.link.title, #selector(BrowserViewController.toggleLinkedPaneNavigation(_:)), target: target))
+            menu.addItem(item(WorkspaceDividerAction.selectMatch.title, #selector(BrowserViewController.selectMatchingPaneItem(_:)), target: target))
+            menu.addItem(item(WorkspaceDividerAction.compareGit.title, #selector(BrowserViewController.comparePaneGitCheckouts(_:)), target: target))
             menu.addItem(.separator())
             menu.addItem(item("Show Hidden Files", #selector(BrowserViewController.toggleHidden(_:)), key: ".", modifiers: [.command, .shift], target: target))
             menu.addItem(item("Show Title Bar Menus", #selector(BrowserViewController.toggleCommandRow(_:)), target: target))
@@ -307,7 +342,11 @@ enum BrowserMenus {
                 command(FilenamePrompt.newFileTitle + "…", #selector(BrowserViewController.createTextFile(_:)))])
             group([command("Paste", #selector(BrowserViewController.pasteFileURLs(_:))),
                 command("Paste with Options…", #selector(BrowserViewController.pasteWithOptions(_:)))], keepClipboard: true)
-            group([command("Open Terminal Here", #selector(BrowserViewController.openTerminalHere(_:))),
+            group([command("Select by Name…", #selector(BrowserViewController.selectByName(_:))),
+                command("Compare with Other Pane…", #selector(BrowserViewController.compareFolders(_:))),
+                command("Compare Git Revisions…", #selector(BrowserViewController.compareGitRevisions(_:))),
+                command("Git Folder History…", #selector(BrowserViewController.showGitFolderHistory(_:))),
+                command("Open Terminal Here", #selector(BrowserViewController.openTerminalHere(_:))),
                 command("Refresh", #selector(BrowserViewController.refresh(_:)))])
             return menu
         }
@@ -315,7 +354,13 @@ enum BrowserMenus {
             command("Open in New Tab", #selector(BrowserViewController.openSelectionInNewTab(_:))),
             command("Edit in Traverse", #selector(BrowserViewController.editTextInTraverse(_:))),
             command("Compare Files", #selector(BrowserViewController.compareSelectedFiles(_:))),
+            command(target.textComparisonTitle, #selector(BrowserViewController.compareTextFiles(_:))),
+            command("Compare File Across Revisions…", #selector(BrowserViewController.compareSelectedGitFileRevisions(_:))),
+            command("Git File History…", #selector(BrowserViewController.showGitFileHistory(_:))),
+            command(target.selectedItemCount == 2 ? "Compare Folders…" : "Compare with Other Pane…",
+                #selector(BrowserViewController.compareFolders(_:))),
             command("Open in Terminal", #selector(BrowserViewController.openSelectedFolderInTerminal(_:)))])
+        group(gitIndexItems(target: target))
         if target.orderedSelectedURLs.count == 1 && target.commandEnabled(#selector(BrowserViewController.openSelectedFileInDefaultApp(_:))) {
             menu.addItem(openWithItem(target: target))
         }
@@ -324,6 +369,7 @@ enum BrowserMenus {
             command("Copy Path", #selector(BrowserViewController.copyPath(_:))),
             command("Duplicate", #selector(BrowserViewController.duplicateSelection(_:))),
             command("New Folder with Selection", #selector(BrowserViewController.newFolderWithSelection(_:))),
+            command("Select by Name…", #selector(BrowserViewController.selectByName(_:))),
             command("Copy to Other Pane", #selector(BrowserViewController.copyToOtherPane(_:))),
             command("Move to Other Pane", #selector(BrowserViewController.moveToOtherPane(_:))),
             command("Paste Into Folder", #selector(BrowserViewController.pasteIntoSelection(_:)))], keepClipboard: true)
@@ -381,6 +427,7 @@ enum BrowserMenus {
         edit.addItem(item("Paste", #selector(NSText.paste(_:)), key: "v", target: nil))
         edit.addItem(item("Paste with Options…", #selector(BrowserViewController.pasteWithOptions(_:)), target: target))
         edit.addItem(item("Select All", #selector(NSText.selectAll(_:)), key: "a", target: nil))
+        edit.addItem(item("Select by Name…", #selector(BrowserViewController.selectByName(_:)), target: target))
         add(edit, to: main)
         add(menu(.view, target: target), to: main)
         add(menu(.go, target: target), to: main)

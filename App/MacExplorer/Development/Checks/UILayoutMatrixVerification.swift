@@ -65,7 +65,7 @@ extension UIVerification {
                         let name = "\(theme)-\(style.rawValue.lowercased())-\(Int(width))-\(expanded ? "expanded" : "collapsed")"
                         let directory = output.appendingPathComponent(name, isDirectory: true)
                         try FileManager().createDirectory(at: directory, withIntermediateDirectories: false)
-                        try await verifySidebarLayout(browser, output: directory)
+                        try await verifySidebarLayout(browser, output: directory, checkFolderPointerFeedback: expanded)
                         try require(browser.tabStrip.activeTabIsVisible && browser.tabStrip.addButton.frame.maxX <= browser.tabStrip.bounds.maxX + 1,
                                     "Layout matrix hid the active tab or adjacent add control")
                         try require(browser.pathField.superview?.bounds.height == 28,

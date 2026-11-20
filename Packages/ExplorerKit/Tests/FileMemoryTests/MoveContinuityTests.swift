@@ -13,7 +13,7 @@ extension PersistentNameStore {
 private func moveStore(_ fixture: MoveFixture, source: URL) async throws -> (PersistentNameStore, RememberedItemID) {
     let first = try await PersistentNameStore.createRemembering(directory: fixture.catalog,
         first: AuthoredNames(nickname: "Orion", alternateNames: ["Working report"], labels: ["private"]),
-        source: source, allowDocumentFollowing: true)
+        source: source, allowDocumentFollowing: true, locationPolicy: .localPermissions)
     let id = try await first.firstItemID()
     await first.close()
     let store = try await PersistentNameStore.open(directory: fixture.catalog, action: .upgradeMoveContinuity)
@@ -116,7 +116,7 @@ private final class MoveCaptureHold: @unchecked Sendable {
         let (store, firstID) = try await moveStore(f, source: sources[0])
         var ids = [firstID]
         for source in sources.dropFirst() {
-            let edit = try await store.prepareRemembering(AuthoredNames(nickname: source.lastPathComponent), source: source, allowDocumentFollowing: true)
+            let edit = try await store.prepareRemembering(AuthoredNames(nickname: source.lastPathComponent), source: source, allowDocumentFollowing: true, locationPolicy: .localPermissions)
             ids.append(try await store.apply(edit))
         }
         let engine = RecoverableFileOperations(journalDirectory: f.history)
@@ -213,7 +213,7 @@ private final class MoveCaptureHold: @unchecked Sendable {
     @Test(arguments: [false, true]) func b074StagedTrackingFailurePreservesSource(unrelatedMismatch: Bool) async throws {
         guard MoveFixture.enabled else { return }
         let f = try MoveFixture(), source = try f.file()
-        _ = try await NativeDocumentReferenceReader(activity: nil).capture(source, scope: .readOnly,
+        _ = try await NativeDocumentReferenceReader(activity: nil).capture(source, scope: .locatorOnly,
             allowDocumentFollowing: true, cancellation: .init())
         // Copy always takes the native staging lane, even on one volume.
         let engine = RecoverableFileOperations(journalDirectory: f.history, hooks: RecoveryHooks(copyFaults: CopyFaultHooks(afterNativeCopy: { a, b in
@@ -344,7 +344,7 @@ private final class MoveCaptureHold: @unchecked Sendable {
         case 1: #expect(try await store.finishRemoveAccess(store.prepareRemoveAccess(id)) == .removed)
         default:
             let other = try f.file("Relinked.txt")
-            let relink = try await store.prepareRelink(id, source: other, allowDocumentFollowing: true)
+            let relink = try await store.prepareRelink(id, source: other, allowDocumentFollowing: true, locationPolicy: .localPermissions)
             _ = try await store.apply(relink)
         }
         await #expect(throws: RememberedReferenceFailure.stale) {
@@ -461,7 +461,7 @@ private final class MoveCaptureHold: @unchecked Sendable {
         let f = try MoveFixture()
         let source = try f.file()
         let reader = NativeDocumentReferenceReader(activity: nil)
-        _ = try await reader.capture(source, scope: .readOnly, allowDocumentFollowing: true, cancellation: .init())
+        _ = try await reader.capture(source, scope: .locatorOnly, allowDocumentFollowing: true, cancellation: .init())
         let engine = RecoverableFileOperations(journalDirectory: f.history)
         let plan = try await engine.prepareTransfer(sources: [source], destinationDirectory: f.destination, move: true)
         let ticket = try #require(engine.moveReferenceTickets(for: plan).first)
@@ -470,7 +470,7 @@ private final class MoveCaptureHold: @unchecked Sendable {
         #expect(result.recordID == ticket.operationID)
         #expect(result.result.disposition == .succeeded)
         let proof = try await engine.inspectMoveReference(ticket, direction: .forward)
-        _ = try await reader.capture(proof.location, scope: .readOnly, allowDocumentFollowing: true, cancellation: .init())
+        _ = try await reader.capture(proof.location, scope: .locatorOnly, allowDocumentFollowing: true, cancellation: .init())
         let undo = await engine.undo(recordID: ticket.operationID)
         #expect(undo.result.disposition == .succeeded)
         _ = try await engine.inspectMoveReference(ticket, direction: .undo)

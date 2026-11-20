@@ -26,29 +26,29 @@
       "version": "0.13.5"
     },
     {
-      "archiveSHA256": "94be3d86c71b9ed220a675c405e35c7a02565a009bf8da2e9cc13a700320a5c5",
+      "archiveSHA256": "78229f06e4d96d83bea5f5133ad3b6e4b5f0ce22d8e31c1ff7243ec8e18d5ba1",
       "name": "russh",
       "notices": [
         {
           "name": "LICENSE.txt",
           "origin": "recorded-upstream-base-revision",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "url": "https://raw.githubusercontent.com/Eugeny/russh/b33092aad1e51c66258a12e8b83fc473a68d9d34/LICENSE.txt"
+          "url": "https://raw.githubusercontent.com/Eugeny/russh/56a999871aa134072e4f2a7395fe2de313870e21/LICENSE.txt"
         },
         {
           "name": "PUBLISHED-COPYRIGHT-HEADERS.txt",
           "origin": "checksum-verified-published-source",
-          "sha256": "37d3aa06a511376e5f24c687d3b0cdcc6d583a0642a006e1f4856b136801264f",
-          "url": "https://crates.io/api/v1/crates/russh/0.65.1/download"
+          "sha256": "62be79c9ac3eb2cc6fb7347c8ba3972907cf351bd30fbd586a7f028d56989295",
+          "url": "https://crates.io/api/v1/crates/russh/0.65.2/download"
         }
       ],
       "publishedVCS": {
         "git": {
-          "sha1": "b33092aad1e51c66258a12e8b83fc473a68d9d34"
+          "sha1": "56a999871aa134072e4f2a7395fe2de313870e21"
         },
         "path_in_vcs": "russh"
       },
-      "version": "0.65.1"
+      "version": "0.65.2"
     },
     {
       "archiveSHA256": "3aec6cb630dbe85d72ffd7bcd95f07e1bd69f9f270ee8adfa1afe443a6331438",

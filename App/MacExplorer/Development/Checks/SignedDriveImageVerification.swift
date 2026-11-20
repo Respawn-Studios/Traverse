@@ -41,6 +41,8 @@ enum SignedDriveImageVerification {
 
     private static func preImage(_ selected: GeneratedDriveImageReview.Selection) async throws {
         let fixture = selected.fixtureRoot
+        try require(selected.formatCompletionContract == selected.caseMode.completionContract,
+                    "Pre-image Format completion contract differs")
         guard let jobID = UUID(uuidString: selected.caseID) else {
             throw GeneratedAPFSFormatFailure(message: "Pre-image case identity refused")
         }
@@ -111,6 +113,8 @@ enum SignedDriveImageVerification {
     }
 
     private static func imagePhase(_ selected: GeneratedDriveImageReview.Selection) async throws {
+        try require(selected.formatCompletionContract == selected.caseMode.completionContract,
+                    "Signed Format completion contract differs")
         let receipt = try imageReceipt(selected)
         let operations = ApplicationOperationCoordinator.shared
         let previous = operations.drives
@@ -129,7 +133,7 @@ enum SignedDriveImageVerification {
                 output: selected.caseRoot.appendingPathComponent("evidence", isDirectory: true))
         case .cold:
             try require(GeneratedDriveImageReview.coldAdmitted
-                        && !AppFeatureAvailability.allows(.apfsVolumeCreation),
+                        && ProductCapabilities.Feature.allCases.allSatisfy({ !AppFeatureAvailability.allows($0) }),
                         "Cold generated APFS mutation unexpectedly available")
             _ = try await GeneratedAPFSFormatVerification.cold(drives: drives,
                 initial: initial, receipt: receipt, fixture: selected.fixtureRoot,
@@ -152,7 +156,7 @@ enum SignedDriveImageVerification {
                 stage = "passive-job-admission"
                 try await preImage(selection)
             case .warm, .cold:
-                stage = selection.phase == .warm ? "generated-add-and-format" : "unresolved-job-inspection"
+                stage = selection.phase == .warm ? "generated-add-and-format" : "native-completion-inspection"
                 try await imagePhase(selection)
             }
             stage = "completed"

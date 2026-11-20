@@ -113,7 +113,7 @@ enum RemoteTextSaveBoundary {
             guard let self, !closed, closingWork == nil, !isBusy,
                   let baseline = state.comparisonBaseline else { return nil }
             return .init(baseline: baseline, current: window.surface.textView.string,
-                format: state.value.format, language: language)
+                format: state.value.format, language: language, currentEditor: window.editableBufferIdentity)
         }
         // A remote Save As must not imply remote creation or switch targets.
         window.onSaveAs = { [weak self] in self?.saveTextCopy() }
@@ -158,7 +158,7 @@ enum RemoteTextSaveBoundary {
         guard !closed else { return }
         do { try preparation.submit(.presentation(ticket: pendingEdit, surfaceGeneration: window.surface.generation,
             text: window.surface.textView.string, format: state.value.format, language: language,
-            detectsLanguage: shouldDetectLanguage)) }
+            detectsLanguage: shouldDetectLanguage, baseline: window.surface.prepareLineChangeBaseline(state.savedTextBaseline))) }
         catch { message = "This text could not be prepared. Your visible text is kept." }
     }
     private var shouldDetectLanguage: Bool {
@@ -167,13 +167,14 @@ enum RemoteTextSaveBoundary {
     func prepared(_ input: EditorPreparationInput, _ result: EditorPreparationResult) {
         guard !closed else { return }
         switch input {
-        case .presentation(let ticket, let generation, _, _, _, _):
+        case .presentation(let request):
+            let ticket = request.ticket, generation = request.generation
             guard generation == window.surface.generation else { return }
             switch result {
-            case .presentation(let value, let syntax, let lines, let detected):
-                if let ticket { do { try state.acceptEdit(ticket, value: value); pendingEdit = nil } catch { return } }
-                if window.surface.present(value, syntax: syntax, lines: lines, for: generation),
-                   let detected, shouldDetectLanguage {
+            case .presentation(let prepared):
+                if let ticket { do { try state.acceptEdit(ticket, value: prepared.value); pendingEdit = nil } catch { return } }
+                if window.surface.present(prepared, for: generation),
+                   let detected = prepared.detectedLanguage, shouldDetectLanguage {
                     language = detected; window.selectLanguage(detected)
                 }
             case .invalid(let failure):
@@ -226,6 +227,7 @@ enum RemoteTextSaveBoundary {
         refresh()
     }
     func refresh() {
+        if !closed, closingWork == nil, window.surface.needsLineChangePreparation(for: state.savedTextBaseline) { present() }
         let unavailable = isBusy || closingWork != nil
         let explanation = remoteBodyHandoffAttempted
             ? "This is local recovery text. Save a Text Copy to keep it. Remote Save and retained-version reads are unavailable from this window."

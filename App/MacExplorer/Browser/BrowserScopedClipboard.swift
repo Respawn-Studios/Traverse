@@ -12,6 +12,7 @@ import AppKit
     private(set) weak var sftpOwner: SFTPTabController?
     private(set) weak var smbOwner: SMBTabController?
     private(set) weak var archiveOwner: ArchiveTabController?
+    private(set) weak var archiveWindowOwner: ArchiveWindowClipboard?
 
     init(owner: SFTPTabController, source: SFTPClipboardSource, operation: TransferClipboardFeedback.Intent = .move) {
         sftpOwner = owner; self.source = .sftp(source); self.operation = operation
@@ -25,6 +26,13 @@ import AppKit
     init(owner: ArchiveTabController, source: TARClipboardSource, operation: TransferClipboardFeedback.Intent) {
         archiveOwner = owner; self.source = .tar(source); self.operation = operation
     }
+    init(owner: ArchiveWindowClipboard, source: ZIPClipboardSource, operation: TransferClipboardFeedback.Intent) {
+        archiveWindowOwner = owner; self.source = .zip(source); self.operation = operation
+    }
+    init(owner: ArchiveWindowClipboard, source: TARClipboardSource, operation: TransferClipboardFeedback.Intent) {
+        archiveWindowOwner = owner; self.source = .tar(source); self.operation = operation
+    }
+    var isArchive: Bool { switch source { case .zip, .tar: true; case .sftp, .smb: false } }
 
     var isAlive: Bool {
         switch source {
@@ -32,8 +40,8 @@ import AppKit
             return sftpOwner.map { !$0.isClosing && $0.connectionID == cut.connectionID && $0.session.latest.failure == nil } == true
         case .smb(let cut):
             return smbOwner.map { !$0.isClosing && $0.connectionID == cut.connectionID && $0.session.latest.failure == nil } == true
-        case .zip(let source): return archiveOwner?.retainsClipboard(source) == true
-        case .tar(let source): return archiveOwner?.retainsClipboard(source) == true
+        case .zip(let source): return archiveOwner?.retainsClipboard(source) == true || archiveWindowOwner?.retains(source) == true
+        case .tar(let source): return archiveOwner?.retainsClipboard(source) == true || archiveWindowOwner?.retains(source) == true
         }
     }
     var display: TransferClipboardFeedback.ScopedItems {
@@ -57,8 +65,10 @@ import AppKit
             return now.connectionID == cut.connectionID && now.directory == cut.directory && now.row == cut.row
         case .zip(let source):
             return browser.currentArchive === archiveOwner && archiveOwner?.matchesClipboardSelection(source) == true
+                || archiveWindowOwner?.matches(source, in: browser) == true
         case .tar(let source):
             return browser.currentArchive === archiveOwner && archiveOwner?.matchesClipboardSelection(source) == true
+                || archiveWindowOwner?.matches(source, in: browser) == true
         }
     }
 
@@ -93,25 +103,25 @@ import AppKit
                   SMBRemoteActionFeature.movesAvailable else { return false }
             return !cut.row.isDirectory || !destination.components.starts(with: cut.directory + [cut.row.name])
         case .zip(let source):
-            if browser.currentArchive === archiveOwner {
-                return archiveOwner?.canPasteMembers(source, operation: operation) == true
+            if let archiveOwner, browser.currentArchive === archiveOwner {
+                return archiveOwner.canPasteMembers(source, operation: operation)
             }
             return operation == .copy && browser.canPasteArchiveIntoLocalFolder
-                && archiveOwner?.canExportClipboard(source) == true
+                && (archiveOwner?.canExportClipboard(source) == true || archiveWindowOwner?.canExport(source) == true)
         case .tar(let source):
-            if browser.currentArchive === archiveOwner {
-                return archiveOwner?.canPasteMembers(source, operation: operation) == true
+            if let archiveOwner, browser.currentArchive === archiveOwner {
+                return archiveOwner.canPasteMembers(source, operation: operation)
             }
             return operation == .copy && browser.canPasteArchiveIntoLocalFolder
-                && archiveOwner?.canExportClipboard(source) == true
+                && (archiveOwner?.canExportClipboard(source) == true || archiveWindowOwner?.canExport(source) == true)
         }
     }
 
     var pasteExplanation: String {
         switch source {
-        case .zip: operation == .move ? "Paste the cut items in another folder in this ZIP tab."
+        case .zip: operation == .move ? "Paste the cut items in another folder in this ZIP archive."
             : "Paste the copied items in this ZIP or an available local folder."
-        case .tar: operation == .move ? "Paste the cut items in another folder in this TAR tab."
+        case .tar: operation == .move ? "Paste the cut items in another folder in this TAR archive."
             : "Paste the copied items in this TAR or an available local folder."
         case .sftp, .smb: "Paste this item in a folder in its original server tab."
         }
@@ -174,7 +184,7 @@ import AppKit
         if confirmed {
             // Any archive rewrite retires the sealed catalog that supplied
             // these item IDs. Copy can be repeated only from the new catalog.
-            if intent.operation == .move || intent.archiveOwner != nil { state.clear() }
+            if intent.operation == .move || intent.isArchive { state.clear() }
         } else if !canRetain { state.clear() }
     }
 }
@@ -339,11 +349,15 @@ import AppKit
             if let owner = context.intent.archiveOwner {
                 if currentArchive === owner { owner.pasteMembers(source, context: context) }
                 else { owner.exportClipboard(source, context: context, to: self) }
+            } else if let owner = context.intent.archiveWindowOwner {
+                owner.export(source, context: context, to: self)
             }
         case .tar(let source):
             if let owner = context.intent.archiveOwner {
                 if currentArchive === owner { owner.pasteMembers(source, context: context) }
                 else { owner.exportClipboard(source, context: context, to: self) }
+            } else if let owner = context.intent.archiveWindowOwner {
+                owner.export(source, context: context, to: self)
             }
         }
         return true

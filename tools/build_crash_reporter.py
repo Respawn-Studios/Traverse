@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shlex
 import shutil
 import stat
 import subprocess
@@ -262,6 +263,11 @@ def embed() -> None:
         if signing_env.get("HOME") == str(REPO / ".build/xcode-user"):
             signing_env.pop("HOME", None)
         command = ["/usr/bin/codesign", "--force", "--sign", identity]
+        # Local qualification explicitly disables timestamping for every
+        # bundled binary. Keep the framework consistent with that request;
+        # production builds retain codesign's normal timestamp behavior.
+        if "--timestamp=none" in shlex.split(os.environ.get("OTHER_CODE_SIGN_FLAGS", "")):
+            command.append("--timestamp=none")
         if os.environ.get("ENABLE_HARDENED_RUNTIME") == "YES":
             command.extend(["--options", "runtime"])
         subprocess.run([*command, str(destination)], env=signing_env, check=True, timeout=45)

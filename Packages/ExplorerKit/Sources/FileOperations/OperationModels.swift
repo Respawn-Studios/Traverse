@@ -49,7 +49,7 @@ public enum FileOperationFailure: String, Error, Sendable {
     case copyContentMismatch, copyMetadataMismatch, copyOwnershipMismatch
     case operationHistoryProtected, protectedLocation
     case undoEndedByCheckpoint, textUndoCapacityReached, legacyTextHistoryRequiresReview
-    case crossVolumeMoveUnsupported, unsupported, unavailable, outOfSpace, quotaExceeded, ioFailure, recoveryUncertain
+    case crossVolumeMoveUnsupported, fatTransferDestinationUnsupported, unsupported, unavailable, outOfSpace, quotaExceeded, ioFailure, recoveryUncertain
 
     public var userMessage: String {
         switch self {
@@ -65,6 +65,7 @@ public enum FileOperationFailure: String, Error, Sendable {
         case .accessDenied: "Access was denied."
         case .notFound: "An item or location could not be found."
         case .crossVolumeMoveUnsupported: "Moving between volumes is not supported yet. The source was preserved."
+        case .fatTransferDestinationUnsupported: "Traverse cannot complete this verified transfer on a FAT-formatted destination. Choose another destination."
         case .undoEndedByCheckpoint: "File Undo for this version ended when a new Undo section was started."
         case .textUndoCapacityReached: "File Undo cannot add another change in this Undo section. Starting a new section ends its remaining file Undo."
         case .legacyTextHistoryRequiresReview: "This document has older text history whose volume identity needs review before another Save. Its saved versions remain protected."

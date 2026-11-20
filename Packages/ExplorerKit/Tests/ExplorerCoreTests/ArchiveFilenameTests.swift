@@ -24,6 +24,11 @@ struct ArchiveFilenameTests {
         #expect(ArchiveFilename("Code.jar")?.kind == .jar)
         #expect(ArchiveFilename("Code.tar")?.kind == .tar)
         #expect(ArchiveFilename("Code.jar")?.kind.isTAR == false)
+        for name in ["Reader.EPUB", "Reader.cbz", "Reader.WhL"] {
+            #expect(ArchiveFilename(name)?.kind == .zipPackage)
+            #expect(ArchiveFilename(name)?.kind.isTAR == false)
+            #expect(ArchiveFilename.removingExtension(from: name) == "Reader")
+        }
         for name in ["", "README", "archive.tar.gz.part", "data.gz", "data.bz2", "data.xz", "data.zst", "zip"] {
             #expect(ArchiveFilename(name) == nil)
             #expect(ArchiveFilename.removingExtension(from: name) == nil)

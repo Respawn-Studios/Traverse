@@ -53,6 +53,28 @@ public final class ZIPArchiveReader: @unchecked Sendable {
                 previewLimits: previewLimits, check: cancellation.check, probe: probe)
         }
     }
+
+    /// Review two distinct UTF-8 members from one observed directory without
+    /// extracting either member or granting archive edit authority.
+    public func readTextComparison(left: ZIPTextPreviewSelection, right: ZIPTextPreviewSelection,
+                                   retaining lifetime: (any Sendable)? = nil) async throws -> TextComparisonDocuments {
+        guard left.binding.source == right.binding.source, left.binding.stamp == right.binding.stamp,
+              left.directoryWitness.digest == right.directoryWitness.digest,
+              left.directoryWitness.offset == right.directoryWitness.offset,
+              left.directoryWitness.bytes == right.directoryWitness.bytes,
+              left.recordOffset != right.recordOffset else { throw ZIPTextPreviewFailure.unsupported }
+        return try await perform(retaining: lifetime) { [self] cancellation in
+            func checkedText(_ selection: ZIPTextPreviewSelection) throws -> TextDocumentValue {
+                try ZIPTextPreviewReader.readChecked(selection, excluding: excludedRoots, limits: limits,
+                    previewLimits: previewLimits, check: cancellation.check, probe: probe) { bytes, _, check in
+                    try check()
+                    _ = try ZIPTextPreviewReader.validatedText(bytes)
+                    return try .original(bytes)
+                }
+            }
+            return .init(left: try checkedText(left), right: try checkedText(right))
+        }
+    }
     /// Explicit selected-member edit admission retains the exact decoded byte
     /// sequence and its source witness. Browsing and Preview do not call this.
     public func openTextForEdit(_ selection: ZIPTextPreviewSelection,

@@ -57,19 +57,31 @@ final class StorageBreakdownChartModel: ObservableObject {
     // Only the bounded root folder breakdown is reused across group changes.
     // A new read view revokes this cache along with Application Layouts.
     private var folderRoots: [AnalysisByteMetric: StoredAnalysisBreakdown] = [:]
-    private var request: Task<Void, Never>?
-    private enum Intent {
+    private enum Intent: Sendable {
         case breakdown(StoredAnalysisDrillTarget, title: String, replace: Bool)
         case composition(StoredAnalysisDrillTarget, title: String, replace: Bool)
         case explainOther(folder: UInt64, level: UUID)
         case applicationLayouts
         case purpose(StoredPurposeJourneyTarget, title: String, replace: Bool)
+
+        var usesSizeMetric: Bool {
+            switch self {
+            case .breakdown, .composition, .purpose: true
+            case .explainOther, .applicationLayouts: false
+            }
+        }
     }
+    private struct Worker: Sendable {
+        let generation: UUID
+        let intent: Intent
+        let task: Task<Void, Never>
+    }
+    private var worker: Worker?
     private var pending: Intent?
     var current: Level? { levels.last }
     var parent: Level? { levels.count > 1 ? levels[levels.count - 2] : nil }
     var scopeIdentity: UUID? { viewID }
-    deinit { request?.cancel() }
+    deinit { worker?.task.cancel() }
 
     func configure(_ result: StorageAnalysisResult?, metric: AnalysisByteMetric = .dataLogical) {
         configureReadView(result, liveLocationResult: result, metric: metric)
@@ -96,17 +108,18 @@ final class StorageBreakdownChartModel: ObservableObject {
     func reset() {
         cancelLocationAction()
         selectedPurposeLocationID = nil
-        generation = UUID(); pending = nil; request?.cancel()
+        generation = UUID(); pending = nil; worker?.task.cancel()
         levels = []; loading = false; message = ""
     }
     func close() { reset(); result = nil; liveLocationResult = nil; viewID = nil; resultID = nil; canBrowse = false; canShowApplicationLayouts = false; canUsePurposeJourney = false; applicationLayouts = nil; folderRoots = [:]; knownTrashes = [:]; onLocationAction = nil; onCancelLocationAction = nil }
     /// A cancelled task may not yet have entered the result's reader queue.
     /// Wait for this owner before interpreting a zero shared reader count.
-    func waitUntilQueriesDrained() async { await request?.value }
+    func waitUntilQueriesDrained() async {
+        while let task = worker?.task { await task.value }
+    }
     func loadApplicationLayouts() {
         guard canShowApplicationLayouts, applicationLayouts == nil else { return }
-        generation = UUID(); pending = .applicationLayouts
-        loading = true; message = ""; request?.cancel(); pump()
+        enqueue(.applicationLayouts)
     }
     func openRootFolder(title: String) {
         guard canBrowse, result != nil else { return }
@@ -119,11 +132,10 @@ final class StorageBreakdownChartModel: ObservableObject {
     }
     func open(_ target: StoredAnalysisDrillTarget, title: String) {
         guard levels.count < 16 else { message = "Use the folder browser below to explore deeper."; return }
-        enqueue(target, title: title, replace: false)
+        enqueue(.breakdown(target, title: title, replace: false))
     }
     func openProject(_ target: StoredAnalysisDrillTarget, title: String) {
-        generation = UUID(); pending = .composition(target, title: title, replace: false)
-        loading = true; message = ""; request?.cancel(); pump()
+        enqueue(.composition(target, title: title, replace: false))
     }
     func openPurpose(_ target: StoredPurposeJourneyTarget, title: String) {
         guard canUsePurposeJourney, !loading, !locationActionRunning else { return }
@@ -136,12 +148,11 @@ final class StorageBreakdownChartModel: ObservableObject {
     }
     private func enqueuePurpose(_ target: StoredPurposeJourneyTarget, title: String, replace: Bool) {
         selectedPurposeLocationID = nil
-        generation = UUID(); pending = .purpose(target, title: title, replace: replace)
-        loading = true; message = ""; request?.cancel(); pump()
+        enqueue(.purpose(target, title: title, replace: replace))
     }
     func browseRecordedProjectFolders() {
         guard let current, current.composition != nil, let target = current.target else { return }
-        enqueue(target, title: current.title, replace: true)
+        enqueue(.breakdown(target, title: current.title, replace: true))
     }
     func back() {
         returnToLevelCount(max(0, levels.count - 1))
@@ -150,21 +161,25 @@ final class StorageBreakdownChartModel: ObservableObject {
     /// Cached levels retain their original stored targets and query ownership.
     func returnToLevelCount(_ count: Int) {
         guard count >= 0 && count <= levels.count && (count < levels.count || count == 0) else { return }
-        cancelLocationAction(); selectedPurposeLocationID = nil; generation = UUID(); pending = nil; request?.cancel(); loading = false
+        cancelLocationAction(); selectedPurposeLocationID = nil; generation = UUID(); pending = nil; worker?.task.cancel(); loading = false
         levels = Array(levels.prefix(count))
         if let level = current, level.value.rankingMetric != metric { reload(level) }
     }
     func setMetric(_ value: AnalysisByteMetric) {
         guard metric != value else { return }
         metric = value
-        if let level = current { reload(level) }
+        // Keep the latest selected drill while its catalog read is in flight.
+        // An older worker can still be draining after Back or a group change.
+        let latest = pending ?? (worker?.generation == generation ? worker?.intent : nil)
+        if loading, let latest, latest.usesSizeMetric {
+            enqueue(latest)
+        } else if let level = current { reload(level) }
     }
     private func reload(_ level: Level) {
         if let target = level.purposeTarget { enqueuePurpose(target, title: level.title, replace: true); return }
         guard let target = level.target else { return }
-        guard level.composition != nil else { enqueue(target, title: level.title, replace: true); return }
-        generation = UUID(); pending = .composition(target, title: level.title, replace: true)
-        loading = true; message = ""; request?.cancel(); pump()
+        if level.composition == nil { enqueue(.breakdown(target, title: level.title, replace: true)) }
+        else { enqueue(.composition(target, title: level.title, replace: true)) }
     }
     var canExplainOther: Bool {
         if case .filtered(_, .fileTypes, 0) = current?.target { return true }
@@ -173,12 +188,11 @@ final class StorageBreakdownChartModel: ObservableObject {
     func explainOther() {
         guard !loading, let current, current.otherExplanation == nil,
               case .filtered(let folder, .fileTypes, 0) = current.target else { return }
-        generation = UUID(); pending = .explainOther(folder: folder, level: current.id)
-        loading = true; message = ""; request?.cancel(); pump()
+        enqueue(.explainOther(folder: folder, level: current.id))
     }
-    private func enqueue(_ target: StoredAnalysisDrillTarget, title: String, replace: Bool) {
-        generation = UUID(); pending = .breakdown(target, title: title, replace: replace); loading = true; message = ""
-        request?.cancel(); pump()
+    private func enqueue(_ intent: Intent) {
+        generation = UUID(); pending = intent; loading = true; message = ""
+        worker?.task.cancel(); pump()
     }
     var visiblePurposeLocations: [StoredPurposeLocation] {
         let removed = Set(knownTrashes.values)
@@ -219,13 +233,13 @@ final class StorageBreakdownChartModel: ObservableObject {
     }
     func recordUndo(recordID: UUID) { knownTrashes.removeValue(forKey: recordID) }
     private func pump() {
-        guard request == nil, let pending else { return }
+        guard worker == nil, let pending else { return }
         self.pending = nil
         guard let result else {
             loading = false; canBrowse = false; message = "The stored result is no longer available. Analyze Again to refresh it."; return
         }
         let token = generation, metric = metric
-        request = Task { [weak self] in
+        let task = Task { [weak self] in
             do {
                 try Task.checkCancellation()
                 switch pending {
@@ -274,7 +288,8 @@ final class StorageBreakdownChartModel: ObservableObject {
                     self.message = (error as? StorageScanFailure) == .busy ? "Storage details are busy. Select this section again." : "This breakdown is unavailable. Analyze Again to refresh it."
                 }
             }
-            guard let self else { return }; self.request = nil; self.pump()
+            guard let self else { return }; self.worker = nil; self.pump()
         }
+        worker = .init(generation: token, intent: pending, task: task)
     }
 }

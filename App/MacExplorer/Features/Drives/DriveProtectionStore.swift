@@ -10,6 +10,9 @@ struct DriveProtectionLibrary: Codable, Equatable, Sendable {
     var version = 1
     var revision = UUID()
     var rules: [Rule] = []
+    /// A missing saved document has no revision. Give each read the same
+    /// in-memory identity so a fresh launch check can compare absence exactly.
+    static let absent = Self(revision: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
     enum Failure: Error { case invalid, stale, unavailable }
     func validate() throws {
         guard version == 1, rules.count <= 256, Set(rules.map(\.id)).count == rules.count,
@@ -53,7 +56,21 @@ final class DriveProtectionStore: @unchecked Sendable {
             if self.memoryOnly { return Snapshot(library: self.memory, bytes: nil) }
             guard let file = self.file else { throw DriveProtectionLibrary.Failure.unavailable }
             let bytes = try file.read(expectDocumentInExistingDirectory: true)
-            return Snapshot(library: try bytes.map(self.decode) ?? DriveProtectionLibrary(), bytes: bytes)
+            return Snapshot(library: try bytes.map(self.decode) ?? .absent, bytes: bytes)
+        }
+    }
+    /// Final off-main launch check for the exact policy reviewed before a
+    /// destructive native request. The APFS tool's utility queue calls this;
+    /// ordinary UI/review code continues to use the asynchronous load above.
+    func matchesSaved(_ expected: Snapshot) -> Bool {
+        queue.sync {
+            if memoryOnly { return expected.bytes == nil && memory == expected.library }
+            guard let file else { return false }
+            do {
+                let bytes = try file.read(expectDocumentInExistingDirectory: true)
+                guard bytes == expected.bytes else { return false }
+                return (try bytes.map(decode) ?? .absent) == expected.library
+            } catch { return false }
         }
     }
     func set(_ id: UUID, name: String, level: VolumeProtectionLevel, expected: Snapshot) async throws -> Snapshot {

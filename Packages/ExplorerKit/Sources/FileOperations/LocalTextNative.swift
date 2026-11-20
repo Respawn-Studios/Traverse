@@ -58,13 +58,18 @@ internal func textDocumentID(_ fd: Int32) throws -> UInt32 {
 }
 
 internal func textReadBytes(_ fd: Int32, cancellation: OperationCancellation) throws -> Data {
+    try boundedRegularFileBytes(fd, maximumBytes: TextDocumentValue.maximumBytes, checkCancellation: cancellation.check)
+}
+
+package func boundedRegularFileBytes(_ fd: Int32, maximumBytes: Int, checkCancellation: () throws -> Void) throws -> Data {
+    try checkCancellation()
     let before = try EntrySnapshot(fd: fd)
-    guard before.type == S_IFREG, before.size >= 0, before.size <= 1_048_576 else { throw FileOperationFailure.unsupported }
+    guard before.type == S_IFREG, before.size >= 0, before.size <= maximumBytes else { throw FileOperationFailure.unsupported }
     var bytes = Data(count: Int(before.size))
     try bytes.withUnsafeMutableBytes { buffer in
         var offset = 0
         while offset < buffer.count {
-            try cancellation.check()
+            try checkCancellation()
             let count = pread(fd, buffer.baseAddress!.advanced(by: offset), min(16_384, buffer.count - offset), off_t(offset))
             if count < 0 && errno == EINTR { continue }
             guard count > 0 else { throw FileOperationFailure.sourceChanged }; offset += count
@@ -96,7 +101,7 @@ internal final class TextPinnedFileV2 {
     let volumeBinding: PersistentVolumeBinding
     let witness: RevisionWitness
     let bytes: Data
-    init(_ url: URL, cancellation: OperationCancellation = .init()) throws {
+    init(_ url: URL, cancellation: OperationCancellation = .init(), matching selection: LocalTextOpenSelection? = nil) throws {
         guard url.isFileURL, url == url.standardizedFileURL, url.query == nil, url.fragment == nil, url.baseURL == nil,
               url.path != "/", url.resolvingSymlinksInPath() == url else { throw FileOperationFailure.unsupported }
         try validateName(url.lastPathComponent)
@@ -106,6 +111,7 @@ internal final class TextPinnedFileV2 {
         guard let native = try NativeRenameVolume.qualified(in: parent),
               let binding = try PersistentVolumeBinding.qualified(in: parent),
               native.device == binding.device, native.uuid == binding.uuid else { throw FileOperationFailure.unsupported }
+        if let selection { try Self.validate(selection, parent: parent, name: url.lastPathComponent) }
         try preflightPrivateTextCopyEntry(parent: parent.fd, name: url.lastPathComponent)
         let resources = try url.resourceValues(forKeys: [.isAliasFileKey, .isUbiquitousItemKey])
         guard resources.isAliasFile == false, resources.isUbiquitousItem != true else { throw FileOperationFailure.unsupported }
@@ -116,8 +122,11 @@ internal final class TextPinnedFileV2 {
             var filesystem = statfs(); guard fstatfs(descriptor, &filesystem) == 0 else { throw posixFailure() }
             let kind = withUnsafeBytes(of: filesystem.f_fstypename) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
             guard kind == "apfs", filesystem.f_flags & UInt32(MNT_LOCAL | MNT_RDONLY) == UInt32(MNT_LOCAL) else { throw FileOperationFailure.unsupported }
-            guard try EntrySnapshot(parent: parent.fd, name: url.lastPathComponent) == EntrySnapshot(fd: descriptor),
-                  try EntrySnapshot(fd: descriptor).device == binding.device else { throw FileOperationFailure.sourceChanged }
+            let opened = try EntrySnapshot(fd: descriptor)
+            guard try EntrySnapshot(parent: parent.fd, name: url.lastPathComponent) == opened,
+                  opened.device == binding.device, selection?.file == nil || selection?.file == opened else {
+                throw FileOperationFailure.sourceChanged
+            }
             let observed = try textProjection(descriptor, volume: volume, cancellation: cancellation)
             guard observed.links == 1 else { throw FileOperationFailure.sourceChanged }
             bytes = try textReadBytes(descriptor, cancellation: cancellation); witness = observed
@@ -127,6 +136,20 @@ internal final class TextPinnedFileV2 {
         } catch { close(descriptor); throw error }
     }
     deinit { close(fd) }
+
+    private static func validate(_ selection: LocalTextOpenSelection, parent: DirectoryAnchor, name: String) throws {
+        guard parent.identity.sameObject(as: selection.parent),
+              let observed = try NativeRenameEntry.optional(parent: parent, name: name),
+              observed.identity == selection.file, observed.nameBytes.elementsEqual(name.utf8) else {
+            throw FileOperationFailure.sourceChanged
+        }
+    }
+
+    func validateOpeningSelection(_ selection: LocalTextOpenSelection) throws {
+        try Self.validate(selection, parent: parent, name: url.lastPathComponent)
+        guard try EntrySnapshot(fd: fd) == selection.file else { throw FileOperationFailure.sourceChanged }
+    }
+
     func validate(_ expected: RevisionWitness? = nil, cancellation: OperationCancellation = .init()) throws {
         try parent.validate()
         guard try PersistentVolumeBinding.qualified(in: parent) == volumeBinding else { throw FileOperationFailure.sourceChanged }

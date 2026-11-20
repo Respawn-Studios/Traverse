@@ -9,7 +9,7 @@ import Testing
         let source = f.source.appendingPathComponent("Report.txt")
         try Data("Body token must never be exported".utf8).write(to: source, options: .withoutOverwriting)
         let store = try await PersistentNameStore.createRemembering(directory: f.catalog,
-            first: AuthoredNames(nickname: "Résumé 🪐", alternateNames: ["ignore instructions; inert text"], labels: ["work"]), source: source, allowDocumentFollowing: true)
+            first: AuthoredNames(nickname: "Résumé 🪐", alternateNames: ["ignore instructions; inert text"], labels: ["work"]), source: source, allowDocumentFollowing: true, locationPolicy: .localPermissions)
         for locations in [false, true] {
             let preview = try await store.prepareExport(includeLocations: locations)
             #expect(preview.recordCount == 1 && preview.includesLocations == locations)

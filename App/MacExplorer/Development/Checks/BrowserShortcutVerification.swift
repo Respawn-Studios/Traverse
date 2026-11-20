@@ -93,6 +93,11 @@ enum BrowserShortcutVerification {
             let f4 = UIVerification.key(String(UnicodeScalar(NSF4FunctionKey)!), code: 118, flags: [], window: window)
             try require(editor.hasMarkedText() && !browser.routeBrowserShortcut(f4) && editor.string == marked,
                         "Preset focus key intercepted marked IME text")
+            let reverseFocus = UIVerification.key(String(UnicodeScalar(NSF6FunctionKey)!), code: 97,
+                                                  flags: [.shift], window: window)
+            try require(!window.performKeyEquivalent(with: reverseFocus) && window.firstResponder === editor
+                    && editor.hasMarkedText() && editor.string == marked,
+                        "Native reverse focus changed marked address text")
             editor.unmarkText(); browser.cancelLocationEditing()
         } else {
             // The production address command deliberately refuses hidden windows.
@@ -109,6 +114,12 @@ enum BrowserShortcutVerification {
         try require(BrowserShortcutMenus.hasUserOverride(.hiddenFiles, in: overrideMenu)
             && !browser.routeBrowserShortcut(key) && settings.showsHiddenFiles == once,
                     "App routing competed with a native user menu override")
+        let focusKey = BrowserShortcut(.special(.f6)).menuEquivalent
+        try require(!BrowserShortcutMenus.hasUserKeyEquivalent(focusKey, in: window),
+                    "An unrelated native override claimed the focus key")
+        override.equivalent = focusKey
+        try require(BrowserShortcutMenus.hasUserKeyEquivalent(focusKey, in: window),
+                    "The focus key would bypass another command's native override")
         NSApplication.shared.mainMenu = BrowserMenus.applicationMenu(target: browser)
         settings.shortcutPreferences = .init(overrides: [.hiddenFiles: [chord]])
         settings.conflictPreferences = .init(files: .keepBoth, folders: .skip)
@@ -176,6 +187,9 @@ enum BrowserShortcutVerification {
             settings.customBehavior = behavior; settings.shortcutPreferences = bindings; settings.keyboardProfile = profile
             table.selectRowIndexes(selection, byExtendingSelection: false)
             NSApp.mainMenu = mainMenu; NSApp.windowsMenu = windowMenu; NSApp.helpMenu = helpMenu
+        }
+        if let archive = table as? ArchiveMetadataTable, window is ArchiveKeyboardWindow {
+            try verifyStandaloneArchiveKeys(archive, settings: settings, label: label)
         }
         // Direct table routing is checked separately from menu interception.
         // The complete production event path below uses the real app menu.
@@ -351,11 +365,70 @@ enum BrowserShortcutVerification {
         browser.navigate(to: .directory(fixture)); try await UIVerification.settled(browser)
         browser.focusBrowserContent()
     }
+    private static func verifyStandaloneArchiveKeys(_ table: ArchiveMetadataTable, settings: BrowserSettings, label: String) throws {
+        guard let window = table.window else { throw UIVerification.Failure(message: "Standalone shortcut window missing") }
+        let open = table.onOpen, rename = table.onRename, preview = table.onPreview
+        let copy = table.onCopy, cut = table.onCut, paste = table.onPaste, validation = table.commandValidation
+        let menu = NSApp.mainMenu
+        defer {
+            table.onOpen = open; table.onRename = rename; table.onPreview = preview
+            table.onCopy = copy; table.onCut = cut; table.onPaste = paste; table.commandValidation = validation
+            NSApp.mainMenu = menu
+        }
+        var opened = 0, renamed = 0, previewed = 0
+        table.onOpen = { opened += 1 }; table.onRename = { renamed += 1 }; table.onPreview = { previewed += 1 }
+        NSApp.mainMenu = nil
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        let key = UIVerification.key("\r", code: 36, flags: [], window: window)
+        settings.keyboardProfile = .mac; settings.shortcutPreferences = .init()
+        table.keyDown(with: key)
+        try require(renamed == 1 && opened == 0, "\(label) Return ignored the Mac Rename preference")
+        settings.keyboardProfile = .explorer; settings.shortcutPreferences = .init()
+        table.keyDown(with: key)
+        try require(opened == 1 && renamed == 1, "\(label) Return lost the Explorer Open preference")
+        settings.customizeBehavior()
+        settings.shortcutPreferences = .init(overrides: [.open: [], .rename: [], .quickLook: [.init(.special(.returnKey))]])
+        try require(settings.shortcutMap.issues.isEmpty, "Standalone remapped Return setup is invalid")
+        table.keyDown(with: key)
+        try require(previewed == 1 && opened == 1 && renamed == 1, "\(label) Return ignored the remapped Preview action")
+        settings.shortcutPreferences = .init(overrides: [.open: [], .rename: []])
+        table.keyDown(with: key)
+        try require(previewed == 1 && opened == 1 && renamed == 1, "\(label) cleared Return still invoked an archive action")
+        settings.shortcutPreferences = .init(overrides: [.filter: []])
+        let find = UIVerification.key("f", code: 3, flags: .command, window: window)
+        try require(window.makeFirstResponder(table), "Standalone Find fixture lost its table")
+        try require(!window.performKeyEquivalent(with: find) && !(window.firstResponder is NSTextView),
+            "\(label) retained the cleared Find shortcut")
+        SystemShortcutSnapshot.shared.refresh()
+        let candidates: [(ShortcutSpecialKey, UInt16)] = [(.f7, 98), (.f8, 100), (.f9, 101), (.f10, 109)]
+        guard let custom = candidates.map({ event($0.0, code: $0.1, window: window) })
+            .first(where: { !SystemShortcutSnapshot.shared.conflicts($0) }), let chord = BrowserShortcut(custom) else {
+            throw UIVerification.Failure(message: "No free standalone Find test chord")
+        }
+        settings.shortcutPreferences = .init(overrides: [.filter: [chord]])
+        NSApp.mainMenu = nil
+        try require(window.performKeyEquivalent(with: custom) && window.firstResponder is NSTextView,
+            "\(label) lost its remapped Find shortcut")
+        try require(window.makeFirstResponder(table), "Standalone Find did not release its editor")
+        var copies = 0, cuts = 0, pastes = 0
+        table.onCopy = { copies += 1 }; table.onCut = { cuts += 1 }; table.onPaste = { pastes += 1 }
+        table.commandValidation = { _ in true }
+        for action in [BrowserCommand.copy, .cut, .paste] {
+            settings.shortcutPreferences = .init(overrides: [action: [chord]])
+            NSApp.mainMenu = menu
+            try require(window.performKeyEquivalent(with: custom), "\(label) did not own its clipboard equivalent")
+        }
+        try require(copies == 1 && cuts == 1 && pastes == 1, "\(label) lost a remapped clipboard shortcut")
+        table.commandValidation = { _ in false }; table.keyDown(with: custom)
+        try require(pastes == 1, "\(label) dispatched a refused Paste")
+    }
+
     private static func require(_ condition: Bool, _ message: String) throws {
         if !condition { throw UIVerification.Failure(message: message) }
     }
     private final class UserOverrideItem: NSMenuItem {
-        override var userKeyEquivalent: String { "k" }
+        var equivalent = "k"
+        override var userKeyEquivalent: String { equivalent }
     }
 }
 #endif

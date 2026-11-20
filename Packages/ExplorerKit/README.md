@@ -25,6 +25,16 @@ FileOperations and app presentation use it without inferring operation support
 from a name. The reader still validates bytes; each mutation keeps its own
 format and protection admission.
 
+`FileOperations/FolderComparison.swift` enumerates local folder metadata and
+retains observations used to validate a selected text diff or missing-file copy.
+`LocalStorage/Git/` handles repository discovery, revision trees, index and file
+history. Its bounded Git commands use a temporary view of the local object
+store. The browser and editor decide when to request file text, then use the
+same data reader for the chosen source. `GitIndexEdit` owns the index lock and
+checks the checkout again at publication. `GitIndexTextChange` checks the exact
+text and line ranges before replacing one block. Use `FolderComparisonTests`
+and `GitRevisionTests` for focused changes.
+
 Matching suites live in `Tests/`; `NameStoreFaultSupport` supports existing storage
 fault tests. New regression tests should live with the affected module and reuse
 its fixtures. Do not create another copied package to test normal changes.
@@ -36,8 +46,8 @@ protocol. TAR has its own explicit format/policy admission; ZIP qualification
 does not authorize it. Reading and explicit extraction remain in the ZIP/TAR
 reader and extraction files, with separate received-data protection policies.
 Archive authoring uses the separately qualified native contracts. Plain and
-prepared gzip/bzip2 TAR member changes are admitted in Development and the
-qualified direct source, but are not in the public 0.2.0 package.
+prepared gzip/bzip2 TAR member changes are available in the direct edition
+starting in 0.3.0.
 `TARMemberMutation` seals the requested change, `TARMutationLayout`
 checks its namespace and limits, and `TARMemberMutationWriter` streams it without
 unpacking an editable tree. `TARMemberHeader` preserves unrelated metadata,

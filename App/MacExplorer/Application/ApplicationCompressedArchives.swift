@@ -82,6 +82,7 @@ enum CompressedTARFeature {
         #endif
         return TARBrowseFeature.available
     }
+    @MainActor static var writable: Bool { TARArchiveEditingFeature.available && available }
 }
 
 /// A deliberate Open includes bounded preparation in the qualified workbench.

@@ -65,17 +65,33 @@ permissions are observations, not proof of current access or object identity.
 | File mutation | Success, conflict/denial and relevant interruption/recovery cases |
 | Distribution | Exact artifact checks and separate installed/update acceptance |
 
-The complete package baseline uses serial execution because some suites share
-process-wide diagnostics and fixtures:
+Choose the smallest check that covers the change. All three levels use the same
+package tests and generated native workflows.
 
 ```sh
-python3 -B tools/dev.py test --serial
+python3 -B tools/dev.py check unit --filter GitRevisionTests
+python3 -B tools/dev.py check section git-index editor-comparison
+python3 -B tools/dev.py check candidate
 ```
 
-Use a focused suite while iterating. Repeat or broaden checks after meaningful
-changes, failures or unresolved concerns. Report device, server, permissions,
-minimum-OS and accessibility coverage only when exercised. Native simulation,
-view caching and actual foreground interaction provide different evidence.
+**Unit** matches a Swift package suite or case. **Section** combines selected
+suites and native journeys in one build. For example, `git-index` and
+`editor-comparison` cover Stage, Unstage and text diffs in one pass.
+**Candidate** runs the complete serial package baseline and generated app
+workflows on one build before packaging.
+Use `--plan` at any level to see the exact commands. Sections are listed by
+`check section --help`.
+
+Use the [native workflow guide](../../tools/NATIVE_WORKFLOWS.md) to run a single
+app journey from a section. Device, server, permission, installed/update and
+minimum-OS checks have separate release scopes. Native simulation, view caching
+and foreground interaction provide different evidence.
+
+Pull requests run native package tests on macOS 15 for Apple Silicon and Intel.
+The hosted Intel macOS 15 job exercises the direct edition's remembered-location
+flow. A separate test attempts to create a read-only scoped bookmark and
+records the known Foundation app-scope key error when it occurs on that runner.
+Other runner jobs also exercise scoped catalog and Move/Undo behavior.
 
 ## Privacy, dependencies and outputs
 

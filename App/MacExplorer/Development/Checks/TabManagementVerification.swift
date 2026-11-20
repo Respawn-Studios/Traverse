@@ -94,8 +94,16 @@ extension UIVerification {
         browser.focusBrowserContent()
         let file = BrowserMenus.menu(.file, target: browser)
         let reopen = BrowserMenus.commandItem(#selector(BrowserViewController.reopenClosedTab(_:)), in: file)
+        let gitActions = file.items.first(where: { $0.identifier == BrowserMenus.gitSectionIdentifier })?.submenu?.items.compactMap(\.action)
         try require(file.items.count <= 36 && file.item(withTitle: "Tabs")?.submenu != nil
-            && file.item(withTitle: "Archives")?.submenu != nil, "File menu exceeds its compact native layout")
+            && file.item(withTitle: "Archives")?.submenu != nil
+            && file.item(withTitle: "Compare")?.submenu?.items.count == 3
+            && gitActions == [BrowserCommand.browseGitWorktrees.selector, BrowserCommand.compareGitRevisions.selector,
+                BrowserCommand.compareGitWorkingFolder.selector,
+                BrowserCommand.reviewStagedChanges.selector, BrowserCommand.gitFolderHistory.selector,
+                BrowserCommand.compareGitFileRevisions.selector, BrowserCommand.compareGitWorkingFile.selector,
+                BrowserCommand.gitFileHistory.selector, BrowserCommand.stageGitFile.selector, BrowserCommand.unstageGitFile.selector],
+            "File menu exceeds its compact native layout or lost a grouped command")
         try require(reopen?.keyEquivalent == "t" && reopen?.keyEquivalentModifierMask == [.command, .shift],
             "Reopen Closed Tab is absent from native command menus")
         try await snapshot(browser.view.window!, to: output.appendingPathComponent("tabs-management.png"))

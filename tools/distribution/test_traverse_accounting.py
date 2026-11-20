@@ -228,6 +228,40 @@ class EditorCacheAccounting(unittest.TestCase):
 
 
 class CrashDependencySymbols(unittest.TestCase):
+    def test_signed_review_refuses_stale_framework_before_compilation(self):
+        import build_crash_reporter as crash
+        from distribution import signed_local_qa as review
+        with TemporaryDirectory(dir=packet.REPO/'.build') as temporary, \
+             mock.patch.object(crash,'verify_prepared',side_effect=RuntimeError('prepared framework stale')), \
+             mock.patch.object(review.subprocess,'Popen') as launch:
+            inputs=mock.Mock();put=mock.Mock()
+            with self.assertRaisesRegex(RuntimeError,'prepared framework stale'):
+                review.build(Path(temporary),'generated',{},'Generated.xcconfig',inputs,mock.Mock(),put,'Generated')
+            inputs.assert_not_called();put.assert_not_called();launch.assert_not_called()
+
+    def test_framework_embed_respects_explicit_local_no_timestamp_only(self):
+        import build_crash_reporter as crash
+        for flags in ('--timestamp=none', '--timestamp', '', '--prefix=local --timestamp=none'):
+            with self.subTest(flags=flags), TemporaryDirectory(dir=packet.REPO/'.build') as temporary:
+                root=Path(temporary)
+                framework=root/'Prepared.framework';framework.mkdir()
+                (framework/'Generated').write_bytes(b'generated framework fixture')
+                target=root/'Generated.app/Contents';target.mkdir(parents=True)
+                env=dict(TARGET_BUILD_DIR=str(target.parent),CONTENTS_FOLDER_PATH='Contents',
+                    CODE_SIGNING_ALLOWED='YES',EXPANDED_CODE_SIGN_IDENTITY='A'*40,
+                    ENABLE_HARDENED_RUNTIME='YES',OTHER_CODE_SIGN_FLAGS=flags)
+                with mock.patch.dict(crash.os.environ,env,clear=True), \
+                     mock.patch.object(crash,'FRAMEWORK',framework), \
+                     mock.patch.object(crash,'verify_prepared',return_value={'framework':{'fixture':True}}), \
+                     mock.patch.object(crash,'snapshot',return_value={'fixture':True}), \
+                     mock.patch.object(crash.subprocess,'run') as run:
+                    crash.embed()
+                signing=run.call_args_list[0].args[0]
+                self.assertEqual('--timestamp=none' in signing,'--timestamp=none' in flags.split())
+                self.assertNotIn('--prefix=local',signing)
+                self.assertIn('runtime',signing)
+                self.assertEqual(run.call_args_list[1].args[0][:3],['/usr/bin/codesign','--verify','--strict'])
+
     def test_stale_generated_notices_stop_before_project_generation(self):
         import sys
         from distribution import traverse

@@ -94,7 +94,7 @@ import FileOperations
             return false
         }
     }
-    private struct Entry { let key: Key; let document: RemoteTextSnapshotController }
+    private struct Entry { let key: Key; let document: NativeTextSnapshotController }
     private var documents: [UUID: Entry] = [:]
     private var pending: [UUID: (key: Key, task: Task<Void, Never>)] = [:]
     private var terminating = false
@@ -156,8 +156,10 @@ import FileOperations
                 guard !Task.isCancelled, !terminating, source.isConnected,
                       ApplicationRemoteTextEditors.shared.permitsSnapshotRead(on: key.connection),
                       !browser.isBrowserSuspended, browser.view.window != nil else { throw CancellationError() }
-                let document = RemoteTextSnapshotController(contents: contents, name: source.name,
-                    connection: key.connection, location: context, settings: settings, retainedCopy: retained, protocolKind: key.protocolKind)
+                let document = NativeTextSnapshotController(contents: contents, filename: source.name, location: context,
+                    status: "Read-only snapshot · " + key.protocolKind.rawValue,
+                    explanation: retained ? "Temporary text data was kept because cleanup could not be confirmed. This window cannot change the server file." : nil,
+                    settings: settings, group: .connection(key.connection))
                 document.didClose = { [weak self] id in self?.documents.removeValue(forKey: id) }
                 documents[document.id] = .init(key: key, document: document)
                 document.show(visible: visible)
@@ -187,7 +189,7 @@ import FileOperations
     }
     func connectionWillClose(_ connection: UUID) {
         for item in pending.values where item.key.connection == connection { item.task.cancel() }
-        for entry in documents.values where entry.key.connection == connection { entry.document.connectionClosed() }
+        for entry in documents.values where entry.key.connection == connection { entry.document.updateStatus("Read-only snapshot · disconnected") }
     }
     func cancelPendingReadsAndDrain(on connection: UUID) async {
         let tasks = pending.values.filter { $0.key.connection == connection }.map(\.task)

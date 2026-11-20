@@ -100,6 +100,49 @@ struct MountScopeTests {
         }
     }
 
+    @Test func formatRequiresBothCurrentNativeStartupMountsOutsideTheImage() throws {
+        let system = entry("/", native: .block(leaf: 61, whole: 60), device: 20)
+        let data = entry("/System/Volumes/Data", native: .block(leaf: 62, whole: 60), device: 21)
+        var fixture = [system.requested: system, data.requested: data]
+        let independent = MountScopeResolver { try #require(fixture[$0]) }
+        try independent.validateStartupStorage(outside: 50)
+        do {
+            try independent.validateStartupStorage(outside: 60)
+            Issue.record("An image group shared with startup System was accepted")
+        } catch VolumeLifecycleFailure.protectedStorage {}
+        for invalid in [entry("/", native: .unresolved), entry("/", local: false), entry("/", type: "other")] {
+            fixture[system.requested] = invalid
+            let reader = MountScopeResolver { try #require(fixture[$0]) }
+            #expect(throws: VolumeLifecycleFailure.self) { try reader.validateStartupStorage(outside: 50) }
+        }
+        fixture[system.requested] = system
+        fixture[data.requested] = entry(data.requested.path, native: .block(leaf: 51, whole: 50))
+        let aliasesData = MountScopeResolver { try #require(fixture[$0]) }
+        do {
+            try aliasesData.validateStartupStorage(outside: 50)
+            Issue.record("An image group shared with startup Data was accepted")
+        } catch VolumeLifecycleFailure.protectedStorage {}
+        fixture[data.requested] = data
+        var dataReads = 0
+        let changed = MountScopeResolver { url in
+            if url == data.requested {
+                dataReads += 1
+                if dataReads > 1 { return entry(url.path, native: .block(leaf: 63, whole: 60), device: 21) }
+            }
+            return try #require(fixture[url])
+        }
+        do {
+            try changed.validateStartupStorage(outside: 50)
+            Issue.record("A changed startup mount was accepted")
+        } catch VolumeLifecycleFailure.changed {}
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["TRAVERSE_OBSERVE_STARTUP_MOUNTS"] == "1"))
+    func nativeStartupMountProtectionResolvesTheExplicitPair() throws {
+        // No selected device, commands, mount changes or printed identities.
+        try VolumeLifecycle.shared.validateStartupStorage(outside: UInt64.max)
+    }
+
     @Test func directoryChildWritesDoNotInvalidateItsIdentityButReplacementDoes() throws {
         // No real device action: this is an owned package-test directory only.
         let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

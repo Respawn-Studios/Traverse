@@ -2,12 +2,12 @@
 /// preparation capability; each consumer still admits its concrete operation.
 public struct ArchiveFilename: Sendable, Hashable {
     public enum Kind: Sendable, Hashable {
-        case zip, jar, tar, tarGzip, tarBzip2, tarXZ, tarZstandard
+        case zip, jar, zipPackage, tar, tarGzip, tarBzip2, tarXZ, tarZstandard
 
         public var isTAR: Bool {
             switch self {
             case .tar, .tarGzip, .tarBzip2, .tarXZ, .tarZstandard: true
-            case .zip, .jar: false
+            case .zip, .jar, .zipPackage: false
             }
         }
     }
@@ -21,7 +21,8 @@ public struct ArchiveFilename: Sendable, Hashable {
         ("tar.bz2", .tarBzip2), ("tbz2", .tarBzip2), ("tbz", .tarBzip2),
         ("tar.xz", .tarXZ), ("txz", .tarXZ),
         ("tar.zst", .tarZstandard), ("tzst", .tarZstandard),
-        ("tar", .tar), ("zip", .zip), ("jar", .jar)
+        ("tar", .tar), ("zip", .zip), ("jar", .jar),
+        ("cbz", .zipPackage), ("epub", .zipPackage), ("whl", .zipPackage)
     ]
 
     public init?(_ filename: String) {

@@ -41,7 +41,7 @@ path = "src/bin/download_worker.rs"
 required-features = ["download-qualification"]
 
 [dependencies]
-russh = { version = "=0.65.1", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "=0.65.2", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = { version = "=3.0.1", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt", "io-util", "net", "sync", "time", "macros"] }
 rand = "=0.10.2"
@@ -49,9 +49,8 @@ bytes = "1"
 zeroize = "=1.9.1"
 ring = "=0.17.14"
 # RSA is used only for public verification and bounded local component
-# preparation. All private signatures use the qualified ring signer; never
-# invoke RustCrypto RSA signing/decryption APIs (RUSTSEC-2023-0071).
-rsa = { version = "=0.10.0-rc.18", default-features = false }
+# preparation. All private signatures still use the ring signer.
+rsa = { version = "=0.10.0", default-features = false }
 sha2 = { version = "=0.11.1", optional = true }
 
 [profile.dev]

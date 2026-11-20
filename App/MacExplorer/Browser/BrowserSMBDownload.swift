@@ -29,9 +29,9 @@ import ExplorerCore
 
 /// Captures one explicit remote observation and a local destination. The SMB
 /// pump owns reading; LocalStorage owns bodies; the existing engine owns writes.
-@MainActor final class BrowserSMBDownload: NSObject {
+@MainActor final class BrowserSMBDownload {
     private weak var browser: BrowserViewController?
-    private var work: Task<Void, Never>?, menu: NSMenu?, chosenPeer: UUID?
+    private var work: Task<Void, Never>?
     private var dragDraft: RemoteDownloadDragOffer?, activeDrag: RemoteDownloadDragOffer?
     private var dragSequence: Int?
     #if DEBUG
@@ -46,7 +46,6 @@ import ExplorerCore
     private(set) var bodyRequestsForQualification = 0
     var didReceiveBytesForQualification: (@Sendable (UInt64) -> Void)?
     #endif
-    private typealias Peer = LocalPaneDestination
     init(browser: BrowserViewController) { self.browser = browser }
     func dragWriter(from owner: SMBTabController, row: Int) -> (any NSPasteboardWriting)? {
         guard RemoteDownloadDrag.smbAvailable, let browser, owner.rows.table.selectedRowIndexes.contains(row),
@@ -79,10 +78,7 @@ import ExplorerCore
               browser.canRunExclusiveFileCommand, browser.view.window?.attachedSheet == nil,
               browser.smbTabs[browser.activeID] === owner, !owner.isClosing, owner.downloads != nil,
               let selection = owner.selectedDownload, browser.recoverableFileOperations != nil else { return false }
-        return !toPane || (selection.proposedLocalName != nil && !peers(browser).isEmpty)
-    }
-    private func peers(_ browser: BrowserViewController) -> [Peer] {
-        LocalPaneDestination.available(from: browser)
+        return !toPane || (selection.proposedLocalName != nil && !LocalPaneDestination.available(from: browser).isEmpty)
     }
     func request(from owner: SMBTabController, toPane: Bool) {
         if owner.sealedBatchDownload != nil, let browser { browser.remoteBatchDownload.request(from: owner, toPane: toPane); return }
@@ -105,18 +101,12 @@ import ExplorerCore
         diagnostic.stage(.destination)
         let tab = browser.activeID, visit = browser.sessionID
         if toPane, selection.proposedLocalName == nil { browser.status.stringValue = "This item needs a local filename. Use Download… to choose one."; diagnostic.finish(.blocked); return false }
-        var peer: Peer?
+        var peer: LocalPaneDestination?
         if toPane {
-            let values = peers(browser)
-            guard let first = values.first else { browser.status.stringValue = "Open a writable local folder in another pane first."; diagnostic.finish(.blocked); return false }
-            if values.count == 1 { peer = first }
-            else {
-                let offered = NSMenu(title: "Download to Pane"); offered.autoenablesItems = false
-                for value in values { let item = offered.addItem(withTitle: value.title, action: #selector(selectPeer(_:)), keyEquivalent: ""); item.target = self; item.representedObject = value.pane }
-                menu = offered; chosenPeer = nil; offered.popUp(positioning: nil, at: .init(x: 24, y: 24), in: owner.rows)
-                peer = values.first { $0.pane == chosenPeer }; menu = nil; chosenPeer = nil
-                guard peer != nil else { diagnostic.finish(.cancelled); return false }
-            }
+            let values = LocalPaneDestination.available(from: browser)
+            guard !values.isEmpty else { browser.status.stringValue = "Open a writable local folder in another pane first."; diagnostic.finish(.blocked); return false }
+            peer = LocalPaneDestination.choose(values, from: browser, in: owner.rows, title: "Download to Pane")
+            guard peer != nil else { diagnostic.finish(.cancelled); return false }
         }
         let preparation = UUID(), coordinator = browser.operationCoordinator
         guard coordinator.beginPreparation(owner: preparation) else { diagnostic.finish(.blocked); return false }
@@ -271,7 +261,6 @@ import ExplorerCore
         browser.operationPreparationTask = work
         return true
     }
-    @objc private func selectPeer(_ item: NSMenuItem) { if menu?.items.contains(where: { $0 === item }) == true { chosenPeer = item.representedObject as? UUID } }
     private static func message(_ error: Error, stopped: Bool) -> String {
         if stopped || error is CancellationError || error as? SMBDirectoryFailure == .stopped || error as? SMBBrowserFailure == .stopped {
             return "Download stopped. No unverified file was published. Connection closure and any retained staging can be reviewed."

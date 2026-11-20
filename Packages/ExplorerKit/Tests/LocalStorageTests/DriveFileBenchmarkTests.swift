@@ -15,6 +15,11 @@ struct DriveFileBenchmarkTests {
         #expect(buckets.first?.lowerBoundMilliseconds == 0 && buckets.first?.upperBoundMilliseconds == 0.125)
         #expect(buckets.last?.lowerBoundMilliseconds == 16 && buckets.last?.upperBoundMilliseconds == nil)
         #expect(latency.medianMilliseconds == 0.5 && latency.p95Milliseconds == 16)
+        let bands = try #require(latency.percentileBands)
+        #expect(bands.map(\.percentile) == [50, 95, 99])
+        #expect(bands.map(\.bucketIndex) == [3, 8, 8])
+        #expect(bands[0].lowerBoundMilliseconds == 0.5 && bands[0].upperBoundMilliseconds == 1)
+        #expect(bands[1].lowerBoundMilliseconds == 16 && bands[1].upperBoundMilliseconds == nil)
         let measured = DriveBenchmarkResult(outcome: .completed, bytesWritten: 40_960, bytesRead: 40_960,
             writeSeconds: 1, readSeconds: 1, flushSeconds: 0.1, workload: .random4K,
             blockBytes: 4096, writeLatency: latency, readLatency: latency)
@@ -24,20 +29,28 @@ struct DriveFileBenchmarkTests {
         #expect(copiedBuckets.map(\.count) == buckets.map(\.count))
         #expect(copiedBuckets.reduce(0) { $0 + $1.count } == copied.writeAndFlush.completedOperations)
         #expect(copied.summary.contains("I/O latency distribution") && copied.summary.contains("[16.000,∞): 1"))
+        #expect(copied.summary.contains("P50 [0.500,1.000) · P95 ≥16.000 · P99 ≥16.000"))
         let copiedJSON = try #require(JSONSerialization.jsonObject(with: Data(copied.json().utf8)) as? [String: Any])
         let write = try #require(copiedJSON["writeAndFlush"] as? [String: Any])
         let ioLatency = try #require(write["ioLatency"] as? [String: Any])
         let encodedBuckets = try #require(ioLatency["distribution"] as? [[String: Any]])
         #expect(copiedJSON["schemaVersion"] as? Int == 3 && encodedBuckets.count == 9)
+        #expect(Set(ioLatency.keys) == Set(["medianMilliseconds", "p95Milliseconds", "p99Milliseconds", "distribution"]))
         #expect(encodedBuckets.compactMap { $0["count"] as? Int }.reduce(0, +) == latency.operations)
         #expect(encodedBuckets.first?["lowerBoundMilliseconds"] as? Double == 0)
         #expect(encodedBuckets.first?["upperBoundMilliseconds"] as? Double == 0.125)
         #expect(encodedBuckets.last?["upperBoundMilliseconds"] is NSNull)
 
         #expect(DriveBenchmarkLatency([]).distribution == nil)
+        #expect(DriveBenchmarkLatency([]).percentileBands == nil)
+        let belowEdge = try #require(DriveBenchmarkLatency([0.0001249]).percentileBands)
+        let atEdge = try #require(DriveBenchmarkLatency([0.000125]).percentileBands)
+        #expect(belowEdge.map(\.bucketIndex) == [0, 0, 0])
+        #expect(atEdge.map(\.bucketIndex) == [1, 1, 1])
         for invalid in [Double.nan, .infinity, -0.001, .greatestFiniteMagnitude] {
             let invalidLatency = DriveBenchmarkLatency([0.001, invalid])
             #expect(invalidLatency.operations == 2 && invalidLatency.distribution == nil)
+            #expect(invalidLatency.percentileBands == nil)
             #expect(invalidLatency.medianMilliseconds.isNaN && invalidLatency.p95Milliseconds.isNaN)
             let result = DriveBenchmarkResult(outcome: .completed, bytesWritten: 8_000_000,
                 writeSeconds: 1, flushSeconds: 1, writeLatency: invalidLatency)
@@ -101,14 +114,34 @@ struct DriveFileBenchmarkTests {
         try Data([7]).write(to: sentinel)
         let reader = DriveFileBenchmark()
         let selected = try await DriveFileBenchmark.prepareDirectory(root)
-        let sequential = await reader.runForTesting(in: selected, bytes: 8 << 20, cacheMode: .normal)
+        let sequentialProgress = BenchmarkProgressCapture()
+        let sequential = await reader.runForTesting(in: selected, bytes: 8 << 20, cacheMode: .normal,
+            progress: sequentialProgress.append)
         #expect(sequential.outcome == .completed && sequential.scratchURL == nil)
         #expect(try FileManager().contentsOfDirectory(atPath: root.path) == ["sentinel"])
-        let random = await reader.runForTesting(in: selected, bytes: 1 << 20, workload: .random4K, cacheMode: .normal)
+        let randomProgress = BenchmarkProgressCapture()
+        let random = await reader.runForTesting(in: selected, bytes: 1 << 20, workload: .random4K, cacheMode: .normal,
+            progress: randomProgress.append)
         #expect(random.outcome == .completed && random.scratchURL == nil)
         #expect(random.preparationBytesWritten == 1 << 20 && random.writeLatency.operations == 256)
         #expect(try FileManager().contentsOfDirectory(atPath: root.path) == ["sentinel"])
         #expect(try Data(contentsOf: sentinel) == Data([7]))
+        for (result, events) in [(sequential, sequentialProgress.events), (random, randomProgress.events)] {
+            let bytes = result.bytesWritten, operations = Int(bytes) / result.blockBytes
+            #expect(result.bytesRead == bytes && result.writeLatency.operations == operations
+                && result.readLatency.operations == operations)
+            #expect(result.writeLatency.distribution?.buckets.reduce(0) { $0 + $1.count } == operations)
+            #expect(result.readLatency.distribution?.buckets.reduce(0) { $0 + $1.count } == operations)
+            var phases: [DriveBenchmarkProgress.Phase] = []
+            for event in events where phases.last != event.phase { phases.append(event.phase) }
+            #expect(phases == [.preparing, .writing, .flushing, .reading, .cleaningUp])
+            for phase in [DriveBenchmarkProgress.Phase.writing, .reading] {
+                let completed = events.filter { $0.phase == phase }.map(\.completedBytes)
+                #expect(completed.first == 0 && completed.contains(Int64(result.blockBytes)) && completed.last == bytes)
+                #expect(completed == completed.sorted() && Set(completed).count == completed.count)
+            }
+            #expect(events.allSatisfy { $0.totalBytes == bytes })
+        }
     }
 
     @Test func copiedReportHasBoundedFiniteSamplesAndNoRecoveryIdentity() throws {
@@ -348,6 +381,13 @@ struct DriveFileBenchmarkTests {
 private func benchmarkScratch(in root: URL) throws -> URL {
     let entries = try FileManager().contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
     return try #require(entries.first { $0.lastPathComponent.hasPrefix(".traverse-benchmark-") })
+}
+
+private final class BenchmarkProgressCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [DriveBenchmarkProgress] = []
+    var events: [DriveBenchmarkProgress] { lock.withLock { values } }
+    func append(_ progress: DriveBenchmarkProgress) { lock.withLock { values.append(progress) } }
 }
 
 /// Installation can race the first callback; retain an early cancellation and

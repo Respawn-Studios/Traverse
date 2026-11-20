@@ -150,8 +150,13 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
 
     func rebind(to browser: BrowserViewController) {
         self.browser = browser
-        // A moved inactive tab must also replace the model's weak extraction
-        // browser without starting a new read. The next presentation does that.
+        // Transfer the presentation owner without reopening the sealed catalog
+        // or granting another compressed preparation to an inactive tab.
+        switch model {
+        case .zip(let model, _): model.rebindEmbedded(source: source, to: browser)
+        case .tar(let model, _): model.rebindEmbedded(source: source, to: browser)
+        case nil: break
+        }
         if isPresented { present(visit, state: snapshot(), from: browser) }
     }
 
@@ -204,8 +209,23 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         case nil: return false
         }
     }
-    private var canPreview: Bool {
+    var canPreview: Bool {
         switch model { case .zip(let m, _): m.canPreviewSelected; case .tar(let m, _): m.canPreviewSelected; case nil: false }
+    }
+    var canCompareSelectedText: Bool {
+        switch model {
+        case .zip(let archive, _): archive.canCompareSelectedText
+        case .tar(let archive, _): archive.canCompareSelectedText
+        case nil: false
+        }
+    }
+    func compareSelectedText(relativeTo parent: NSWindow?) {
+        guard isPresented else { return }
+        switch model {
+        case .zip(let archive, _): archive.compareSelectedText(relativeTo: parent)
+        case .tar(let archive, _): archive.compareSelectedText(relativeTo: parent)
+        case nil: break
+        }
     }
     var canExtract: Bool {
         return switch model { case .zip(let m, _): m.canExtractWhole; case .tar(let m, _): m.canExtract; case nil: false }
@@ -403,7 +423,8 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
             item.target = self; actions.menu?.addItem(item)
         }
         actions.menu?.addItem(.separator())
-        for (title, action) in [("Preview Text", #selector(previewText(_:))), ("Preview as Hex", #selector(previewHex(_:)))] {
+        for (title, action) in [("Preview Text", #selector(previewText(_:))), ("Preview as Hex", #selector(previewHex(_:))),
+                                ("Compare Text Files…", #selector(compareText(_:)))] {
             let item=NSMenuItem(title:title,action:action,keyEquivalent:"");item.target=self;actions.menu?.addItem(item)
         }
         if format == .zip && ZIPTextEditorFeature.available || format == .tar && allowsOriginalMutation {
@@ -647,22 +668,6 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
 
     private func shortcut(_ event: NSEvent) -> Bool {
         guard isPresented, let browser else { return false }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if [36, 76].contains(event.keyCode), flags.intersection([.command, .control, .option]).isEmpty {
-            openSelection(); return true
-        }
-        if event.keyCode == 49, flags.intersection([.command, .control, .option]).isEmpty {
-            switch model {
-            case .zip(let m, _): m.previewSelected()
-            case .tar(let m, _): m.previewSelected()
-            case nil: break
-            }
-            return true
-        }
-        if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "f" { browser.focusFilter(nil); return true }
-        if flags.contains(.option), event.keyCode == 123 { browser.goBack(nil); return true }
-        if flags.contains(.option), event.keyCode == 124 { browser.goForward(nil); return true }
-        if flags.contains(.command), event.keyCode == 126 { browser.goUp(nil); return true }
         return browser.routeBrowserShortcut(event)
     }
 
@@ -744,6 +749,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     func stop() {
         explicitPreparationPresentation = nil
         opening?.cancel(); addressWork?.cancel()
+        (table as? ArchiveMetadataTable)?.cancelNameSelection()
         switch model { case .zip(let m, _): m.stop(); case .tar(let m, _): m.stop(); case nil: break }
     }
     func suspend() { stop(); switch model { case .zip(let m, _): m.prepareForVolumeQuiescence(); case .tar(let m, _): m.suspend(); case nil: break } }
@@ -771,6 +777,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
                 rows.isCut = nil
                 rows.table.onCut = nil; rows.table.onCopy = nil; rows.table.onPaste = nil
                 rows.table.onRename = nil; rows.table.nameClickRenameEnabled = nil
+                rows.table.retireNameSelection()
                 rows.table.marquee?.cancel(restore: false); rows.table.marquee = nil
                 await m.closeAndDrain()
             case .tar(let m, let rows): rows.embeddedShortcut = nil; rows.retire(); await m.closeAndDrain()
@@ -799,7 +806,12 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
     }
     @objc private func extractSelected(_ sender: Any?) { switch model { case .zip(let m, _): m.reviewExtraction(m.selection); case .tar(let m, _): m.extract(selected: true); case nil: break } }
     @objc private func extractAll(_ sender: Any?) { switch model { case .zip(let m, _): m.extract(); case .tar(let m, _): m.extract(selected: false); case nil: break } }
-    @objc private func previewText(_ sender:Any?) {switch model{case .zip(let m,_):m.previewSelected();case .tar(let m,_):m.previewSelected();case nil:break}}
+    func previewSelection() {
+        guard isPresented else { return }
+        switch model { case .zip(let model, _): model.previewSelected(); case .tar(let model, _): model.previewSelected(); case nil: break }
+    }
+    @objc private func previewText(_ sender: Any?) { previewSelection() }
+    @objc private func compareText(_ sender: Any?) { compareSelectedText(relativeTo: view.window) }
     @objc private func editText(_ sender: Any?) {
         guard isPresented else { return }
         switch model { case .zip(let m, _): m.editSelectedText(); case .tar(let m, _): m.editSelectedText(); case nil: break }
@@ -848,6 +860,7 @@ final class ArchiveTabController: NSObject, NSMenuItemValidation {
         case #selector(removeFromCopy(_:)): canRemoveFromCopy
         case #selector(addToCopy(_:)): canAddCopiedFiles
         case #selector(previewText(_:)), #selector(previewHex(_:)): canPreview
+        case #selector(compareText(_:)): canCompareSelectedText
         case #selector(editText(_:)):
             switch model { case .zip(let m, _): m.canEditSelectedText; case .tar(let m, _): m.canEditSelectedText; case nil: false }
         case #selector(refreshArchive(_:)): true

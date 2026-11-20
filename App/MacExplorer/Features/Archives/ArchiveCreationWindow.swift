@@ -36,7 +36,7 @@ enum ArchiveCreationFormat: String, Codable, CaseIterable, Sendable {
         case .zip: return true
         case .tar: return TARArchiveEditingFeature.available && AppFeatureAvailability.allows(.tarCreation)
         case .tarGzip: return AppFeatureAvailability.allows(.tarCreation) && TARGzipCreationFeature.available
-        case .tarBzip2: return AppFeatureAvailability.allows(.tarCreation) && TARBzip2Feature.available
+        case .tarBzip2: return AppFeatureAvailability.allows(.tarCreation) && CompressedTARFeature.writable
         }
     }
 }
@@ -218,7 +218,7 @@ enum ZIPMemberRenameFeature {
     func chooseOutputFormat(_ value: ArchiveCreationFormat) {
         guard !closed, !isRunning, !isChoosing, outcome == nil, offersOutputFormats, outputFormat != value else { return }
         guard value != .tarGzip || TARGzipCreationFeature.available else { return }
-        guard value != .tarBzip2 || TARBzip2Feature.available else { return }
+        guard value != .tarBzip2 || CompressedTARFeature.writable else { return }
         let previousFormat = outputFormat
         outputFormat = value; window?.title = title
         if value == .tarGzip { tarCompression = .gzipBalanced }
@@ -487,7 +487,7 @@ enum ZIPMemberRenameFeature {
                     if chosenFormat != .zip {
                         guard AppFeatureAvailability.allows(.tarCreation) else { throw FileOperationFailure.unsupported }
                         guard chosenFormat != .tarGzip || TARGzipCreationFeature.available else { throw FileOperationFailure.unsupported }
-                        guard chosenFormat != .tarBzip2 || TARBzip2Feature.available else { throw FileOperationFailure.unsupported }
+                        guard chosenFormat != .tarBzip2 || CompressedTARFeature.writable else { throw FileOperationFailure.unsupported }
                         return .create(try await engine.prepareTARCreation(sources: sources, parent: chosenParent,
                             name: chosenName, compression: chosenFormat == .tar ? .none : chosenTARCompression, observing: captured))
                     }
@@ -922,7 +922,7 @@ private struct ArchiveCreationView: View {
                     Text("ZIP").tag(ArchiveCreationFormat.zip)
                     Text("TAR (uncompressed)").tag(ArchiveCreationFormat.tar)
                     if TARGzipCreationFeature.available { Text("TAR + gzip").tag(ArchiveCreationFormat.tarGzip) }
-                    if TARBzip2Feature.available { Text("TAR + bzip2").tag(ArchiveCreationFormat.tarBzip2) }
+                    if CompressedTARFeature.writable { Text("TAR + bzip2").tag(ArchiveCreationFormat.tarBzip2) }
                 }.pickerStyle(.segmented).disabled(model.isRunning || model.outcome != nil || model.isChoosing)
             }
             if model.outputFormat == .zip && (!model.isMemberCopy || model.isMemberAddition) { Picker("Compression", selection: $model.compression) {

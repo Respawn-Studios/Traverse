@@ -9,6 +9,7 @@ final class BrowserCanvasTransition: NSView {
     private let foregroundClip = NSView()
     var image: NSImage? { picture.image }
     private var timeout: Task<Void, Never>?
+    private var revealStart: Task<Void, Never>?
     private var cleanup: Task<Void, Never>?
     private var revealing = false
     private var direction = 0
@@ -86,6 +87,19 @@ final class BrowserCanvasTransition: NSView {
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { finish(); return }
         if revealing { stageIncomingForeground(); return }
         revealing = true; timeout?.cancel(); timeout = nil
+        stageIncomingForeground()
+        // The destination can become ready while the enclosing tab drop is
+        // still building its panes. Keep the outgoing foreground in place
+        // until that synchronous layout can commit, then start one clock.
+        revealStart = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            self.revealStart = nil
+            self.beginDissolve()
+        }
+    }
+    private func beginDissolve() {
+        guard !isFinished else { return }
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { finish(); return }
         let began = CACurrentMediaTime(); revealBeganAt = began
         let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 1; fade.toValue = 0
         let shift = CABasicAnimation(keyPath: "transform.translation.x")
@@ -142,6 +156,7 @@ final class BrowserCanvasTransition: NSView {
     func finish() {
         guard !isFinished else { return }
         isFinished = true; timeout?.cancel(); timeout = nil; cleanup?.cancel(); cleanup = nil
+        revealStart?.cancel(); revealStart = nil
         incomingViews = nil; revealBeganAt = nil
         for view in arrivals.allObjects { restoreArrival(view) }
         arrivals.removeAllObjects(); originalOpacity.removeAllObjects()
@@ -175,29 +190,39 @@ extension BrowserViewController {
     }
     var paneTransitionForeground: [NSView] { visibleCanvasForeground() }
 
+    var paneRearrangementSnapshot: [NSView] {
+        let chrome = [navigationSurface?.contentView, addressLayout?.bottomSurface.contentView].compactMap { $0 }
+        return chrome + paneTransitionForeground
+    }
+
+    var paneRearrangementLiveForeground: [NSView] {
+        [navigationSurface?.contentView, addressLayout?.bottomSurface.contentView,
+         contentSurface?.contentView].compactMap { $0 }
+    }
+
     private func visibleCanvasForeground(realizingRows: Bool = false) -> [NSView] {
-        if !archiveHost.isHidden, let owner = archiveTabs.values.first(where: { $0.view.superview === archiveHost }), let table = owner.table {
+        func rows(in table: NSTableView) -> [NSView] {
             let visible = table.rows(in: table.visibleRect)
             return visible.location == NSNotFound ? [] : (visible.location..<min(table.numberOfRows, visible.location + min(256, visible.length)))
                 .compactMap { table.rowView(atRow: $0, makeIfNecessary: realizingRows) }
         }
-        if !smbHost.isHidden, smbTabs[activeID] == nil { return savedNetworkForeground(in: smbHost) }
-        if !sftpHost.isHidden, sftpTabs[activeID] == nil { return savedNetworkForeground(in: sftpHost) }
-        let remote = !smbHost.isHidden ? smbTabs[activeID]?.rows.table : !sftpHost.isHidden ? sftpTabs[activeID]?.rows.table : nil
-        if let remote {
-            let visible = remote.rows(in: remote.visibleRect)
-            return visible.location == NSNotFound ? [] : (visible.location..<min(remote.numberOfRows, visible.location + min(256, visible.length)))
-                .compactMap { remote.rowView(atRow: $0, makeIfNecessary: realizingRows) }
-        // Navigation has already changed the logical location. Capture the
-        // surface that is still visible, before visibility follows the new
-        // location; otherwise This Mac captures the hidden, empty destination.
-        } else if !volumeBrowser.isHidden { return volumeBrowser.visibleTiles.map(\.view) }
-        else if !iconBrowser.isHidden { return iconBrowser.collectionView.visibleItems().map(\.view) }
-        else {
-            let visible = table.rows(in: table.visibleRect)
-            return visible.location == NSNotFound ? [] : (visible.location..<min(table.numberOfRows, visible.location + min(256, visible.length)))
-                .compactMap { table.rowView(atRow: $0, makeIfNecessary: realizingRows) }
+        // A tab can change before its AppKit view is replaced. Observe the
+        // installed surface, including a remote owner that is being moved.
+        if !archiveHost.isHidden {
+            let table = archiveTabs.values.first { $0.view.superview === archiveHost }?.table
+            return table.map(rows(in:)) ?? []
         }
+        if !smbHost.isHidden {
+            let table = (smbHost.subviews.first as? SMBRemoteRowsView)?.table
+            return table.map(rows(in:)) ?? savedNetworkForeground(in: smbHost)
+        }
+        if !sftpHost.isHidden {
+            let table = (sftpHost.subviews.first as? SFTPRemoteRowsView)?.table
+            return table.map(rows(in:)) ?? savedNetworkForeground(in: sftpHost)
+        }
+        if !volumeBrowser.isHidden { return volumeBrowser.visibleTiles.map(\.view) }
+        if !iconBrowser.isHidden { return iconBrowser.collectionView.visibleItems().map(\.view) }
+        return rows(in: table)
     }
     func updateCanvasTransition() {
         guard let transition = canvasTransition else { return }

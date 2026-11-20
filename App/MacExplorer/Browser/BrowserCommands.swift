@@ -5,14 +5,19 @@ import SwiftUI
 
 extension BrowserViewController {
     @objc func newTab(_ sender: Any?) {
-        guard canOpenBrowserTab else { return }
+        _ = openNewTab(at: settings.newTabDestination.location(current: location, home: BrowsingHome.url))
+    }
+
+    @discardableResult
+    func openNewTab(at destination: BrowserLocation) -> Bool {
+        guard canOpenBrowserTab else { return false }
         saveViewState()
-        let destination = settings.newTabDestination.location(current: location, home: BrowsingHome.url)
         let tab = BrowserTab(location: destination)
         tabs.append(tab)
         activeID = tab.id
         loadLocation(animatingTab: true)
         if isActiveCommandPane { focusBrowserContent() }
+        return true
     }
 
     @objc func closeTab(_ sender: Any?) {
@@ -116,6 +121,7 @@ extension BrowserViewController {
         if case .sftp(let value) = location { loadSFTPLocation(value, refresh: true); return }
         saveViewState()
         loadLocation()
+        gitControls.update(refreshingCheckout: true)
     }
 
     @objc func chooseFolder(_ sender: Any?) {
@@ -312,6 +318,15 @@ extension BrowserViewController {
     @objc func splitPaneBelow(_ sender: Any?) { _ = workspace?.splitActive(at: .bottom) }
     @objc func closePane(_ sender: Any?) { _ = workspace?.closeActivePane() }
     @objc func focusOtherPane(_ sender: Any?) { workspace?.focusOtherPane() }
+    @objc func swapPaneSides(_ sender: Any?) { workspace?.performDividerAction(.swap) }
+    @objc func balancePaneSizes(_ sender: Any?) { workspace?.performDividerAction(.balance) }
+    @objc func rotatePaneSplit(_ sender: Any?) { workspace?.performDividerAction(.rotate) }
+    @objc func toggleLinkedPaneNavigation(_ sender: Any?) { workspace?.performDividerAction(.link) }
+    @objc func selectMatchingPaneItem(_ sender: Any?) {
+        guard isActiveCommandPane, hasFileCommandFocus else { return }
+        workspace?.performDividerAction(.selectMatch)
+    }
+    @objc func comparePaneGitCheckouts(_ sender: Any?) { workspace?.performDividerAction(.compareGit) }
     @objc func toggleInlinePreview(_ sender: Any?) { workspace?.togglePreview(sender) }
     @objc func toggleSidebar(_ sender: Any?) { workspace?.toggleSidebar() }
 
@@ -436,6 +451,18 @@ extension BrowserViewController: NSMenuItemValidation, NSToolbarItemValidation {
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool { commandEnabled(item.action) }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(compareGitRevisions(_:)) || item.action == #selector(reviewStagedChanges(_:))
+            || item.action == #selector(compareGitWorkingFolder(_:)) || item.action == #selector(browseGitWorktrees(_:))
+            || item.action == #selector(showGitFolderHistory(_:)) {
+            item.isHidden = !gitControls.isAvailable
+        }
+        if item.action == #selector(showGitFileHistory(_:)) { item.isHidden = !canShowGitFileHistory }
+        if item.action == #selector(compareSelectedGitFileRevisions(_:)) || item.action == #selector(compareSelectedGitWorkingFile(_:)) {
+            item.isHidden = !canShowGitFileHistory
+        }
+        if item.action == BrowserCommand.stageGitFile.selector || item.action == BrowserCommand.unstageGitFile.selector {
+            item.isHidden = !canShowGitFileHistory
+        }
         if item.action == #selector(copyToOtherPane(_:)) {
             // Clear a preceding remote version explanation when this menu is
             // reused locally or with an eligible/connection-specific action.
@@ -471,12 +498,16 @@ extension BrowserViewController: NSMenuItemValidation, NSToolbarItemValidation {
         case #selector(toggleCommandRow(_:)): item.state = settings.showsCommandRow ? .on : .off
         case #selector(toggleInlinePreview(_:)): item.state = workspace?.preview.isEnabled == true ? .on : .off
         case #selector(toggleSidebar(_:)): item.title = workspace?.isSidebarCollapsed == true ? "Show Sidebar" : "Hide Sidebar"
+        case #selector(toggleLinkedPaneNavigation(_:)):
+            item.state = workspace?.folderNavigation.isLinked(workspace?.layout.parent(of: paneID)?.id) == true ? .on : .off
+        case #selector(comparePaneGitCheckouts(_:)): item.isHidden = workspace?.canPerformDividerAction(.compareGit) != true
         case #selector(togglePathBar(_:)): item.state = settings.showsPathBar ? .on : .off
         case #selector(toggleAscending(_:)): item.state = tabs[activeIndex].sort.ascending ? .on : .off
         case #selector(changeViewMode(_:)): item.state = item.tag == BrowserViewMode.allCases.firstIndex(of: effectiveViewMode) ? .on : .off
         case #selector(toggleCompactRows(_:)): item.state = settings.rowDensity == .compact ? .on : .off
         case #selector(toggleExtensions(_:)): item.state = settings.showsFileExtensions ? .on : .off
         case #selector(toggleFoldersFirst(_:)): item.state = tabs[activeIndex].sort.foldersFirst ? .on : .off
+        case #selector(compareTextFiles(_:)): item.title = textComparisonTitle
         case #selector(saveFolderView(_:)):
             let saved = folderViewPath.flatMap { folderViews.library.record(for: $0) }
             item.title = saved == nil ? "Save View for This Folder" : "Update Saved View for This Folder"
@@ -499,6 +530,22 @@ extension BrowserViewController: NSMenuItemValidation, NSToolbarItemValidation {
             return openAndShare.canOpenTerminal && selectedFolderURL != nil && orderedSelectedURLs.count == 1
         }
         if action == #selector(compareSelectedFiles(_:)) { return openAndShare.canCompare }
+        if action == #selector(compareFolders(_:)) { return canCompareFolders }
+        if action == #selector(compareTextFiles(_:)) { return canCompareTextFiles }
+        if action == #selector(showGitFileHistory(_:)) { return canShowGitFileHistory }
+        if action == #selector(compareSelectedGitFileRevisions(_:)) || action == #selector(compareSelectedGitWorkingFile(_:)) {
+            return canCompareSelectedGitFile
+        }
+        if action == BrowserCommand.stageGitFile.selector || action == BrowserCommand.unstageGitFile.selector {
+            return canEditSelectedGitIndex
+        }
+        if action == #selector(browseGitWorktrees(_:)) { return canBrowseGitWorktrees }
+        if action == #selector(showGitMenu(_:)) || action == #selector(compareGitRevisions(_:))
+            || action == #selector(reviewStagedChanges(_:)) || action == #selector(compareGitWorkingFolder(_:))
+            || action == #selector(showGitFolderHistory(_:)) {
+            return gitControls.isAvailable && isActiveCommandPane && view.window?.attachedSheet == nil
+        }
+        if action == #selector(selectByName(_:)) { return nameSelection.canPresent }
         if action == #selector(showKeyboardContextMenu(_:)) {
             return !isBrowserSuspended && keyboardContextTarget != nil && view.window?.attachedSheet == nil
         }
@@ -615,6 +662,13 @@ extension BrowserViewController: NSMenuItemValidation, NSToolbarItemValidation {
         case #selector(splitPaneBelow(_:)): return workspace?.canSplitActive(at: .bottom) == true
         case #selector(closePane(_:)): return workspace.map { $0.canChangePaneLayout && $0.browsers.count > 1 } ?? false
         case #selector(focusOtherPane(_:)): return hasFileCommandFocus && (workspace.map { $0.browsers.count > 1 } ?? false)
+        case #selector(swapPaneSides(_:)): return workspace?.canPerformDividerAction(.swap) == true
+        case #selector(balancePaneSizes(_:)): return workspace?.canPerformDividerAction(.balance) == true
+        case #selector(rotatePaneSplit(_:)): return workspace?.canPerformDividerAction(.rotate) == true
+        case #selector(selectMatchingPaneItem(_:)):
+            return isActiveCommandPane && hasFileCommandFocus && workspace?.canPerformDividerAction(.selectMatch) == true
+        case #selector(toggleLinkedPaneNavigation(_:)): return workspace?.canPerformDividerAction(.link) == true
+        case #selector(comparePaneGitCheckouts(_:)): return workspace?.canPerformDividerAction(.compareGit) == true
         case #selector(nextBrowserControl(_:)), #selector(previousBrowserControl(_:)): return hasFileCommandFocus && !isBrowserSuspended
         case #selector(pinCurrentFolder(_:)): return canPinCurrentFolder
         case #selector(toggleSelectedFolderPin(_:)): return selectedFolderURL != nil && pinsController.canEdit

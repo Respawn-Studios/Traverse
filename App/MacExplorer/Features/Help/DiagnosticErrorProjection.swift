@@ -237,6 +237,7 @@ enum DiagnosticErrors {
         case .undoEndedByCheckpoint: code = 19
         case .textUndoCapacityReached: code = 20
         case .legacyTextHistoryRequiresReview: code = 21
+        case .fatTransferDestinationUnsupported: code = 22
         }
         return .init(domain: .operation, code: code)
     }

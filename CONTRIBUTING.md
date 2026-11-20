@@ -48,19 +48,22 @@ The [roadmap](docs/ROADMAP.md) distinguishes current priorities from proposals.
 Check the task you changed from beginning to end, then choose the existing
 checks that help you trust it. A typo fix doesn't need a tour of every feature.
 
-Run the relevant existing suite and exercise one complete affected workflow:
+Run the small check while you edit, then exercise the affected feature in the app.
+For example, when changing local file operations:
 
 ```sh
-python3 -B tools/dev.py test --filter ExplorerCoreTests
-python3 -B tools/dev.py test --filter FileOperationsTests --serial
-python3 -B tools/dev.py native-check --help
+python3 -B tools/dev.py check unit --filter FileOperationsTests
+python3 -B tools/dev.py check section operations
 ```
 
-Choose the checks that match the change; these examples are not a required
-sequence. Add a regression for a demonstrated bug or integrity contract. Broaden
+Use `check section --help` for other areas and `--plan` to see the commands.
+Add a regression for a demonstrated bug or integrity contract. Broaden
 validation when shared behavior changes or a failure exposes another risk.
+The full `check candidate` baseline is for release preparation.
+
 Pull requests into `main` run ExplorerKit tests on native Apple Silicon and
-Intel runners and compile unsigned apps for both architectures. See the
+Intel runners, including macOS 15 on both, and compile unsigned apps for both
+architectures with the release toolchain. See the
 [workflow runs](https://github.com/Respawn-Studios/Traverse/actions/workflows/pull-request.yml).
 With the supported Xcode and the pinned dependencies installed, run the same
 checks locally:
@@ -72,7 +75,6 @@ python3 -B tools/dev.py test --serial
 
 The app build here is for compilation. Bundled workers use local ad-hoc
 signatures. Interactive macOS checks and release signing run separately.
-
 For visual changes, build and inspect normal and enlarged layouts, keyboard
 focus and the relevant motion settings. State what was checked and what remains
 unexercised; a hidden-window check does not establish visible interaction.

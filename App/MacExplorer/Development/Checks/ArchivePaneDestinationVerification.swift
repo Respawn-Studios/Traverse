@@ -300,6 +300,33 @@ import LocalStorage
         peer.navigate(to: .directory(alternative)); try await wait { settled(peer) && backend.active == 0 }
         metrics["finalDestinationLeaseStarts"] = backend.starts; metrics["finalDestinationLeaseStops"] = backend.stops
         checks.append("Existing Copy to Other Pane and exact Undo still pass through the shared native intent rule")
+
+        if root.deletingLastPathComponent().lastPathComponent == "traverse-development" {
+            window.makeKeyAndOrderFront(nil); workspace.activate(browser)
+            browser.settings.motion.mode = .full
+            browser.settings.newTabDestination = .currentFolder
+            browser.newTab(nil); try await wait { settled(browser) && browser.rowsByURL[source] != nil }
+            browser.setFileSelection([source]); browser.fileSelectionDidChange(); browser.openSelection(nil)
+            try await wait { browser.currentArchive?.current == true && browser.currentArchive?.busy == false }
+            guard let archive = browser.currentArchive else { throw UIVerification.Failure(message: "Inline ZIP tab is missing") }
+            let moved = browser.activeID
+            try UIVerification.require(workspace.moveTab(moved, from: browser, into: peer, before: nil)
+                && browser.archiveTabs[moved] == nil && peer.activeID == moved && peer.currentArchive === archive,
+                "Moving the inline ZIP did not keep its exact owner and selected tab")
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                guard let image = browser.canvasTransition?.image?.representations.first as? NSBitmapImageRep else {
+                    throw UIVerification.Failure(message: "The moved ZIP's outgoing foreground was lost")
+                }
+                let hasContent = stride(from: 0, to: image.pixelsHigh, by: 6).contains { y in
+                    stride(from: 0, to: image.pixelsWide, by: 6).contains { x in
+                        (image.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.2
+                    }
+                }
+                try UIVerification.require(hasContent, "The moved ZIP captured an empty outgoing layer")
+            }
+            try await wait { peer.currentArchive === archive && archive.current && !archive.busy && settled(browser) }
+            checks.append("Moving an active inline ZIP preserves the exact archive owner and animates the outgoing foreground in the surviving source pane")
+        }
     }
 
     private static func settled(_ browser: BrowserViewController) -> Bool {

@@ -3,11 +3,43 @@ import AppKit
 import FileOperations
 #endif
 
+@MainActor enum EditorFindMenu {
+    static func items(target: AnyObject, selector: Selector, allowsReplacement: Bool) -> [NSMenuItem] {
+        let commands: [(String, NSTextFinder.Action, String, NSEvent.ModifierFlags)] = [
+            ("Find…", .showFindInterface, "f", .command),
+            ("Find Next", .nextMatch, "g", .command),
+            ("Find Previous", .previousMatch, "G", [.command, .shift]),
+            ("Replace…", .showReplaceInterface, "f", [.command, .option]),
+            ("Use Selection for Find", .setSearchString, "e", .command)
+        ]
+        return commands.compactMap { title, action, key, modifiers in
+            guard allowsReplacement || action != .showReplaceInterface else { return nil }
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+            item.target = target
+            item.tag = action.rawValue
+            item.keyEquivalentModifierMask = modifiers
+            return item
+        }
+    }
+
+    static func selectionItem(target: AnyObject, selector: Selector) -> NSMenuItem {
+        BrowserMenus.item("Find in Selection…", selector, key: "l", modifiers: [.command, .option], target: target)
+    }
+}
+
 final class EditorFindCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
     func cancel() { lock.lock(); value = true; lock.unlock() }
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+enum EditorFindScopeLabel: Equatable {
+    case selection, outline(String)
+
+    var title: String {
+        switch self { case .selection: "Selection"; case .outline(let name): name }
+    }
 }
 
 /// One loaded-buffer search/replacement worker, one latest pending request.
@@ -23,6 +55,16 @@ final class EditorFindController {
     private var matches: EditorFindMatches?
     private var matchedGeneration: UUID?
     private var options = EditorFindOptions()
+    private enum Scope {
+        case document, limited(NSRange, UUID, EditorFindScopeLabel), expired(EditorFindScopeLabel)
+        var label: EditorFindScopeLabel? {
+            switch self {
+            case .document: nil
+            case .limited(_, _, let label), .expired(let label): label
+            }
+        }
+    }
+    private var scope = Scope.document
     private var pending: Input?
     private var worker: Task<Void, Never>?
     private var cancellation: EditorFindCancellation?
@@ -35,7 +77,7 @@ final class EditorFindController {
     var matchCount: Int { matches?.ranges.count ?? 0 }
     var currentOptions: EditorFindOptions { options }
     private enum Work: Sendable {
-        case search(String, String, EditorFindOptions)
+        case search(String, String, EditorFindOptions, NSRange?)
         case replace(EditorFindMatches, String, TextDocumentFormat, Int?, NSRange, NSSelectionAffinity, Bool)
     }
     private struct Input: Sendable { let epoch: UUID; let generation: UUID; let work: Work }
@@ -56,13 +98,15 @@ final class EditorFindController {
         bar.onReplacement = { [weak self] in self?.refreshControls() }
         bar.onCommand = { [weak self] action in self?.perform(action) }
         bar.onOptions = { [weak self] value in self?.setOptions(value) }
+        bar.onSelectionScope = { [weak self] in self?.toggleSelectionScope() }
+        bar.onWholeDocument = { [weak self] in self?.findInWholeDocument() }
     }
 
     func perform(_ action: NSTextFinder.Action) {
         guard !invalidated, let surface, surface.window?.attachedSheet == nil else { return }
         switch action {
         case .showFindInterface: show(replace: false)
-        case .showReplaceInterface: show(replace: true)
+        case .showReplaceInterface: if surface.textView.isEditable { show(replace: true) }
         case .hideFindInterface: hide()
         case .hideReplaceInterface: show(replace: false)
         case .nextMatch: navigate(backwards: false)
@@ -71,25 +115,79 @@ final class EditorFindController {
         case .replaceAndFind: replace(all: false, thenFind: true)
         case .replaceAll: replace(all: true, thenFind: false)
         case .setSearchString:
-            let text = surface.textView.string as NSString, range = surface.textView.selectedRange()
-            guard range.location >= 0, range.length > 0, range.location <= text.length,
-                  range.length <= text.length - range.location else { return }
-            let selected = text.substring(with: range)
-            guard selected.utf8.count <= EditorFindPlan.maximumQueryBytes else { return }
+            guard let selected = selectedQuery(allowsNewlines: true) else { return }
             let wasShown = isShown
             bar.query.stringValue = selected; show(replace: showsReplacement)
             if wasShown { requestSearch() }
         default: break
         }
     }
-    func show(replace: Bool) {
+    func show(replace: Bool, focusReplacement: Bool = false) {
         guard !invalidated, let surface else { return }
         let wasShown = isShown
         isShown = true; showsReplacement = replace
         bar.isHidden = false; bar.secondRow.isHidden = !replace
         changeHeight(to: bar.presentationHeight)
-        surface.window?.makeFirstResponder(bar.query); bar.query.selectText(nil)
+        let field = focusReplacement ? bar.replacement : bar.query
+        surface.window?.makeFirstResponder(field); field.selectText(nil)
         if !wasShown { requestSearch() } else { refreshControls() }
+    }
+
+    func replaceOccurrences(of query: String, wholeWord: Bool) {
+        guard !invalidated, surface?.textView.isEditable == true else { return }
+        let wasShown = isShown
+        scope = .document
+        options.matchesCase = true
+        options.matchMode = wholeWord ? .wholeWord : .contains
+        bar.setOptions(options)
+        bar.query.stringValue = query
+        bar.replacement.stringValue = ""
+        show(replace: true, focusReplacement: true)
+        if wasShown { requestSearch() }
+    }
+    var canFindInSelection: Bool {
+        guard !invalidated, let surface, surface.window?.attachedSheet == nil,
+              !surface.textView.hasMarkedText(), !bar.queryHasMarkedText,
+              surface.textView.selectedRanges.count == 1 else { return false }
+        return surface.textView.selectedRange().length > 0
+    }
+
+    func selectedQuery(maximumUnits: Int = EditorFindPlan.maximumQueryBytes, allowsNewlines: Bool = false) -> String? {
+        guard canFindInSelection, !bar.replacementHasMarkedText, let editor = surface?.textView else { return nil }
+        let selection = editor.selectedRange(), text = editor.string
+        guard selection.length <= maximumUnits, let range = Range(selection, in: text) else { return nil }
+        let query = String(text[range])
+        guard query.utf8.count <= EditorFindPlan.maximumQueryBytes,
+              allowsNewlines || query.rangeOfCharacter(from: .newlines) == nil else { return nil }
+        return query
+    }
+
+    func findInSelection() {
+        guard canFindInSelection, let surface else { return }
+        find(within: surface.textView.selectedRange(), label: .selection, generation: surface.generation)
+    }
+
+    func findInCurrentScope() {
+        guard !invalidated, !bar.queryHasMarkedText, !bar.replacementHasMarkedText,
+              let surface, let current = surface.currentSearchScope else { return }
+        find(within: current.range, label: .outline(current.name), generation: surface.generation)
+    }
+
+    private func find(within range: NSRange, label: EditorFindScopeLabel, generation: UUID) {
+        scope = .limited(range, generation, label)
+        let wasShown = isShown
+        show(replace: showsReplacement)
+        if wasShown { requestSearch() }
+    }
+
+    private func toggleSelectionScope() {
+        if scope.label == .selection { findInWholeDocument() }
+        else { findInSelection() }
+    }
+
+    private func findInWholeDocument() {
+        scope = .document
+        requestSearch()
     }
     func applyInterfaceScale(_ value: CGFloat) {
         guard bar.applyInterfaceScale(value) else { return }
@@ -97,7 +195,7 @@ final class EditorFindController {
     }
     func hide() {
         guard isShown else { return }
-        isShown = false
+        isShown = false; scope = .document
         invalidateWork(); matches = nil; matchedGeneration = nil
         surface?.textView.findHighlights = []; surface?.textView.currentFindHighlight = nil
         surface?.window?.makeFirstResponder(surface?.textView)
@@ -127,9 +225,16 @@ final class EditorFindController {
         options = value; bar.setOptions(value); requestSearch()
     }
     func documentDidChange() {
+        if case .limited(_, let generation, let label) = scope, generation != surface?.generation { scope = .expired(label) }
         invalidateWork(); matches = nil; matchedGeneration = nil
         surface?.textView.findHighlights = []; surface?.textView.currentFindHighlight = nil
         if isShown { requestSearch() } else { refreshControls() }
+    }
+
+    func outlineLanguageDidChange() {
+        guard case .limited(_, _, let label) = scope, case .outline = label else { return }
+        scope = .expired(label)
+        requestSearch()
     }
     func inputSettled() {
         if isShown, matches == nil, worker == nil, surface?.textView.hasMarkedText() == false { requestSearch() }
@@ -140,11 +245,13 @@ final class EditorFindController {
     }
     func clear() {
         invalidated = true; isShown = false; showsReplacement = false
+        scope = .document
         heightTransition = UUID()
         invalidateWork(); matches = nil; matchedGeneration = nil
         surface?.textView.findHighlights = []; surface?.textView.currentFindHighlight = nil
         bar.clear(); height.constant = 0; bar.isHidden = true
     }
+    func drain() async { await worker?.value }
     private func invalidateWork() {
         epoch = UUID(); pending = nil; navigation = []
         cancellation?.cancel(); worker?.cancel()
@@ -155,8 +262,22 @@ final class EditorFindController {
         surface.textView.findHighlights = []; surface.textView.currentFindHighlight = nil
         bar.notice.stringValue = ""
         guard !surface.textView.hasMarkedText(), !bar.queryHasMarkedText else { bar.count.stringValue = ""; refreshControls(); return }
+        let selection: NSRange?
+        switch scope {
+        case .document: selection = nil
+        case .limited(let range, let generation, _) where generation == surface.generation: selection = range
+        case .limited(_, _, let label), .expired(let label):
+            scope = .expired(label)
+            let selection = label == .selection
+            bar.count.stringValue = selection ? "Select text again" : "Scope changed"
+            bar.count.toolTip = selection
+                ? "The selected text changed. Select text again or turn off Find in Selection."
+                : "Choose Find in Current Scope again, or choose Search Whole Document in Find options."
+            refreshControls(); return
+        }
+        bar.count.toolTip = nil
         pending = .init(epoch: epoch, generation: surface.generation,
-                        work: .search(surface.textView.string, bar.query.stringValue, options))
+                        work: .search(surface.textView.string, bar.query.stringValue, options, selection))
         bar.count.stringValue = bar.query.stringValue.isEmpty ? "" : "Finding…"
         startNext(); refreshControls()
     }
@@ -167,11 +288,11 @@ final class EditorFindController {
         worker = Task.detached(priority: .userInitiated) { [weak self] in
             let output: Output
             switch input.work {
-            case .search(let text, let query, let options):
+            case .search(let text, let query, let options, let scope):
                 // Debounce within the single owned task. New input cancels it
                 // and replaces one pending snapshot; it never fans out workers.
                 do { try await Task.sleep(for: .milliseconds(45)) } catch { flag.cancel() }
-                output = .search(EditorFindPlan.search(text: text, query: query, options: options,
+                output = .search(EditorFindPlan.search(text: text, query: query, options: options, within: scope,
                                                        cancelled: { flag.isCancelled }))
             case .replace(let matches, let text, let format, let index, _, _, _):
                 output = .replace(EditorFindPlan.replace(matches, with: text, format: format,
@@ -196,7 +317,7 @@ final class EditorFindController {
             for backwards in queued { navigate(backwards: backwards) }
         case .search(.refused(let reason)): showFailure(reason)
         case .replace(let result):
-            guard case .replace(_, _, _, _, let selection, let affinity, let thenFind) = input.work,
+            guard case .replace(let previousMatches, _, _, _, let selection, let affinity, let thenFind) = input.work,
                   surface.textView.selectedRanges.count == 1,
                   surface.textView.selectedRange() == selection, surface.textView.selectionAffinity == affinity,
                   !bar.queryHasMarkedText, !bar.replacementHasMarkedText,
@@ -210,8 +331,14 @@ final class EditorFindController {
             case .invalidText(let reason):
                 surface.onRejectedEdit?(reason); bar.notice.stringValue = "This replacement cannot be used."
             case .replace(let plan):
+                let selectionScope = scope.label == .selection
                 guard surface.applyFindReplacement(plan, generation: input.generation) else {
                     bar.notice.stringValue = "The document changed. Try again."; return
+                }
+                if selectionScope, let captured = previousMatches.selection {
+                    let length = captured.length + plan.value.utf16Count - previousMatches.utf16Length
+                    scope = length > 0 ? .limited(.init(location: captured.location, length: length), surface.generation, .selection) : .expired(.selection)
+                    requestSearch()
                 }
                 bar.notice.stringValue = plan.count == 1 ? "Replaced 1 match" : "Replaced \(plan.count) matches"
                 if thenFind { navigation = [false] }
@@ -261,6 +388,7 @@ final class EditorFindController {
         return low < ranges.count && ranges[low] == selection ? low : nil
     }
     private func refreshControls() {
+        bar.setScope(scope.label, canSelect: canFindInSelection || scope.label == .selection)
         let ready = isShown && !invalidated && worker == nil && pending == nil
             && surface?.textView.hasMarkedText() == false && !bar.queryHasMarkedText && matchedGeneration == surface?.generation
         let found = ready && matches?.ranges.isEmpty == false
@@ -271,7 +399,10 @@ final class EditorFindController {
         if let matches, ready {
             if matches.query.isEmpty { bar.count.stringValue = "" }
             else if let index = exactSelectedMatch() { bar.count.stringValue = "\(index + 1) of \(matches.ranges.count)" }
-            else { bar.count.stringValue = matches.ranges.isEmpty ? "No matches" : "\(matches.ranges.count) matches" }
+            else {
+                let count = matches.ranges.count
+                bar.count.stringValue = count == 0 ? "No matches" : "\(count) \(count == 1 ? "match" : "matches")"
+            }
             if let index = exactSelectedMatch() { surface?.textView.currentFindHighlight = matches.ranges[index] }
             else { surface?.textView.currentFindHighlight = nil }
         }

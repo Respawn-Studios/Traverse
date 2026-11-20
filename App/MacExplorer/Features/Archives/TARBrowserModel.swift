@@ -44,6 +44,8 @@ struct TARClipboardSource {
     var embeddedUp: (() -> Void)?
     var embeddedIsPresented: (() -> Bool)?
     private var permitsEmbeddedAction: Bool { embeddedIsPresented?() ?? true }
+    var allowsVisibleNameSelection: Bool { permitsEmbeddedAction && current && !busy && !suspended && !closed }
+    func reportNameSelection(_ message: String) { notice = message }
     var embeddedScrollOffset: Double = 0
     private struct EmbeddedPresentation {
         let location:ArchiveLocation;let state:ArchiveBrowseState;let token:UUID
@@ -66,9 +68,12 @@ struct TARClipboardSource {
     var memberDragHandoffForVerification: ((ArchivePromiseExport) -> Void)?
     var lastHandedExportForVerification: ArchivePromiseExport? { handedExports.last }
     #endif
+    #if DEBUG
+    var beforeOpenAccessForVerification: (@MainActor () async -> Void)?
+    #endif
     private var isPreparingDrag = false
     private var createdMemberToReveal: (archive: URL, path: String)?
-    private struct Open {let source:URL;weak var browser:BrowserViewController?;let token:UUID;let preparesCompressed:Bool}
+    private struct Open {let source:URL;let token:UUID;let preparesCompressed:Bool}
     private struct Visit {let folder:TARFolderID;var query="",scope=ArchiveNameScope.folder,order=TARArchiveOrder(),offset=0}
     private struct Pending {let visit:Visit;let token:UUID;var selected:TARItemID?}
     private struct Page:Sendable {let items:[TARArchiveItem],breadcrumbs:[TARBreadcrumb];let offset:Int,total:Int}
@@ -108,10 +113,13 @@ struct TARClipboardSource {
         guard let member = observedMember, let browser, !browser.isBrowserSuspended else { return }
         browser.showItemProperties(.archive(member), relativeTo: parent)
     }
-    func canPreviewSelection(_ ids:Set<TARItemID>)->Bool {
+    private var canReviewMemberText: Bool {
         TARTextPreviewFeature.available && (!isCompressedSource || compressedSummary != nil && !requiresPreparation)
             && permitsEmbeddedAction && current && !busy && !isPreparingPreview && !closed && !suspended
-            && ids.count == 1 && !ApplicationFileActivity.gate.isClosed
+            && !ApplicationFileActivity.gate.isClosed
+    }
+    func canPreviewSelection(_ ids:Set<TARItemID>)->Bool {
+        canReviewMemberText && ids.count == 1
             && items.contains{ids.contains($0.id) && $0.kind == .file}
     }
     var canPreviewSelected:Bool {canPreviewSelection(selection)}
@@ -121,9 +129,38 @@ struct TARClipboardSource {
             && (!isCompressedSource || source.map(Self.allowsCompressedEditing) == true && compressedSummary != nil && !requiresPreparation)
     }
     func canEditTextSelection(_ ids: Set<TARItemID>) -> Bool {
-        allowsTextEditing && canPreviewSelection(ids) && items.contains {
-            ids.contains($0.id) && !ArchiveImagePreview.supportsFilename($0.name)
-                && $0.logicalBytes <= TARTextPreview.maximumUTF8Bytes
+        allowsTextEditing && canPreviewSelection(ids) && items.contains { ids.contains($0.id) && supportsTextReview($0) }
+    }
+    private func supportsTextReview(_ item: TARArchiveItem) -> Bool {
+        item.kind == .file && !ArchiveImagePreview.supportsFilename(item.name)
+            && item.logicalBytes <= TARTextPreview.maximumUTF8Bytes
+    }
+    var canCompareSelectedText: Bool { comparisonPair != nil }
+    private var comparisonPair: (TARArchiveItem, TARArchiveItem)? {
+        guard canReviewMemberText, selection.count == 2, browser?.workspace != nil else { return nil }
+        let candidates = items.filter { selection.contains($0.id) }
+        guard candidates.count == 2, candidates.allSatisfy(supportsTextReview) else { return nil }
+        return (candidates[0], candidates[1])
+    }
+    func compareSelectedText(relativeTo parent: NSWindow?) {
+        guard let (left, right) = comparisonPair, let session, let source, let parent,
+              let browser, !browser.isBrowserSuspended else { return }
+        let currentToken = token, currentPage = pageToken, captured = selection
+        isPreparingPreview = true
+        selectionWork = Task { [self, reader] in
+            defer { selectionWork = nil; isPreparingPreview = false }
+            do {
+                let first = try await session.selectionForTextPreview(left.id)
+                let second = try await session.selectionForTextPreview(right.id)
+                guard permitsEmbeddedAction, !Task.isCancelled, !closed, !suspended,
+                      currentToken == token, currentPage == pageToken, selection == captured,
+                      parent.isKeyWindow, !browser.isBrowserSuspended else { return }
+                ArchiveTextReview.show(source: source, left: left.path, right: right.path, from: browser, relativeTo: parent) {
+                    try await reader.readTextComparison(left: first, right: second, retaining: $0)
+                }
+            } catch {
+                if !closed, !Task.isCancelled, currentToken == token { notice = ArchiveTextPreviewOwner.message(error) }
+            }
         }
     }
     func editSelectedText() {
@@ -263,9 +300,7 @@ struct TARClipboardSource {
         return kind == .tarGzip || kind == .tarBzip2
     }
     static func allowsCompressedEditing(_ source: URL) -> Bool {
-        let kind = ArchiveFilename(source.lastPathComponent)?.kind
-        if kind == .tarBzip2 { return TARBzip2Feature.available }
-        return TARGzipEditingFeature.available && kind == .tarGzip
+        isCompressed(source) && CompressedTARFeature.writable
     }
     func prepareCompressed() {
         guard canPrepareCompressed, let source, let browser else { return }
@@ -506,6 +541,12 @@ struct TARClipboardSource {
         let field:TARArchiveOrder.Field = switch state.sortField {case .size:.size;case .modified:.modified;case .kind:.kind;default:.name}
         return .init(field,descending:!state.ascending)
     }
+    func rebindEmbedded(source: URL, to browser: BrowserViewController) {
+        guard !closed, embeddedIsPresented != nil, self.source == source else { return }
+        self.browser = browser
+        window = browser.viewIfLoaded?.window
+    }
+
     func presentEmbedded(_ location:ArchiveLocation,state:ArchiveBrowseState,from browser:BrowserViewController,
                          preparesCompressed:Bool=false) {
         guard !closed,!suspended else{return}
@@ -543,7 +584,7 @@ struct TARClipboardSource {
         current=false;selection=[]
         notice = requiresPreparation ? "Prepare this archive to browse its folders and preview files. Preparation reads the archive and uses temporary space on this Mac." : "Reading archive names…"
         summary=nil;compressedSummary=nil;items=[];breadcrumbs=[];total=0;offset=0;history=[];historyIndex=0
-        desiredOpen = .init(source:url,browser:browser,token:token,preparesCompressed:preparesCompressed);desiredPage=nil
+        desiredOpen = .init(source:url,token:token,preparesCompressed:preparesCompressed);desiredPage=nil
         desiredEmbedded=nil;desiredEmbeddedNavigation=nil
         readTask?.cancel();queryTask?.cancel();filterWork?.cancel();selectionWork?.cancel();start()
     }
@@ -565,7 +606,14 @@ struct TARClipboardSource {
                 desiredOpen=nil
                 await textPreview.drain()
                 if let session{await session.close()};session=nil;await reader.drain()
-                guard request.token==token,let browser=request.browser,!browser.isBrowserSuspended else{continue}
+                #if DEBUG
+                if let beforeOpenAccessForVerification { await beforeOpenAccessForVerification() }
+                #endif
+                // A pending request can move while the old readers drain.
+                // The model owns its current pane; the value request owns only
+                // source identity and the explicit preparation permission.
+                guard !closed,!suspended,!Task.isCancelled,request.token==token,source==request.source,
+                      let browser,!browser.isBrowserSuspended else{continue}
                 // Passive presentation never starts a body decode. Explicit
                 // Prepare or a qualified deliberate Open admits that work.
                 if requiresPreparation { continue }
@@ -706,11 +754,20 @@ struct TARClipboardSource {
         current=false;selection=[];filterWork?.cancel();queryTask?.cancel();desiredPage=nil;pageToken=UUID()
         filterWork=Task{[weak self]in
             do{try await Task.sleep(for:.milliseconds(160))}catch{return}
-            guard let self,!closed,!suspended,history.indices.contains(historyIndex)else{return}
-            guard query.utf8.count<=128 else{notice="That name search is too long. Try fewer words or characters.";filterWork=nil;return}
-            var visit=history[historyIndex];visit.query=query;visit.scope=scope;visit.order=order;visit.offset=0;history[historyIndex]=visit
-            requestPage(visit);filterWork=nil
+            self?.applyQuery()
         }
+    }
+    func applyQuery() {
+        filterWork?.cancel(); filterWork = nil
+        guard !closed, !suspended, history.indices.contains(historyIndex) else { return }
+        guard query.utf8.count <= 128 else {
+            notice = "That name search is too long. Try fewer words or characters."; return
+        }
+        var visit = history[historyIndex]
+        if current, visit.query == query, visit.scope == scope, visit.order == order { return }
+        visit.query = query; visit.scope = scope; visit.order = order; visit.offset = 0
+        history[historyIndex] = visit
+        requestPage(visit)
     }
     func order(by value:TARArchiveOrder){guard !closed,!suspended,history.indices.contains(historyIndex)else{return};order=value;scheduleQuery()}
     func openSelection() {

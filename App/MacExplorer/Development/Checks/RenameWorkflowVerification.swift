@@ -129,6 +129,9 @@ enum RenameWorkflowVerification {
                 guard let record else { throw UIVerification.Failure(message: "New Folder operation history missing") }
                 return record
             }
+            func usesQuietSelection() -> Bool {
+                browser.usesFileIcons ? !browser.iconBrowser.emphasizesSelection : browser.table.selectionHighlightStyle == .none
+            }
             for mode in modes {
                 let listing = owned.appendingPathComponent(mode.rawValue, isDirectory: true)
                 browser.setPaneViewMode(mode)
@@ -147,6 +150,7 @@ enum RenameWorkflowVerification {
                 }
                 observingRefresh = false
                 try UIVerification.require(refreshStayedVisible, "New Folder cleared the current rows before its replacement listing")
+                try UIVerification.require(usesQuietSelection(), "New Folder emphasized its provisional selection")
                 try UIVerification.require(createEditor.string == "New Folder 3"
                     && browser.selectedURLs.first?.path == automaticFolder.path && browser.selectedURLs.count == 1
                     && createEditor.selectedRange() == NSRange(location: 0, length: createEditor.string.utf16.count)
@@ -154,6 +158,7 @@ enum RenameWorkflowVerification {
                 createEditor.insertText("Created and Renamed", replacementRange: createEditor.selectedRange())
                 observingRefresh = true; refreshStayedVisible = false
                 key(36, text: "\r", to: createEditor)
+                try UIVerification.require(usesQuietSelection(), "Rename emphasized the pre-rename position")
                 let renamedFolder = listing.appendingPathComponent("Created and Renamed", isDirectory: true)
                 try await waitUntil("New Folder Rename and visible result") {
                     browser.operationTask == nil && browser.operationPreparationTask == nil && browser.inlineRename.field == nil
@@ -161,6 +166,7 @@ enum RenameWorkflowVerification {
                 }
                 observingRefresh = false
                 try UIVerification.require(refreshStayedVisible, "Rename cleared the current rows before its replacement listing")
+                try UIVerification.require(!usesQuietSelection(), "Confirmed Rename left the selection muted")
                 let renameRecord = try requireRecord(browser.lastRecoveryRecordID)
                 try UIVerification.require(renameRecord != createRecord && browser.lastOperationResult?.disposition == .succeeded,
                     "Create and Rename did not retain their independent guarded history")
@@ -176,6 +182,7 @@ enum RenameWorkflowVerification {
                 let escapeRecord = try requireRecord(browser.lastRecoveryRecordID)
                 key(53, text: "\u{1b}", to: escapeEditor)
                 try await waitUntil("New Folder Escape leaves creation intact") { browser.inlineRename.field == nil && browser.operationPreparationTask == nil }
+                try UIVerification.require(!usesQuietSelection(), "Cancelled Rename left the selection muted")
                 try UIVerification.require(browser.displayedEntries.contains { $0.url.path == automaticFolder.path }
                     && browser.lastRecoveryRecordID == escapeRecord, "Escape removed the created folder or added another operation")
                 try await undoFolderAction(escapeRecord)

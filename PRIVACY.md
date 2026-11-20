@@ -37,10 +37,11 @@ is an explicit action; review the exported material before sending it anywhere.
 Local crash capture is separately controllable in Settings. A native capture can
 contain process paths, loaded-image information, exception text and register
 values. It stays in a private app-owned location, subject to both a five-report
-count and a 4 MiB encoded storage limit; large captures may fill the limit sooner.
-If storage cannot be confirmed or is full, Traverse keeps existing data and
-pauses new capture. Capture cannot cover every termination, power loss, hang or
-worker failure. It does not replace macOS's own crash reporting.
+count and a 4 MiB storage limit for the encoded catalog and any pending capture.
+Traverse reserves a slot and up to 1 MiB for the next native capture before
+enabling it. If storage cannot be confirmed or is full, Traverse keeps existing
+data and pauses new capture. Capture cannot cover every termination, power loss,
+hang or worker failure. It does not replace macOS's own crash reporting.
 
 Help → Crash Reports & Feedback creates an editable sharing projection. It omits
 native paths, registers, memory contents and free-form exception messages.

@@ -1,6 +1,7 @@
 import AppKit
 import ExplorerCore
 import FileOperations
+import QuartzCore
 @_spi(Qualification) import LocalStorage
 
 @MainActor
@@ -28,13 +29,17 @@ private final class InlineFilenameField: NSTextField {
 final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
     weak var browser: BrowserViewController?
     private(set) var field: NSTextField?
-    private var request: Request?
+    private var request: Request? { didSet { updateSelectionAppearance() } }
     private var session: Session?
     private var observations: [BrowserNotificationObservation] = []
     private var interactionMonitor: Any?
-    private var creation: CreatedFolder?
+    private var creation: CreatedFolder? { didSet { updateSelectionAppearance() } }
     private weak var hiddenLabel: NSTextField?
     private var previousLabelHidden = false
+    private weak var submittedLabel: NSTextField?
+    private var submittedName: SubmittedName? { didSet { updateSelectionAppearance() } }
+    private let reflowLayers = NSHashTable<CALayer>.weakObjects()
+    private static let reflowKey = "traverse.inlineRenameReflow"
     var isEditing: Bool { session != nil }
 
     private enum Target: Equatable {
@@ -60,6 +65,12 @@ final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
         let visit: UUID
         let presentation: UUID
         let requiresContentFocus: Bool
+    }
+
+    private struct SubmittedName {
+        let id: UUID, source: URL, tab: UUID
+        let name: String, priorText: String, priorHelp: String?
+        var destination: URL?
     }
 
     private struct CreatedFolder {
@@ -117,10 +128,16 @@ final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
         return id
     }
 
-    func prepareForLocationChange(preservingCreatedFolder id: UUID?) {
+    func prepareForLocationChange(preservingCreatedFolder id: UUID?, preservingVisibleRows: Bool) {
+        endReflow()
         cancelEditing()
+        if let submittedName,
+           !preservingVisibleRows || submittedName.destination == nil || browser?.activeID != submittedName.tab
+            || browser?.location.directoryURL?.path != submittedName.source.deletingLastPathComponent().path {
+            clearSubmittedName()
+        }
         guard let id, let creation, creation.id == id, creation.phase == .refreshPermitted,
-              creationIsCurrent(creation) else { cancel(); return }
+              creationIsCurrent(creation) else { creation = nil; clearObservations(); return }
     }
 
     func createdFolderListingStarted(_ id: UUID?) {
@@ -130,7 +147,9 @@ final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
     }
 
     func prepareForRender() {
+        endReflow()
         cancelEditing()
+        clearSubmittedName()
         if let creation, creation.phase != .listing || !creationIsCurrent(creation) { cancel() }
     }
 
@@ -310,13 +329,17 @@ final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
     }
 
     func selectionDidChange() {
+        endReflow()
         if creation != nil { cancel(); return }
+        if let submittedName, browser?.selectedURLs != [submittedName.source] { clearSubmittedName() }
         guard let request, let browser else { return }
         if !targetIsCurrent(request.target, browser: browser) { cancel() }
     }
 
     func cancel() {
+        endReflow()
         creation = nil
+        clearSubmittedName()
         cancelEditing()
     }
 
@@ -333,17 +356,29 @@ final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
 
     func cancel(requestID: UUID) {
         if request?.id == requestID { cancel() }
+        else if submittedName?.id == requestID, browser?.operationTask == nil, submittedName?.destination == nil {
+            clearSubmittedName()
+        }
     }
 
     /// Consume once immediately before engine admission. Lifecycle events can
     /// revoke a confirmed answer while its continuation is still queued.
     func consume(requestID: UUID, source: URL) -> Bool {
-        defer { cancel(requestID: requestID) }
         guard let request, let browser, request.id == requestID, request.target == .local(source) else { return false }
+        defer { cancelEditing() }
         return !browser.isBrowserSuspended && browser.isActiveCommandPane && !browser.metadataSearch.isShowingResults
             && browser.activeID == request.tab && browser.sessionID == request.visit
             && browser.filePresentationID == request.presentation && browser.selectedURLs == [source]
             && (!request.requiresContentFocus || hasContentFocus)
+    }
+
+    func operationFinished(_ result: FileOperationResult?) {
+        guard let submittedName else { return }
+        if let result, result.disposition == .succeeded, result.items.count == 1, let item = result.items.first,
+           item.status == .succeeded, item.source?.path == submittedName.source.path,
+           let destination = item.destination, destination.lastPathComponent.utf8.elementsEqual(submittedName.name.utf8) {
+            self.submittedName?.destination = destination
+        } else { clearSubmittedName() }
     }
 
     func consumeRemote(requestID: UUID) -> Bool {
@@ -386,6 +421,15 @@ final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
         let accepted = request?.id == session.id && isCurrent(session) && spellingChanged ? name : nil
         if accepted == nil { request = nil; clearObservations() }
         self.session = nil
+        if let accepted, case .local(let source) = session.target, let label = hiddenLabel {
+            // Only the old row's presentation changes here. Its path, sort
+            // position, operation authority and Undo still use verified data.
+            submittedLabel = label
+            submittedName = .init(id: session.id, source: source, tab: session.tab, name: accepted,
+                priorText: label.stringValue, priorHelp: label.toolTip)
+            label.stringValue = accepted
+            label.toolTip = "Renaming this item…"
+        }
         hiddenLabel?.isHidden = previousLabelHidden
         hiddenLabel = nil
         if let field {
@@ -397,6 +441,86 @@ final class BrowserInlineRenameController: NSObject, NSTextFieldDelegate {
         }
         field = nil
         session.continuation.resume(returning: accepted)
+    }
+
+    private func clearSubmittedName() {
+        if let submittedName, let label = submittedLabel,
+           label.stringValue.utf8.elementsEqual(submittedName.name.utf8), label.toolTip == "Renaming this item…" {
+            label.stringValue = submittedName.priorText
+            label.toolTip = submittedName.priorHelp
+        }
+        submittedName = nil
+        submittedLabel = nil
+    }
+
+    private func updateSelectionAppearance() {
+        guard let browser else { return }
+        let quiet = creation?.phase == .listing || request?.requiresContentFocus == true || submittedName != nil
+        let style: NSTableView.SelectionHighlightStyle = quiet ? .none : .regular
+        if browser.table.selectionHighlightStyle != style { browser.table.selectionHighlightStyle = style }
+        browser.iconBrowser.emphasizesSelection = !quiet
+    }
+
+    /// The listing remains authoritative. These frames only describe the
+    /// visible items that can follow a confirmed rename to their new positions.
+    func reflowOrigins(for selection: Set<URL>) -> [URL: NSRect]? {
+        guard let browser, let submittedName, let destination = submittedName.destination,
+              browser.activeID == submittedName.tab, browser.hasFileCommandFocus,
+              browser.selectedURLs == [submittedName.source], selection.count == 1,
+              let target = selection.first, target.path == destination.path, !browser.isLoading,
+              browser.canvasTransition == nil, browser.settings.motion.mode == .full,
+              browser.settings.motion.allows(.folders), browser.view.window?.isVisible == true,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return nil }
+        let clip = browser.activeFileScrollView.contentView
+        var origins: [URL: NSRect] = [:]
+        for (url, view) in browser.fileViewsForRenameMotion() {
+            let key = url == submittedName.source ? target : url
+            origins[key] = clip.convert(view.bounds, from: view)
+        }
+        return origins[target] == nil ? nil : origins
+    }
+
+    func animateReflow(from origins: [URL: NSRect]) {
+        guard let browser else { return }
+        let clip = browser.activeFileScrollView.contentView
+        let visible = clip.bounds, selected = browser.selectedURLs
+        for (url, view) in browser.fileViewsForRenameMotion() {
+            guard let origin = origins[url], let parent = view.superview else { continue }
+            let destination = clip.convert(view.bounds, from: view)
+            guard origin.size == destination.size, origin.intersects(visible), destination.intersects(visible),
+                  origin.origin != destination.origin else { continue }
+            view.wantsLayer = true
+            guard let layer = view.layer else { continue }
+            let before = parent.convertToLayer(parent.convert(origin.origin, from: clip))
+            let after = parent.convertToLayer(parent.convert(destination.origin, from: clip))
+            let move = CABasicAnimation(keyPath: "position")
+            move.isAdditive = true
+            move.fromValue = NSValue(point: NSPoint(x: before.x - after.x, y: before.y - after.y))
+            move.toValue = NSValue(point: .zero)
+            move.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            move.duration = 0.18
+            if selected.contains(url) {
+                // Keep the named item readable as it crosses its neighbours.
+                // The temporary elevation retires with the same owned move.
+                let lift = CABasicAnimation(keyPath: "zPosition")
+                lift.isAdditive = true
+                lift.fromValue = 1
+                lift.toValue = 1
+                lift.duration = move.duration
+                let movement = CAAnimationGroup()
+                movement.animations = [move, lift]
+                movement.duration = move.duration
+                layer.add(movement, forKey: Self.reflowKey)
+            } else {
+                layer.add(move, forKey: Self.reflowKey)
+            }
+            reflowLayers.add(layer)
+        }
+    }
+
+    private func endReflow() {
+        for layer in reflowLayers.allObjects { layer.removeAnimation(forKey: Self.reflowKey) }
+        reflowLayers.removeAllObjects()
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

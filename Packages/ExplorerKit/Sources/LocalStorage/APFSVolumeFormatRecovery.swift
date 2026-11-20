@@ -95,30 +95,90 @@ public struct APFSVolumeFormatGeneratedOwner: Codable, Equatable, Sendable {
     }
 }
 
+/// A user-owned, attached regular image file. The file and its outer IOMedia
+/// are rechecked independently at launch; these saved facts are never authority
+/// to attach an image or infer the contents of a previous erase.
+public struct APFSVolumeFormatImageOwner: Codable, Equatable, Sendable {
+    public let imagePath: String
+    public let parentDevice: Int64
+    public let parentInode: UInt64
+    public let imageDevice: Int64
+    public let imageInode: UInt64
+    public let imageBytes: Int64
+    public let ownerUID: UInt32
+    public let outerDevice: String
+    public let outerMediaID: UInt64
+
+    public init(imagePath: String, parentDevice: Int64, parentInode: UInt64,
+                imageDevice: Int64, imageInode: UInt64, imageBytes: Int64,
+                ownerUID: UInt32, outerDevice: String, outerMediaID: UInt64) {
+        self.imagePath = imagePath; self.parentDevice = parentDevice; self.parentInode = parentInode
+        self.imageDevice = imageDevice; self.imageInode = imageInode; self.imageBytes = imageBytes
+        self.ownerUID = ownerUID; self.outerDevice = outerDevice; self.outerMediaID = outerMediaID
+    }
+
+    public func validate() -> Bool {
+        let image = URL(fileURLWithPath: imagePath)
+        return imagePath.hasPrefix("/") && image.standardizedFileURL.path == imagePath
+            && image.pathExtension.lowercased() == "dmg" && image.deletingLastPathComponent().path != "/"
+            && parentDevice > 0 && parentInode > 0 && imageDevice > 0 && imageInode > 0
+            && imageBytes > 0 && outerMediaID > 0
+            && outerDevice.range(of: #"\Adisk[0-9]{1,6}\z"#, options: .regularExpression) != nil
+    }
+}
+
 /// One persisted operation slot. On a fresh launch, every nonterminal phase
 /// means the tool may have started, including `intent`: a crash can occur in
 /// the gap between Process.run and the submitted-record publication.
 public struct APFSVolumeFormatJobRecord: Codable, Equatable, Sendable {
     public enum Phase: String, Codable, Sendable {
-        case intent, submitted, uncertain, compatibleReplacement, notSubmitted
+        case intent, submitted, uncertain, compatibleReplacement, notSubmitted, observedNativeCompletion
     }
     public let version: Int
     public let id: UUID
-    public let owner: APFSVolumeFormatGeneratedOwner
+    /// v1/v2 retain their original `owner` wire field. v3 has only
+    /// `ordinaryImageOwner`; neither version invents the other's identity.
+    public let owner: APFSVolumeFormatGeneratedOwner?
+    public let ordinaryImageOwner: APFSVolumeFormatImageOwner?
     public let snapshot: APFSVolumeFormatSnapshot
     public var phase: Phase
     public var replacementID: UUID?
+    public var nativeCompletion: APFSVolumeFormatNativeCompletion?
 
     public init(id: UUID, owner: APFSVolumeFormatGeneratedOwner, snapshot: APFSVolumeFormatSnapshot, phase: Phase,
-                replacementID: UUID? = nil) {
-        version = 1; self.id = id; self.owner = owner; self.snapshot = snapshot
-        self.phase = phase; self.replacementID = replacementID
+                replacementID: UUID? = nil, version: Int = 1,
+                nativeCompletion: APFSVolumeFormatNativeCompletion? = nil) {
+        self.version = version; self.id = id; self.owner = owner; ordinaryImageOwner = nil; self.snapshot = snapshot
+        self.phase = phase; self.replacementID = replacementID; self.nativeCompletion = nativeCompletion
     }
-    public var isUnresolved: Bool { [.intent, .submitted, .uncertain, .compatibleReplacement].contains(phase) }
+    public init(id: UUID, ordinaryImageOwner: APFSVolumeFormatImageOwner, snapshot: APFSVolumeFormatSnapshot,
+                phase: Phase, replacementID: UUID? = nil,
+                nativeCompletion: APFSVolumeFormatNativeCompletion? = nil) {
+        version = 3; self.id = id; owner = nil; self.ordinaryImageOwner = ordinaryImageOwner; self.snapshot = snapshot
+        self.phase = phase; self.replacementID = replacementID; self.nativeCompletion = nativeCompletion
+    }
+    public var isUnresolved: Bool {
+        !validate() || [.intent, .submitted, .uncertain, .compatibleReplacement].contains(phase)
+    }
     public func validate() -> Bool {
-        version == 1 && owner.validate() && snapshot.validate()
-            && (phase == .compatibleReplacement) == (replacementID != nil)
-            && replacementID != snapshot.targetID
+        guard snapshot.validate() else { return false }
+        switch version {
+        case 1, 2:
+            guard owner?.validate() == true, ordinaryImageOwner == nil else { return false }
+        case 3:
+            guard owner == nil, ordinaryImageOwner?.validate() == true else { return false }
+        default: return false
+        }
+        switch phase {
+        case .observedNativeCompletion:
+            return (version == 2 || version == 3) && nativeCompletion?.validates(snapshot) == true
+                && replacementID == nativeCompletion?.replacementID
+        case .compatibleReplacement:
+            return version < 3 && nativeCompletion == nil
+                && replacementID != nil && replacementID != snapshot.targetID
+        default:
+            return replacementID == nil && nativeCompletion == nil
+        }
     }
 }
 
@@ -129,16 +189,22 @@ public enum APFSVolumeFormatRecoveryTerminal: Sendable, Equatable {
     /// The backend saw a compatible APFS replacement. Marker evidence is not
     /// in this record, so the durable job remains unresolved.
     case compatibleReplacement(UUID)
+    case observedNativeCompletion(APFSVolumeFormatNativeCompletion)
     case uncertain
 }
 
 public protocol APFSVolumeFormatRecording: Sendable {
+    var completionPolicy: APFSVolumeFormatCompletionPolicy { get }
     /// Must bind the saved generated backing file and live outer attachment.
     /// A recorder cannot be paired with a default-true launch permission.
     func ownerStillCurrent() -> Bool
     func recordIntent(_ snapshot: APFSVolumeFormatSnapshot) async throws
     func recordSubmitted() async throws
     func recordTerminal(_ terminal: APFSVolumeFormatRecoveryTerminal) async throws
+}
+
+public extension APFSVolumeFormatRecording {
+    var completionPolicy: APFSVolumeFormatCompletionPolicy { .provisional }
 }
 
 /// Shared by the real backend and focused failure tests. The postlaunch write
@@ -148,6 +214,7 @@ final class APFSVolumeFormatRecoverySession: @unchecked Sendable {
     private let recording: any APFSVolumeFormatRecording
     private let lock = NSLock()
     private var submission: Task<Void, Error>?
+    private var intent: APFSVolumeFormatSnapshot?
     init(_ recording: any APFSVolumeFormatRecording) { self.recording = recording }
 
     func ownerStillCurrent() -> Bool { recording.ownerStillCurrent() }
@@ -155,6 +222,7 @@ final class APFSVolumeFormatRecoverySession: @unchecked Sendable {
     func begin(_ snapshot: APFSVolumeFormatSnapshot) async throws {
         guard snapshot.validate(), ownerStillCurrent() else { throw APFSVolumeFormatFailure.changed }
         try await recording.recordIntent(snapshot)
+        lock.withLock { intent = snapshot }
     }
     func didSubmit() {
         lock.withLock {
@@ -163,7 +231,7 @@ final class APFSVolumeFormatRecoverySession: @unchecked Sendable {
         }
     }
     func finish(_ result: APFSVolumeFormatResult) async -> APFSVolumeFormatResult {
-        let task = lock.withLock { submission }
+        let (task, snapshot) = lock.withLock { (submission, intent) }
         var final = result
         if result.submitted {
             if let task {
@@ -176,12 +244,29 @@ final class APFSVolumeFormatRecoverySession: @unchecked Sendable {
             if let task { _ = try? await task.value }
             final = Self.uncertain(result, submitted: true)
         }
-        let terminal: APFSVolumeFormatRecoveryTerminal = !final.submitted ? .notSubmitted
-            : final.failure == nil && final.formatted != nil ? .compatibleReplacement(final.formatted!.id) : .uncertain
+        let terminal: APFSVolumeFormatRecoveryTerminal
+        if !final.submitted { terminal = .notSubmitted }
+        else if final.failure == nil, let formatted = final.formatted {
+            if recording.completionPolicy == .sourceQualification {
+                if let snapshot, let completion = final.nativeCompletion,
+                   completion.validates(snapshot), completion.replacementID == formatted.id,
+                   final.toolExitStatus == completion.nativeExitStatus,
+                   final.diskutilErrorCode == completion.nativeErrorCode,
+                   formatted.name == snapshot.name, ownerStillCurrent() {
+                    terminal = .observedNativeCompletion(completion)
+                } else {
+                    final = Self.uncertain(final, submitted: true); terminal = .uncertain
+                }
+            } else { terminal = .compatibleReplacement(formatted.id) }
+        } else { terminal = .uncertain }
         do { try await recording.recordTerminal(terminal) }
         catch {
             final = final.submitted ? Self.uncertain(final, submitted: true)
                 : .init(submitted: false, formatted: nil, failure: .recoveryUnavailable)
+        }
+        if recording.completionPolicy == .provisional {
+            final = .init(submitted: final.submitted, formatted: final.formatted, failure: final.failure,
+                          toolExitStatus: final.toolExitStatus, diskutilErrorCode: final.diskutilErrorCode)
         }
         return final
     }

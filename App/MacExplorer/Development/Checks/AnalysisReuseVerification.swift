@@ -3,6 +3,9 @@ import AppKit
 import Darwin
 import Foundation
 import ExplorerCore
+import LocalStorage
+import ObjectiveC
+import SwiftUI
 @_spi(ApplicationOwnership) import StorageAnalysis
 
 /// Descriptor-bound I/O for the one generated persistence case. It never
@@ -425,6 +428,211 @@ private enum PersistenceFixtureIO {
               named.st_dev == facts.st_dev, named.st_ino == facts.st_ino else {
             throw refuse("persistence-child-sync")
         }
+    }
+}
+
+/// The existing persistence packet supplies the one real saved row. The other
+/// inventories below are display projections only and never enter an owner.
+@MainActor private enum RecentAnalysisVisualQA {
+    private struct EmptyTopology: DriveTopologyReading {
+        func readTopology() async throws -> DriveTopologySnapshot { try .init(nodes: []) }
+    }
+    private final class Callbacks {
+        var opened: [UUID] = []
+        var refreshes = 0
+    }
+    private struct Projection: View {
+        let inventory: RecentAnalysisInventory
+        let actions: Callbacks
+        var body: some View {
+            RecentAnalysesSection(inventory: inventory, enabled: true,
+                onRefresh: { actions.refreshes += 1 },
+                onOpen: { actions.opened.append($0) })
+                .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color(nsColor: .windowBackgroundColor))
+        }
+    }
+    private static func accessibilityValue(_ object: NSObject, _ name: String) -> Any? {
+        let selector = NSSelectorFromString(name)
+        guard object.responds(to: selector), let method = class_getInstanceMethod(type(of: object), selector),
+              method_getNumberOfArguments(method) == 2 else { return nil }
+        let encoding = method_copyReturnType(method)
+        defer { free(encoding) }
+        guard String(cString: encoding).hasPrefix("@") else { return nil }
+        return object.perform(selector)?.takeUnretainedValue()
+    }
+    private static func accessibleButtons(in window: NSWindow) -> [(NSObject, String)] {
+        var visited = Set<ObjectIdentifier>(), count = 0
+        func walk(_ raw: Any, depth: Int) -> [(NSObject, String)] {
+            guard depth <= 24, count < 2_048, let object = raw as? NSObject,
+                  visited.insert(ObjectIdentifier(object)).inserted else { return [] }
+            count += 1
+            var children = (accessibilityValue(object, "accessibilityChildren") as? [Any] ?? [])
+                + (accessibilityValue(object, "accessibilityContents") as? [Any] ?? [])
+            if let view = object as? NSView { children += view.subviews }
+            let label = accessibilityValue(object, "accessibilityLabel") as? String ?? ""
+            let own = accessibilityValue(object, "accessibilityRole") as? String
+                == NSAccessibility.Role.button.rawValue ? [(object, label)] : []
+            return own + children.flatMap { walk($0, depth: depth + 1) }
+        }
+        return window.contentView.map { walk($0, depth: 0) } ?? []
+    }
+    private static func press(_ object: NSObject) -> Bool {
+        let selector = NSSelectorFromString("accessibilityPerformPress")
+        guard let method = class_getInstanceMethod(type(of: object), selector),
+              method_getNumberOfArguments(method) == 2 else { return false }
+        let encoding = method_copyReturnType(method)
+        defer { free(encoding) }
+        guard ["B", "c"].contains(String(cString: encoding)) else { return false }
+        typealias Function = @convention(c) (AnyObject, Selector) -> ObjCBool
+        return unsafeBitCast(method_getImplementation(method), to: Function.self)(object, selector).boolValue
+    }
+
+    static func capture(root: URL, real row: RecentAnalysis, settings: BrowserSettings) async throws -> [String] {
+        try UIVerification.require(row.root.path.hasPrefix(root.path + "/source/"),
+            "recent-visual-row-outside-generated-source")
+        let priorSize = settings.interfaceSize
+        let selectedAppearance = settings.appearance
+        let priorAppearance = NSApp.appearance
+        let priorKeeping = settings.analysisKeepsResults
+        defer {
+            settings.interfaceSize = priorSize
+            settings.appearance = selectedAppearance
+            NSApp.appearance = priorAppearance
+            settings.analysisKeepsResults = priorKeeping
+        }
+        settings.driveHealthLiveUpdates = false
+        settings.motion.mode = .off
+        settings.interfaceSize = .standard
+        // The offscreen full-page capture showed dark text on a dark background
+        // while native views reported DarkAqua. Capture full-page layout in
+        // Light; the leaf also exercises dark presentation.
+        settings.appearance = .light
+        BrowserAppearanceController.apply(.light)
+
+        // This is the actual Drives composition and passive owner inventory,
+        // with an empty generated topology so no native drive is sampled.
+        let model = ApplicationDriveManagement(reader: EmptyTopology())
+        var appearanceFacts = ""
+        model.show(settings: settings, offscreen: true, initialPage: .analysis)
+        do {
+            await model.drain()
+            guard case .ready(let rows) = model.recentAnalyses, rows.count == 1,
+                  rows[0].id == row.id, model.health.target == nil,
+                  let window = model.window else {
+                throw UIVerification.Failure(message: "recent-visual-real-drive-inventory")
+            }
+            let scanStarts = ApplicationStorageAnalysis.shared.allScanStartsForSessionReuseVerification
+            settings.analysisKeepsResults = false
+            await model.drain()
+            guard case .disabled = model.recentAnalyses else {
+                throw UIVerification.Failure(message: "recent-drive-setting-off-must-hide-rows")
+            }
+            settings.analysisKeepsResults = true
+            await model.drain()
+            guard case .ready(let restored) = model.recentAnalyses,
+                  restored.count == 1, restored[0].id == row.id else {
+                throw UIVerification.Failure(message: "recent-drive-setting-on-must-restore-row")
+            }
+            settings.analysisKeepsResults = false
+            settings.analysisKeepsResults = true
+            settings.analysisKeepsResults = false
+            await model.drain()
+            guard case .disabled = model.recentAnalyses else {
+                throw UIVerification.Failure(message: "recent-drive-latest-off-must-win")
+            }
+            settings.analysisKeepsResults = true
+            settings.analysisKeepsResults = false
+            settings.analysisKeepsResults = true
+            await model.drain()
+            guard case .ready(let latest) = model.recentAnalyses,
+                  latest.count == 1, latest[0].id == row.id else {
+                throw UIVerification.Failure(message: "recent-drive-latest-on-must-win")
+            }
+            try UIVerification.require(scanStarts == ApplicationStorageAnalysis.shared.allScanStartsForSessionReuseVerification,
+                "recent-drive-preference-refresh-must-not-start-scanner")
+            try await UIVerification.snapshot(window,
+                to: root.appendingPathComponent("evidence/recent-drives-one-100.png"))
+            let chrome = window.contentViewController as? ToolWindowChrome
+            let name: (NSAppearance?) -> String = { $0?.name.rawValue ?? "nil" }
+            var hosted: [String] = []
+            func walk(_ view: NSView) {
+                if String(describing: type(of: view)).contains("Hosting") && hosted.count < 12 {
+                    hosted.append("\(type(of: view))=\(name(view.effectiveAppearance))")
+                }
+                for child in view.subviews { walk(child) }
+            }
+            if let content = window.contentView { walk(content) }
+            appearanceFacts = "app=\(name(NSApp.effectiveAppearance)) override=\(name(NSApp.appearance)) "
+                + "window=\(name(window.effectiveAppearance)) override=\(name(window.appearance)) "
+                + "content=\(name(window.contentView?.effectiveAppearance)) "
+                + "chromeHost=\(name(chrome?.contentHost.effectiveAppearance)) hosts=\(hosted.joined(separator: ","))"
+            settings.interfaceSize = .init(150)
+            try await UIVerification.snapshot(window,
+                to: root.appendingPathComponent("evidence/recent-drives-one-150.png"))
+        } catch {
+            await model.closeAndDrain()
+            throw error
+        }
+        await model.closeAndDrain()
+        settings.appearance = selectedAppearance
+        BrowserAppearanceController.apply(selectedAppearance)
+
+        // Render the same production leaf with generated, typed states. This
+        // tests copy/layout without granting any callback mutation authority.
+        let secondRoot = root.appendingPathComponent("source", isDirectory: true)
+            .appendingPathComponent(String(repeating: "Generated long folder ", count: 8)
+                .trimmingCharacters(in: .whitespaces), isDirectory: true)
+            .appendingPathComponent("Analysis", isDirectory: true)
+        let second = RecentAnalysis(id: UUID(), root: secondRoot,
+            observedThrough: row.observedThrough.addingTimeInterval(-3600),
+            result: .partial, policy: .applicationData)
+        let actions = Callbacks()
+        let host = NSHostingView(rootView: InterfaceRoot(content: Projection(inventory: .loading, actions: actions)))
+        let window = NSWindow(contentRect: .init(x: -12_000, y: -12_000, width: 720, height: 400),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Generated Recent Analyses states"
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.close() }
+        let states: [(String, RecentAnalysisInventory, InterfaceSize)] = [
+            ("zero-100", .ready([]), .standard),
+            ("one-100", .ready([row]), .standard),
+            ("two-100", .ready([row, second]), .standard),
+            ("two-150", .ready([row, second]), .init(150)),
+            ("loading-100", .loading, .standard),
+            ("disabled-100", .disabled, .standard),
+            ("busy-100", .busy, .standard),
+            ("unavailable-100", .unavailable, .standard),
+            ("attention-100", .needsAttention, .standard),
+        ]
+        for (name, inventory, size) in states {
+            settings.interfaceSize = size
+            host.rootView = InterfaceRoot(content: Projection(inventory: inventory, actions: actions))
+            try await UIVerification.snapshot(window,
+                to: root.appendingPathComponent("evidence/recent-leaf-" + name + ".png"))
+        }
+        try UIVerification.require(actions.opened.isEmpty && actions.refreshes == 0,
+            "recent-visual-render-invoked-action")
+        host.rootView = InterfaceRoot(content: Projection(inventory: .ready([row, second]), actions: actions))
+        try await UIVerification.waitUntil("recent-accessible-rows") {
+            let labels = accessibleButtons(in: window).map(\.1)
+            return labels.contains { $0.hasPrefix("Open saved analysis for \(row.root.path), Complete, Standard,") }
+                && labels.contains { $0.hasPrefix("Open saved analysis for \(second.root.path), Partial, Application Data,") }
+        }
+        let buttons = accessibleButtons(in: window)
+        guard let first = buttons.first(where: { $0.1.hasPrefix("Open saved analysis for \(row.root.path), Complete, Standard,") })?.0,
+              let other = buttons.first(where: { $0.1.hasPrefix("Open saved analysis for \(second.root.path), Partial, Application Data,") })?.0 else {
+            throw UIVerification.Failure(message: "recent-accessible-row-identity")
+        }
+        try UIVerification.require(press(first) && press(other), "recent-accessible-row-press")
+        try UIVerification.require(actions.opened == [row.id, second.id] && actions.refreshes == 0,
+            "recent-accessible-row-exact-id")
+        return ["Actual Drives Analysis shows the one recorded row at 100% and 150% without device sampling",
+            "The production Recent Analyses leaf renders zero, one, two, loading, disabled, busy, unavailable and needs-attention states from generated display inputs; screenshots require human visual review",
+            "Two same-named rows expose distinct full paths, scope and state to the owned accessibility tree; accessible press dispatches their exact IDs without refresh",
+            "Generated Drives appearance: \(appearanceFacts)"]
     }
 }
 
@@ -857,6 +1065,45 @@ private enum PersistenceFixtureIO {
                     let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
                     try await Task.detached { try PersistenceFixtureIO.writeNew(data, to: seed) }.value
                     checks += ["Properties opens without a scan", "Explicit Analyze shows real chart and retains one metadata result"]
+                    stage = "recent-analysis-exact-row"
+                    await owner.stopAndDrain()
+                    let inventory = await owner.recentSavedAnalyses(keepingResults: true)
+                    let inventoryLabel: String = switch inventory {
+                    case .ready: "ready"
+                    case .loading: "loading"
+                    case .disabled: "disabled"
+                    case .busy: "busy"
+                    case .unavailable: "unavailable"
+                    case .needsAttention: "needs-attention"
+                    }
+                    guard case .ready(let recent) = inventory else {
+                        let state = await owner.recentOwnerStateForVerification()
+                        throw UIVerification.Failure(message: "recent-inventory-\(inventoryLabel)-\(state)")
+                    }
+                    try UIVerification.require(recent.count == 1, "recent-inventory-count-\(recent.count)")
+                    guard let row = recent.first else { throw UIVerification.Failure(message: "recent-row-absent") }
+                    try UIVerification.require(row.root.standardizedFileURL.path.utf8
+                        .elementsEqual(folder.standardizedFileURL.path.utf8),
+                        "recent-row-root-mismatch")
+                    try UIVerification.require(row.result == .complete, "recent-row-not-complete")
+                    stage = "recent-analysis-visual"
+                    checks += try await RecentAnalysisVisualQA.capture(root: root, real: row, settings: settings)
+                    stage = "recent-analysis-exact-row"
+                    let stale = RecentAnalysis(id: UUID(), root: row.root, observedThrough: row.observedThrough,
+                        result: row.result, policy: row.policy)
+                    let starts = owner.allScanStartsForSessionReuseVerification
+                    try UIVerification.require(owner.beginSavedForVerification(stale), "recent-stale-row-admission")
+                    try await UIVerification.waitUntil("recent-stale-row-settles") { !owner.hasWork }
+                    try UIVerification.require(owner.recordedOpenIssueForVerification == .changed
+                        && owner.recordedMetadataForVerification == nil
+                        && owner.allScanStartsForSessionReuseVerification == starts,
+                        "recent-stale-id-cannot-scan")
+                    try UIVerification.require(owner.beginSavedForVerification(row), "recent-exact-row-admission")
+                    try await UIVerification.waitUntil("recent-exact-row-settles") { !owner.hasWork }
+                    try UIVerification.require(owner.recordedMetadataForVerification?.catalogID == row.id
+                        && owner.allScanStartsForSessionReuseVerification == starts,
+                        "recent-exact-id-reopens-without-scanner")
+                    checks += ["Recent Analyses shows one complete saved record; a wrong ID refuses without scanning, while its exact ID reopens without a scanner start"]
                     stage = "idle-saved-hover"
                     await owner.stopAndDrain()
                     let hover = await owner.datedHoverSummaryForVerification(root: folder, access: FolderAccessController(stateDirectory: nil))
@@ -1062,6 +1309,12 @@ private enum PersistenceFixtureIO {
                             : "Fresh creation-history overlap selects a complete full Refresh, reports its fallback and claims no borrowed folders",
                         "Refreshed totals equal a separate full scan; Properties/Analyzer retain scope, actual duration and honest observation provenance",
                         "Stop preserves the old generation and its live queries; a mismatched event UUID causes a visible ordinary full scan"]
+                    guard let savedBeforeRecordingOff = owner.recordedMetadataForVerification else {
+                        throw UIVerification.Failure(message: "recent-analysis-record-before-recording-off")
+                    }
+                    let savedRow = RecentAnalysis(id: savedBeforeRecordingOff.catalogID, root: folder,
+                        observedThrough: savedBeforeRecordingOff.observedThrough, result: .complete,
+                        policy: savedBeforeRecordingOff.metadataPolicy)
                     let startsBeforeRecordingOff = owner.allScanStartsForSessionReuseVerification
                     settings.analysisKeepsResults = false
                     window.refreshButton.performClick(nil)
@@ -1070,11 +1323,38 @@ private enum PersistenceFixtureIO {
                         && owner.recordedMetadataForVerification == nil && window.chartCanBrowseForVerification,
                         "recording-off-keeps-normal-scan-and-shared-pool-accounting")
                     checks += ["Refresh replaces dated totals; recording-off still supports ordinary scan and chart"]
+                    stage = "recent-analysis-disabled-and-replaced"
+                    guard case .disabled = await owner.recentSavedAnalyses(keepingResults: false) else {
+                        throw UIVerification.Failure(message: "recent-disabled-hides-saved-rows")
+                    }
+                    let startsBeforeRecent = owner.allScanStartsForSessionReuseVerification
+                    try UIVerification.require(owner.beginSavedForVerification(savedRow), "recent-disabled-row-admission")
+                    try await UIVerification.waitUntil("recent-disabled-row-settles") { !owner.hasWork }
+                    try UIVerification.require(owner.recordedMetadataForVerification == nil
+                        && owner.allScanStartsForSessionReuseVerification == startsBeforeRecent,
+                        "recent-disabled-refuses-open-without-scan")
+                    settings.analysisKeepsResults = true
+                    try UIVerification.require(owner.sessionReuseCountForVerification > 0,
+                        "recent-replaced-id-requires-live-session-cache-candidate")
+                    let replaced = RecentAnalysis(id: baseline.catalogID, root: folder,
+                        observedThrough: baseline.observedThrough, result: .complete,
+                        policy: baseline.metadataPolicy)
+                    try UIVerification.require(owner.beginSavedForVerification(replaced), "recent-replaced-row-admission")
+                    try await UIVerification.waitUntil("recent-replaced-row-settles") { !owner.hasWork }
+                    try UIVerification.require(owner.recordedOpenIssueForVerification == .changed
+                        && owner.allScanStartsForSessionReuseVerification == startsBeforeRecent,
+                        "recent-replaced-catalog-refuses-without-scan")
+                    checks += ["Keep Recent off suppresses rows and exact-row reopening; a replaced catalog ID cannot reopen a newer generation or start a scanner"]
                     stage = "forget"
                     window.onClearSessionResults?()
                     try await UIVerification.waitUntil(stage) { !owner.hasWork && window.statusLabel.stringValue.contains("removed") }
                     try UIVerification.require(!model.chartDrill.canBrowse && !window.chartCanBrowseForVerification
                         && window.pagedRowCountForVerification == 0, "forget-revokes-all-view-queries")
+                    try UIVerification.require(owner.beginSavedForVerification(savedRow), "recent-forgotten-row-admission")
+                    try await UIVerification.waitUntil("recent-forgotten-row-settles") { !owner.hasWork }
+                    try UIVerification.require(owner.recordedOpenIssueForVerification == .changed
+                        && owner.allScanStartsForSessionReuseVerification == startsBeforeRecent,
+                        "recent-forgotten-id-refuses-without-scan")
                     controller.update(urls: [folder])
                     try await UIVerification.waitUntil("post-forget-properties") { !model.isLoading && !owner.hasWork }
                     try UIVerification.require(model.attribution == nil && !model.chartDrill.canBrowse

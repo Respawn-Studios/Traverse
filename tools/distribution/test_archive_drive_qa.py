@@ -2,14 +2,18 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 import uuid
+from types import SimpleNamespace
+import plistlib
 
 import archive_drive_qa as qa
+from distribution import drive_image_qa as drive, signed_local_qa as signed_local
 import native_checks
 import verify_signed_drive_image as signed_drive
 
@@ -18,6 +22,7 @@ class SignedDrivePostcheckTests(unittest.TestCase):
     def outcome(self):
         return dict(passed=True, submitted=True, targetMarkerRemoved=True,
             siblingMarkerPreserved=True, unrelatedMountsUnchanged=True,
+            completionContract='observed-native-v2', jobVersion=2, nativeCompletionObserved=True,
             siblingUUID="sibling", formattedUUID="formatted", outerDevice="/dev/disk21",
             siblingDevice="disk22s1", formattedName="Generated", siblingMarkerInode=42)
 
@@ -32,15 +37,318 @@ class SignedDrivePostcheckTests(unittest.TestCase):
         return Fixture()
 
     def test_absolute_owned_device_is_not_prefixed_twice(self):
-        self.assertEqual(signed_drive.post_format(self.fixture(), self.outcome())["outerDevice"], "/dev/disk21")
+        self.assertEqual(signed_drive.post_format(self.fixture(), self.outcome(),
+            drive.CaseMode.GENERATED)["outerDevice"], "/dev/disk21")
 
     def test_different_device_and_changed_sibling_still_refuse(self):
         outcome = self.outcome()
         outcome["outerDevice"] = "/dev/disk99"
         with self.assertRaisesRegex(RuntimeError, "graph changed"):
-            signed_drive.post_format(self.fixture(), outcome)
+            signed_drive.post_format(self.fixture(), outcome, drive.CaseMode.GENERATED)
         with self.assertRaisesRegex(RuntimeError, "marker postcondition"):
-            signed_drive.post_format(self.fixture(marker_changed=True), self.outcome())
+            signed_drive.post_format(self.fixture(marker_changed=True), self.outcome(), drive.CaseMode.GENERATED)
+
+    def test_app_model_requires_its_own_warm_and_cold_results(self):
+        mode = drive.CaseMode.APP_MODEL
+        warm = dict(self.outcome(), completionContract='observed-native-v3', jobVersion=3,
+            model='ApplicationAPFSVolumeFormat', typedGestureClaimed=False, ordinaryEnabled=False)
+        cold = dict(passed=True, jobID='job', completionContract='observed-native-v3', jobVersion=3,
+            resolvedNativeCompletion=True, admissionHeld=True, recordUnchanged=True,
+            unresolvedPromotion=False, allMutationCapabilitiesHeld=True,
+            siblingMarkerPreserved=True, targetMarkerAbsent=True, ordinaryEnabled=False)
+        self.assertTrue(signed_drive.post_format(self.fixture(), warm, mode)['targetMarkerRemoved'])
+        self.assertTrue(signed_drive.valid_cold_result(cold, 'job', mode))
+        with self.assertRaisesRegex(RuntimeError, 'postconditions'):
+            signed_drive.post_format(self.fixture(), self.outcome(), mode)
+        self.assertFalse(signed_drive.valid_cold_result(cold, 'job', drive.CaseMode.GENERATED))
+        self.assertFalse(signed_drive.valid_cold_result(dict(cold, ordinaryEnabled=True), 'job', mode))
+        self.assertFalse(signed_drive.valid_cold_result(dict(cold, recordUnchanged=1), 'job', mode))
+
+    def test_app_model_job_binds_the_added_member_and_exact_image_owner(self):
+        image = qa.REPO / '.build/fixtures/generated/fixture.dmg'
+        receipt = dict(fixtureDevice=1, fixtureInode=2, imageDevice=1, imageInode=3, outerMediaID=4)
+        owner = dict(imagePath=str(image), parentDevice=1, parentInode=2, imageDevice=1,
+            imageInode=3, outerMediaID=4, imageBytes=1 << 30, ownerUID=os.geteuid(), outerDevice='disk21')
+        saved = dict(version=3, id='job', replacementID='formatted', phase='observedNativeCompletion',
+            ordinaryImageOwner=owner, snapshot={'targetID': 'added'}, nativeCompletion=dict(
+                version=1, nativeExitStatus=0, replacementID='formatted', intentSHA256='a' * 64))
+        warm = dict(self.outcome(), jobID='job')
+        def verify(record):
+            signed_drive.verify_warm_job(record, warm, drive.CaseMode.APP_MODEL,
+                image=image, receipt=receipt, added_uuid='added')
+        verify(saved)
+        for altered in (dict(saved, ordinaryImageOwner=dict(owner, imageInode=5)),
+                        dict(saved, snapshot={'targetID': 'sibling'}), dict(saved, owner={})):
+            with self.assertRaisesRegex(RuntimeError, 'exact generated target'):
+                verify(altered)
+
+
+class DetachedImageInfoScopeTests(unittest.TestCase):
+    """Pure schema and cross-mode refusal checks; no image tool calls."""
+
+    def test_projection_bounds_literals_and_requires_an_explicit_boolean(self):
+        secret = '/private/generated-sensitive-image-path'
+        value = signed_drive.detached_imageinfo_projection({
+            'Format': 'RAW', 'image-type': secret, 'system-image': False,
+            'Properties': {'image-path': secret}, 'image-path': secret})
+        self.assertEqual(value['format'], {'present': True, 'type': 'string', 'literal': 'RAW'})
+        self.assertEqual(value['imageType'], {'present': True, 'type': 'string', 'literal': 'other'})
+        self.assertEqual(value['systemImage'], {'present': True, 'type': 'boolean', 'value': False})
+        self.assertEqual(value['properties'], {'present': True, 'type': 'dictionary'})
+        self.assertNotIn(secret, json.dumps(value))
+        raw = signed_drive.detached_imageinfo_projection({'Format': 'RAW*', 'image-type': 'raw disk image'})
+        self.assertEqual(raw['format']['literal'], 'RAW*')
+        self.assertEqual(raw['imageType']['literal'], 'raw disk image')
+        self.assertEqual(raw['systemImage'], {'present': False, 'type': 'missing'})
+        for source, expected_type in [({}, 'missing'), ({'system-image': 0}, 'integer'),
+                                      ({'system-image': 'false'}, 'string')]:
+            field = signed_drive.detached_imageinfo_projection(source)['systemImage']
+            self.assertEqual(field['type'], expected_type)
+            self.assertNotIn('value', field)
+        with self.assertRaisesRegex(ValueError, 'not an object'):
+            signed_drive.detached_imageinfo_projection([])
+
+    def test_v1_attach_scope_cannot_authorize_detached_imageinfo(self):
+        parent = qa.REPO / '.build/tmp'
+        parent.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='detached-imageinfo-scope-', dir=parent) as temporary:
+            root = Path(temporary)
+            tag = str(uuid.uuid4()).upper()
+            record = root / tag
+            record.mkdir(mode=0o700)
+            case = root / 'case' / tag
+            fixture = SimpleNamespace(root=root / 'fixture', attachment=lambda: None)
+            expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            facts = {'imageDevice': 1, 'imageInode': 2, 'imageModifiedNS': 3, 'imageChangedNS': 4}
+            with patch.object(signed_drive, 'SCHEMA_ROOT', root), \
+                 patch.object(signed_drive, 'retained_schema_source', return_value=(case, fixture, {})), \
+                 patch.object(signed_drive, 'schema_image_facts', return_value=facts), \
+                 patch.object(signed_drive, 'schema_input_hashes', return_value={'source': 'a' * 64}), \
+                 patch.object(signed_drive, 'tool') as image_tool:
+                old = signed_drive.schema_scope(tag, expiry, case, fixture)
+                new = signed_drive.detached_imageinfo_scope(tag, expiry, case, fixture)
+                self.assertNotEqual(old, new)
+                self.assertEqual(new['packet'], signed_drive.DETACHED_IMAGEINFO_PACKET)
+                self.assertEqual((new['imageInfoMaximum'], new['normalAttachMaximum'],
+                                  new['normalDetachMaximum']), (1, 0, 0))
+                drive.put(record / 'scope.json', old)
+                approved = hashlib.sha256((record / 'scope.json').read_bytes()).hexdigest()
+                with self.assertRaisesRegex(RuntimeError, 'scope or retained inputs changed'):
+                    signed_drive.execute_detached_imageinfo_scope(tag, tag, approved)
+                image_tool.assert_not_called()
+                self.assertFalse((record / 'attempt.json').exists())
+                self.assertFalse((record / 'terminal.json').exists())
+                reverse_id = str(uuid.uuid4()).upper()
+                reverse = root / reverse_id
+                reverse.mkdir(mode=0o700)
+                drive.put(reverse / 'scope.json', signed_drive.detached_imageinfo_scope(reverse_id, expiry, case, fixture))
+                reverse_hash = hashlib.sha256((reverse / 'scope.json').read_bytes()).hexdigest()
+                with self.assertRaisesRegex(RuntimeError, 'controller inputs changed'):
+                    signed_drive.execute_schema_scope(tag, reverse_id, reverse_hash)
+                image_tool.assert_not_called()
+                self.assertFalse((reverse / 'attempt.json').exists())
+
+    def test_one_shot_records_tool_failure_and_postflight_drift_without_cleanup(self):
+        parent = qa.REPO / '.build/tmp'
+        parent.mkdir(exist_ok=True)
+        for scenario in ['completed', 'toolFailure', 'invalidPlist', 'oversize', 'fileDrift', 'attached']:
+            with self.subTest(scenario=scenario), \
+                 tempfile.TemporaryDirectory(prefix='detached-imageinfo-terminal-', dir=parent) as temporary:
+                root = Path(temporary)
+                tag = str(uuid.uuid4()).upper()
+                record = root / tag
+                record.mkdir(mode=0o700)
+                case = root / 'case' / tag
+                facts = {'imageDevice': 1, 'imageInode': 2, 'imageModifiedNS': 3, 'imageChangedNS': 4}
+                attachment = [None]
+                fixture = SimpleNamespace(root=root / 'fixture', image=root / 'fixture.dmg',
+                                          attachment=lambda: attachment[0])
+                expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+                def inquiry(arguments, *, timeout):
+                    self.assertEqual(arguments, ['/usr/bin/hdiutil', 'imageinfo', '-plist', str(fixture.image)])
+                    self.assertEqual(timeout, 30)
+                    self.assertTrue((record / 'attempt.json').exists())
+                    if scenario == 'toolFailure':
+                        raise RuntimeError('Generated failure')
+                    if scenario == 'fileDrift':
+                        facts['imageModifiedNS'] += 1
+                    if scenario == 'attached':
+                        attachment[0] = ('generated-device',)
+                    if scenario == 'invalidPlist':
+                        return b'not a plist'
+                    if scenario == 'oversize':
+                        return b'x' * (signed_drive.DETACHED_IMAGEINFO_LIMIT + 1)
+                    return plistlib.dumps({'Format': 'RAW', 'system-image': False})
+
+                with patch.object(signed_drive, 'SCHEMA_ROOT', root), \
+                     patch.object(signed_drive, 'retained_schema_source', return_value=(case, fixture, {})), \
+                     patch.object(signed_drive, 'schema_image_facts', side_effect=lambda _: dict(facts)), \
+                     patch.object(signed_drive, 'schema_input_hashes', return_value={'source': 'a' * 64}), \
+                     patch.object(signed_drive, 'require_unlocked_console'), \
+                     patch.object(signed_drive, 'tool', side_effect=inquiry) as image_tool:
+                    scope = signed_drive.detached_imageinfo_scope(tag, expiry, case, fixture)
+                    drive.put(record / 'scope.json', scope)
+                    approved = hashlib.sha256((record / 'scope.json').read_bytes()).hexdigest()
+                    if scenario == 'completed':
+                        signed_drive.execute_detached_imageinfo_scope(tag, tag, approved)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'retain image and evidence'):
+                            signed_drive.execute_detached_imageinfo_scope(tag, tag, approved)
+                    terminal = drive.owned_json(record / 'terminal.json', maximum=8192)
+                    self.assertEqual(terminal['passed'], scenario == 'completed')
+                    self.assertFalse(terminal['ordinaryFormatQualified'])
+                    self.assertEqual((terminal['explicitAttachCalls'], terminal['explicitDetachCalls']), (0, 0))
+                    self.assertEqual(terminal['imageFactsUnchanged'], scenario != 'fileDrift')
+                    self.assertEqual(terminal['attachmentAfter'], 'attached' if scenario == 'attached' else 'detached')
+                    self.assertEqual(image_tool.call_count, 1)
+                    self.assertEqual(hashlib.sha256((record / 'scope.json').read_bytes()).hexdigest(), approved)
+                    image_tool.reset_mock()
+                    with self.assertRaises(RuntimeError):
+                        signed_drive.execute_detached_imageinfo_scope(tag, tag, approved)
+                    image_tool.assert_not_called()
+
+
+class FrozenDriveArtifactTests(unittest.TestCase):
+    """Offline receipt and provenance checks; no process or device launches."""
+    def setUp(self):
+        parent = qa.REPO / '.build/tmp'
+        parent.mkdir(exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(prefix='drive-frozen-', dir=parent)
+        self.addCleanup(temporary.cleanup)
+        self.tag = str(uuid.uuid4()).upper()
+        self.case = Path(temporary.name) / self.tag
+        self.identifier = drive.identifier(self.tag)
+        app = self.case / 'Products/Release/Mac Explorer.app'
+        (app / 'Contents/MacOS').mkdir(parents=True)
+        (app / 'Contents/Helpers').mkdir()
+        (app / 'Contents/MacOS/Mac Explorer').write_bytes(b'generated app')
+        (app / 'Contents/Helpers/storage-scanner-worker').write_bytes(b'generated worker')
+        for name in ('Mac Explorer.app.dSYM', 'storage-scanner-worker.dSYM'):
+            (self.case / 'Products/Release' / name).mkdir()
+        with (app / 'Contents/Info.plist').open('wb') as output:
+            plistlib.dump(dict(CFBundleIdentifier=self.identifier,
+                MacExplorerDistributionChannel='qualification', MacExplorerAccessPolicy='local-user-v1',
+                MacExplorerStorageMode='portable', TraverseDriveImageArchitecture='arm64'), output)
+        (self.case / 'evidence').mkdir(mode=0o700)
+        self.source = {'App/MacExplorer/Generated.swift': 'a' * 64}
+        qa.put(self.case / 'evidence/build-inputs.json', dict(sourceSHA256=self.source,
+            sourceInputs=1, case=self.tag, bundleIdentifier=self.identifier,
+            appLaunches=0, driveMutations=0))
+
+    def observed(self, *, current_source=False, require_current_source=True):
+        signer = dict(Identifier=self.identifier, runtime=True,
+            TeamIdentifier=signed_local.TEAM, authorities=['Developer ID Application: Generated'])
+        worker = dict(signer, Identifier='generated.worker')
+        tree = lambda path: {'treeSHA256': ('b' if path.suffix == '.app' else 'c') * 64}
+        with patch.object(signed_local.subprocess, 'run', return_value=SimpleNamespace(stdout='arm64')), \
+             patch.object(signed_local, 'signing', side_effect=[signer, worker]), \
+             patch.object(signed_local, 'entitlements', return_value={}), \
+             patch('distribution.sandbox.compiled_tree_receipt', side_effect=tree), \
+             patch('distribution.helper_symbols.validate', return_value={'UUIDs': ['generated'], 'hasCompileUnits': True}):
+            return signed_local.inspect(self.case, {'signingIdentity': 'D' * 40}, self.identifier,
+                lambda info: True, lambda: self.source if current_source else {'different': 'e' * 64},
+                'Generated drive', require_current_source=require_current_source)
+
+    def test_frozen_inspector_keeps_signed_checks_when_source_changes(self):
+        with self.assertRaisesRegex(ValueError, 'artifact inspection failed'):
+            self.observed(current_source=False)
+        observed = self.observed(current_source=True)
+        self.assertTrue(observed['passed'])
+        self.assertTrue(observed['currentSourceMatch'])
+        self.assertTrue(observed['checks']['sourceMatch'])
+        sealed = dict(observed)
+        qa.put(self.case / 'evidence/build-result.json', dict(case=self.tag, passed=True,
+            actualBuildExit=0, appLaunches=0, driveMutations=0, inspected=sealed))
+        with patch.object(drive, 'case_path', return_value=self.case):
+            frozen = self.observed(current_source=False, require_current_source=False)
+            self.assertFalse(frozen['currentSourceMatch'])
+            self.assertNotIn('sourceMatch', frozen['checks'])
+            self.assertEqual(set(drive.sealed_build_provenance(self.tag, frozen)),
+                             {'buildInputsSHA256', 'buildResultSHA256'})
+            changed = dict(frozen, app={'treeSHA256': 'f' * 64})
+            with self.assertRaisesRegex(ValueError, 'artifact differs from build'):
+                drive.sealed_build_provenance(self.tag, changed)
+
+    def test_controller_receipt_refuses_a_changed_live_input(self):
+        packet = {'packet': drive.CONTROLLER_PACKET,
+                  'sourceSHA256': {'tools/verify_signed_drive_image.py': 'a' * 64}}
+        qa.put(self.case / 'evidence/execution-controller-inputs.json', packet)
+        with patch.object(drive, 'case_path', return_value=self.case), \
+             patch.object(drive, 'controller_packet', return_value=packet):
+            provenance = drive.current_controller_provenance(self.tag)
+        self.assertEqual(provenance['controllerInputsCount'], 1)
+        with patch.object(drive, 'case_path', return_value=self.case), \
+             patch.object(drive, 'controller_packet', return_value=dict(packet, sourceSHA256={'changed': 'b' * 64})):
+            with self.assertRaisesRegex(ValueError, 'controller or probe inputs changed'):
+                drive.current_controller_provenance(self.tag)
+
+    def test_controller_inventory_covers_host_imports_and_compiled_probe(self):
+        paths = set(drive.execution_controller_inputs())
+        self.assertTrue({'tools/verify_signed_drive_image.py', 'tools/verify_drive_lifecycle.py',
+            'tools/dev.py', 'tools/development.py', 'tools/distribution/preflight.py',
+            'tools/distribution/signed_local_qa.py', 'tools/DrivePreparationProbe.swift',
+            'Packages/ExplorerKit/Sources/LocalStorage/VolumeInspection.swift'} <= paths)
+
+    def exercise_phase_permit(self, mode, packet, permit_packet, contract, scope_fields):
+        fixture = self.case.parent / ('drive-lifecycle-' + self.tag)
+        fixture.mkdir(mode=0o700)
+        qa.put(fixture / 'owner.json', {'jobID': self.tag, 'bytes': drive.IMAGE_BYTES})
+        app_hash = 'b' * 64
+        provenance = dict(buildInputsSHA256='c' * 64, buildResultSHA256='d' * 64,
+            controllerInputsSHA256='e' * 64, controllerInputsCount=100)
+        scope = dict(packet=packet, case=self.tag,
+            bundleIdentifier=self.identifier, caseRoot=str(self.case), fixtureRoot=str(fixture),
+            artifactTreeSHA256=app_hash, **provenance,
+            expiresUTC=(datetime.now(timezone.utc) + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            phaseLaunchCeiling=dict(drive.PHASE_CEILING), formatCompletionContract=contract, **scope_fields,
+            imageBytes=drive.IMAGE_BYTES, normalAttachMaximum=1, normalDetachMaximum=1,
+            forceDetachMaximum=0, apfsAddMaximum=1, apfsFormatMaximum=1,
+            driveMutationMaximum=2, physicalDriveMaximum=0,
+            archiveJobsMaximum=0, networkSessionsMaximum=0, trashJobsMaximum=0)
+        qa.put(self.case / 'evidence/runtime-scope.json', scope)
+        with patch.object(drive, 'case_path', return_value=self.case), \
+             patch.object(drive, 'fixture_path', return_value=fixture):
+            self.assertTrue(drive.valid_scope(self.tag, scope, app_hash, provenance, mode))
+            other_mode = drive.CaseMode.APP_MODEL if mode is drive.CaseMode.GENERATED else drive.CaseMode.GENERATED
+            self.assertFalse(drive.valid_scope(self.tag, scope, app_hash, provenance, other_mode))
+            self.assertFalse(drive.valid_scope(self.tag,
+                dict(scope, packet='drive-image-runtime-scope-v2'), app_hash, provenance, mode))
+            self.assertFalse(drive.valid_scope(self.tag, scope, app_hash,
+                dict(provenance, controllerInputsSHA256='f' * 64), mode))
+            for count in (0, 513):
+                self.assertFalse(drive.valid_scope(self.tag,
+                    dict(scope, controllerInputsCount=count), app_hash,
+                    dict(provenance, controllerInputsCount=count), mode))
+            self.assertTrue(drive.valid_scope(self.tag,
+                dict(scope, controllerInputsCount=512), app_hash,
+                dict(provenance, controllerInputsCount=512), mode))
+            self.assertFalse(drive.valid_scope(self.tag, dict(scope,
+                phaseLaunchCeiling={'pre-image': True, 'warm': 1, 'cold': 1}), app_hash, provenance, mode))
+        with patch.object(drive, 'case_path', return_value=self.case), \
+             patch.object(drive, 'fixture_path', return_value=fixture), \
+             patch.object(drive, 'admitted_case', return_value=(self.case, scope_fields)), \
+             patch.object(drive, 'inspect', return_value={'app': {'treeSHA256': app_hash}}), \
+             patch.object(drive, 'sealed_build_provenance', return_value={
+                 key: provenance[key] for key in ('buildInputsSHA256', 'buildResultSHA256')}), \
+             patch.object(drive, 'current_controller_provenance', return_value={
+                 key: provenance[key] for key in ('controllerInputsSHA256', 'controllerInputsCount')}):
+            issued = drive.issue_phase(self.tag, 'pre-image')
+        permit = json.loads((qa.REPO / issued['permit']).read_bytes())
+        self.assertEqual(permit['packet'], permit_packet)
+        self.assertEqual(permit['scopeSHA256'],
+            hashlib.sha256((self.case / 'evidence/runtime-scope.json').read_bytes()).hexdigest())
+        self.assertEqual({key: permit[key] for key in ('buildInputsSHA256', 'buildResultSHA256',
+                         'controllerInputsSHA256')}, {key: provenance[key] for key in (
+                         'buildInputsSHA256', 'buildResultSHA256', 'controllerInputsSHA256')})
+
+    def test_v3_phase_permit_binds_all_frozen_receipts_before_launch(self):
+        self.exercise_phase_permit(drive.CaseMode.GENERATED, 'drive-image-runtime-scope-v3',
+            'drive-image-phase-permit-v3', 'observed-native-v2', {})
+
+    def test_v4_phase_permit_requires_app_model_scope_and_preserves_budgets(self):
+        self.exercise_phase_permit(drive.CaseMode.APP_MODEL, 'drive-image-runtime-scope-v4',
+            'drive-image-phase-permit-v4', 'observed-native-v3', {'caseMode': 'ordinary-format-v3'})
 
 
 class ArchivePhaseAdmissionTests(unittest.TestCase):

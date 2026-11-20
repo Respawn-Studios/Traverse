@@ -12,6 +12,20 @@ public enum RememberedReferenceFailure: Error, Sendable, Equatable {
     case alreadyRemembered(RememberedItemID)
 }
 
+public enum RememberedLocationPolicy: Sendable, Equatable {
+    /// Persist read-only access to a location the user selected.
+    case selectedReadAccess
+    /// Keep an identity-checked locator and use the application's current filesystem access.
+    case localPermissions
+
+    var scope: NativeDocumentReference.Scope {
+        switch self {
+        case .selectedReadAccess: .readOnly
+        case .localPermissions: .locatorOnly
+        }
+    }
+}
+
 /// Stored evidence is not mutation authority. No source body is read or mapped
 /// by this adapter. Original-object operation proofs remain independent.
 internal struct NativeDocumentReference: Codable, Sendable, Equatable {

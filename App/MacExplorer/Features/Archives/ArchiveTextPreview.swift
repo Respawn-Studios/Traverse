@@ -1,5 +1,33 @@
 import AppKit
+import FileOperations
 import LocalStorage
+
+@MainActor enum ArchiveTextReview {
+    static func show(source: URL, left: String, right: String, from browser: BrowserViewController,
+                     relativeTo parent: NSWindow?,
+                     read: @escaping @Sendable (FileAccessLifetimes) async throws -> TextComparisonDocuments) {
+        guard let parent, let workspace = browser.workspace, !workspace.isClosing else { return }
+        let labels = EditorComparisonWindow.Labels(title: "Compare Archive Text", source: source.lastPathComponent,
+            left: left, right: right,
+            detail: "Compare two members without extracting them. If the archive changes, select the members again to review the new versions.",
+            refresh: "Refresh")
+        func language(_ name: String) -> TextSyntaxLanguage {
+            .inferred(extension: EditorOpeningSupport.key(forFilename: (name as NSString).lastPathComponent) ?? "")
+        }
+        workspace.presentTextComparison(relativeTo: parent, settings: browser.settings, labels: labels) { [access = browser.folderAccess] in
+            let lifetime = try await access.retainComparisonAccess(for: [source])
+            do {
+                return .init(documents: try await read(lifetime), leftLanguage: language(left), rightLanguage: language(right))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is TextDocumentFailure {
+                throw EditorComparisonLoadFailure.unavailable("Choose two UTF-8 members with consistent line endings.")
+            } catch {
+                throw EditorComparisonLoadFailure.unavailable(ArchiveTextPreviewOwner.message(error, mode: .text))
+            }
+        }
+    }
+}
 
 enum ZIPTextPreviewFeature {
     static let ordinaryEnabled = true

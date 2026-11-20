@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import LocalStorage
+import UniformTypeIdentifiers
 #if canImport(FileOperations)
 import FileOperations
 #endif
@@ -12,11 +14,15 @@ import FileOperations
 }
 
 struct EditorTextCopyResult { let id: UUID; let title: String }
+struct EditorDiskComparisonSource {
+    let url: URL
+    let capture: @MainActor () async throws -> EditorComparisonCapture
+}
 
 /// Native presentation only. The document owner supplies semantic commands and
 /// installs the app's shared tool chrome; this class has no file I/O authority.
 @MainActor
-final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
+final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopoverDelegate, NSMenuDelegate, NSUserInterfaceValidations {
     enum SaveAnnouncement {
         case saved(newerEditsRemain: Bool), notSaved, conflict, historyNeedsReview, needsReview, stopped
 
@@ -52,6 +58,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     private let locationRow = NSStackView()
     private let locationIcon = NSImageView()
     private let locationLabel = NSTextField(labelWithString: "")
+    let scrollContextButton = NSButton()
     private let recoveryActions = NSStackView()
     private let refusedActions = NSStackView()
     private let copyActions = NSStackView()
@@ -74,10 +81,16 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     private var keyboardObservation: AnyCancellable?
     private weak var keyboardSettings: BrowserSettings?
     private var usesControlAliases = false
-    private var lineNavigation: EditorLineNavigationDialog?
+    private let lineNavigation = EditorLineNavigation()
+    private var navigationChoice: Task<Void, Never>?
     private var comparison: EditorComparisonWindow?
-    private var comparisonBlocked = true
+    private var openEditorComparison: EditorComparisonWindow?
+    private var diskComparison: (url: URL, view: EditorComparisonWindow)?
+    private var clipboardComparison: EditorComparisonWindow?
+    private var unsavedChangePreview: NSPopover?
+    private var documentWorking = true
     var captureComparison: (@MainActor () -> EditorComparisonCapture?)?
+    var diskComparisonSource: (() -> EditorDiskComparisonSource?)?
     private var commandFinderStorage: EditorCommandFinder?
     var commandFinder: EditorCommandFinder {
         if let commandFinderStorage { return commandFinderStorage }
@@ -87,6 +100,13 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     private var copyResults: [EditorTextCopyResult] = []
     private var readOnlyPresentation = false
     private var consumedSaveAnnouncement: UUID?
+    private(set) var fileSidebar: EditorSidebarPresentation?
+    var gitLineReview: GitLineReview?
+    private var gitFileHistory: GitFileHistoryWindow?
+    private var gitHistoryRequest: Task<Void, Never>?
+    private var gitRevisionEditor: NativeTextSnapshotController?
+    private var gitRevisionDiff: EditorComparisonWindow?
+    var onEditedChanged: (() -> Void)?
 
     var onSave: (() -> Void)?
     var onSaveAs: (() -> Void)?
@@ -102,13 +122,14 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     var shouldClose: (() -> Bool)?
     var didClose: (() -> Void)?
 
-    init(displayName: String, installChrome: (NSWindow) -> Void) {
+    init(displayName: String, supportsFileSidebar: Bool = false, installChrome: (NSWindow) -> Void) {
         openSearchName = displayName
         let window = ToolWindowChrome.makeWindow(title: displayName + " — Traverse", size: .init(width: 920, height: 650),
             minimumSize: .init(width: 720, height: 440))
         super.init(window: window)
         window.delegate = self
         surface.setAccessibilityLabel("Text editor")
+        surface.textView.onCompleteLocalName = { [weak self] in self?.completeLocalName(nil) }
         for button in [saveButton, saveAsButton, reloadButton, recoveryButton, stopButton, textCopyButton, textCopyResultsButton, beforeSaveButton, editedSaveButton] {
             button.bezelStyle = .rounded; button.target = self
         }
@@ -139,6 +160,15 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         language.setAccessibilityLabel("Syntax language")
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let toolbar = commandBar
+        let viewport: NSView
+        if supportsFileSidebar {
+            let sidebar = EditorSidebarPresentation(text: surface)
+            fileSidebar = sidebar
+            sidebar.button.target = self
+            sidebar.button.action = #selector(toggleEditorSidebar(_:))
+            toolbar.addArrangedSubview(sidebar.button)
+            viewport = sidebar.split
+        } else { viewport = surface }
         for view in [saveButton, saveAsButton, reloadButton, recoveryButton, stopButton, spacer] {
             toolbar.addArrangedSubview(view)
         }
@@ -156,6 +186,23 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         locationIcon.widthAnchor.constraint(equalToConstant: 14).isActive = true
         locationIcon.heightAnchor.constraint(equalToConstant: 14).isActive = true
         locationRow.addArrangedSubview(locationIcon); locationRow.addArrangedSubview(locationLabel)
+        scrollContextButton.isBordered = false
+        scrollContextButton.alignment = .right
+        scrollContextButton.isHidden = true
+        scrollContextButton.imagePosition = .imageLeading
+        scrollContextButton.contentTintColor = .secondaryLabelColor
+        scrollContextButton.cell?.lineBreakMode = .byTruncatingHead
+        scrollContextButton.font = .systemFont(ofSize: 11, weight: .semibold)
+        scrollContextButton.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        scrollContextButton.setAccessibilityIdentifier("editor-scroll-context")
+        scrollContextButton.target = self
+        scrollContextButton.action = #selector(goToVisibleScope(_:))
+        locationRow.addArrangedSubview(scrollContextButton)
+        scrollContextButton.widthAnchor.constraint(lessThanOrEqualTo: locationRow.widthAnchor, multiplier: 0.46).isActive = true
+        scrollContextButton.heightAnchor.constraint(equalTo: locationIcon.heightAnchor).isActive = true
+        surface.onScrollContextChanged = { [weak self] in self?.displayScrollContext($0) }
+        surface.onReviewUnsavedLine = { [weak self] in self?.reviewUnsavedLine($0) == true }
+        surface.onUnsavedLineBaselineChanged = { [weak self] in self?.closeUnsavedChangePreview() }
         locationRow.orientation = .horizontal; locationRow.spacing = 6; locationRow.alignment = .centerY
         locationRow.isHidden = true
         banner.maximumNumberOfLines = 6; banner.textColor = .secondaryLabelColor
@@ -183,7 +230,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let separator = NSBox(); separator.boxType = .separator
-        let layout = NSStackView(views: [toolbar, locationRow, banner, recoveryActions, surface, separator, bottom])
+        let layout = NSStackView(views: [toolbar, locationRow, banner, recoveryActions, viewport, separator, bottom])
         layout.orientation = .vertical; layout.spacing = 10; layout.alignment = .leading
         layout.translatesAutoresizingMaskIntoConstraints = false
         guard let content = window.contentView else { preconditionFailure("Native editor content") }
@@ -195,12 +242,17 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
             layout.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
             surface.heightAnchor.constraint(greaterThanOrEqualToConstant: 120)
         ])
-        for view in [toolbar, locationRow, banner, recoveryActions, surface, separator, bottom] {
+        for view in [toolbar, locationRow, banner, recoveryActions, viewport, separator, bottom] {
             view.widthAnchor.constraint(equalTo: layout.widthAnchor).isActive = true
         }
         surface.setContentHuggingPriority(.defaultLow, for: .vertical)
+        viewport.setContentHuggingPriority(.defaultLow, for: .vertical)
         surface.onCaret = { [weak self] value in
             self?.position.stringValue = value.map { "Ln \($0.line), Col \($0.column)" } ?? "Updating position…"
+        }
+        surface.onNavigationJump = { [weak self] position in
+            guard let self, let location = EditorDocumentNavigation.shared.location(in: self, position: position) else { return }
+            EditorDocumentNavigation.shared.record(location)
         }
         surface.lineCommands.onNotice = { [weak self] notice in
             self?.status.stringValue = notice.message
@@ -212,6 +264,310 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         ToolWindowChrome.position(window, relativeTo: NSApp.keyWindow ?? NSApp.mainWindow)
     }
     required init?(coder: NSCoder) { nil }
+
+    @objc func toggleEditorSidebar(_ sender: Any?) {
+        guard !closing, window?.isKeyWindow == true else { return }
+        fileSidebar?.toggle()
+    }
+
+    @objc private func moveEditorFocus(_ sender: Any?) {
+        guard !closing, window?.isKeyWindow == true else { return }
+        fileSidebar?.moveFocus()
+    }
+
+    @objc private func showSidebarMode(_ item: NSMenuItem) {
+        guard !closing, window?.isKeyWindow == true, let mode = EditorSidebarMode(rawValue: item.tag) else { return }
+        fileSidebar?.showMode(mode)
+    }
+
+    @objc private func revealCurrentFile(_ sender: Any?) {
+        guard !closing, window?.isKeyWindow == true, let fileSidebar, fileSidebar.canToggle else { return }
+        fileSidebar.showMode(.files)
+        fileSidebar.files?.revealCurrentFile()
+    }
+
+    var navigationStatus: String { status.stringValue }
+
+    func reportNavigation(_ message: String) {
+        status.stringValue = message
+        status.toolTip = message
+    }
+
+    @objc func showCurrentGitHistory(_ sender: Any?) {
+        guard !closing, window?.isKeyWindow == true, let files = fileSidebar?.files,
+              let url = files.currentHistoryFile else { return }
+        files.onHistory?(url)
+    }
+
+    @objc private func reviewCurrentGitStagedChanges(_ sender: Any?) { showCurrentGitFolderReview(.index) }
+    @objc private func compareCurrentGitWorkingFolder(_ sender: Any?) { showCurrentGitFolderReview(.working) }
+    @objc private func stageSavedGitFile(_ sender: Any?) {
+        if canEditGitIndex { fileSidebar?.files?.onGitIndexAction?(.stageSavedFile) }
+    }
+    @objc private func unstageCurrentGitFile(_ sender: Any?) {
+        if canEditGitIndex { fileSidebar?.files?.onGitIndexAction?(.unstage) }
+    }
+
+    private var canEditGitIndex: Bool {
+        !closing && !documentWorking && !readOnlyPresentation && gitHistoryRequest == nil
+            && window?.isKeyWindow == true && window?.attachedSheet == nil && !surface.textView.hasMarkedText()
+            && fileSidebar?.files?.currentHistoryFile != nil && fileSidebar?.files?.onGitIndexAction != nil
+            && !ApplicationFileActivity.gate.isClosed
+    }
+
+    func editGitIndex(_ action: GitIndexEditAction, for url: URL, fileSystem: LocalFileSystem,
+                      access: FolderAccessController, settings: BrowserSettings, matchingSavedText: LocalTextReadToken?,
+                      hasUnsavedEdits: @escaping @MainActor () -> Bool, isCurrent: @escaping @MainActor () -> Bool) {
+        guard canEditGitIndex else { return }
+        requestGitReview(for: url, fileSystem: fileSystem, access: access, settings: settings) { [weak self] review, path, parent in
+            guard let self, isCurrent() else { return }
+            do {
+                let outcome = try await GitIndexEditFlow.run(action, path: path, using: review, in: parent,
+                    hasUnsavedEdits: hasUnsavedEdits, matchingSavedText: matchingSavedText) {
+                        !self.closing && parent.isKeyWindow && isCurrent() && !ApplicationFileActivity.gate.isClosed
+                    }
+                if let notice = outcome.notice(for: action) { reportNavigation(notice) }
+            } catch is CancellationError { return }
+            catch { reportNavigation(GitIndexEditFlow.message(for: error)) }
+        }
+    }
+
+    private func showCurrentGitFolderReview(_ mode: GitComparisonModel.Mode) {
+        guard !closing, window?.isKeyWindow == true, let files = fileSidebar?.files,
+              let url = files.currentHistoryFile else { return }
+        files.onFolderReview?(url, mode)
+    }
+
+    @objc func chooseCurrentGitRevision(_ sender: Any?) {
+        showGitRevisionChoices(.openOrCompare)
+    }
+
+    @objc private func compareCurrentGitRevisions(_ sender: Any?) {
+        showGitRevisionChoices(.comparePair)
+    }
+
+    @objc private func compareEditorWithGit(_ sender: NSMenuItem) {
+        guard let intent = EditorGitRevisionIntent(rawValue: sender.tag), intent == .compareHead || intent == .compareIndex else { return }
+        showGitRevisionChoices(intent)
+    }
+
+    @objc private func chooseCurrentGitWorktree(_ sender: Any?) {
+        guard !closing, window?.isKeyWindow == true, let files = fileSidebar?.files, let url = files.currentHistoryFile else { return }
+        files.onWorktree?(url)
+    }
+
+    private func showGitRevisionChoices(_ intent: EditorGitRevisionIntent) {
+        guard !closing, window?.isKeyWindow == true, let files = fileSidebar?.files,
+              let url = files.currentHistoryFile else { return }
+        files.onRevision?(url, intent)
+    }
+
+    func openGitHistory(for url: URL, fileSystem: LocalFileSystem, access: FolderAccessController, settings: BrowserSettings) {
+        requestGitReview(for: url, fileSystem: fileSystem, access: access, settings: settings) { [weak self] access, path, parent in
+            guard let self else { return }
+            if let gitFileHistory, gitFileHistory.matches(access.location, path: path) { gitFileHistory.present(); return }
+            gitFileHistory?.window?.performClose(nil)
+            let review = GitFileHistoryWindow(parent: parent, settings: settings, access: access, path: path,
+                local: ApplicationLocalTextEditors.shared.reviewSource(for: url))
+            gitFileHistory = review
+            review.didClose = { [weak self, weak review] in if self?.gitFileHistory === review { self?.gitFileHistory = nil } }
+            review.present()
+        }
+    }
+
+    func openGitFolderReview(for url: URL, mode: GitComparisonModel.Mode, fileSystem: LocalFileSystem,
+                             access: FolderAccessController, settings: BrowserSettings, workspace: BrowserWorkspaceController) {
+        requestGitReview(for: url, fileSystem: fileSystem, access: access, settings: settings) { [weak self, weak workspace] review, _, parent in
+            guard self?.fileSidebar?.files?.currentHistoryFile == url, let workspace, !workspace.isClosing else { return }
+            workspace.presentGitComparison(access: review, parent: parent, settings: settings, mode: mode)
+        }
+    }
+
+    func chooseGitRevision(for url: URL, intent: EditorGitRevisionIntent,
+                           fileSystem: LocalFileSystem, access: FolderAccessController, settings: BrowserSettings,
+                           capture: @escaping @MainActor () -> EditorComparisonCapture.Side?) {
+        requestGitReview(for: url, fileSystem: fileSystem, access: access, settings: settings) { [weak self] access, path, parent in
+            guard let self else { return }
+            @MainActor func compareBuffer(with label: String, detail: String,
+                                        read: @escaping @MainActor () async throws -> EditorComparisonCapture.Side) async {
+                guard !closing, parent.isVisible, parent.isKeyWindow || NSApp.keyWindow == nil,
+                      settings.showsGitControls else { return }
+                await presentGitRevisionDiff(parent: parent, settings: settings,
+                    labels: .init(title: "Git Text Diff", source: path.display, left: label,
+                        right: "Editor Buffer · " + url.lastPathComponent, detail: detail, refresh: "Refresh")) {
+                    guard let text = capture() else {
+                        throw EditorComparisonLoadFailure.unavailable("The editor’s current text is unavailable.")
+                    }
+                    return .init(left: try await read(), right: text)
+                }
+            }
+            do {
+                if intent == .compareHead || intent == .compareIndex {
+                    let language = TextSyntaxLanguage.inferred(extension: EditorOpeningSupport.key(forFilename: url.lastPathComponent) ?? "")
+                    if intent == .compareHead {
+                        let (version, contents) = try await access.versionText(path: path, at: .head)
+                        guard let source = version.editorTextSource else {
+                            reportNavigation("HEAD has no comparable file at this path.")
+                            return
+                        }
+                        let text = try contents ?? .original(Data())
+                        let before = EditorComparisonCapture.Side(text: text.text, format: text.format, language: language)
+                        await compareBuffer(with: "HEAD · " + source.label,
+                            detail: "This comparison keeps the selected HEAD commit. Refresh rereads the editor.") { before }
+                    } else {
+                        await compareBuffer(with: "Git Index", detail: "Refresh reads the current Git index and the editor again.") {
+                            do {
+                                let staged = try await access.indexText(for: url)
+                                return .init(text: staged.text, format: staged.format, language: language)
+                            } catch is CancellationError { throw CancellationError() }
+                            catch { throw EditorComparisonLoadFailure.unavailable(GitReviewAccess.message(for: error)) }
+                        }
+                    }
+                    return
+                }
+                let catalog = try await access.catalog()
+                try Task.checkCancellation()
+                let options = GitRevisionOption.choices(catalog)
+                if intent == .comparePair {
+                    guard let pair = await GitFileRevisionPair.choose(filename: path.display, choices: options, in: parent) else { return }
+                    try Task.checkCancellation()
+                    let comparison = try await pair.resolve(path: path, using: access)
+                    await presentGitRevisionDiff(parent: parent, settings: settings, labels: comparison.labels, capture: comparison.read)
+                    return
+                }
+                enum Intent: Sendable { case compare, open }
+                let open = GitFileRevisionSheet<Intent>.Command(title: "Open Version", intent: .open)
+                let compare = GitFileRevisionSheet<Intent>.Command(title: "Compare with Editor", intent: .compare)
+                let canCompare = capture() != nil
+                let sheet = GitFileRevisionSheet(filename: url.lastPathComponent, choices: options,
+                    primary: canCompare ? compare : open, alternate: canCompare ? open : nil)
+                guard let choice = await sheet.choose(in: parent) else { return }
+                try Task.checkCancellation()
+                switch choice.intent {
+                case .open:
+                    let (version, contents) = try await access.versionText(path: path, at: choice.revision.revision)
+                    try Task.checkCancellation()
+                    guard !closing, parent.isVisible else { return }
+                    guard let contents, let member = version.editorTextSource?.member else {
+                        reportNavigation("The selected revision has no readable text file at this path.")
+                        return
+                    }
+                    await gitRevisionEditor?.closeAndDrain()
+                    try Task.checkCancellation()
+                    let viewer = NativeTextSnapshotController.gitVersion(text: contents, member: member, commit: version.commit,
+                        access: access, settings: settings, parent: parent)
+                    gitRevisionEditor = viewer
+                    viewer.didClose = { [weak self, weak viewer] _ in if self?.gitRevisionEditor === viewer { self?.gitRevisionEditor = nil } }
+                    viewer.show()
+                case .compare:
+                    let version = try await access.version(path: path, at: choice.revision.revision)
+                    try Task.checkCancellation()
+                    guard !closing, parent.isVisible else { return }
+                    guard let source = version.editorTextSource else {
+                        reportNavigation("The selected revision has no comparable file at this path.")
+                        return
+                    }
+                    await compareBuffer(with: source.label,
+                        detail: "Compare this pinned Git revision with the open editor. Refresh captures the editor text again.") {
+                        try await access.committedSide(source.member)
+                    }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                reportNavigation(GitReviewAccess.message(for: error))
+            }
+        }
+    }
+
+    func chooseGitWorktree(for url: URL, fileSystem: LocalFileSystem, access: FolderAccessController,
+                           settings: BrowserSettings, capture: @escaping @MainActor () -> EditorComparisonCapture.Side?,
+                           open: @escaping @MainActor (GitWorktreeFile, NSWindow, EditorDocumentNavigation.Location?) -> Void) {
+        enum Intent: Sendable { case open, compare }
+        let origin = EditorDocumentNavigation.shared.location(in: self)
+        requestGitReview(for: url, fileSystem: fileSystem, access: access, settings: settings) { [weak self] review, path, parent in
+            guard let self else { return }
+            do {
+                let listing = try await review.worktrees()
+                try Task.checkCancellation()
+                guard parent.isKeyWindow, parent.attachedSheet == nil, settings.showsGitControls,
+                      fileSidebar?.files?.currentHistoryFile == url else { return }
+                guard let choice = await GitWorktreeSheet<Intent>.choose(listing, title: "File in Git Worktree", file: url.lastPathComponent,
+                    primary: .init(title: "Open File", destination: .open, identifier: "git-worktree-file"),
+                    alternate: .init(title: "Compare with Editor", destination: .compare, identifier: "git-worktree-compare",
+                                     enabled: capture() != nil), in: parent) else { return }
+                let file = try await review.worktreeFile(path, in: choice.worktree)
+                try Task.checkCancellation()
+                guard !closing, parent.isVisible, parent.isKeyWindow, settings.showsGitControls,
+                      fileSidebar?.files?.currentHistoryFile == url else { return }
+                switch choice.destination {
+                case .open: open(file, parent, origin)
+                case .compare:
+                    guard capture() != nil else { return }
+                    let peerBuffer = ApplicationLocalTextEditors.shared.capturedEditorSource(for: file.url)
+                    let label = file.head.displayName + " · " + (peerBuffer == nil ? "On Disk" : "Editor Buffer")
+                    let language = TextSyntaxLanguage.inferred(extension: EditorOpeningSupport.key(forFilename: file.url.lastPathComponent) ?? "")
+                    await presentGitRevisionDiff(parent: parent, settings: settings,
+                        labels: .init(title: "Worktree Text Diff", source: path.display, left: "Current Editor",
+                            right: label, detail: "Compare the current editor with the same path in another checkout.", refresh: "Refresh")) {
+                        let result = try await review.worktreeFile(path, in: choice.worktree, readingText: peerBuffer == nil)
+                        try Task.checkCancellation()
+                        guard let first = capture() else {
+                            throw EditorComparisonLoadFailure.unavailable("The original editor’s text is unavailable.")
+                        }
+                        if let peerBuffer {
+                            guard let second = peerBuffer() else {
+                                throw EditorComparisonLoadFailure.unavailable("The other editor closed or moved. Open a new comparison.")
+                            }
+                            return .init(left: first, right: second)
+                        }
+                        guard let contents = result.text else { throw GitInspectionFailure.worktreeFileUnavailable }
+                        return .init(left: first, right: .init(text: contents.text, format: contents.format, language: language))
+                    }
+                }
+            } catch is CancellationError { return }
+            catch { reportNavigation(GitReviewAccess.message(for: error)) }
+        }
+    }
+
+    private func presentGitRevisionDiff(parent: NSWindow, settings: BrowserSettings, labels: EditorComparisonWindow.Labels,
+                                        capture: @escaping @MainActor () async throws -> EditorComparisonCapture) async {
+        await gitRevisionDiff?.closeAndDrain()
+        guard !Task.isCancelled, !closing, parent.isVisible else { return }
+        let view = EditorComparisonWindow(relativeTo: parent, settings: settings,
+            pointSize: surface.textView.font?.pointSize ?? 13, labels: labels, capture: capture)
+        gitRevisionDiff = view
+        view.didClose = { [weak self, weak view] in if self?.gitRevisionDiff === view { self?.gitRevisionDiff = nil } }
+        view.present()
+    }
+
+    private func requestGitReview(for url: URL, fileSystem: LocalFileSystem, access: FolderAccessController,
+                                  settings: BrowserSettings,
+                                  action: @escaping @MainActor (GitReviewAccess, GitSnapshotPath, NSWindow) async -> Void) {
+        guard !closing, gitHistoryRequest == nil, window?.isKeyWindow == true, window?.attachedSheet == nil,
+              settings.showsGitControls else { return }
+        let navigator = fileSidebar?.files
+        let previousStatus = status.stringValue
+        let opening = "Opening Git review…"
+        reportNavigation(opening)
+        gitHistoryRequest = Task { [weak self, weak navigator] in
+            await navigator?.pauseGitBadges()
+            defer {
+                navigator?.resumeGitBadges()
+                if self?.status.stringValue == opening { self?.reportNavigation(previousStatus) }
+                self?.gitHistoryRequest = nil
+            }
+            let checkout = try? await GitReviewAccess.discover(in: url.deletingLastPathComponent(), fileSystem: fileSystem, access: access)
+            guard let self else { return }
+            guard !Task.isCancelled, !closing, let parent = window, parent.isKeyWindow, parent.attachedSheet == nil else { return }
+            guard let location = checkout?.location, let path = location.filePath(for: url),
+                  let reviewAccess = GitReviewAccess(location: location, fileSystem: fileSystem, access: access) else {
+                reportNavigation("Git revisions could not be found for this file.")
+                return
+            }
+            await action(reviewAccess, path, parent)
+        }
+    }
 
     /// Presentation only; the document owner still supplies the copy action.
     func configureLocalCopyPresentation() {
@@ -257,8 +613,8 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         let enabled = keyboardSettings?.behavior.controlAliasesEnabled == true
         guard usesControlAliases != enabled else { return }
         usesControlAliases = enabled
-        if EditorMenuOwnership.owns(self), window?.isKeyWindow == true {
-            ownMenu = EditorMenuOwnership.claim(self) { makeMenu(base: $0) }
+        if ToolWindowMenuOwnership.owns(self), window?.isKeyWindow == true {
+            ownMenu = ToolWindowMenuOwnership.claim(self) { makeMenu(base: $0) }
         }
     }
 
@@ -302,9 +658,18 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         openSearchPresented && !closing && window != nil && window?.attachedSheet == nil
             && !surface.textView.hasMarkedText()
     }
-    static func openSearchDocuments(preferred: NativeTextEditorWindow) -> [NativeTextEditorWindow] {
+    var canCompareOpenBuffer: Bool { canSearchOpenBuffer && !documentWorking }
+    var openBufferIdentity: EditorBufferIdentity { .init(document: openSearchID, generation: surface.generation) }
+    var editableBufferIdentity: EditorBufferIdentity? {
+        !readOnlyPresentation && canCompareOpenBuffer && surface.textView.isEditable ? openBufferIdentity : nil
+    }
+    var openEditorReference: EditorOpenSearch.Reference {
+        .init(id: openSearchID, generation: surface.generation, name: openSearchName,
+              context: openSearchContext, isEdited: window?.isDocumentEdited == true)
+    }
+    static func openSearchDocuments(preferred: NativeTextEditorWindow? = nil) -> [NativeTextEditorWindow] {
         var seen = Set<UUID>()
-        return ([preferred] + (NSApp.orderedWindows + NSApp.windows).compactMap {
+        return ((preferred.map { [$0] } ?? []) + (NSApp.orderedWindows + NSApp.windows).compactMap {
             $0.windowController as? NativeTextEditorWindow
         }).filter { $0.canSearchOpenBuffer && seen.insert($0.openSearchID).inserted }
     }
@@ -313,15 +678,22 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         return .init(id: openSearchID, generation: surface.generation, name: openSearchName,
             context: openSearchContext, text: surface.textView.string)
     }
-    func revealOpenSearchMatch(_ range: NSRange, generation: UUID) -> Bool {
+    func revealOpenSearchMatch(_ range: NSRange, generation: UUID, returningTo origin: EditorDocumentNavigation.Location?) -> Bool {
         guard canSearchOpenBuffer, surface.generation == generation,
-              Range(range, in: surface.textView.string) != nil, let window else { return false }
+              Range(range, in: surface.textView.string) != nil else { return false }
+        let history = EditorDocumentNavigation.shared
+        focusNavigationTarget()
+        surface.revealNavigationSelection(range, remembersLocation: false)
+        if let origin, history.location(in: self) != origin { history.record(origin) }
+        return true
+    }
+
+    func focusNavigationTarget() {
+        guard let window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.tabGroup?.selectedWindow = window
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(surface.textView)
-        surface.textView.setSelectedRange(range); surface.textView.scrollRangeToVisible(range)
-        return true
     }
 
     /// Owners call once after accepting an actual terminal Save result. Hidden
@@ -350,7 +722,10 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         window?.title = displayName + " — Traverse"
         openSearchName = displayName; openSearchContext = location?.label ?? ""
         window?.tab.title = displayName
-        window?.isDocumentEdited = dirty
+        if let window, window.isDocumentEdited != dirty {
+            window.isDocumentEdited = dirty
+            onEditedChanged?()
+        }
         locationRow.isHidden = location == nil
         locationLabel.stringValue = location?.label ?? ""
         locationLabel.toolTip = location?.detail
@@ -364,7 +739,8 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         format.stringValue = (documentFormat.bom ? "UTF-8 BOM" : "UTF-8")
             + (documentFormat.lineEnding == .crlf ? " · CRLF" : " · LF")
         saveButton.isEnabled = !readOnlyPresentation && canSave
-        comparisonBlocked = readOnlyPresentation || working
+        documentWorking = working
+        if working { closeUnsavedChangePreview() }
         saveAsButton.isEnabled = !readOnlyPresentation && !working && !needsRecovery
         reloadButton.isEnabled = !readOnlyPresentation && canReload
         let reviewAvailable = canReviewVersions ?? needsRecovery
@@ -394,19 +770,41 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     /// session overrides; the controller decides whether a new default applies.
     func applyEditorPreferences(_ value: EditorPreferences, pointSize: CGFloat,
                                 applyWrapping: Bool = true) {
+        closeUnsavedChangePreview()
         if applyWrapping {
             wrapping.state = value.wrapsLines ? .on : .off
         }
         surface.applyEditorPreferences(value, pointSize: pointSize, applyWrapping: applyWrapping)
     }
+
+    private func displayScrollContext(_ value: NativeTextEditorSurface.ScrollContext?) {
+        guard let value, let scope = value.scopes.last else {
+            ToolContentMotion.finishCrossfade(in: scrollContextButton)
+            scrollContextButton.isHidden = true
+            scrollContextButton.title = ""
+            scrollContextButton.image = nil
+            scrollContextButton.toolTip = nil
+            return
+        }
+        let fullTitle = value.scopes.map(\.title).joined(separator: " › ")
+        let revealing = scrollContextButton.isHidden
+        if !revealing { ToolContentMotion.crossfade(scrollContextButton) }
+        scrollContextButton.title = fullTitle
+        scrollContextButton.image = NSImage(systemSymbolName: scope.kind.icon, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+        scrollContextButton.toolTip = "Go to " + fullTitle
+        scrollContextButton.setAccessibilityLabel("Go to visible scope, " + fullTitle)
+        scrollContextButton.isHidden = false
+        if revealing { ToolContentMotion.reveal(scrollContextButton, movesContent: false) }
+    }
     func selectLanguage(_ value: TextSyntaxLanguage) {
-        if language.titleOfSelectedItem != value.title { surface.lineCommands.inputDidChange() }
-        surface.textView.indentationLanguage = value
+        surface.setEditingLanguage(value)
         let index = TextSyntaxLanguage.allCases.firstIndex(of: value) ?? 0
         language.selectItem(at: index)
     }
     func finishClose() {
         closing = true
+        closeUnsavedChangePreview()
         commandFinderStorage?.dismiss(restoringFocus: false)
         openSearchStorage?.dismiss(restoringFocus: false)
         cancelLineNavigation()
@@ -427,8 +825,10 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     /// work. The actual native close remains synchronous in finishClose().
     func prepareAcceptedClose() async -> Bool {
         guard !closing, acceptedCloseEditable == nil, let window else { return false }
+        lineNavigation.cancel()
         acceptedCloseEditable = surface.textView.isEditable
         closing = true; surface.textView.isEditable = false
+        closeUnsavedChangePreview()
         let prepared = await ToolWindowCloseMotion.prepareAcceptedClose(window)
         guard prepared, self.window === window else {
             restoreAcceptedClosePresentation(for: window)
@@ -447,13 +847,34 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     /// Document owners join captured-text CPU work before releasing their own
     /// buffers. No file-access lifetime or Save operation belongs to this view.
     func closeComparisonAndDrain() async {
+        navigationChoice?.cancel()
+        await navigationChoice?.value
+        await gitLineReview?.closeAndDrain()
         await openSearchStorage?.closeAndDrain()
+        await fileSidebar?.files?.projectSearch?.closeAndDrain()
+        gitHistoryRequest?.cancel()
+        await gitHistoryRequest?.value
+        await gitRevisionEditor?.closeAndDrain()
+        await gitRevisionDiff?.closeAndDrain()
+        await openEditorComparison?.closeAndDrain()
+        await diskComparison?.view.closeAndDrain()
+        await clipboardComparison?.closeAndDrain()
         guard let held = comparison else { return }
         await held.closeAndDrain()
         if comparison === held { comparison = nil }
     }
     #if DEBUG
     var comparisonForVerification: EditorComparisonWindow? { comparison }
+    var unsavedChangePreviewForVerification: EditorUnsavedChangePreview? {
+        guard unsavedChangePreview?.isShown == true else { return nil }
+        return unsavedChangePreview?.contentViewController as? EditorUnsavedChangePreview
+    }
+    var openEditorComparisonForVerification: EditorComparisonWindow? { openEditorComparison }
+    var diskComparisonForVerification: EditorComparisonWindow? { diskComparison?.view }
+    var clipboardComparisonForVerification: EditorComparisonWindow? { clipboardComparison }
+    var readClipboardForComparisonVerification: (() -> String?)?
+    var gitRevisionDiffForVerification: EditorComparisonWindow? { gitRevisionDiff }
+    var gitRevisionEditorForVerification: NativeTextSnapshotController? { gitRevisionEditor }
     #endif
     /// A failed post-close local retirement reopens the same native surface,
     /// including its actual Undo history, in recovery-only mode.
@@ -469,6 +890,13 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         return closing || shouldClose?() == true
     }
     func windowWillClose(_ notification: Notification) {
+        closeUnsavedChangePreview()
+        fileSidebar?.windowWillClose()
+        navigationChoice?.cancel()
+        gitHistoryRequest?.cancel()
+        gitFileHistory?.window?.close()
+        gitRevisionEditor?.window.window?.performClose(nil)
+        gitRevisionDiff?.window?.performClose(nil)
         openSearchPresented = false
         commandFinderStorage?.dismiss(restoringFocus: false)
         openSearchStorage?.dismiss(restoringFocus: false)
@@ -478,16 +906,22 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         didClose?()
     }
     func windowDidBecomeKey(_ notification: Notification) {
+        if !surface.textView.bracketHighlights.isEmpty { surface.textView.needsDisplay = true }
+        fileSidebar?.windowDidAppear()
         synchronizeKeyboardBehavior()
-        guard !EditorMenuOwnership.owns(self) else { return }
-        ownMenu = EditorMenuOwnership.claim(self) { makeMenu(base: $0) }
+        guard !ToolWindowMenuOwnership.owns(self) else { return }
+        ownMenu = ToolWindowMenuOwnership.claim(self) { makeMenu(base: $0) }
     }
     func windowDidResignKey(_ notification: Notification) {
-        surface.lineCommands.inputDidChange(); releaseOwnedMenu()
+        if !surface.textView.bracketHighlights.isEmpty { surface.textView.needsDisplay = true }
+        surface.lineCommands.inputDidChange(preservingExpansion: true); releaseOwnedMenu()
     }
-    func windowWillBeginSheet(_ notification: Notification) { surface.lineCommands.inputDidChange() }
+    func windowWillBeginSheet(_ notification: Notification) {
+        closeUnsavedChangePreview()
+        surface.lineCommands.inputDidChange(preservingExpansion: true)
+    }
     private func releaseOwnedMenu() {
-        EditorMenuOwnership.release(self)
+        ToolWindowMenuOwnership.release(self)
         ownMenu = nil
     }
     private func makeMenu(base: NSMenu?) -> NSMenu {
@@ -504,58 +938,116 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
             root.submenu = submenu; menu.addItem(root)
             return submenu
         }
-        section("File", [
+        let isGitSnapshot = gitLineReview?.isSnapshot == true
+        let file = section("File", isGitSnapshot ? [] : [
             ("Save", #selector(saveDocument(_:)), "s", .command, self),
             (saveAsMenuTitle ?? "Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift], self),
             ("Save a Text Copy…", #selector(saveTextCopy(_:)), "", .command, self),
             ("Copy Results…", #selector(showTextCopyResults(_:)), "", .command, self),
             ("Reload from File…", #selector(reloadDocument(_:)), "", .command, self),
-            ("Compare Changes…", #selector(compareChanges(_:)), "", .command, self),
-            (recoveryMenuTitle ?? "Review Retained Versions…", #selector(reviewVersions(_:)), "", .command, self),
-            ("Close", #selector(NSWindow.performClose(_:)), "w", .command, nil)
+            (recoveryMenuTitle ?? "Review Retained Versions…", #selector(reviewVersions(_:)), "", .command, self)
         ])
+        file.delegate = self
+        if !isGitSnapshot && fileSidebar != nil {
+            file.insertItem(BrowserMenus.item("Open Project File…", #selector(findProjectFile(_:)), key: "p", target: self), at: 0)
+        }
+        if !file.items.isEmpty { file.addItem(.separator()) }
+        BrowserMenus.addSection("Compare", to: file) { comparisons in
+            if !isGitSnapshot && !readOnlyPresentation {
+                comparisons.addItem(BrowserMenus.item("Compare Changes…", #selector(compareChanges(_:)), target: self))
+                if diskComparisonSource != nil {
+                    comparisons.addItem(BrowserMenus.item("Compare with File on Disk…", #selector(compareWithDisk(_:)), target: self))
+                }
+            }
+            comparisons.addItem(BrowserMenus.item("Compare with Open Editor…", #selector(chooseOpenEditorComparison(_:)), target: self))
+            comparisons.addItem(BrowserMenus.item("Compare with Clipboard", #selector(compareWithClipboard(_:)), target: self))
+        }
+        BrowserMenus.addSection("Git", to: file, identifier: BrowserMenus.gitSectionIdentifier) { git in
+            if !isGitSnapshot && fileSidebar != nil {
+                git.addItem(BrowserMenus.item("Review Staged Changes…", #selector(reviewCurrentGitStagedChanges(_:)), target: self))
+                git.addItem(BrowserMenus.item("Compare Working Folder…", #selector(compareCurrentGitWorkingFolder(_:)), target: self))
+                git.addItem(BrowserMenus.item("Stage Saved File…", #selector(stageSavedGitFile(_:)), target: self))
+                git.addItem(BrowserMenus.item("Unstage File…", #selector(unstageCurrentGitFile(_:)), target: self))
+                git.addItem(.separator())
+                git.addItem(BrowserMenus.item("Git File History…", #selector(showCurrentGitHistory(_:)), target: self))
+                for (title, intent) in [("Compare Editor with HEAD", EditorGitRevisionIntent.compareHead), ("Compare Editor with Git Index", .compareIndex)] {
+                    let item = BrowserMenus.item(title, #selector(compareEditorWithGit(_:)), target: self)
+                    item.tag = intent.rawValue
+                    git.addItem(item)
+                }
+                git.addItem(BrowserMenus.item("Open or Compare Git Revision…", #selector(chooseCurrentGitRevision(_:)), target: self))
+                git.addItem(BrowserMenus.item("Compare Git Revisions…", #selector(compareCurrentGitRevisions(_:)), target: self))
+                git.addItem(BrowserMenus.item("Open or Compare File in Git Worktree…", #selector(chooseCurrentGitWorktree(_:)), target: self))
+            }
+            if gitLineReview != nil {
+                if !git.items.isEmpty { git.addItem(.separator()) }
+                git.addItem(BrowserMenus.item("Show Commit for Line…", #selector(showGitLineCommit(_:)), target: self))
+                git.addItem(BrowserMenus.item("Stop Git Lookup", #selector(stopGitLineCommit(_:)), target: self))
+            }
+        }
+        menuNeedsUpdate(file)
+        file.addItem(.separator())
+        file.addItem(BrowserMenus.item("Close", #selector(NSWindow.performClose(_:)), key: "w", target: nil))
         let edit = section("Edit", [
             ("Undo Typing", #selector(NativeTextUndoActions.undo(_:)), "z", .command, nil),
             ("Redo Typing", #selector(NativeTextUndoActions.redo(_:)), "z", [.command, .shift], nil),
             ("Cut", #selector(NSText.cut(_:)), "x", .command, nil),
             ("Copy", #selector(NSText.copy(_:)), "c", .command, nil),
             ("Paste", #selector(NSText.paste(_:)), "v", .command, nil),
-            ("Select All", #selector(NSText.selectAll(_:)), "a", .command, nil),
-            ("Go to Line…", #selector(showGoToLine(_:)), "g", .control, self)
+            ("Select All", #selector(NSText.selectAll(_:)), "a", .command, nil)
         ])
-        let findItems: [(String, NSTextFinder.Action, String, NSEvent.ModifierFlags)] = [
-            ("Find…", .showFindInterface, "f", .command),
-            ("Find Next", .nextMatch, "g", .command),
-            ("Find Previous", .previousMatch, "G", [.command, .shift]),
-            ("Replace…", .showReplaceInterface, "f", [.command, .option]),
-            ("Use Selection for Find", .setSearchString, "e", .command)
-        ]
-        for (title, action, key, modifiers) in findItems {
-            let item = NSMenuItem(title: title, action: #selector(performFind(_:)), keyEquivalent: key)
-            item.tag = action.rawValue; item.keyEquivalentModifierMask = modifiers
-            // Target the owning key window, including while a Find field is
-            // first responder. Retained items cannot act on a closed editor.
-            item.target = self
-            edit.insertItem(item, at: edit.numberOfItems - 1)
-        }
-        let openFind = NSMenuItem(title: "Find in Open Editors…", action: #selector(findInOpenEditors(_:)), keyEquivalent: "f")
-        openFind.keyEquivalentModifierMask = [.command, .shift]; openFind.target = self
-        edit.insertItem(openFind, at: edit.numberOfItems - 1)
+        edit.insertItem(.separator(), at: 2)
         edit.addItem(.separator())
-        for (tag, title, key, modifiers) in [
-            (0, "Duplicate Lines", "D", NSEvent.ModifierFlags([.command, .shift])),
-            (1, "Move Lines Up", String(UnicodeScalar(NSUpArrowFunctionKey)!), NSEvent.ModifierFlags.option),
-            (2, "Move Lines Down", String(UnicodeScalar(NSDownArrowFunctionKey)!), NSEvent.ModifierFlags.option),
-            (3, "Toggle Line Comment", "/", NSEvent.ModifierFlags.command),
-            (4, "Format JSON", "F", NSEvent.ModifierFlags([.option, .shift])),
-            (5, "Compact JSON", "", NSEvent.ModifierFlags([])),
-            (6, "Sort Lines Ascending", "", NSEvent.ModifierFlags([])),
-            (7, "Sort Lines Descending", "", NSEvent.ModifierFlags([])),
-            (8, "Trim Trailing Whitespace", "", NSEvent.ModifierFlags([]))
-        ] {
-            let item = NSMenuItem(title: title, action: #selector(performLineCommand(_:)), keyEquivalent: key)
-            item.tag = tag; item.keyEquivalentModifierMask = modifiers; item.target = self
-            edit.addItem(item)
+        EditorFindMenu.items(target: self, selector: #selector(performFind(_:)), allowsReplacement: !readOnlyPresentation).forEach(edit.addItem)
+        if !readOnlyPresentation {
+            edit.addItem(BrowserMenus.item("Replace Occurrences in File…", #selector(replaceOccurrencesInFile(_:)), target: self))
+        }
+        edit.addItem(BrowserMenus.item("Find in Open Editors…", #selector(findInOpenEditors(_:)), key: "f",
+            modifiers: [.command, .shift], target: self))
+        BrowserMenus.addSection("Search Scope", to: edit) { scope in
+            scope.addItem(EditorFindMenu.selectionItem(target: self, selector: #selector(findInSelection(_:))))
+            scope.addItem(BrowserMenus.item("Find in Current Scope…", #selector(findInCurrentScope(_:)), target: self))
+            if fileSidebar != nil {
+                scope.addItem(BrowserMenus.item("Find in Selected Folder…", #selector(findSelectedFolderText(_:)), target: self))
+                scope.addItem(BrowserMenus.item("Find in Project…", #selector(findProjectText(_:)), target: self))
+            }
+        }
+        edit.addItem(.separator())
+        edit.addItem(BrowserMenus.item("Select Inside Brackets", #selector(selectInsideBrackets(_:)), target: self))
+        EditorSelectionAdjustment.menuItems(target: self, action: #selector(adjustEditorSelection(_:))).forEach(edit.addItem)
+        if !readOnlyPresentation {
+            edit.addItem(BrowserMenus.item("Complete Name in This File", #selector(completeLocalName(_:)),
+                key: String(UnicodeScalar(NSF5FunctionKey)!), modifiers: [], target: self))
+        }
+        edit.addItem(.separator())
+        let lineGroups: [(String, [(Int, String, String, NSEvent.ModifierFlags)])] = [
+            ("Lines", [
+                (0, "Duplicate Lines", "D", [.command, .shift]),
+                (1, "Move Lines Up", String(UnicodeScalar(NSUpArrowFunctionKey)!), .option),
+                (2, "Move Lines Down", String(UnicodeScalar(NSDownArrowFunctionKey)!), .option),
+                (3, "Toggle Line Comment", "/", .command),
+                (6, "Sort Lines Ascending", "", []),
+                (7, "Sort Lines Descending", "", []),
+                (8, "Trim Trailing Whitespace", "", [])
+            ]),
+            ("JSON", [(4, "Format JSON", "F", [.option, .shift]), (5, "Compact JSON", "", [])])
+        ]
+        for (group, commands) in lineGroups {
+            BrowserMenus.addSection(group, to: edit) { submenu in
+                for (tag, title, key, modifiers) in commands {
+                    let item = BrowserMenus.item(title, #selector(performLineCommand(_:)), key: key, modifiers: modifiers, target: self)
+                    item.tag = tag
+                    submenu.addItem(item)
+                }
+                if group == "JSON" {
+                    submenu.addItem(.separator())
+                    let syntax = BrowserMenus.item("Check JSON", #selector(checkJSONDocument(_:)), target: self)
+                    let schema = BrowserMenus.item("Check Against JSON Schema…", #selector(checkJSONDocument(_:)), target: self)
+                    schema.tag = 1
+                    submenu.addItem(syntax)
+                    submenu.addItem(schema)
+                }
+            }
         }
         let surround = NSMenuItem(title: "Surround Selection", action: nil, keyEquivalent: "")
         let surroundMenu = NSMenu(title: surround.title)
@@ -565,6 +1057,86 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
             surroundMenu.addItem(item)
         }
         surround.submenu = surroundMenu; edit.addItem(surround)
+        if !readOnlyPresentation {
+            let markers = NSMenuItem(title: "Merge Conflict Markers", action: nil, keyEquivalent: "")
+            let choices = NSMenu(title: markers.title)
+            for direction in [EditorJumpDirection.next, .previous] {
+                let item = BrowserMenus.item(direction == .next ? "Next Conflict" : "Previous Conflict",
+                    #selector(visitConflictMarker(_:)), target: self)
+                item.tag = direction.rawValue
+                choices.addItem(item)
+            }
+            choices.addItem(.separator())
+            for resolution in EditorConflictMarkers.Resolution.allCases {
+                let item = BrowserMenus.item(resolution.title, #selector(resolveConflictMarker(_:)), target: self)
+                item.tag = resolution.rawValue
+                choices.addItem(item)
+            }
+            markers.submenu = choices; edit.addItem(markers)
+        }
+        let view = section("View", [
+            (NativeTextEditorSurface.whitespaceMarksTitle, #selector(toggleWhitespaceMarks(_:)), "", [], self)
+        ])
+        if fileSidebar != nil {
+            view.addItem(.separator())
+            view.addItem(BrowserMenus.item("Editor Sidebar", #selector(toggleEditorSidebar(_:)), key: "\\", target: self))
+            view.addItem(BrowserMenus.item("Switch Between Sidebar and Text", #selector(moveEditorFocus(_:)),
+                key: String(UnicodeScalar(NSF6FunctionKey)!), modifiers: [], target: self))
+            view.addItem(.separator())
+            for (mode, title, key) in [(EditorSidebarMode.files, "Project Files", ""), (.open, "Open Editors", ""), (.outline, "Document Outline", "o")] {
+                let item = BrowserMenus.item(title, #selector(showSidebarMode(_:)), key: key, modifiers: [.command, .shift], target: self)
+                item.tag = mode.rawValue
+                view.addItem(item)
+            }
+            view.addItem(BrowserMenus.item("Reveal Current File", #selector(revealCurrentFile(_:)), target: self))
+        }
+        let go = section("Go", [
+            ("Go to Line…", #selector(showGoToLine(_:)), "g", .control, self),
+            ("Go to Matching Bracket", #selector(goToMatchingBracket(_:)), "\\", [.command, .shift], self),
+            ("Go to Visible Scope", #selector(goToVisibleScope(_:)), "", [], self),
+            ("Find Declaration in This File", #selector(findLocalDeclaration(_:)), String(UnicodeScalar(NSF12FunctionKey)!), [], self),
+            ("Go to Symbol in This File…", #selector(goToDocumentSymbol(_:)), "o", [.command, .control], self),
+            ("Go to Symbol in Open Editors…", #selector(goToOpenSymbol(_:)), "o", [.command, .option], self)
+        ])
+        BrowserMenus.addSection("Outline", to: go) { menu in
+            for direction in EditorJumpDirection.allCases {
+                let previous = direction == .previous
+                let arrow = String(UnicodeScalar(previous ? NSUpArrowFunctionKey : NSDownArrowFunctionKey)!)
+                let item = BrowserMenus.item(previous ? "Previous Outline Item" : "Next Outline Item",
+                    #selector(visitOutlineItem(_:)), key: arrow, modifiers: [.command, .option], target: self)
+                item.tag = direction.rawValue
+                menu.addItem(item)
+            }
+            menu.addItem(BrowserMenus.item("Go to Enclosing Scope", #selector(goToEnclosingScope(_:)), target: self))
+        }
+        if !readOnlyPresentation {
+            go.insertItem(BrowserMenus.item("Go to Last Edit", #selector(goToLastEdit(_:)), target: self), at: 1)
+            BrowserMenus.addSection("Line Bookmarks", to: go) { menu in
+                menu.addItem(BrowserMenus.item("Toggle Line Bookmark", #selector(toggleLineBookmark(_:)), target: self))
+                menu.addItem(BrowserMenus.item("Choose Line Bookmark…", #selector(chooseLineBookmark(_:)), target: self))
+                let key = String(UnicodeScalar(NSF2FunctionKey)!)
+                for direction in [EditorJumpDirection.next, .previous] {
+                    let title = direction == .next ? "Next Bookmark" : "Previous Bookmark"
+                    let item = BrowserMenus.item(title, #selector(visitLineBookmark(_:)), key: key,
+                        modifiers: direction == .next ? [] : [.shift], target: self)
+                    item.tag = direction.rawValue
+                    menu.addItem(item)
+                }
+            }
+        }
+        if fileSidebar != nil {
+            go.addItem(BrowserMenus.item("Find Project Declarations…", #selector(findProjectDeclarations(_:)), target: self))
+        }
+        go.addItem(.separator())
+        EditorJumpDirection.menuItems(target: self, action: #selector(visitTextLocation(_:))).forEach(go.addItem)
+        if !readOnlyPresentation {
+            EditorJumpDirection.changeMenuItems(target: self, action: #selector(visitUnsavedChange(_:)), qualifier: "Unsaved ")
+                .forEach(go.addItem)
+            go.addItem(BrowserMenus.item("Review Unsaved Change…", #selector(reviewSelectedUnsavedLine(_:)),
+                key: String(UnicodeScalar(NSF7FunctionKey)!), modifiers: .option, target: self))
+            go.addItem(BrowserMenus.item("Go to Unsaved Change…", #selector(chooseUnsavedChange(_:)),
+                key: String(UnicodeScalar(NSF7FunctionKey)!), modifiers: [.command, .option], target: self))
+        }
         if let window {
             let item = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
             item.submenu = NativeWindowMenu.make(tabbedWindow: window)
@@ -580,18 +1152,23 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         }
         if usesControlAliases {
             let basic: Set<String> = ["Save", saveAsMenuTitle ?? "Save As…", "Close", "Undo Typing", "Redo Typing", "Cut", "Copy", "Paste", "Select All", "Find…", "Find in Open Editors…", "Toggle Line Comment"]
-            for parent in menu.items where ["File", "Edit"].contains(parent.title) {
-                guard let submenu = parent.submenu else { continue }
-                for item in submenu.items where basic.contains(item.title) && item.keyEquivalentModifierMask.contains(.command) {
-                    guard let alias = item.copy() as? NSMenuItem else { continue }
+            func addAliases(to section: NSMenu) {
+                for item in section.items {
+                    if let submenu = item.submenu { addAliases(to: submenu) }
+                    guard basic.contains(item.title), item.keyEquivalentModifierMask.contains(.command),
+                          let alias = item.copy() as? NSMenuItem else { continue }
                     alias.keyEquivalentModifierMask.remove(.command); alias.keyEquivalentModifierMask.insert(.control)
                     alias.isHidden = true; alias.allowsKeyEquivalentWhenHidden = true
-                    submenu.addItem(alias)
+                    section.addItem(alias)
                     if item.title == "Redo Typing", let redo = alias.copy() as? NSMenuItem {
-                        redo.keyEquivalent = "y"; redo.keyEquivalentModifierMask = .control; submenu.addItem(redo)
+                        redo.keyEquivalent = "y"; redo.keyEquivalentModifierMask = .control; section.addItem(redo)
                     }
                 }
-                if parent.title == "Edit" {
+            }
+            for parent in menu.items where ["File", "Edit"].contains(parent.title) {
+                guard let submenu = parent.submenu else { continue }
+                addAliases(to: submenu)
+                if parent.title == "Edit", !readOnlyPresentation {
                     let replace = NSMenuItem(title: "Replace…", action: #selector(performFind(_:)), keyEquivalent: "h")
                     replace.keyEquivalentModifierMask = .control; replace.tag = NSTextFinder.Action.showReplaceInterface.rawValue
                     replace.target = self; replace.isHidden = true; replace.allowsKeyEquivalentWhenHidden = true
@@ -601,9 +1178,73 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         }
         return menu
     }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let git = menu.items.first { $0.identifier == BrowserMenus.gitSectionIdentifier }
+        git?.isHidden = fileSidebar?.files?.currentHistoryFile == nil && gitLineReview?.isAvailable != true
+    }
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         guard !closing, window?.isKeyWindow == true else { return false }
         switch item.action {
+        case #selector(toggleWhitespaceMarks(_:)):
+            (item as? NSMenuItem)?.state = surface.showsWhitespaceMarks ? .on : .off
+            return window?.attachedSheet == nil && !surface.textView.hasMarkedText()
+        case #selector(toggleEditorSidebar(_:)):
+            (item as? NSMenuItem)?.state = fileSidebar?.isShown == true ? .on : .off
+            return fileSidebar?.canToggle == true
+        case #selector(moveEditorFocus(_:)): return fileSidebar?.canToggle == true
+        case #selector(showSidebarMode(_:)), #selector(revealCurrentFile(_:)): return fileSidebar?.canToggle == true
+        case #selector(findProjectFile(_:)), #selector(findProjectText(_:)), #selector(findProjectDeclarations(_:)):
+            return fileSidebar?.canToggle == true
+        case #selector(findSelectedFolderText(_:)):
+            let available = fileSidebar?.isShown == true && fileSidebar?.files?.canFindInSelectedFolder == true
+            (item as? NSMenuItem)?.isHidden = !available
+            return available
+        case #selector(goToVisibleScope(_:)):
+            return surface.scrollContext != nil && window?.attachedSheet == nil && surface.canGoToLine
+        case #selector(visitOutlineItem(_:)):
+            guard canChooseNavigationTarget, let tag = (item as? NSMenuItem)?.tag,
+                  let direction = EditorJumpDirection(rawValue: tag) else { return false }
+            return surface.adjacentOutlineEntry(toward: direction) != nil
+        case #selector(goToEnclosingScope(_:)):
+            return canChooseNavigationTarget && surface.enclosingOutlineEntry != nil
+        case #selector(goToLastEdit(_:)):
+            return window?.attachedSheet == nil && surface.canGoToLastEdit
+                && (window?.firstResponder as? NSTextView)?.hasMarkedText() != true
+        case #selector(toggleLineBookmark(_:)):
+            let line = surface.bookmarkCaretLine
+            (item as? NSMenuItem)?.state = line.map { surface.hasBookmark(on: $0) } == true ? .on : .off
+            return canChooseNavigationTarget && line != nil
+        case #selector(chooseLineBookmark(_:)):
+            return canChooseNavigationTarget && !surface.bookmarkedLines.isEmpty
+        case #selector(visitLineBookmark(_:)):
+            guard canChooseNavigationTarget, let tag = (item as? NSMenuItem)?.tag,
+                  let direction = EditorJumpDirection(rawValue: tag) else { return false }
+            return surface.bookmarkLine(toward: direction) != nil
+        case #selector(findLocalDeclaration(_:)): return canChooseNavigationTarget && surface.canFindDeclaration
+        case #selector(completeLocalName(_:)): return canChooseNavigationTarget && surface.canCompleteLocalName
+        case #selector(replaceOccurrencesInFile(_:)): return canChooseNavigationTarget && surface.occurrenceSeed() != nil
+        case #selector(findInCurrentScope(_:)): return canChooseNavigationTarget && surface.currentSearchScope != nil
+        case #selector(adjustEditorSelection(_:)):
+            guard let tag = (item as? NSMenuItem)?.tag, let direction = EditorSelectionAdjustment(rawValue: tag) else { return false }
+            return surface.lineCommands.canAdjustSelection(direction)
+        case #selector(stageSavedGitFile(_:)), #selector(unstageCurrentGitFile(_:)):
+            (item as? NSMenuItem)?.isHidden = fileSidebar?.files?.currentHistoryFile == nil
+            return canEditGitIndex
+        case #selector(showCurrentGitHistory(_:)), #selector(chooseCurrentGitRevision(_:)), #selector(compareCurrentGitRevisions(_:)),
+             #selector(chooseCurrentGitWorktree(_:)), #selector(compareEditorWithGit(_:)),
+             #selector(reviewCurrentGitStagedChanges(_:)), #selector(compareCurrentGitWorkingFolder(_:)):
+            let available = fileSidebar?.files?.currentHistoryFile != nil
+            (item as? NSMenuItem)?.isHidden = !available
+            return available && gitHistoryRequest == nil && window?.attachedSheet == nil
+                && (item.action != #selector(compareEditorWithGit(_:)) || canCompareOpenBuffer)
+        case #selector(showGitLineCommit(_:)):
+            (item as? NSMenuItem)?.isHidden = gitLineReview?.isAvailable != true
+            return gitLineReview?.canLookUp == true
+        case #selector(stopGitLineCommit(_:)):
+            let running = gitLineReview?.isRunning == true
+            (item as? NSMenuItem)?.isHidden = !running
+            return running
         case #selector(saveDocument(_:)): return saveButton.isEnabled
         case #selector(saveDocumentAs(_:)): return saveAsButton.isEnabled
         case #selector(saveTextCopy(_:)): return !textCopyButton.isHidden && textCopyButton.isEnabled
@@ -611,14 +1252,44 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         case #selector(reloadDocument(_:)): return reloadButton.isEnabled
         case #selector(reviewVersions(_:)): return !recoveryButton.isHidden && recoveryButton.isEnabled
         case #selector(compareChanges(_:)): return canCompare
+        case #selector(compareWithDisk(_:)): return canCompare && diskComparisonSource?() != nil
+        case #selector(compareWithClipboard(_:)): return canCompareClipboard
+        case #selector(chooseOpenEditorComparison(_:)):
+            return canCompareOpenBuffer && (openEditorComparison != nil
+                || Self.openSearchDocuments(preferred: self).contains { $0 !== self && $0.canCompareOpenBuffer })
         case #selector(stopDocumentWork(_:)): return !stopButton.isHidden && stopButton.isEnabled
         case #selector(findEditorCommand(_:)): return canDiscoverCommands
-        case #selector(findInOpenEditors(_:)): return canDiscoverCommands && canSearchOpenBuffer
+        case #selector(findInOpenEditors(_:)), #selector(goToOpenSymbol(_:)): return canDiscoverCommands && canSearchOpenBuffer
+        case #selector(goToDocumentSymbol(_:)):
+            return canDiscoverCommands && canSearchOpenBuffer && surface.currentOutlineForSymbols?.value.entries.isEmpty == false
         case #selector(showGoToLine(_:)): return surface.canGoToLine && window?.attachedSheet == nil
-        case #selector(performFind(_:)): return !closing && window?.isVisible == true && window?.attachedSheet == nil
+        case #selector(visitTextLocation(_:)):
+            return EditorJumpDirection(rawValue: item.tag).map { EditorDocumentNavigation.shared.canVisit($0, from: self) } ?? false
+        case #selector(visitUnsavedChange(_:)):
+            return window?.isKeyWindow == true && canSearchOpenBuffer && EditorJumpDirection(rawValue: item.tag)
+                .flatMap(surface.unsavedChangeLine(toward:)) != nil
+        case #selector(reviewSelectedUnsavedLine(_:)):
+            return canCompare && surface.selectedUnsavedLine != nil
+        case #selector(chooseUnsavedChange(_:)):
+            return canChooseNavigationTarget && surface.canGoToLine && surface.unsavedLineChanges?.marks.isEmpty == false
+        case #selector(visitConflictMarker(_:)):
+            return EditorJumpDirection(rawValue: item.tag).flatMap(conflictDestination(toward:)) != nil
+        case #selector(resolveConflictMarker(_:)):
+            guard !closing, surface.lineCommands.canPerform, let choice = EditorConflictMarkers.Resolution(rawValue: item.tag),
+                  let block = surface.conflictMarkers?.block(containing: surface.textView.selectedRange()) else { return false }
+            return choice != .base || block.base != nil
+        case #selector(goToMatchingBracket(_:)), #selector(selectInsideBrackets(_:)):
+            return surface.lineCommands.canNavigate && selectedSyntaxLanguage.map(EditorBracketNavigation.supports) == true
+                && (item.action != #selector(goToMatchingBracket(_:)) || surface.textView.selectedRange().length <= 1)
+        case #selector(performFind(_:)):
+            guard window?.isVisible == true && window?.attachedSheet == nil else { return false }
+            return item.tag != NSTextFinder.Action.setSearchString.rawValue || surface.find.selectedQuery(allowsNewlines: true) != nil
+        case #selector(findInSelection(_:)): return surface.find.canFindInSelection
         case #selector(performLineCommand(_:)):
             return !closing && surface.lineCommands.canPerform && (item.tag != 3 || lineCommentStyle != nil)
                 && (![4, 5].contains(item.tag) || supportsJSONFormatting)
+        case #selector(checkJSONDocument(_:)):
+            return canChooseNavigationTarget && supportsJSONFormatting && !surface.textView.hasMarkedText()
         case #selector(surroundSelection(_:)):
             return !closing && surface.lineCommands.canPerform && surface.textView.selectedRange().length > 0
                 && EditorSurroundingPair(rawValue: item.tag) != nil
@@ -629,24 +1300,149 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
         !closing && window?.isVisible == true && window?.attachedSheet == nil
     }
     private var canCompare: Bool {
-        !closing && !comparisonBlocked && captureComparison != nil && window?.isVisible == true
+        !closing && !readOnlyPresentation && !documentWorking && captureComparison != nil && window?.isVisible == true
             && window?.attachedSheet == nil && !surface.textView.hasMarkedText()
     }
     @objc func compareChanges(_ sender: Any?) {
-        guard window?.isKeyWindow == true, canCompare, let parent = window,
-              let captureComparison, let settings = commandDiscoverySettings else { return }
-        if let comparison, !comparison.closed { comparison.present(); return }
+        guard window?.isKeyWindow == true else { return }
+        savedComparison()?.present()
+    }
+    private func savedComparison() -> EditorComparisonWindow? {
+        guard canCompare, let parent = window, let captureComparison, let settings = commandDiscoverySettings else { return nil }
+        if let comparison, !comparison.closed { return comparison }
         let held = EditorComparisonWindow(relativeTo: parent, settings: settings,
             pointSize: surface.textView.font?.pointSize ?? 13, capture: captureComparison)
         comparison = held
         held.didClose = { [weak self, weak held] in
             if self?.comparison === held { self?.comparison = nil }
         }
+        return held
+    }
+    @objc private func toggleWhitespaceMarks(_ sender: Any?) {
+        guard window?.isKeyWindow == true, window?.attachedSheet == nil, !surface.textView.hasMarkedText() else { return }
+        surface.setWhitespaceMarks(!surface.showsWhitespaceMarks)
+    }
+
+    @objc func chooseOpenEditorComparison(_ sender: Any?) {
+        guard window?.isKeyWindow == true, canCompareOpenBuffer else { return }
+        if let openEditorComparison, !openEditorComparison.closed { openEditorComparison.present(); return }
+        openSearch.present(.compare)
+    }
+    @objc private func compareWithDisk(_ sender: Any?) {
+        guard window?.isKeyWindow == true, canCompare, let parent = window,
+              let settings = commandDiscoverySettings, let source = diskComparisonSource?() else { return }
+        if let existing = diskComparison, !existing.view.closed {
+            if existing.url == source.url { existing.view.present() }
+            else {
+                Task { @MainActor [weak self] in
+                    await existing.view.closeAndDrain()
+                    self?.compareWithDisk(nil)
+                }
+            }
+            return
+        }
+        let held = EditorComparisonWindow(relativeTo: parent, settings: settings,
+            pointSize: surface.textView.font?.pointSize ?? 13,
+            labels: .init(title: "Compare with File on Disk", source: source.url.lastPathComponent, left: "File on Disk",
+                right: "Editor Buffer", detail: "Review the file as it is on disk alongside your current editor text.",
+                refresh: "Refresh"), capture: source.capture)
+        diskComparison = (source.url, held)
+        held.didClose = { [weak self, weak held] in
+            if self?.diskComparison?.view === held { self?.diskComparison = nil }
+        }
         held.present()
+    }
+    func compareOpenBuffers(_ origin: EditorOpenSearch.Reference, with candidate: EditorOpenSearch.Reference,
+                            editor: NativeTextEditorWindow) {
+        guard editor !== self, canCompareOpenBuffer, editor.canCompareOpenBuffer,
+              origin == openEditorReference, candidate == editor.openEditorReference,
+              let parent = window, parent.isKeyWindow, let settings = commandDiscoverySettings,
+              openEditorComparison == nil else { return }
+        let left = comparisonSide(), right = editor.comparisonSide()
+        var initial: EditorComparisonCapture? = .init(left: left, right: right)
+        func description(_ ref: EditorOpenSearch.Reference) -> String {
+            guard origin.name == candidate.name, !ref.context.isEmpty else { return ref.name }
+            return ref.context
+        }
+        let held = EditorComparisonWindow(relativeTo: parent, settings: settings,
+            pointSize: surface.textView.font?.pointSize ?? 13,
+            labels: .init(title: "Compare Open Editors", source: "Open editor buffers", left: description(origin),
+                right: description(candidate), detail: "Includes unsaved text from the two selected editors.",
+                refresh: "Refresh Current Buffers")) { [weak self, weak editor] in
+            if let captured = initial { initial = nil; return captured }
+            guard let self, let editor, canCompareOpenBuffer, editor.canCompareOpenBuffer,
+                  origin.identifies(openEditorReference), candidate.identifies(editor.openEditorReference) else {
+                throw EditorComparisonLoadFailure.unavailable("One of these editors closed, moved or is busy.")
+            }
+            return .init(left: comparisonSide(), right: editor.comparisonSide())
+        }
+        openEditorComparison = held
+        held.didClose = { [weak self, weak held] in
+            if self?.openEditorComparison === held { self?.openEditorComparison = nil }
+        }
+        held.present()
+    }
+    private func comparisonSide() -> EditorComparisonCapture.Side {
+        .init(text: surface.textView.string, format: surface.documentFormat, language: selectedSyntaxLanguage ?? .plain,
+            editor: editableBufferIdentity)
+    }
+
+    private var canCompareClipboard: Bool {
+        canCompareOpenBuffer && surface.textView.selectedRanges.count == 1
+            && clipboardComparison?.canPresentCapture != false
+    }
+
+    @objc private func compareWithClipboard(_ sender: Any?) {
+        guard canCompareClipboard, let parent = window, parent.isKeyWindow,
+              let settings = commandDiscoverySettings else { return }
+        let editor = surface.textView
+        let selection = editor.selectedRange()
+        let source = editor.string
+        guard let range = Range(selection, in: source) else { return }
+        let text = selection.length == 0 ? source : String(source[range])
+        guard let clipboard = clipboardTextForComparison(), !clipboard.isEmpty else {
+            status.stringValue = "Copy plain text before starting a clipboard comparison."
+            return
+        }
+        let maximumBytes = TextDocumentValue.maximumBytes
+        guard clipboard.utf8.prefix(maximumBytes + 1).count <= maximumBytes,
+              text.utf8.prefix(maximumBytes + 1).count <= maximumBytes else {
+            status.stringValue = "Clipboard comparisons can read up to 1 MiB from each side. Copy or select a smaller section."
+            return
+        }
+        let scope = selection.length == 0 ? "Editor Buffer" : "Selected Text"
+        let labels = EditorComparisonWindow.Labels(title: "Compare with Clipboard", source: openSearchName,
+            left: "Clipboard", right: scope, detail: "Captured when you chose Compare with Clipboard.", refresh: nil)
+        let capture = EditorComparisonCapture(baseline: clipboard, current: text,
+            format: .init(bom: false, lineEnding: .lf), language: selectedSyntaxLanguage ?? .plain)
+        if let comparison = clipboardComparison, !comparison.closed {
+            comparison.present(capture, labels: labels)
+            return
+        }
+        let comparison = EditorComparisonWindow(relativeTo: parent, settings: settings,
+            pointSize: editor.font?.pointSize ?? 13, labels: labels) {
+            throw EditorComparisonLoadFailure.unavailable("Choose Compare with Clipboard from the editor.")
+        }
+        clipboardComparison = comparison
+        comparison.didClose = { [weak self, weak comparison] in
+            if self?.clipboardComparison === comparison { self?.clipboardComparison = nil }
+        }
+        comparison.present(capture)
+    }
+
+    private func clipboardTextForComparison() -> String? {
+        #if DEBUG
+        if let readClipboardForComparisonVerification { return readClipboardForComparisonVerification() }
+        #endif
+        let board = NSPasteboard.general
+        let revision = board.changeCount
+        let text = board.string(forType: .string)
+        return board.changeCount == revision ? text : nil
     }
     var commandDiscoverySettings: BrowserSettings? { keyboardSettings ?? InterfacePresentation.shared.settings }
     func discoverableCommands() -> [(NSMenuItem, String)] {
         guard let ownMenu else { return [] }
+        if let file = ownMenu.item(withTitle: "File")?.submenu { menuNeedsUpdate(file) }
         func commands(in menu: NSMenu, category: String, depth: Int) -> [(NSMenuItem, String)] {
             guard depth < 4 else { return [] }
             return menu.items.filter { !$0.isHidden && !$0.isSeparatorItem }.flatMap { item in
@@ -656,16 +1452,41 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
                 return item.action == nil ? [] : [(item, category)]
             }
         }
-        return ownMenu.items.filter { ["File", "Edit", "Window"].contains($0.title) }.flatMap { section in
+        return ownMenu.items.filter { ["File", "Edit", "View", "Go", "Window"].contains($0.title) }.flatMap { section in
             section.submenu.map { commands(in: $0, category: section.title, depth: 0) } ?? []
         }
     }
     @objc func findEditorCommand(_ sender: Any?) { if !closing { commandFinder.present() } }
     @objc func findInOpenEditors(_ sender: Any?) { if !closing { openSearch.present() } }
+    @objc private func goToOpenSymbol(_ sender: Any?) { if !closing { openSearch.present(.symbols) } }
+    @objc private func goToDocumentSymbol(_ sender: Any?) {
+        guard !closing, surface.currentOutlineForSymbols?.value.entries.isEmpty == false else { return }
+        openSearch.present(.documentSymbols)
+    }
+    @objc private func findProjectFile(_ sender: Any?) {
+        guard !closing else { return }
+        fileSidebar?.files?.findProjectFile(in: self)
+    }
+    @objc private func findProjectText(_ sender: Any?) {
+        guard !closing else { return }
+        fileSidebar?.files?.findProjectFile(in: self, purpose: .findText)
+    }
+    @objc private func findProjectDeclarations(_ sender: Any?) {
+        guard !closing else { return }
+        fileSidebar?.files?.findProjectFile(in: self, purpose: .findDeclarations)
+    }
+    @objc func findSelectedFolderText(_ sender: Any?) {
+        guard !closing, fileSidebar?.isShown == true else { return }
+        fileSidebar?.files?.findProjectFile(in: self, purpose: .findFolderText)
+    }
     @objc private func surroundSelection(_ sender: NSMenuItem) {
         guard !closing, surface.lineCommands.canPerform, surface.textView.selectedRange().length > 0,
               let pair = EditorSurroundingPair(rawValue: sender.tag) else { return }
         surface.lineCommands.perform(.surroundSelection(pair))
+    }
+    @objc private func adjustEditorSelection(_ sender: NSMenuItem) {
+        guard !closing, let direction = EditorSelectionAdjustment(rawValue: sender.tag) else { return }
+        surface.lineCommands.adjustSelection(direction)
     }
     @objc private func performLineCommand(_ sender: NSMenuItem) {
         guard !closing, surface.lineCommands.canPerform else { return }
@@ -696,6 +1517,89 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     private var supportsJSONFormatting: Bool {
         selectedSyntaxLanguage == .json || selectedSyntaxLanguage == .jsonc
     }
+
+    @objc private func checkJSONDocument(_ sender: NSMenuItem) {
+        guard validateUserInterfaceItem(sender), let parent = window else { return }
+        let syntax = selectedSyntaxLanguage
+        let generation = surface.generation
+        let text = surface.textView.string
+        let wantsSchema = sender.tag == 1
+        guard text.utf8.count <= LocalJSONCheck.maximumBytes else {
+            reportNavigation("Check a document of 1 MiB or less.")
+            return
+        }
+        navigationChoice = Task { [weak self, weak parent] in
+            defer { self?.navigationChoice = nil }
+            guard let parent else { return }
+            var selectedSchema: URL?
+            if wantsSchema {
+                let panel = NSOpenPanel()
+                panel.title = "Choose a Local JSON Schema"
+                panel.prompt = "Check"
+                panel.allowedContentTypes = [.json]
+                panel.resolvesAliases = false
+                panel.canChooseDirectories = false
+                panel.allowsMultipleSelection = false
+                let response = await withTaskCancellationHandler {
+                    await panel.beginSheetModal(for: parent)
+                } onCancel: {
+                    Task { @MainActor in panel.cancel(nil) }
+                }
+                guard response == .OK, let url = panel.url else { return }
+                selectedSchema = url
+            }
+            guard let self, !Task.isCancelled, !closing, window === parent, parent.isVisible else { return }
+            @MainActor func isCurrent() -> Bool {
+                surface.generation == generation && selectedSyntaxLanguage == syntax
+                    && !surface.textView.hasMarkedText() && surface.textView.string.utf16.elementsEqual(text.utf16)
+            }
+            guard isCurrent() else { return }
+            reportNavigation("Checking JSON…")
+            let file = selectedSchema
+            let allowsComments = syntax == .jsonc
+            let worker = Task.detached(priority: .userInitiated) {
+                if let file {
+                    return try LocalJSONCheck.check(text, allowsComments: allowsComments, schemaFile: file)
+                }
+                return try LocalJSONCheck.check(text, allowsComments: allowsComments)
+            }
+            let result = await withTaskCancellationHandler {
+                await worker.result
+            } onCancel: { worker.cancel() }
+            guard !Task.isCancelled, !closing, window === parent, parent.isVisible else { return }
+            guard isCurrent() else {
+                reportNavigation("The text or language changed. Run the check again.")
+                return
+            }
+            switch result {
+            case .failure:
+                reportNavigation("The JSON check stopped.")
+            case .success(.unavailable(let message)):
+                reportNavigation(message)
+            case .success(.checked(let issues, let more)):
+                await showJSONIssues(issues, more: more, usedSchema: wantsSchema, in: parent, generation: generation,
+                                     isCurrent: isCurrent)
+            }
+        }
+    }
+
+    private func showJSONIssues(_ issues: [LocalJSONCheck.Issue], more: Bool, usedSchema: Bool,
+                                in parent: NSWindow, generation: UUID, isCurrent: @MainActor () -> Bool) async {
+        guard !issues.isEmpty else {
+            reportNavigation(usedSchema ? "JSON matches the selected schema." : "JSON check found no issues.")
+            return
+        }
+        let count = more ? "\(issues.count.formatted())+ issues" : issues.count == 1 ? "1 issue" : "\(issues.count.formatted()) issues"
+        reportNavigation("JSON check found \(count).")
+        let sheet = NativeChoiceSheet<LocalJSONCheck.Issue>(title: "JSON Check",
+            heading: "JSON Check · \(count)", confirm: "Go to Issue", rows: issues.map {
+                .init(title: $0.message, detail: "Line \($0.line.formatted()), column \($0.column.formatted())", value: $0)
+            })
+        guard let issue = await sheet.choose(in: parent), !closing, window === parent, isCurrent(),
+              surface.goToTextOffset(issue.offset, generation: generation) else { return }
+        reportNavigation(issue.message)
+    }
+
     @objc private func performFind(_ sender: NSMenuItem) {
         guard window?.isKeyWindow == true, window?.isVisible == true, !closing, window?.attachedSheet == nil,
               let action = NSTextFinder.Action(rawValue: sender.tag) else { return }
@@ -729,62 +1633,241 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSUser
     }
     @objc private func reviewVersions(_ sender: Any?) { if !closing && window?.isKeyWindow == true && recoveryButton.isEnabled { onRecovery?() } }
     @objc private func stopDocumentWork(_ sender: Any?) { if !closing && window?.isKeyWindow == true && stopButton.isEnabled { onStop?() } }
+    @objc private func showGitLineCommit(_ sender: Any?) { gitLineReview?.lookUp() }
+    @objc private func stopGitLineCommit(_ sender: Any?) { gitLineReview?.stop() }
+    @objc private func findInSelection(_ sender: Any?) { surface.find.findInSelection() }
+
+    @objc private func findInCurrentScope(_ sender: NSMenuItem) {
+        if validateUserInterfaceItem(sender) { surface.find.findInCurrentScope() }
+    }
+
+    @objc private func replaceOccurrencesInFile(_ sender: NSMenuItem) {
+        guard canChooseNavigationTarget, let seed = surface.occurrenceSeed() else { return }
+        surface.find.replaceOccurrences(of: seed.query, wholeWord: seed.wholeWord)
+    }
     @objc private func showGoToLine(_ sender: Any?) {
-        guard !closing, let window, window.isKeyWindow, window.attachedSheet == nil,
-              lineNavigation == nil, surface.canGoToLine, let index = surface.lineIndex else { return }
+        guard !closing, let window else { return }
+        lineNavigation.present(in: window, surface: surface) { [weak self] in
+            self?.status.stringValue = "The text changed. Open Go to Line again."
+        }
+    }
+    @objc private func goToMatchingBracket(_ sender: Any?) { navigateBrackets(.matching) }
+    @objc private func selectInsideBrackets(_ sender: Any?) { navigateBrackets(.enclosing) }
+    @objc private func goToVisibleScope(_ sender: Any?) { surface.goToVisibleScope() }
+    @objc private func visitOutlineItem(_ sender: NSMenuItem) {
+        guard canChooseNavigationTarget, let direction = EditorJumpDirection(rawValue: sender.tag),
+              let entry = surface.adjacentOutlineEntry(toward: direction) else { return }
+        surface.goToTextOffset(entry.offset, generation: surface.generation)
+    }
+    @objc private func goToEnclosingScope(_ sender: NSMenuItem) {
+        guard canChooseNavigationTarget, let entry = surface.enclosingOutlineEntry else { return }
+        surface.goToTextOffset(entry.offset, generation: surface.generation)
+    }
+    @objc private func goToLastEdit(_ sender: NSMenuItem) {
+        if validateUserInterfaceItem(sender) { surface.goToLastEdit() }
+    }
+
+    @objc private func toggleLineBookmark(_ sender: NSMenuItem) {
+        guard validateUserInterfaceItem(sender), let line = surface.bookmarkCaretLine else { return }
+        let wasBookmarked = surface.hasBookmark(on: line)
+        let changed = surface.toggleBookmarkAtCaret()
+        reportNavigation(changed ? (wasBookmarked ? "Bookmark removed." : "Bookmark added.")
+            : "This editor can hold up to \(EditorLineBookmarks.maximumCount) bookmarks.")
+    }
+
+    @objc private func visitLineBookmark(_ sender: NSMenuItem) {
+        guard validateUserInterfaceItem(sender), let direction = EditorJumpDirection(rawValue: sender.tag),
+              let line = surface.bookmarkLine(toward: direction) else { return }
+        surface.goToLine(line, generation: surface.generation)
+    }
+
+    @objc private func chooseLineBookmark(_ sender: NSMenuItem) {
+        guard validateUserInterfaceItem(sender), let parent = window, let index = surface.lineIndex else { return }
+        let text = surface.textView.string as NSString, generation = surface.generation
+        let lines = surface.bookmarkedLines
+        let rows = lines.map { line -> NativeChoiceSheet<Int>.Row in
+            let excerpt = index.start(ofLine: line).flatMap {
+                EditorFindPlan.excerpt(for: .init(location: $0, length: 0), in: text, lines: index)?.text
+            }
+            return .init(title: "Line \(line.formatted())", detail: excerpt ?? "", value: line)
+        }
+        let selected = surface.bookmarkCaretLine.flatMap { lines.firstIndex(of: $0) } ?? 0
+        let sheet = NativeChoiceSheet<Int>(title: "Line Bookmarks", heading: "Bookmarked Lines",
+            confirm: "Go to Bookmark", rows: rows, initialSelection: selected)
+        chooseNavigationTarget(in: parent, using: sheet, generation: generation) { [weak self] line in
+            guard let self, surface.hasBookmark(on: line) else { return }
+            surface.goToLine(line, generation: generation)
+        }
+    }
+
+    private var canChooseNavigationTarget: Bool {
+        !closing && navigationChoice == nil && window?.isKeyWindow == true && window?.attachedSheet == nil
+            && window?.firstResponder === surface.textView
+    }
+
+    @objc private func findLocalDeclaration(_ sender: Any?) {
+        guard canChooseNavigationTarget, surface.canFindDeclaration, let parent = window else { return }
+        let candidates = surface.matchingDeclarations()
+        guard let first = candidates.first else { reportNavigation("No recognized declaration for this text in the current file."); return }
         let generation = surface.generation
-        let current = index.location(at: surface.textView.selectedRange().location)?.line ?? 1
-        let dialog = EditorLineNavigationDialog(current: current, maximum: index.starts.count)
-        lineNavigation = dialog
-        dialog.alert.beginSheetModal(for: window) { [weak self, weak dialog] response in
-            guard let self, let dialog, self.lineNavigation === dialog else { return }
-            self.lineNavigation = nil
-            guard response == .alertFirstButtonReturn, self.window?.isVisible == true, !self.closing,
-                  let line = dialog.line else { return }
-            if !self.surface.goToLine(line, generation: generation) {
-                self.status.stringValue = "The text changed. Open Go to Line again."
+        let jump: @MainActor (EditorDocumentOutline.Entry) -> Void = { [weak self] entry in
+            guard let self, surface.goToTextOffset(entry.offset, generation: generation) else { return }
+            reportNavigation("Declaration at line \(entry.line.formatted()).")
+        }
+        if candidates.count == 1 { jump(first.entry); return }
+        let sheet = NativeChoiceSheet<EditorDocumentOutline.Entry>(title: "Choose Declaration",
+            heading: "Declarations in This File", confirm: "Go to Declaration", rows: candidates.map {
+                .init(title: $0.preview, detail: "Line \($0.entry.line.formatted())", value: $0.entry)
+            })
+        chooseNavigationTarget(in: parent, using: sheet, generation: generation, accept: jump)
+    }
+
+    @objc private func completeLocalName(_ sender: Any?) {
+        guard canChooseNavigationTarget, surface.canCompleteLocalName, let parent = window else { return }
+        guard let request = surface.nameCompletion(), let first = request.entries.first else {
+            reportNavigation("No name in this file completes the text at the caret.")
+            return
+        }
+        let insert: @MainActor (EditorDocumentOutline.Entry) -> Void = { [weak self] entry in
+            guard let self else { return }
+            if surface.completeLocalName(entry, with: request) { reportNavigation("Completed name.") }
+        }
+        if request.entries.count == 1 { insert(first); return }
+        let sheet = NativeChoiceSheet<EditorDocumentOutline.Entry>(title: "Complete Name",
+            heading: "Matching Names in This File", confirm: "Complete Name", rows: request.entries.map {
+                .init(title: $0.title, detail: "Declared at line \($0.line.formatted())", value: $0)
+            })
+        chooseNavigationTarget(in: parent, using: sheet, generation: request.generation, accept: insert)
+    }
+
+    private func chooseNavigationTarget<Value: Sendable>(in parent: NSWindow, using sheet: NativeChoiceSheet<Value>,
+                                                generation: UUID, accept: @escaping @MainActor (Value) -> Void) {
+        let language = selectedSyntaxLanguage, selection = surface.textView.selectedRange()
+        navigationChoice = Task { [weak self, weak parent] in
+            defer { self?.navigationChoice = nil }
+            guard let parent, let choice = await sheet.choose(in: parent), let self,
+                  !Task.isCancelled, !closing, window === parent, parent.isVisible,
+                  parent.attachedSheet == nil, parent.isKeyWindow || NSApp.keyWindow == nil else { return }
+            guard surface.generation == generation, selectedSyntaxLanguage == language, surface.textView.selectedRanges.count == 1,
+                  surface.textView.selectedRange() == selection, !surface.textView.hasMarkedText() else {
+                reportNavigation("The text or selection changed. Try again.")
+                return
+            }
+            accept(choice)
+        }
+    }
+    @objc private func visitTextLocation(_ sender: NSMenuItem) {
+        guard !closing, let direction = EditorJumpDirection(rawValue: sender.tag) else { return }
+        EditorDocumentNavigation.shared.visit(direction, from: self)
+    }
+    @objc private func visitUnsavedChange(_ sender: NSMenuItem) {
+        guard validateUserInterfaceItem(sender), let direction = EditorJumpDirection(rawValue: sender.tag),
+              let line = surface.unsavedChangeLine(toward: direction) else { return }
+        surface.goToLine(line, generation: surface.generation)
+    }
+    @objc private func reviewSelectedUnsavedLine(_ sender: Any?) {
+        if let line = surface.selectedUnsavedLine { _ = reviewUnsavedLine(line) }
+    }
+
+    @objc private func chooseUnsavedChange(_ sender: Any?) {
+        guard canChooseNavigationTarget, surface.canGoToLine, let parent = window,
+              let changes = surface.unsavedLineChanges, !changes.marks.isEmpty else { return }
+        let generation = surface.generation
+        let line = surface.selectedUnsavedLine.map { $0 - 1 }
+        let selected = changes.marks.firstIndex { mark in line.map(mark.lines.contains) == true } ?? 0
+        let rows = changes.marks.map { mark -> NativeChoiceSheet<EditorUnsavedLineChanges.Mark>.Row in
+            let title: String
+            switch mark.kind {
+            case .added: title = "Added " + mark.change.currentLineLabel
+            case .changed: title = "Edited " + mark.change.currentLineLabel
+            case .removed: title = "Deleted " + mark.change.beforeLineLabel
+            }
+            return .init(title: title, detail: "Saved \(mark.change.beforeLineLabel) · Edited \(mark.change.currentLineLabel)", value: mark)
+        }
+        let preview: NativeChoiceSheet<EditorUnsavedLineChanges.Mark>.SelectionPreview?
+        if let capture = captureComparison?(), let identity = capture.right.editor, identity == editableBufferIdentity {
+            let beforeLength = capture.left.text.utf16.count, currentLength = capture.right.text.utf16.count
+            preview = changes.marks.allSatisfy {
+                NSMaxRange($0.change.beforeRange) <= beforeLength && NSMaxRange($0.change.currentRange) <= currentLength
+            } ? EditorChangeExcerpt.selectionPreview(before: ("Saved", capture.left.text),
+                after: ("Edited", capture.right.text), change: \.change) : nil
+        } else { preview = nil }
+        let sheet = NativeChoiceSheet(title: "Go to Unsaved Change", heading: "Changes Since Save", confirm: "Go to Change",
+            rows: rows, initialSelection: selected, preview: preview,
+            size: preview.map { _ in EditorChangeExcerpt.choiceSize(in: parent) })
+        chooseNavigationTarget(in: parent, using: sheet, generation: generation) { [weak self] mark in
+            guard let self else { return }
+            let line = mark.lines.lowerBound
+            guard let current = surface.unsavedLineChanges, current.baselineID == changes.baselineID, current.mark(at: line) == mark else {
+                reportNavigation("The saved version changed. Open the list again.")
+                return
+            }
+            surface.goToLine(line + 1, generation: generation)
+        }
+    }
+
+    private func reviewUnsavedLine(_ line: Int) -> Bool {
+        guard canCompare, let parent = window, parent.isKeyWindow,
+              let marks = surface.unsavedLineChanges, let mark = marks.mark(at: line - 1),
+              let capture = captureComparison?(), let identity = capture.right.editor, identity == editableBufferIdentity,
+              NSMaxRange(mark.change.beforeRange) <= capture.left.text.utf16.count,
+              NSMaxRange(mark.change.currentRange) <= capture.right.text.utf16.count else { return false }
+        closeUnsavedChangePreview()
+        let content = EditorUnsavedChangePreview(mark.change, capture: capture) { [weak self, weak parent] in
+            guard let self, let parent, window === parent, canCompare, unsavedChangePreview?.isShown == true,
+                  editableBufferIdentity == identity, surface.unsavedLineChanges?.baselineID == marks.baselineID,
+                  surface.unsavedLineChanges?.mark(at: line - 1) == mark else {
+                self?.closeUnsavedChangePreview(); return
+            }
+            closeUnsavedChangePreview()
+            if savedComparison()?.present(capture, at: mark.change) != true {
+                reportNavigation("Finish the current comparison, then open this change again.")
             }
         }
+        let popover = NSPopover()
+        popover.behavior = .semitransient
+        let motion = commandDiscoverySettings?.motion ?? .init()
+        popover.animates = motion.mode == .full && motion.allows(.pages) && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        popover.contentViewController = content
+        popover.delegate = self
+        unsavedChangePreview = popover
+        let (anchor, rect) = surface.unsavedLineAnchor(line)
+        popover.show(relativeTo: rect, of: anchor, preferredEdge: .maxX)
+        if !popover.isShown { closeUnsavedChangePreview(); return false }
+        return true
     }
-    private func cancelLineNavigation() {
-        guard let dialog = lineNavigation else { return }
-        lineNavigation = nil
-        if window?.attachedSheet === dialog.alert.window {
-            window?.endSheet(dialog.alert.window, returnCode: .alertSecondButtonReturn)
-        }
+
+    private func closeUnsavedChangePreview() {
+        let previous = unsavedChangePreview
+        unsavedChangePreview = nil
+        previous?.close()
     }
+
+    func popoverDidClose(_ notification: Notification) {
+        if notification.object as? NSPopover === unsavedChangePreview { unsavedChangePreview = nil }
+    }
+    private func conflictDestination(toward direction: EditorJumpDirection) -> Int? {
+        guard !closing, surface.lineCommands.canNavigate, surface.canGoToLine else { return nil }
+        return surface.conflictMarkers?.destination(from: surface.textView.selectedRange().location, toward: direction)
+    }
+    @objc private func visitConflictMarker(_ sender: NSMenuItem) {
+        guard let direction = EditorJumpDirection(rawValue: sender.tag), let offset = conflictDestination(toward: direction) else { return }
+        surface.goToTextOffset(offset, generation: surface.generation)
+    }
+    @objc private func resolveConflictMarker(_ sender: NSMenuItem) {
+        guard validateUserInterfaceItem(sender), let choice = EditorConflictMarkers.Resolution(rawValue: sender.tag) else { return }
+        surface.lineCommands.perform(.resolveConflict(choice))
+    }
+    private func navigateBrackets(_ operation: EditorBracketNavigation) {
+        guard !closing, let language = selectedSyntaxLanguage, EditorBracketNavigation.supports(language) else { return }
+        surface.lineCommands.perform(.navigateBrackets(operation, language))
+    }
+    private func cancelLineNavigation() { lineNavigation.cancel() }
     @objc private func toggleWrap(_ sender: Any?) { surface.setWrapping(wrapping.state == .on); onWrapping?() }
     @objc private func changeLanguage(_ sender: Any?) {
         let values = TextSyntaxLanguage.allCases
         guard values.indices.contains(language.indexOfSelectedItem) else { return }
-        surface.lineCommands.inputDidChange()
-        surface.textView.indentationLanguage = values[language.indexOfSelectedItem]
+        surface.setEditingLanguage(values[language.indexOfSelectedItem])
         onLanguage?(values[language.indexOfSelectedItem])
     }
-}
-
-@MainActor
-private final class EditorLineNavigationDialog: NSObject, NSTextFieldDelegate {
-    let alert = NSAlert()
-    private let field: NSTextField
-    private let maximum: Int
-    var line: Int? { EditorLineNumber.parse(field.stringValue, maximum: maximum) }
-    init(current: Int, maximum: Int) {
-        self.maximum = maximum
-        field = NSTextField(string: String(current))
-        super.init()
-        alert.messageText = "Go to Line"
-        alert.informativeText = "Enter a line number from 1 to \(maximum.formatted())."
-        alert.addButton(withTitle: "Go"); alert.addButton(withTitle: "Cancel")
-        alert.buttons[1].keyEquivalent = "\u{1b}"
-        field.frame = .init(x: 0, y: 0, width: 260, height: 24)
-        field.drawsBackground = false
-        field.setAccessibilityLabel("Line number")
-        field.delegate = self
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        validate()
-    }
-    func controlTextDidChange(_ notification: Notification) { validate() }
-    private func validate() { alert.buttons[0].isEnabled = line != nil }
 }

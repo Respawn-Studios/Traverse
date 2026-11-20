@@ -435,6 +435,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         raise ValueError("Chart integration requires its visible native Properties and analysis windows")
     if feature == "external-tools" and (not interactive or offscreen):
         raise ValueError("External-tools requires --interactive: opens Terminal and FileMerge on generated fixtures")
+    if feature == "selection-group" and motion and motion_mode != "full":
+        raise ValueError("Rename motion recording uses Full motion")
     if archive_format not in ("zip", "tar", "tar.gz", "tar.bz2") or archive_format != "zip" and feature != "archive-export":
         raise ValueError("Choose an archive format only for archive-export")
     gzip_tar = feature == "create-targz"
@@ -521,6 +523,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         "clipboard-admission": ("clipboard-admission-diagnostics", "--check-clipboard-diagnostics", "native-clipboard-diagnostics.json"),
         "connection-fields": ("native-connection-fields", "--check-connection-fields", "native-connection-fields.json"),
         "editor-preferences": ("native-editor-preferences", "--check-editor-preferences", "native-editor-preferences.json"),
+        "editor-comparison": ("native-editor-preferences", "--check-editor-preferences", "native-editor-preferences.json"),
         "drive-benchmark": ("native-drive-benchmark", "--check-drive-benchmark-native", "native-drive-benchmark.json"),
         "drive-status": ("native-drive-storage-status", "--check-drive-storage-status", "native-storage-status.json"),
         "startup-analysis": ("native-properties-capacity", "--check-properties-capacity", "properties-capacity.json"),
@@ -530,7 +533,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         "create-zip": ("archive-creation", "--check-zip-creation", "native.json"),
         "create-tar": ("archive-creation", "--check-zip-creation", "native.json"),
         "batch-rename": ("batch-rename", "--check-batch-rename", "native.json"),
-        "selection-group": ("selection-group-native", "--check-selection-group-native", "native-selection-group-recover.json"),
+        "selection-group": ("selection-group-native", "--check-selection-group-native",
+                            "native-selection-group.json" if motion else "native-selection-group-recover.json"),
         "zip-update-add": ("native-zip-rename-copy", "--check-zip-rename-copy", "native-zip-rename-copy.json"),
         "zip-update-rename": ("native-zip-rename-copy", "--check-zip-rename-copy", "native-zip-rename-copy.json"),
         "zip-update-tracked": ("native-zip-rename-copy", "--check-zip-rename-copy", "native-zip-rename-copy.json"),
@@ -598,6 +602,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
               "action": "native-sftp-promise-gesture" if external_promise_receiver and feature != "archive-export" else action}
     if external_promise_receiver:
         marker["externalPromiseReceiver"] = True
+    if feature == "editor-comparison":
+        marker["editorComparisonOnly"] = True
     if marked_source_create:
         marker.update(markedSourceCreate=True, format="tar" if feature == "create-tar" else "zip")
     if sample_health:
@@ -631,7 +637,11 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             kind="folder" if folder_flow else "both", directAccess=True, destinationName=destination_name,
             sourceSHA256=hashlib.sha256(archive_export_source.read_bytes()).hexdigest())) + "\n")
     if feature == "selection-group":
-        mode = "off-light150" if large_interface or motion_mode == "off" else motion_mode + "-dark"
+        if large_interface:
+            mode = "full-light150" if motion else "off-light150"
+        else:
+            mode = "off-light150" if motion_mode == "off" else motion_mode + "-dark"
+        selection_group_phases = ("rename-motion",) if motion else ("suite", "recover")
         items = case / "source/Items"
         for name in ("Folder", "Empty", "Taken", "Away"):
             (items / name).mkdir(mode=0o700, parents=True)
@@ -639,7 +649,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                            "Stale.txt": b"generated stale", "Restart.txt": b"generated restart"}.items():
             (items / name).write_bytes(body)
             (items / name).chmod(0o600)
-        for phase in ("suite", "recover"):
+        for phase in selection_group_phases:
             (case / f"selection-group-admission-{phase}.json").write_text(json.dumps(dict(
                 format="ordinary-selection-group-review-v1", case=case.name, mode=mode, phase=phase)) + "\n")
     if feature == "trash-command":
@@ -873,6 +883,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command.append("--quick-mix-benchmark")
     if feature == "compressed-tar":
         command.append("--compressed-tar")
+    if feature == "editor-comparison":
+        command.append("--editor-comparison-only")
     if feature == "startup-analysis":
         command.append("--startup-data-fallback")
     if feature == "sftp-batch-download":
@@ -942,6 +954,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command.append("--clipboard-copy-members")
     if large_interface:
         command.append("--large-interface")
+    if feature == "editor-comparison":
+        command += ["--motion-mode", motion_mode]
     if feature in ("settings-motion", "help-motion", "tool-windows", "window-lifecycle", "pane-motion", "server-prompts", "sftp-profiles", "storage-chart"):
         command += ["--motion-mode", motion_mode]
         if large_interface:
@@ -950,12 +964,15 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
         command.append("--interactive-tar-member-drag" if tar_editor else
                        "--interactive-zip-move" if feature == "zip-update-move" else "--interactive-sidebar-review")
     if motion:
-        command.append("--record-download-motion" if feature == "sftp-batch-download" else
-                       "--record-connection-fields" if feature == "connection-fields" else
-                       "--record-drive-benchmark" if feature == "drive-benchmark" else
-                       "--record-remote-properties" if feature == "remote-properties" else
-                       "--record-storage-status" if feature == "drive-status" else
-                       "--record-analysis-persistence" if feature == "analysis-persistence" else "--check-development-motion")
+        command.append({
+            "sftp-batch-download": "--record-download-motion",
+            "connection-fields": "--record-connection-fields",
+            "drive-benchmark": "--record-drive-benchmark",
+            "remote-properties": "--record-remote-properties",
+            "drive-status": "--record-storage-status",
+            "analysis-persistence": "--record-analysis-persistence",
+            "storage-chart-integration": "--record-chart-integration",
+        }.get(feature, "--check-development-motion"))
     env = environment(tooling=False)
     env["MAC_EXPLORER_TEST_ROOT"] = str(case)
     if feature in ("support-details", "archive-export"):
@@ -969,7 +986,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
     elif feature == "analysis-persistence":
         phases = ("unchanged", "unchanged-reopen") if incremental_analysis else ("seed", "reopen", "repair")
     elif feature == "selection-group":
-        phases = ("suite", "recover")
+        phases = selection_group_phases
     elif tar_editor and not interactive:
         phases = ("suite", "cold-undo")
     else:
@@ -996,7 +1013,7 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                                         timeout=1500 if feature == "smb-connected-uploads" and generated_flow.startswith("download-drops")
                                             else 750 if feature == "sftp-group-upload" and interactive else 240)
         if result.returncode:
-            raise RuntimeError(f"Native {feature} {phase or ''} failed; inspect {case / 'evidence'}")
+            raise RuntimeError(f"Native {feature} {phase or ''} exited with status {result.returncode}; inspect {case / 'evidence'}")
         if tar_editor:
             phase_receipt = case / "evidence" / ("native-editor-preferences-cold.json" if phase == "cold-undo" else "native-editor-preferences.json")
             phase_value = json.loads(phase_receipt.read_text()) if phase_receipt.is_file() else {}
@@ -1033,6 +1050,9 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
             expected_clips = (["selection-group-draft", "selection-group-results",
                                "selection-group-new-folder", "selection-group-new-folder-return"]
                               if phase == "suite" and mode == "full-dark" else [])
+            if phase == "rename-motion":
+                expected_clips = [f"{label}-{view}" for view in ("details", "list", "icons")
+                                  for label in ("selection-group-new-folder", "selection-group-new-folder-return")]
             clips = phase_value.get("clips")
             if not isinstance(clips, list) or [clip.get("label") if isinstance(clip, dict) else None for clip in clips] != expected_clips:
                 raise RuntimeError(f"Native {feature} {phase} has the wrong recorded action set; inspect {case / 'evidence'}")
@@ -1054,6 +1074,8 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                       if value.get(key) is not None), "unsuccessful native report" if receipt.is_file() else "missing report")
         failure_type = f" ({value['failureType']})" if value.get("failureType") else ""
         raise RuntimeError(f"Native {feature} failed at {stage}{failure_type}; inspect {case / 'evidence'}")
+    if feature == "editor-comparison" and (value.get("focusedComparison") is not True or value.get("actualOwnerDrain") is not True):
+        raise RuntimeError(f"Native comparison did not complete its focused flow; inspect {case / 'evidence'}")
     if feature == "storage-chart-integration":
         steam = case / "source/Steam"
         expected = {"steamapps": None, "steamapps/common": None, "steamapps/common/Game": None,
@@ -1078,8 +1100,23 @@ def native_check(feature: str, *, skip_build: bool, interactive: bool, motion: b
                 or value.get("properties_first_groups") is not True \
                 or value.get("properties_viewport_stable") is not True \
                 or value.get("cached_root_stale_query_rejected") is not True \
+                or value.get("interfacePercent") != (150 if large_interface else 100) \
                 or value.get("gate_active") != 0 or value.get("captures") != []:
             raise RuntimeError("Native chart integration report omitted its ordinary worker or first-group checks")
+        clips = value.get("motionClips", [])
+        if [clip.get("label") for clip in clips] != (["analyzer-folders", "analyzer-drill", "analyzer-back"] if motion else []):
+            raise RuntimeError("Native chart integration did not record the requested actions")
+        for clip in clips:
+            label = clip["label"]
+            movie = case / "evidence" / f"{label}.mov"
+            if not movie.is_file() or not 0 < movie.stat().st_size <= 4 << 20 \
+                    or not (case / "evidence" / f"{label}.capture.json").is_file() \
+                    or abs(clip.get("scrollOffsetBefore", 0)) < 20:
+                raise RuntimeError(f"Native {label} recording lacks a scrolled viewport; inspect {case / 'evidence'}")
+            if not 0 <= clip.get("maximumFeasibleOffsetDrift", float("inf")) < 2:
+                raise RuntimeError(f"Native {label} moved the viewport; inspect {case / 'evidence'}")
+            if not 0 <= clip.get("chartTopShift", float("inf")) < 2:
+                raise RuntimeError(f"Native {label} moved the chart in its viewport; inspect {case / 'evidence'}")
     if external_promise_receiver and feature != "archive-export" and (value.get("actualFinderReceiver") is not True
                                       or value.get("actualReceiverDrag") is not True
                                       or value.get("nativeProviderCallbacks") != 1

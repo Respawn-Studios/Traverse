@@ -288,6 +288,17 @@ class Fixture:
         tool(["/usr/bin/hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(self.image)], timeout=300)
         self.mounted_owned()
 
+    def attach_preserved_two_member(self, *, original_uuid: str, target_uuid: str) -> dict:
+        """Normal attach of a sealed retained image; keep one-member admission strict."""
+        self.validate()
+        if self.attachment() is not None:
+            raise RuntimeError("Retained generated image is already attached; no duplicate attach")
+        # This is an explicit native attachment, not a read-only file open.
+        # The caller must own a fresh one-shot attach/detach scope. If the
+        # child returns uncertain or the graph differs, retain the attachment.
+        tool(["/usr/bin/hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(self.image)], timeout=300)
+        return self.two_member_owned(original_uuid=original_uuid, target_uuid=target_uuid)
+
     def create(self) -> None:
         self.validate()
         space = os.statvfs(self.root)

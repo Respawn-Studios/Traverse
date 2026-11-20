@@ -79,8 +79,8 @@ final class BrowserViewController: NSViewController {
     lazy var sftpDownload = BrowserSFTPDownload(browser: self)
     lazy var remoteBatchDownload = BrowserRemoteBatchDownload(browser: self)
     lazy var smbDownload = BrowserSMBDownload(browser: self)
-    lazy var smbFolderDownload = BrowserSMBFolderDownload(browser: self)
-    lazy var sftpFolderDownload = BrowserSFTPFolderDownload(browser: self)
+    lazy var smbFolderDownload = BrowserRemoteFolderDownload(browser: self, kind: .smb)
+    lazy var sftpFolderDownload = BrowserRemoteFolderDownload(browser: self, kind: .sftp)
     lazy var sftpUpload = BrowserSFTPUpload(browser: self)
     lazy var sftpNewFile = BrowserSFTPNewFile(browser: self)
     lazy var smbUpload = BrowserSMBUpload(browser: self)
@@ -100,6 +100,8 @@ final class BrowserViewController: NSViewController {
     let filterField = NSSearchField()
     lazy var folderFilter = BrowserLocalFilterController(browser: self)
     lazy var commandFinder = CommandFinderController(browser: self)
+    lazy var nameSelection = BrowserNameSelection(browser: self)
+    lazy var gitControls = BrowserGitControls(browser: self)
     let outline = BrowserSidebarOutlineView()
     let table = FileTableView()
     var detailsHeader: NSTableHeaderView?
@@ -127,7 +129,7 @@ final class BrowserViewController: NSViewController {
     /// may retain it, but must never activate another saved/bookmarked grant.
     var summaryBrowsingAccess: FileAccessLifetimes?
     var directoryRefreshTask: Task<Void, Never>?
-    var directoryRefreshPending = false
+    var directoryRefreshPending: DirectoryRefreshReason?
     var isBackgroundRefreshing = false
     private var isBrowserClosed = false
     var isBrowserSuspended: Bool {
@@ -154,14 +156,33 @@ final class BrowserViewController: NSViewController {
               let directory = historyRoot else { return nil }
         return operationCoordinator.engine(at: directory.appendingPathComponent("operation-recovery", isDirectory: true))
     }()
-    var recoveryRecords: [OperationRecoveryRecord] = []
-    var refusedRecoveryEntries: [URL] = []
-    var recoveryNextCursor: UUID?
-    var recoveryUnfinishedCount = 0
-    var recoveryHistoryReadiness: OperationHistoryReadiness = .absent
-    var recoveryInspectionTask: Task<Void, Never>?
+    var recoveryRecords: [OperationRecoveryRecord] {
+        get { operationHistory.recoveryRecords }
+        set { operationHistory.recoveryRecords = newValue }
+    }
+    var refusedRecoveryEntries: [URL] {
+        get { operationHistory.refusedRecoveryEntries }
+        set { operationHistory.refusedRecoveryEntries = newValue }
+    }
+    var recoveryNextCursor: UUID? {
+        get { operationHistory.recoveryNextCursor }
+        set { operationHistory.recoveryNextCursor = newValue }
+    }
+    var recoveryUnfinishedCount: Int {
+        get { operationHistory.recoveryUnfinishedCount }
+        set { operationHistory.recoveryUnfinishedCount = newValue }
+    }
+    var recoveryHistoryReadiness: OperationHistoryReadiness {
+        get { operationHistory.recoveryHistoryReadiness }
+        set { operationHistory.recoveryHistoryReadiness = newValue }
+    }
+    var recoveryInspectionTask: Task<Void, Never>? {
+        get { operationHistory.recoveryInspectionTask }
+        set { operationHistory.recoveryInspectionTask = newValue }
+    }
     #if DEBUG
     var beforeRecoveryInspectionReturnsForVerification: (@MainActor () async -> Void)?
+    var recoveryLookupPageSizeForVerification: Int?
     var beforeSelectionGroupPerformForVerification: (@MainActor () async -> Void)?
     var beforeSelectionGroupReviewActionForVerification: (@MainActor () async -> Void)?
     var operationFolderAccessRequestForVerification: ((URL?) -> Void)?
@@ -459,7 +480,11 @@ final class BrowserViewController: NSViewController {
                     Task { @MainActor [weak self, weak window] in
                         guard let self, let window, self.viewIfLoaded?.window === window else { return }
                         self.validateNavigationButtons()
-                        if name == NSWindow.didBecomeKeyNotification { self.addressCompletion.resumeIfEditing() }
+                        self.gitControls.updateBadges(windowBecameKey: name == NSWindow.didBecomeKeyNotification)
+                        if name == NSWindow.didBecomeKeyNotification {
+                            self.gitControls.update(refreshingCheckout: true)
+                            self.addressCompletion.resumeIfEditing()
+                        }
                     }
                 }
             })
@@ -473,6 +498,7 @@ final class BrowserViewController: NSViewController {
                         guard let self, let scroll, self.activeFileScrollView === scroll,
                               !self.updatingSelection, !self.restoringScroll else { return }
                         self.recordBrowserSession()
+                        self.gitControls.updateBadges()
                     }
                 })
         }
@@ -485,15 +511,15 @@ final class BrowserViewController: NSViewController {
     }
 
     func begin() {
-        // Folder-reference restoration can wait for macOS access before volume
-        // discovery starts. Do not present that interval as an empty machine.
-        if location == .computer { isLoading = true }
+        // Reference restoration can wait for macOS access. A new pane has no
+        // current directory snapshot during that interval, even on a local path.
+        isLoading = true
+        let initialVisit = sessionID
         Task { [weak self] in
             guard let self else { return }
             #if DEBUG
             defer { self.didFinishBeginForVerification?() }
             #endif
-            let initialVisit = self.sessionID
             let restoresSession = self.settings.restoresSession
             #if DEBUG
             if let barrier = self.beforeBeginReferencesForVerification { await barrier() }
@@ -516,7 +542,7 @@ final class BrowserViewController: NSViewController {
                 if let engine = self.recoverableFileOperations {
                     await self.operationCoordinator.restoreCopyPreviewIfNeeded(engine: engine, settings: self.settings)
                 }
-                self.inspectOperationRecovery()
+                self.readOperationRecovery()
             }
         }
         _ = view
@@ -575,17 +601,19 @@ final class BrowserViewController: NSViewController {
             ("Forward", "arrow.right", #selector(goForward(_:))),
             ("Up", "arrow.up", #selector(goUp(_:))),
             ("Refresh", "arrow.clockwise", #selector(refresh(_:))),
-            ("Open Terminal Here", "terminal", #selector(openTerminalHere(_:)))
+            ("Open Terminal Here", "terminal", #selector(openTerminalHere(_:))),
+            ("Git Tools", "arrow.triangle.branch", #selector(showGitMenu(_:)))
         ]
         let navigation = definitions.map { title, icon, action -> NSButton in
             let button = NSButton(image: symbol(icon, title) ?? NSImage(), target: self, action: action)
             button.isBordered = false
             button.bezelStyle = .recessed
             button.image = button.image?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-            button.widthAnchor.constraint(equalToConstant: workspace == nil ? 28 : 24).interfaceScaled.isActive = true
+            button.widthAnchor.constraint(equalToConstant: BrowserAddressLayout.buttonWidth(inWorkspace: workspace != nil)).interfaceScaled.isActive = true
             button.heightAnchor.constraint(equalToConstant: 28).interfaceScaled.isActive = true
             button.toolTip = title
             button.setAccessibilityLabel(title)
+            if action == #selector(showGitMenu(_:)) { button.isHidden = true }
             navigationButtons.append((button, action))
             return button
         }
@@ -790,25 +818,30 @@ final class BrowserViewController: NSViewController {
         return Set(orderedSelectedURLs)
     }
 
-    func navigate(to next: BrowserLocation) {
+    func navigate(to next: BrowserLocation, followingLinkedPane: Bool = false) {
         guard !isBrowserSuspended else { return }
         let oldPath = location.directoryURL?.path, newPath = next.directoryURL?.path
         let ascending: Bool
         if let oldPath, let newPath { ascending = newPath == "/" || oldPath.hasPrefix(newPath + "/") }
         else { ascending = next == .computer }
         let direction = next == location ? 0 : ascending ? -1 : 1
-        if let url = next.directoryURL { operationCoordinator.drives.acknowledgeNavigation(to: url) }
+        if !followingLinkedPane, let url = next.directoryURL { operationCoordinator.drives.acknowledgeNavigation(to: url) }
         saveViewState()
         tabs[activeIndex].navigate(to: next)
-        recordsNextExplicitVisit = next.directoryURL != nil
+        recordsNextExplicitVisit = next.directoryURL != nil && !followingLinkedPane
         loadLocation(directoryDirection: direction)
     }
 
     func loadLocation(preservingVisibleRows: Bool = false, animatingTab: Bool = false, directoryDirection: Int = 0,
                       createdFolderRename: UUID? = nil) {
+        if !preservingVisibleRows { nameSelection.cancel() }
         let previousInstallation = isInstallingLocation
         isInstallingLocation = true
-        defer { isInstallingLocation = previousInstallation; updateConnectionStatusIndicator() }
+        defer {
+            isInstallingLocation = previousInstallation
+            updateConnectionStatusIndicator()
+            gitControls.update()
+        }
         // Replacing an active file view can make AppKit advance its responder
         // into a neighbouring pane. Preserve only existing content focus here;
         // background refreshes and address/search editing must never steal it.
@@ -823,12 +856,13 @@ final class BrowserViewController: NSViewController {
             }
         }
         let animate = animatingTab ? settings.motion.allows(.tabContent) : directoryDirection != 0 && settings.motion.allows(.folders)
+        let replacingFileView = volumeBrowser.isHidden && location == .computer
         prepareCanvasTransition(enabled: animate, directoryDirection: directoryDirection)
         folderSummary.cancel()
         let recordsExplicitVisit = recordsNextExplicitVisit
         recordsNextExplicitVisit = false
         addressCompletion.cancel()
-        inlineRename.prepareForLocationChange(preservingCreatedFolder: createdFolderRename)
+        inlineRename.prepareForLocationChange(preservingCreatedFolder: createdFolderRename, preservingVisibleRows: preservingVisibleRows)
         selectionGroupDraft.contextChanged()
         guard !isBrowserSuspended else { return }
         folderFilter.contextWillChange()
@@ -897,6 +931,12 @@ final class BrowserViewController: NSViewController {
         }
         if location == .computer {
             renderVolumes()
+            if replacingFileView, let canvasTransition {
+                volumeBrowser.layoutSubtreeIfNeeded()
+                // The new heading owns its own area. An outgoing file row
+                // can dissolve inside the drive grid while the heading settles.
+                canvasTransition.restrictForeground(to: volumeBrowser.collectionView)
+            }
             updateCanvasTransition()
             listingTask = Task { [weak self] in await self?.refreshVolumes() }
         } else if let url = location.directoryURL {
@@ -926,6 +966,9 @@ final class BrowserViewController: NSViewController {
                             self.issueCount = issues.count
                             self.enumerationMilliseconds = Date().timeIntervalSince(self.loadStarted) * 1000
                             self.requestOrdering()
+                            if recordsExplicitVisit {
+                                self.workspace?.folderNavigation.folderDidLoad(in: self, at: url)
+                            }
                         }
                         self.refreshStatus()
                     }
@@ -962,8 +1005,6 @@ final class BrowserViewController: NSViewController {
                 let state = self.metadataSearch.isShowingResults ? self.metadataSearch.resultViewState : self.tabs[self.activeIndex].state
                 let scroll = self.restoringScroll ? state.scrollOffset : self.currentScrollOffset
                 self.updatingSelection = true
-                self.displayedEntries = result.entries
-                self.rowsByURL = result.rowsByURL
                 // Native operation outcomes may omit a directory URL's trailing
                 // slash. Match the local location, then render its actual listed
                 // URL; do not lose folder selections when a Copy refreshes rows.
@@ -974,7 +1015,11 @@ final class BrowserViewController: NSViewController {
                     let paths = Set(unresolved.map(\.path))
                     selection = state.selection.subtracting(unresolved).union(result.entries.lazy.filter { paths.contains($0.url.path) }.map(\.url))
                 }
+                let renameOrigins = self.inlineRename.reflowOrigins(for: selection)
+                self.displayedEntries = result.entries
+                self.rowsByURL = result.rowsByURL
                 self.renderFilePresentation(selection: selection, scrollOffset: scroll)
+                if let renameOrigins { self.inlineRename.animateReflow(from: renameOrigins) }
                 self.updatingSelection = false
                 // A tall first batch may still omit selected items. Keep the
                 // visit pending until both selection and scroll can be restored.
@@ -1148,10 +1193,8 @@ final class BrowserViewController: NSViewController {
         operationResultsButton.isEnabled = canInspectLastOperationResult
         for (button, action) in navigationButtons {
             button.isEnabled = commandEnabled(action)
-            if action == #selector(openTerminalHere(_:)) {
-                button.isHidden = !settings.showsTerminalButton || isRemoteLocation || isArchiveLocation || location.directoryURL == nil
-            }
         }
+        updateGitButton()
         view.window?.toolbar?.validateVisibleItems()
     }
 
@@ -1159,6 +1202,7 @@ final class BrowserViewController: NSViewController {
         super.viewDidLayout()
         table.columnSizing.fit(table)
         folderFilter.updateLayout(paneWidth: view.bounds.width)
+        addressLayout?.updateCommandVisibility()
         addressCompletion.layout()
     }
 
@@ -1193,7 +1237,8 @@ final class BrowserViewController: NSViewController {
             status.stringValue = "Loading… \(browserItemCount(rawEntries.count))" + suffix
         } else {
             let count = tabs[activeIndex].filter.isEmpty ? browserItemCount(displayedEntries.count) : "\(displayedEntries.count) of \(browserItemCount(rawEntries.count))"
-            status.stringValue = count + suffix + (issueCount > 0 ? " · Some item details unavailable" : "")
+            let linkedNotice = workspace?.folderNavigation.notice(in: self).map { " · " + $0 } ?? ""
+            status.stringValue = count + suffix + (issueCount > 0 ? " · Some item details unavailable" : "") + linkedNotice
         }
         overlay.isHidden = !displayedEntries.isEmpty
         if displayedEntries.isEmpty {

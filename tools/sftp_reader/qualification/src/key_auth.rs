@@ -143,10 +143,8 @@ fn prepare_rsa(key:&ssh_key::private::RsaKeypair)->Result<ring::rsa::KeyPair,Fai
     for component in[private.d(),private.p(),private.q(),private.iqmp()]{
         if component.as_positive_bytes().is_none_or(|b|b.is_empty()||b.len()>512){return Err(Failure::Algorithm)}
     }
-    // Local bounded CRT preparation only. Never call this crate's private
-    // signing/decryption operations (RUSTSEC-2023-0071). The fixed bigint graph
-    // is pinned separately. ring owns all private signatures.
-    let computed=rsa::RsaPrivateKey::try_from(key).map_err(|_|Failure::Inconsistent)?;
+    // Local bounded CRT preparation only. ring owns all private signatures.
+    let computed=rsa::PrivateKey::try_from(key).map_err(|_|Failure::Inconsistent)?;
     let dp=Zeroizing::new(computed.dp().ok_or(Failure::Inconsistent)?.to_be_bytes().to_vec());
     let dq=Zeroizing::new(computed.dq().ok_or(Failure::Inconsistent)?.to_be_bytes().to_vec());
     let components=ring::rsa::KeyPairComponents{
@@ -186,6 +184,16 @@ impl russh::Signer for PreparedKey{
         (private,prepared)
     }
     fn selected_user_key()->(PrivateKey,PreparedKey){selected_key(Algorithm::Ed25519)}
+    #[test]
+    fn selected_rsa_key_signs_with_both_modern_hashes() {
+        let (_, mut prepared) = selected_key(Algorithm::Rsa { hash: None });
+        let challenge = b"Generated SSH signing check";
+        for hash in [HashAlg::Sha256, HashAlg::Sha512] {
+            let signature = prepared.signature(challenge, Some(hash)).unwrap();
+            assert_eq!(signature.algorithm(), Algorithm::Rsa { hash: Some(hash) });
+        }
+    }
+
     fn certificate(subject:&PrivateKey,kind:CertType,after:u64,before:u64)->Certificate{
         let ca=PrivateKey::random(&mut rand::rng(),Algorithm::Ed25519).unwrap();
         let mut builder=ssh_key::certificate::Builder::new(vec![7;16],subject.public_key().key_data().clone(),after,before).unwrap();

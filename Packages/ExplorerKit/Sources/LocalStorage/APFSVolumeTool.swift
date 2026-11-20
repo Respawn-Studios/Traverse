@@ -48,10 +48,10 @@ final class APFSVolumeTool: Sendable {
     final class Cancellation: @unchecked Sendable {
         private let lock = NSLock()
         private var cancelled = false
-        private var inquiry: DriveHealthChildControl?
+        private var inquiry: ReadOnlyToolChildControl?
         var isCancelled: Bool { lock.withLock { cancelled } }
         func cancel() { lock.withLock { cancelled = true; inquiry?.requestStop() } }
-        func attach(_ control: DriveHealthChildControl) {
+        func attach(_ control: ReadOnlyToolChildControl) {
             lock.withLock { inquiry = control; if cancelled { control.requestStop() } }
         }
         func detach() { lock.withLock { inquiry = nil } }
@@ -168,6 +168,11 @@ final class APFSVolumeTool: Sendable {
                                 admission: MutationAdmission?, permitted: @Sendable () -> Bool,
                                 submitted: @Sendable () -> Void, observer: TerminalObserver?) throws -> Reply {
         if !mutation, cancellation?.isCancelled == true { throw CancellationError() }
+        let child = Process(), output = Pipe(), errors = Pipe()
+        let control = ReadOnlyToolChildControl()
+        child.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        child.arguments = arguments; child.environment = ["LANG": "C", "LC_ALL": "C"]
+        child.standardInput = FileHandle.nullDevice; child.standardOutput = output; child.standardError = errors
         if mutation {
             switch admission?.beginIfAllowed(permitted) ?? .unavailable {
             case .launch: break
@@ -175,75 +180,24 @@ final class APFSVolumeTool: Sendable {
             case .unavailable: throw Failure.admission
             }
         }
-        let child = Process(), output = Pipe(), errors = Pipe()
-        let control = DriveHealthChildControl()
-        child.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        child.arguments = arguments; child.environment = ["LANG": "C", "LC_ALL": "C"]
-        child.standardInput = FileHandle.nullDevice; child.standardOutput = output; child.standardError = errors
         do { try child.run() } catch { throw Failure.launch }
         if mutation { submitted() }
         else { control.attach(child); cancellation?.attach(control) }
-        defer {
-            if !mutation { cancellation?.detach(); control.detachAfterReap() }
-            try? output.fileHandleForReading.close(); try? errors.fileHandleForReading.close()
-        }
-        var data = Data(), terminalOutput = Data(), terminalErrors = Data()
-        var outputTruncated = false, errorsTruncated = false
-        var overflow = false, outputEOF = false, errorEOF = false
-        let began = ProcessInfo.processInfo.systemUptime
-        while !outputEOF || !errorEOF {
-            if !mutation {
-                if ProcessInfo.processInfo.systemUptime - began > 20 || overflow { control.requestStop() }
-                control.escalateIfNeeded()
-            }
-            var descriptors = [pollfd(fd: outputEOF ? -1 : output.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0),
-                pollfd(fd: errorEOF ? -1 : errors.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)]
-            let ready = Darwin.poll(&descriptors, nfds_t(descriptors.count), 100)
-            if ready < 0 {
-                if errno == EINTR { continue }
-                // Closing our read ends prevents pipe backpressure, while an
-                // already submitted mutation still drains normally below.
-                overflow = true; break
-            }
-            for index in 0..<2 where descriptors[index].revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 {
-                var buffer = [UInt8](repeating: 0, count: 16_384)
-                let count = Darwin.read(descriptors[index].fd, &buffer, buffer.count)
-                if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
-                if count <= 0 {
-                    if count < 0 { overflow = true }
-                    if index == 0 { outputEOF = true } else { errorEOF = true }
-                } else if mutation {
-                    // Keep bounded prefixes separately. Never classify partial
-                    // or truncated output; continue draining without signalling.
-                    if index == 0 {
-                        let available = 8192 - terminalOutput.count
-                        terminalOutput.append(contentsOf: buffer.prefix(min(count, available)))
-                        outputTruncated = outputTruncated || count > available
-                    } else {
-                        let available = 8192 - terminalErrors.count
-                        terminalErrors.append(contentsOf: buffer.prefix(min(count, available)))
-                        errorsTruncated = errorsTruncated || count > available
-                    }
-                } else if index == 0 {
-                    if data.count + count <= 2 << 20 { data.append(contentsOf: buffer.prefix(count)) }
-                    else { overflow = true }
-                }
-                // Transient bounded text is reduced to fixed facts only.
-                // Nothing forwards names or raw progress into diagnostics.
-            }
-        }
-        try? output.fileHandleForReading.close(); try? errors.fileHandleForReading.close()
-        child.waitUntilExit()
-        let status = child.terminationReason == .exit ? child.terminationStatus : -1
+        let query: NativeToolPipes.Query? = mutation ? nil : .init(control: control, timeout: 20)
+        let result = NativeToolPipes.collect(child, output: output, outputLimit: mutation ? 8192 : 2 << 20,
+            errors: errors, errorLimit: mutation ? 8192 : nil, query: query)
+        if !mutation { cancellation?.detach(); control.detachAfterReap() }
         if mutation {
-            observer?(.init(stdout: terminalOutput, stderr: terminalErrors, stdoutTruncated: outputTruncated,
-                stderrTruncated: errorsTruncated, readIncomplete: overflow, status: status))
+            observer?(.init(stdout: result.stdout, stderr: result.stderr, stdoutTruncated: result.stdoutTruncated,
+                stderrTruncated: result.stderrTruncated, readIncomplete: !result.complete, status: result.status))
         }
-        let canClassify = mutation && status != 0 && !overflow && !outputTruncated && !errorsTruncated
-        let outputCode = canClassify ? numericErrorCode(terminalOutput) : nil
-        let errorCode = canClassify ? numericErrorCode(terminalErrors) : nil
-        return .init(status: status, data: data, overflow: overflow, stopped: control.didSignal,
+        let canClassify = mutation && result.status != 0 && result.complete
+            && !result.stdoutTruncated && !result.stderrTruncated
+        let outputCode = canClassify ? numericErrorCode(result.stdout) : nil
+        let errorCode = canClassify ? numericErrorCode(result.stderr) : nil
+        return .init(status: result.status, data: mutation ? Data() : result.stdout,
+            overflow: !result.complete || result.stdoutTruncated, stopped: result.stopped,
             errorCode: outputCode == nil || errorCode == nil || outputCode == errorCode ? errorCode ?? outputCode : nil,
-            diagnosticCategory: canClassify ? diagnosticCategory(stdout: terminalOutput, stderr: terminalErrors) : nil)
+            diagnosticCategory: canClassify ? diagnosticCategory(stdout: result.stdout, stderr: result.stderr) : nil)
     }
 }

@@ -971,6 +971,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
         #endif
+        // A submitted erase cannot be interrupted by normal app teardown.
+        // Check this before health/editor/other termination preparations.
+        if ApplicationOperationCoordinator.shared.drives.isFormatting {
+            browserWindow?.showWindow(nil)
+            browserWindow?.browser.explainPendingOperation()
+            return .terminateCancel
+        }
         ApplicationDriveDetails.shared.pauseHealthMonitoring()
         folderDefaults.beginTermination()
         if ApplicationDriveDetails.shared.hasPendingHealthCheck {
@@ -1223,7 +1230,16 @@ final class BrowserWindow: NSWindow {
     weak var workspace: BrowserWorkspaceController?
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .mouseMoved, isKeyWindow { workspace?.updatePaneDividerHover(at: event.locationInWindow) }
+        if event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .scrollWheel {
+            workspace?.settlePaneRearrangementBeforePointerInput()
+        }
         if event.type == .leftMouseDown || event.type == .rightMouseDown {
+            if workspace?.isPaneDividerButton(at: event.locationInWindow) == true {
+                super.sendEvent(event)
+                return
+            }
+            workspace?.dismissPaneDividerControls()
             workspace?.activatePane(at: event.locationInWindow)
             (workspace?.activeBrowser ?? browser)?.folderSummary.cancel()
         }
@@ -1233,10 +1249,17 @@ final class BrowserWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if let browser {
             BrowserShortcutMenus.refreshWindowMenus(self, browser: browser)
-            if !(firstResponder is NSTextView), event.isARepeat, let shortcut = BrowserShortcut(event),
+            if let shortcut = BrowserShortcut(event), event.isARepeat || shortcut.key == .special(.f6),
                let action = browser.settings.shortcutMap.resolve(shortcut,
-                    fileSurface: firstResponder === browser.activeFileView || firstResponder === browser.volumeBrowser.collectionView),
-               !action.allowsRepeat { return true }
+                    fileSurface: firstResponder === browser.activeFileView || firstResponder === browser.volumeBrowser.collectionView) {
+                if !(firstResponder is NSTextView), event.isARepeat, !action.allowsRepeat { return true }
+                if shortcut.key == .special(.f6), action == .nextFocus || action == .previousFocus,
+                   !BrowserShortcutMenus.hasUserKeyEquivalent(shortcut.menuEquivalent, in: self) {
+                    // AppKit can resolve both F6 variants to the same menu item.
+                    // Use the exact focus binding before native menu matching.
+                    return browser.routeBrowserShortcut(event)
+                }
+            }
         }
         // Native menu user overrides and normal responder editing get priority.
         if super.performKeyEquivalent(with: event) { return true }
@@ -1423,7 +1446,10 @@ final class BrowserWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     func windowWillClose(_ notification: Notification) { suspendBrowsing() }
 
-    func windowDidResignKey(_ notification: Notification) { invalidatePendingSearchOpen() }
+    func windowDidResignKey(_ notification: Notification) {
+        workspace.dismissPaneDividerControls()
+        invalidatePendingSearchOpen()
+    }
 
     /// A pending result validation cannot regain authority merely because focus
     /// returns before its worker completes.

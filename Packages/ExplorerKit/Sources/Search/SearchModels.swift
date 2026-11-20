@@ -4,8 +4,33 @@ import Foundation
 /// The complete permitted search grammar. No predicate strings, arbitrary metadata
 /// keys, snippets, document attributes, or filesystem handles cross this boundary.
 public struct SearchRequest: Sendable, Equatable {
-    public enum FilenameMatch: String, Sendable { case contains, exact }
+    public enum FilenameMatch: String, Sendable { case contains, exact, navigation }
     public enum DateField: String, Sendable { case modified, created, accessed }
+
+    public struct FilenameAllowlist: Sendable, Equatable {
+        private let names: Set<String>
+        private let extensions: Set<String>
+
+        public init(names: [String], extensions: [String]) throws {
+            guard names.count <= 128, extensions.count <= 128, !names.isEmpty || !extensions.isEmpty,
+                  names.allSatisfy(Self.isLiteral),
+                  extensions.allSatisfy({ Self.isLiteral($0) && !$0.contains(".") }) else {
+                throw SearchValidationError.invalidRequest
+            }
+            self.names = Set(names.map(Self.key))
+            self.extensions = Set(extensions.map(Self.key))
+        }
+
+        fileprivate func matches(_ entry: FileEntry) -> Bool {
+            names.contains(Self.key(entry.name)) || entry.filenameExtension.map { extensions.contains(Self.key($0)) } == true
+        }
+
+        private static func key(_ name: String) -> String { name.lowercased(with: Locale(identifier: "en_US_POSIX")) }
+        private static func isLiteral(_ value: String) -> Bool {
+            (1...128).contains(value.utf8.count) && !value.contains("/") && !value.contains("\n") && !value.utf8.contains(0)
+        }
+    }
+
     public let filename: String
     public let filenameMatch: FilenameMatch
     public let kind: FileKind?
@@ -14,12 +39,14 @@ public struct SearchRequest: Sendable, Equatable {
     public let dateField: DateField
     public let dateRange: ClosedRange<Date>?
     public let symbolTolerant: Bool
+    private let filenameAllowlist: FilenameAllowlist?
     private let normalizedFilename: String
+    private let navigationQuery: FilenameMatching.NavigationQuery?
 
     public init(filename: String, filenameMatch: FilenameMatch = .contains, kind: FileKind? = nil,
                 filenameExtension: String? = nil, byteRange: ClosedRange<Int64>? = nil,
                 dateField: DateField = .modified, dateRange: ClosedRange<Date>? = nil,
-                symbolTolerant: Bool = true) throws {
+                symbolTolerant: Bool = true, filenameAllowlist: FilenameAllowlist? = nil) throws {
         guard filename.utf8.count <= 2_048, !filename.utf8.contains(0),
               !filename.contains("/"), !filename.contains("\n"),
               byteRange.map({ $0.lowerBound >= 0 }) ?? true else { throw SearchValidationError.invalidRequest }
@@ -37,7 +64,13 @@ public struct SearchRequest: Sendable, Equatable {
         self.dateField = dateField
         self.dateRange = dateRange
         self.symbolTolerant = symbolTolerant
+        self.filenameAllowlist = filenameAllowlist
         normalizedFilename = FilenameMatching.folded(filename, symbolTolerant: symbolTolerant)
+        navigationQuery = filenameMatch == .navigation ? .init(filename, symbolTolerant: symbolTolerant) : nil
+    }
+
+    public func filenameNavigationRank(for name: String) -> FilenameMatching.NavigationQuery.Rank? {
+        navigationQuery?.rank(in: name, isFilename: true)
     }
 
     /// Unicode-aware filename matching with optional separator equivalence for
@@ -52,9 +85,12 @@ public struct SearchRequest: Sendable, Equatable {
                 guard FilenameMatching.folded(entry.name, symbolTolerant: symbolTolerant).contains(normalizedFilename) else { return false }
             case .exact:
                 guard entry.name.compare(filename, options: options, locale: locale) == .orderedSame else { return false }
+            case .navigation:
+                guard filenameNavigationRank(for: entry.name) != nil else { return false }
             }
         }
         if let kind, kind != entry.kind { return false }
+        if let filenameAllowlist, !filenameAllowlist.matches(entry) { return false }
         if let filenameExtension {
             guard let observed = entry.filenameExtension,
                   observed.compare(filenameExtension, options: [.caseInsensitive], locale: locale) == .orderedSame else {
@@ -87,12 +123,22 @@ public struct SearchScope: Sendable, Equatable {
     public let root: URL
     public let showHidden: Bool
     public let excludedSubroots: [URL]
+    public let excludesGitMetadata: Bool
+    private let excludesSensitiveText: Bool
+    private let excludedDescendantNames: Set<String>
+    private let rootComponentCount: Int
 
-    public init(root: URL, showHidden: Bool = false, excludedSubroots: [URL] = []) throws {
+    public init(root: URL, showHidden: Bool = false, excludedSubroots: [URL] = [], excludesGitMetadata: Bool = false,
+                excludesSensitiveText: Bool = false, excludedDescendantNames: Set<String> = []) throws {
         guard Self.localURL(root), root.standardizedFileURL.path != "/",
-              root.standardizedFileURL.path != "/Volumes", excludedSubroots.count <= 128 else {
+              root.standardizedFileURL.path != "/Volumes", excludedSubroots.count <= 128,
+              !excludesGitMetadata || !Self.containsGitMetadata(root),
+              !excludesSensitiveText || !AutomaticMetadataPolicy.excludesProjectText(root) else {
             throw SearchValidationError.invalidScope
         }
+        guard excludedDescendantNames.count <= 32, excludedDescendantNames.allSatisfy({ value in
+            !value.isEmpty && value.utf8.count <= 255 && !value.contains("/") && !value.utf8.contains(0) && value != "." && value != ".."
+        }) else { throw SearchValidationError.invalidExclusion }
         let normalized = root.standardizedFileURL
         for exclusion in excludedSubroots {
             guard Self.localURL(exclusion), Self.contains(exclusion.standardizedFileURL, inside: normalized),
@@ -101,17 +147,65 @@ public struct SearchScope: Sendable, Equatable {
         self.root = normalized
         self.showHidden = showHidden
         self.excludedSubroots = excludedSubroots.map(\.standardizedFileURL)
+        self.excludesGitMetadata = excludesGitMetadata
+        self.excludesSensitiveText = excludesSensitiveText
+        self.excludedDescendantNames = Set(excludedDescendantNames.map(Self.foldExclusion))
+        self.rootComponentCount = normalized.pathComponents.count
     }
 
     public func permits(_ url: URL) -> Bool {
-        guard Self.localURL(url), Self.contains(url.standardizedFileURL, inside: root) else { return false }
-        let candidate = url.standardizedFileURL.path.lowercased(with: Locale(identifier: "en_US_POSIX"))
+        guard Self.localURL(url) else { return false }
+        let normalized = url.standardizedFileURL
+        guard Self.contains(normalized, inside: root),
+              !excludesGitMetadata || !Self.containsGitMetadata(url),
+              !excludesSensitiveText || !AutomaticMetadataPolicy.excludesProjectText(url) else { return false }
+        // The explicitly chosen root remains searchable. Only a descendant
+        // name can cause this optional convenience exclusion.
+        if !excludedDescendantNames.isEmpty && normalized.pathComponents.dropFirst(rootComponentCount).contains(where: {
+            excludedDescendantNames.contains(Self.foldExclusion($0))
+        }) { return false }
+        guard !excludedSubroots.isEmpty else { return true }
+        let candidate = Self.foldExclusion(normalized.path)
         return !excludedSubroots.contains {
             // A conservative exclusion must not be bypassed by spelling case
             // differently on the default case-insensitive macOS filesystem.
-            let excluded = $0.path.lowercased(with: Locale(identifier: "en_US_POSIX"))
+            let excluded = Self.foldExclusion($0.path)
             return candidate == excluded || candidate.hasPrefix(excluded + "/")
         }
+    }
+
+    /// Narrow an explicit search without dropping its existing exclusions.
+    /// File access and the resolved directory are still checked by the reader.
+    public func confined(toRelativeFolder path: String) throws -> SearchScope {
+        if path.isEmpty { return self }
+        let relative = path.hasSuffix("/") ? path.dropLast() : path[...]
+        let components = relative.split(separator: "/", omittingEmptySubsequences: false)
+        guard path.utf8.count <= 4_096, !path.utf8.contains(0), (1...28).contains(components.count),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.count <= 255
+                  && (showHidden || !$0.hasPrefix(".")) }) else { throw SearchValidationError.invalidScope }
+        var folder = root
+        for component in components {
+            folder = folder.appendingPathComponent(String(component), isDirectory: true)
+            guard permits(folder) else { throw SearchValidationError.invalidScope }
+        }
+        let parentComponents = folder.pathComponents.map(Self.foldExclusion)
+        let retainedExclusions = excludedSubroots.compactMap { exclusion -> URL? in
+            let parts = exclusion.pathComponents
+            guard parts.count > parentComponents.count, parts.map(Self.foldExclusion).starts(with: parentComponents) else { return nil }
+            return parts.dropFirst(parentComponents.count).reduce(folder) { $0.appendingPathComponent($1, isDirectory: true) }
+        }
+        return try .init(root: folder, showHidden: showHidden,
+            excludedSubroots: retainedExclusions,
+            excludesGitMetadata: excludesGitMetadata, excludesSensitiveText: excludesSensitiveText,
+            excludedDescendantNames: excludedDescendantNames)
+    }
+
+    private static func foldExclusion(_ value: String) -> String {
+        value.lowercased(with: Locale(identifier: "en_US_POSIX"))
+    }
+
+    private static func containsGitMetadata(_ candidate: URL) -> Bool {
+        candidate.standardizedFileURL.pathComponents.contains { $0.lowercased() == ".git" }
     }
 
     private static func contains(_ candidate: URL, inside root: URL) -> Bool {

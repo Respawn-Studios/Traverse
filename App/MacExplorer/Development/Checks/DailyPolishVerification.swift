@@ -219,24 +219,24 @@ extension UIVerification {
     private static func verifyClipboardF6(_ browser: BrowserViewController, in window: NSWindow) throws {
         browser.focusBrowserContent()
         let content: NSView = browser.showsComputerVolumes ? browser.volumeBrowser.collectionView : browser.activeFileView
-        try require(window.performKeyEquivalent(with: key("\u{f709}", code: 97, flags: [], window: window))
-                    && window.firstResponder === browser.clipboardStatus,
-                    "Native F6 shortcut dispatch cannot reach the visible clipboard inspector")
-        try require(window.performKeyEquivalent(with: key("\u{f709}", code: 97, flags: [], window: window))
-                    && window.firstResponder === browser.outline,
-                    "Native F6 cannot leave the clipboard inspector")
-        try require(window.performKeyEquivalent(with: key("\u{f709}", code: 97, flags: [.shift], window: window))
-                    && window.firstResponder === browser.clipboardStatus,
-                    "Native Shift-F6 cannot reach the clipboard inspector in reverse")
-        try require(window.performKeyEquivalent(with: key("\u{f709}", code: 97, flags: [.shift], window: window))
-                    && window.firstResponder === content,
-                    "Native Shift-F6 cannot return from the clipboard inspector to file content")
-        if !browser.showsComputerVolumes {
-            // A compact search uses a transient popover, which an offscreen
-            // window cannot display. Its address is the native text editor
-            // available in both layouts for this shortcut-isolation control.
-            if browser.folderFilter.isCompact { browser.focusLocation(nil) }
-            else { browser.focusFilter(nil) }
+        func move(backward: Bool, to expected: NSView) throws {
+            let event = key("\u{f709}", code: 97, flags: backward ? [.shift] : [], window: window)
+            let label = backward ? "Shift-F6" : "F6"
+            if window.isKeyWindow {
+                NSApp.sendEvent(event)
+            } else {
+                try require(window.performKeyEquivalent(with: event), "Native \(label) did not dispatch")
+            }
+            let responder = window.firstResponder.map { String(describing: type(of: $0)) } ?? "none"
+            try require(window.firstResponder === expected,
+                "Native \(label) focused \(responder) instead of \(type(of: expected))")
+        }
+        try move(backward: false, to: browser.clipboardStatus)
+        try move(backward: false, to: browser.outline)
+        try move(backward: true, to: browser.clipboardStatus)
+        try move(backward: true, to: content)
+        if window.isKeyWindow, !browser.showsComputerVolumes {
+            browser.focusLocation(nil)
             let editor = window.firstResponder
             try require(editor is NSTextView, "Clipboard focus regression did not enter its native text editor")
             let revision = browser.clipboardRevision
@@ -763,14 +763,7 @@ extension UIVerification {
                 settings.showsPathBar = pathVisible
                 await Task.yield()
                 window.contentView?.layoutSubtreeIfNeeded()
-                if preset == .explorer { try verifyClipboardF6(primary, in: window) }
-                else {
-                    primary.focusBrowserContent()
-                    let responder = window.firstResponder
-                    try require(!primary.handleExplorerShortcut(key("\u{f709}", code: 97, flags: [], window: window))
-                                && window.firstResponder === responder,
-                                "Mac preset unexpectedly enabled Explorer F6 focus remapping")
-                }
+                try verifyClipboardF6(primary, in: window)
                 window.makeFirstResponder(primary.clipboardStatus)
                 primary.clipboardStatus.layoutSubtreeIfNeeded()
                 guard let dismiss = primary.clipboardStatus.subviews.compactMap({ $0 as? NSButton }).first else {

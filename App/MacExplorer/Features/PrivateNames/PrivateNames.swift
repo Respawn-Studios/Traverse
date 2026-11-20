@@ -35,6 +35,9 @@ final class ApplicationPrivateNames: ObservableObject {
     @Published var moveNotice = ""
     let enablesMoveContinuity: Bool
     let enablesImport: Bool
+    private var locationPolicy: RememberedLocationPolicy {
+        AppFeatureAvailability.policy.edition == .directPublic ? .localPermissions : .selectedReadAccess
+    }
     var moveGaps = Set<RememberedItemID>()
     private(set) var directory: URL?
     private weak var settings: BrowserSettings?
@@ -190,14 +193,16 @@ final class ApplicationPrivateNames: ObservableObject {
                 result = try await store.apply(store.prepareEdit(current, names: names))
             } else {
                 guard let source else { throw RememberedReferenceFailure.unavailable }
-                let edit = try await store.prepareRemembering(names, source: source, retaining: access, allowDocumentFollowing: allowFollowing)
+                let edit = try await store.prepareRemembering(names, source: source, retaining: access,
+                    allowDocumentFollowing: allowFollowing, locationPolicy: locationPolicy)
                 result = try await store.apply(edit)
             }
         } else {
             guard id == nil, let directory, let source else { throw NameIndexFailure.missingRecord }
             try await AppStoragePreparation.owner(for: directory.deletingLastPathComponent()).prepare()
             let created = try await PersistentNameStore.createRemembering(directory: directory, first: names, source: source,
-                retaining: access, activity: ApplicationFileActivity.gate, allowDocumentFollowing: allowFollowing)
+                retaining: access, activity: ApplicationFileActivity.gate, allowDocumentFollowing: allowFollowing,
+                locationPolicy: locationPolicy)
             store = created; writable = true; result = try await created.firstItemID()
             settings?.privateNamesSources = .both
         }
@@ -388,7 +393,8 @@ final class ApplicationPrivateNames: ObservableObject {
         guard operations.beginPreparation(owner: owner) else { throw NameStoreFailure.busy }
         defer { operations.finishPreparation(owner: owner) }
         guard let store = try await writer() else { throw NameIndexFailure.missingRecord }
-        let request = try await store.prepareRelink(id, source: source, retaining: access, allowDocumentFollowing: allowFollowing)
+        let request = try await store.prepareRelink(id, source: source, retaining: access,
+            allowDocumentFollowing: allowFollowing, locationPolicy: locationPolicy)
         _ = try await store.apply(request); moveGaps.remove(id); await refreshMoveAttention(in: store); notify(.changed)
     }
     func storageAction(_ action: NameStoreOpenAction) async throws {

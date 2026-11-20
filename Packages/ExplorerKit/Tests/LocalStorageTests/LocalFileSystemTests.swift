@@ -1,5 +1,6 @@
 import Darwin
 import ExplorerCore
+import FileOperations
 import Foundation
 @testable import LocalStorage
 import Testing
@@ -77,6 +78,86 @@ private struct MetadataSnapshot: Equatable {
     }
 }
 
+@Test func projectTextReadKeepsItsRootPrivacyAndByteBounds() async throws {
+    let fixture = try Fixture()
+    defer { try? fixture.remove() }
+    let root = try fixture.directory("Project")
+    let text = try fixture.file("Project/Ready.txt", text: "fixture\r\n")
+    let outside = try fixture.file("Other.txt", text: "fixture\r\n")
+    let environment = try fixture.file("Project/.env.generated", text: "fixture\r\n")
+    let git = try fixture.directory("Project/.git")
+    let internalFile = try fixture.file("Project/.git/HEAD", text: "fixture\r\n")
+    let link = root.appendingPathComponent("Link.txt")
+    try FileManager().createSymbolicLink(at: link, withDestinationURL: outside)
+    let invalid = root.appendingPathComponent("Binary.txt")
+    try Data([0xff, 0x00]).write(to: invalid, options: .withoutOverwriting)
+    func candidate(_ url: URL, bytes: Int64 = 9) -> FileEntry {
+        .init(url: url, name: url.lastPathComponent, kind: .file, byteCount: bytes)
+    }
+    let service = LocalFileSystem()
+    let scope = try await service.prepareProjectText(in: root)
+    let observation = try await service.readProjectText([candidate(text), candidate(outside), candidate(environment),
+        candidate(internalFile), candidate(link), candidate(invalid, bytes: 2), candidate(text, bytes: 10)], within: scope)
+    #expect(observation.files.map(\.entry.url) == [text])
+    #expect(observation.files.first?.contents.text == "fixture\n")
+    #expect(observation.skipped == 6 && observation.consumed == 7)
+    await #expect(throws: LocalStorageError.self) {
+        try await service.prepareProjectText(in: git)
+    }
+
+    let size = 1 << 20
+    let large = Data(String(repeating: String(repeating: "a", count: 1_023) + "\n", count: 1_024).utf8)
+    let candidates = try (0..<5).map { index in
+        let url = root.appendingPathComponent("Large-\(index).txt")
+        try large.write(to: url, options: .withoutOverwriting)
+        return candidate(url, bytes: Int64(size))
+    }
+    let firstPage = try await service.readProjectText(candidates[...], within: scope)
+    #expect(firstPage.files.map(\.entry.url) == candidates.prefix(4).map(\.url))
+    #expect(firstPage.skipped == 0 && firstPage.consumed == 4)
+    let lastPage = try await service.readProjectText(candidates.dropFirst(firstPage.consumed), within: scope)
+    #expect(lastPage.files.map(\.entry.url) == candidates.suffix(1).map(\.url))
+    #expect(lastPage.skipped == 0 && lastPage.consumed == 1)
+
+    try FileManager().moveItem(at: root, to: fixture.root.appendingPathComponent("Earlier Project", isDirectory: true))
+    _ = try fixture.directory("Project")
+    _ = try fixture.file("Project/Ready.txt", text: "same size")
+    await #expect(throws: TextComparisonReadFailure.changed) {
+        try await service.readProjectText([candidate(text)], within: scope)
+    }
+    await #expect(throws: TextComparisonReadFailure.changed) {
+        try await service.validateProjectTextScope(scope)
+    }
+}
+
+@Test func linkedFolderNavigationConfinesAndRechecksBothRoots() async throws {
+    let fixture = try Fixture()
+    defer { try? fixture.remove() }
+    let left = try fixture.directory("Left"), right = try fixture.directory("Right")
+    let source = try fixture.directory("Left/Sources"), destination = try fixture.directory("Right/Sources")
+    let missing = try fixture.directory("Left/Missing")
+    let secret = try fixture.directory("Left/.git")
+    let outside = try fixture.directory("Outside")
+    let linkSource = try fixture.directory("Left/Linked")
+    try FileManager().createSymbolicLink(at: right.appendingPathComponent("Linked"), withDestinationURL: outside)
+    let system = LocalFileSystem()
+    let link = try await system.linkFolderNavigation(left, right)
+    #expect(try await system.correspondingFolder(in: link, from: left, visited: source) == destination)
+    #expect(try await system.correspondingFolder(in: link, from: right, visited: destination) == source)
+    #expect(try await system.correspondingFolder(in: link, from: left, visited: left) == right)
+    for invalid in [missing, secret, outside, linkSource] {
+        await #expect(throws: LinkedFolderFailure.unavailable) {
+            try await system.correspondingFolder(in: link, from: left, visited: invalid)
+        }
+    }
+    try FileManager().moveItem(at: right, to: fixture.root.appendingPathComponent("Earlier Right", isDirectory: true))
+    _ = try fixture.directory("Right")
+    _ = try fixture.directory("Right/Sources")
+    await #expect(throws: LinkedFolderFailure.rootsChanged) {
+        try await system.correspondingFolder(in: link, from: left, visited: source)
+    }
+}
+
 @Test func shallowListingPreservesFixtureAndReportsKinds() async throws {
     let fixture = try Fixture()
     defer { try? fixture.remove() }
@@ -103,6 +184,33 @@ private struct MetadataSnapshot: Equatable {
     #expect(all.contains { $0.name == ".hidden" })
     let after = try observed.map(MetadataSnapshot.init)
     #expect(before == after)
+}
+
+@Test func boundedOutlineListingKeepsItsRootAndShallowLimit() async throws {
+    let fixture = try Fixture()
+    defer { try? fixture.remove() }
+    let project = try fixture.directory("Project")
+    let outside = try fixture.directory("Outside")
+    try Data("outside".utf8).write(to: outside.appendingPathComponent("Outside.txt"))
+    let nested = try fixture.directory("Project/Nested")
+    try Data("inside".utf8).write(to: nested.appendingPathComponent("Inside.txt"))
+    _ = try fixture.file("Project/One.txt")
+    _ = try fixture.file("Project/Two.txt")
+    _ = try fixture.file("Project/.gitignore")
+    _ = try fixture.directory("Project/.ssh")
+    let link = project.appendingPathComponent("Unresolved link", isDirectory: true)
+    try FileManager().createSymbolicLink(at: link, withDestinationURL: outside)
+    let fs = LocalFileSystem(batchSize: 1)
+    let bounded = try await fs.boundedEntries(in: project, within: project, maximum: 2)
+    #expect(!bounded.isComplete && bounded.entries.count == 2)
+    let listed = try await fs.boundedEntries(in: project, within: project, showHidden: true)
+    #expect(listed.isComplete && listed.hasUnavailableItems)
+    #expect(listed.entries.first?.name == "Nested")
+    #expect(listed.entries.first { $0.name == "Unresolved link" }?.kind == .symbolicLink)
+    #expect(Set(listed.entries.map(\.name)) == ["Nested", "One.txt", "Two.txt", ".gitignore", "Unresolved link"])
+    #expect(try await fs.boundedEntries(in: nested, within: project).entries.map(\.name) == ["Inside.txt"])
+    await #expect(throws: (any Error).self) { try await fs.boundedEntries(in: link, within: project) }
+    await #expect(throws: (any Error).self) { try await fs.boundedEntries(in: outside, within: project) }
 }
 
 @Test func batchesAreBoundedAndEmptyIsSuccessful() async throws {
@@ -353,7 +461,7 @@ func nearestExistingLocationDoesNotMislabelDeniedAsMissing() async throws {
     var waiting: [Task<URL?, Error>] = []
     defer { active.cancel(); waiting.forEach { $0.cancel() }; gate.release() }
     try await waitForNearestReadGate { gate.probes("active-cap") == 1 }
-    for index in 1..<LocalFileSystem.maximumNearestLocationRequests {
+    for index in 1..<LocalFileSystem.maximumLocationReads {
         let label = "waiting-cap-\(index)"
         waiting.append(Task {
             try await service.nearestExistingLocation(to: file, retaining: nil,
@@ -361,10 +469,10 @@ func nearestExistingLocationDoesNotMislabelDeniedAsMissing() async throws {
         })
     }
     try await waitForNearestReadGate {
-        (1..<LocalFileSystem.maximumNearestLocationRequests).allSatisfy { gate.isEnqueued("waiting-cap-\($0)") }
+        (1..<LocalFileSystem.maximumLocationReads).allSatisfy { gate.isEnqueued("waiting-cap-\($0)") }
     }
     active.cancel(); waiting.forEach { $0.cancel() }
-    #expect(service.nearestLocationOutstandingCount == LocalFileSystem.maximumNearestLocationRequests)
+    #expect(service.outstandingLocationReads == LocalFileSystem.maximumLocationReads)
     do {
         _ = try await service.nearestExistingLocation(to: file, acquiring: {
             gate.observed("overflow-acquisition")
@@ -389,8 +497,8 @@ func nearestExistingLocationDoesNotMislabelDeniedAsMissing() async throws {
         do { _ = try await request.value; Issue.record("Canceled queued admission delivered a result.") }
         catch is CancellationError {} catch { Issue.record("Unexpected canceled waiting admission error.") }
     }
-    #expect((1..<LocalFileSystem.maximumNearestLocationRequests).allSatisfy { gate.probes("waiting-cap-\($0)") == 0 })
-    try await waitForNearestReadGate { service.nearestLocationOutstandingCount == 0 }
+    #expect((1..<LocalFileSystem.maximumLocationReads).allSatisfy { gate.probes("waiting-cap-\($0)") == 0 })
+    try await waitForNearestReadGate { service.outstandingLocationReads == 0 }
     #expect(try await service.nearestExistingLocation(to: file, acquiring: {
         gate.observed("later-acquisition")
         return NearestReadLease()
@@ -409,7 +517,7 @@ func nearestExistingLocationDoesNotMislabelDeniedAsMissing() async throws {
         _ = try await service.nearestExistingLocation(to: file, acquiring: { throw LocalStorageError.accessDenied })
         Issue.record("Failed access acquisition unexpectedly reached lookup.")
     } catch LocalStorageError.accessDenied {} catch { Issue.record("Unexpected acquisition failure type.") }
-    #expect(service.nearestLocationOutstandingCount == 0)
+    #expect(service.outstandingLocationReads == 0)
     let canceled = Task {
         try await service.nearestExistingLocation(to: file, acquiring: {
             withUnsafeCurrentTask { $0?.cancel() }
@@ -418,7 +526,7 @@ func nearestExistingLocationDoesNotMislabelDeniedAsMissing() async throws {
     }
     do { _ = try await canceled.value; Issue.record("Canceled access acquisition reached lookup.") }
     catch is CancellationError {} catch { Issue.record("Unexpected acquisition cancellation type.") }
-    #expect(service.nearestLocationOutstandingCount == 0)
+    #expect(service.outstandingLocationReads == 0)
     #expect(try await service.nearestExistingLocation(to: file) == file)
     #expect(LocalStorageError.busy.userMessage.contains("busy"))
 }

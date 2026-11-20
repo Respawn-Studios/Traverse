@@ -59,12 +59,14 @@ enum ZIPRootExtractionPreparation {
     private let target: BrowserViewController
     private let tab: UUID, visit: UUID, directory: URL
     private let engine: RecoverableFileOperations
+    private let diagnostic: DiagnosticWorkflowBinding
 
     init?(_ context: ScopedItemPaste, to target: BrowserViewController) {
         guard ArchiveMemberDragActivation.available,
               context.intent.operation == .copy, context.isCurrent(), target.canPasteArchiveIntoLocalFolder,
               let directory = target.location.directoryURL, let engine = target.recoverableFileOperations else { return nil }
         self.context = context; self.target = target; self.directory = directory; self.engine = engine
+        diagnostic = ApplicationDiagnostics.shared.workflow(.browse, context: .init(.clipboardCapture))
         tab = target.activeID; visit = target.sessionID
         target.status.stringValue = "Checking the archive and destination…"
     }
@@ -75,23 +77,48 @@ enum ZIPRootExtractionPreparation {
     }
 
     func present(_ selection: ArchivePreparedSelection, source: URL, from origin: BrowserViewController) async throws {
-        guard destinationIsCurrent else { return }
+        diagnostic.event(.verifying, context: .init(.queueSources))
+        guard requireDestination(.queueDestination) else { return }
         guard context.isCurrent(), !origin.isBrowserSuspended else { staleSource(); return }
+        diagnostic.event(.preparing, context: .init(.queueAccess))
         let sourceAccess = await origin.accessLifetime(for: [source])
         let access = await target.accessLifetime(for: [directory])
         let observation = try await engine.observeSelection([directory])
-        guard destinationIsCurrent else { return }
+        guard requireDestination(.queueDestination) else { return }
         guard context.isCurrent(), !origin.isBrowserSuspended else { staleSource(); return }
         let destination = ArchiveExtractionDestination(directory: directory, observation: observation, access: access)
         if ApplicationArchiveExtraction.shared.showSelection(source: source, from: target, selection: selection,
             destination: destination, sourceAccess: sourceAccess, presentation: .paste) {
+            diagnostic.event(.completed, context: .init(.queueAdmission))
             target.status.stringValue = "Checking the copy destination…"
-        } else { target.status.stringValue = "The destination is no longer ready. Paste into its current folder again." }
+        } else {
+            diagnostic.event(.blocked, context: .init(.queueAdmission, flags: [.queueUnavailable]))
+            target.status.stringValue = "The destination is no longer ready. Paste into its current folder again."
+        }
     }
 
-    private func staleSource() { target.status.stringValue = "The copied archive selection changed. Copy the items again." }
+    private func requireDestination(_ checkpoint: DiagnosticCheckpoint) -> Bool {
+        guard !destinationIsCurrent else { return true }
+        var flags: [DiagnosticStateFlag] = []
+        if Task.isCancelled { flags.append(.cancellationRequested) }
+        if target.activeID != tab { flags.append(.presentationChanged) }
+        if target.sessionID != visit { flags.append(.visitChanged) }
+        if target.location.directoryURL != directory || target.recoverableFileOperations !== engine { flags.append(.contextChanged) }
+        if target.isBrowserSuspended { flags.append(.browserSuspended) }
+        if target.isLoading { flags.append(.browserLoading) }
+        if !target.hasFileCommandFocus { flags.append(.windowNotKey) }
+        if !target.canPasteArchiveIntoLocalFolder { flags.append(.queueUnavailable) }
+        diagnostic.event(.blocked, context: .init(checkpoint, flags: flags))
+        return false
+    }
+    private func staleSource() {
+        diagnostic.event(.blocked, context: .init(.queueSources, flags: [.contextChanged]))
+        target.status.stringValue = "The copied archive selection changed. Copy the items again."
+    }
 
     func report(_ error: Error) {
+        diagnostic.event(error is CancellationError || Task.isCancelled ? .cancelled : .failed,
+            context: .init(.queueSources), error: DiagnosticErrors.project(error))
         if destinationIsCurrent { target.status.stringValue = ArchiveExtractionModel.message(error) }
     }
 }

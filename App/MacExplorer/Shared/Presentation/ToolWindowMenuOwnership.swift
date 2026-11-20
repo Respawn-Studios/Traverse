@@ -1,8 +1,8 @@
 import AppKit
 
-/// One menu handoff for native editors and their read-only comparison windows.
+/// A key tool window can replace the browser menus while it owns focus.
 /// An old resign-key notification cannot restore a menu over a newer owner.
-@MainActor enum EditorMenuOwnership {
+@MainActor enum ToolWindowMenuOwnership {
     private static var owner: ObjectIdentifier?
     private static var current: NSMenu?
     private static var baseline: NSMenu?
@@ -35,5 +35,25 @@ import AppKit
             NativeWindowMenu.bind(baselineWindows); NSApp.helpMenu = baselineHelp
         }
         owner = nil; current = nil; baseline = nil; baselineWindows = nil; baselineHelp = nil
+    }
+
+    static func reviewMenu(from baseline: NSMenu?, window: NSWindow?, actions: [NSMenuItem] = [],
+                           viewActions: [NSMenuItem] = []) -> NSMenu {
+        let menu = NSMenu()
+        if let app = baseline?.items.first?.copy() as? NSMenuItem { menu.addItem(app) }
+        let file = NSMenu(title: "File")
+        actions.forEach(file.addItem)
+        file.addItem(BrowserMenus.item("Close", #selector(NSWindow.performClose(_:)), key: "w", target: window))
+        let entry = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+        entry.submenu = file
+        menu.addItem(entry)
+        if !viewActions.isEmpty {
+            let view = NSMenu(title: "View")
+            viewActions.forEach(view.addItem)
+            let item = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+            item.submenu = view
+            menu.addItem(item)
+        }
+        return menu
     }
 }

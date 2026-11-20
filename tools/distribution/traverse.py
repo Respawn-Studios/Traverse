@@ -35,8 +35,8 @@ RELEASE_INPUTS = (
     'Distribution/LicenseSupplements/delegate-0.13.5/LICENSE-APACHE',
     'Distribution/LicenseSupplements/delegate-0.13.5/LICENSE-MIT',
     'Distribution/LicenseSupplements/index.json',
-    'Distribution/LicenseSupplements/russh-0.65.1/LICENSE.txt',
-    'Distribution/LicenseSupplements/russh-0.65.1/PUBLISHED-COPYRIGHT-HEADERS.txt',
+    'Distribution/LicenseSupplements/russh-0.65.2/LICENSE.txt',
+    'Distribution/LicenseSupplements/russh-0.65.2/PUBLISHED-COPYRIGHT-HEADERS.txt',
     'Distribution/LicenseSupplements/russh-cryptovec-0.62.0/LICENSE.txt',
     'Distribution/LicenseSupplements/russh-cryptovec-0.62.0/PUBLISHED-COPYRIGHT-HEADERS.txt',
     'Distribution/LicenseSupplements/russh-util-0.52.0/LICENSE-2.0.txt',
@@ -241,6 +241,15 @@ def main():
             from build_drive_health_worker import verify_provisional_archive
             receipt['healthServiceArchive']=verify_provisional_archive(case,
                 archive/'Products/Applications/Traverse.app')
+        if direct_shipping:
+            from distribution import source_capsule
+            version, build = info['CFBundleShortVersionString'], info['CFBundleVersion']
+            capsule = case / 'source' / f'Frozen-{version}-{build}-sources.tar.gz'
+            creation = source_capsule.create(REPO, wanted, capsule)
+            verified = source_capsule.inspect(capsule, wanted, creation['sha256'])
+            put(case / 'source/frozen-source.json', dict(creation=creation, verified=verified))
+            receipt['frozenSource'] = verified
+            receipt['packet'] = audit()
         put(case/'archive.json',receipt)
     else:
         if not args.case: raise RuntimeError('Export requires an exact successful archive case')

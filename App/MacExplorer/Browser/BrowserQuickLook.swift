@@ -199,5 +199,8 @@ extension BrowserViewController {
             && !quickLookSelection.isEmpty && (hasFileCommandFocus || quickLook.isActive)
     }
 
-    @objc func showQuickLook(_ sender: Any?) { quickLook.toggle() }
+    @objc func showQuickLook(_ sender: Any?) {
+        if isArchiveLocation { currentArchive?.previewSelection(); return }
+        quickLook.toggle()
+    }
 }

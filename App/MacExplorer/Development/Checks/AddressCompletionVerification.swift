@@ -56,6 +56,7 @@ enum AddressCompletionVerification {
         }
         try UIVerification.require(before == (try await Task.detached { try journalBytes(journal) }.value), "Startup inspection changed retained history")
         var checks = ["Repeated startup inspection remains quiet and preserves the interrupted operation and all catalog bytes"]
+        checks += try await verifyRestoredArchiveHistory(in: root)
         if interactive {
             checks += try await verifyEditor(in: root, output: output)
             checks += try await FolderLookupVerification.run(in: root)
@@ -66,6 +67,249 @@ enum AddressCompletionVerification {
         if interactive { checks += try await verifyPanes(in: root, output: output) }
         checks += try await profile(in: root, output: output)
         return checks
+    }
+
+    private static func verifyRestoredArchiveHistory(in root: URL) async throws -> [String] {
+        let owned = root.appendingPathComponent("Restored Archive History", isDirectory: true)
+        try await Task.detached {
+            try FileManager().createDirectory(at: owned, withIntermediateDirectories: false,
+                                              attributes: [.posixPermissions: 0o700])
+        }.value
+        let journal = owned.appendingPathComponent("journal", isDirectory: true)
+        let engine = RecoverableFileOperations(journalDirectory: journal)
+        let seed = await engine.perform(.createFolder(parent: owned, name: "Undo After Restore"))
+        guard seed.result.disposition == .succeeded, let recordID = seed.recordID else {
+            throw UIVerification.Failure(message: "Restored archive history fixture could not create its recorded folder")
+        }
+        let before = try await Task.detached { try journalBytes(journal) }.value
+        let local = BrowserTab(location: .directory(owned))
+        let archive = BrowserTab(location: .archive(try ArchiveLocation(
+            source: owned.appendingPathComponent("Unprepared.zip"), format: .zip)))
+        let first = UUID(), second = UUID()
+        var layout = PaneLayout(paneID: first)
+        try layout.split(first, inserting: second, at: .trailing)
+        let snapshot = PaneWorkspaceSnapshot(layout: layout, activePane: second, panes: [
+            .init(id: first, tabs: try WorkspaceSession.capture([local], activeID: local.id),
+                  viewMode: BrowserViewMode.details.rawValue),
+            .init(id: second, tabs: try WorkspaceSession.capture([archive], activeID: archive.id),
+                  viewMode: BrowserViewMode.details.rawValue)
+        ])
+        let state = owned.appendingPathComponent("workspace-state", isDirectory: true)
+        let saved = BrowserWorkspacePersistence(stateDirectory: state)
+        _ = await saved.restore(enabled: true, legacyPane: first, viewMode: BrowserViewMode.details.rawValue)
+        saved.record(snapshot)
+        try UIVerification.require(await saved.flush() == nil, "Restored archive workspace fixture could not be saved")
+        let settings = BrowserSettings(persist: false)
+        settings.restoresSession = true; settings.autoRefreshFolders = false
+        settings.reviewsRecoveryAtStartup = false; settings.showsDockProgress = false
+        let initial = BrowserViewController(settings: settings)
+        initial.recoverableFileOperations = engine
+        initial.folderAccess = FolderAccessController(stateDirectory: nil)
+        let workspace = BrowserWorkspaceController(primaryBrowser: initial)
+        workspace.persistence = BrowserWorkspacePersistence(stateDirectory: state)
+        var finished = Set<UUID>()
+        workspace.willStartBrowserForVerification = { browser in
+            browser.permitsBackgroundVerification = true
+            browser.readVolumesForVerification = { [] }
+            browser.didFinishBeginForVerification = { finished.insert(browser.paneID) }
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 800),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.isRestorable = false
+        window.contentViewController = workspace
+        defer {
+            workspace.willStartBrowserForVerification = nil
+            for browser in workspace.browsers.values { browser.didFinishBeginForVerification = nil }
+            workspace.suspendWorkspace(); window.close()
+        }
+        workspace.begin()
+        try await UIVerification.waitUntil("Restored archive panes started") {
+            workspace.sessionReady && finished.count == 2
+        }
+        for browser in workspace.browsers.values { await browser.recoveryInspectionTask?.value }
+        let active = workspace.activeBrowser
+        try UIVerification.require(active.paneID == second && active.isArchiveLocation,
+                                    "The generated archive pane was not restored as active")
+        try UIVerification.require(Set(workspace.primaryBrowser.recoveryRecords.map(\.id)) == [recordID],
+                                    "Primary restored pane did not finish startup history inspection")
+        try UIVerification.require(workspace.browsers.values.allSatisfy {
+            Set($0.recoveryRecords.map(\.id)) == [recordID]
+        }, "Restored active archive pane did not receive startup operation history")
+        try UIVerification.require(before == (try await Task.detached { try journalBytes(journal) }.value),
+                                    "Restored archive startup changed operation history")
+        let primary = workspace.primaryBrowser
+        var expectedRecords: Set<UUID> = [recordID]
+        var newestLookupID = recordID
+        for scenario in ["sibling suspended", "review closed", "newer inspection", "lookup prefix", "lookup closed"] {
+            var entered = false
+            var continuation: CheckedContinuation<Void, Never>?
+            primary.beforeRecoveryInspectionReturnsForVerification = {
+                entered = true
+                await withCheckedContinuation { continuation = $0 }
+            }
+            defer {
+                primary.beforeRecoveryInspectionReturnsForVerification = nil
+                primary.recoveryLookupPageSizeForVerification = nil
+                let pending = continuation; continuation = nil; pending?.resume()
+            }
+            if scenario == "review closed" { primary.showOperationRecovery(nil) }
+            else if scenario.hasPrefix("lookup") {
+                // These controlled reviews are never ordered onto the screen.
+                // A fresh native window gives Close its real first transition.
+                primary.recoveryWindow?.close(); primary.recoveryWindow = nil
+                primary.recoveryLookupPageSizeForVerification = 1
+                primary.openOperationRecovery(recordID: scenario == "lookup prefix" ? newestLookupID : recordID,
+                                              presentingWindow: false)
+            }
+            else { primary.inspectOperationRecovery() }
+            guard let pending = primary.recoveryInspectionTask else {
+                throw UIVerification.Failure(message: "Recovery inspection did not start")
+            }
+            try await UIVerification.waitUntil("Shared history inspection captured") { entered }
+            if scenario == "sibling suspended" {
+                active.suspendBrowser()
+                try UIVerification.require(!pending.isCancelled,
+                                            "Suspending a sibling cancelled another pane's history read")
+                active.resumeBrowser()
+            } else if scenario == "review closed" {
+                primary.recoveryWindow?.close()
+                try UIVerification.require(!pending.isCancelled,
+                                            "Closing Recovery cancelled the browser workspace's history refresh")
+            } else if scenario == "lookup closed" {
+                let later = await engine.perform(.createFolder(parent: owned, name: "While Review Closed"))
+                guard later.result.disposition == .succeeded, let laterID = later.recordID else {
+                    throw UIVerification.Failure(message: "Closed lookup fixture could not create its folder")
+                }
+                expectedRecords.insert(laterID)
+                primary.beforeRecoveryInspectionReturnsForVerification = nil
+                primary.recoveryWindow?.close()
+                try UIVerification.require(primary.recoveryWindow?.isClosed == true,
+                    "The generated specific-record review did not receive its close callback")
+            } else if scenario == "newer inspection" {
+                let later = await engine.perform(.createFolder(parent: owned, name: "Later Folder"))
+                guard later.result.disposition == .succeeded, let laterID = later.recordID else {
+                    throw UIVerification.Failure(message: "Newer history fixture could not create its folder")
+                }
+                expectedRecords.insert(laterID)
+                newestLookupID = laterID
+                active.inspectOperationRecovery()
+                await active.recoveryInspectionTask?.value
+                try UIVerification.require(pending.isCancelled && Set(active.recoveryRecords.map(\.id)) == expectedRecords,
+                                            "A newer pane inspection did not replace the stale shared read")
+            }
+            let release = continuation; continuation = nil; release?.resume()
+            await pending.value
+            if scenario == "lookup prefix" {
+                try UIVerification.require(Set(active.recoveryRecords.map(\.id)) == expectedRecords,
+                    "A specific-record lookup replaced previously loaded shared history with a partial prefix")
+                try UIVerification.require(active.recoveryNextCursor == nil,
+                    "A specific-record lookup reopened pagination for already loaded history")
+            }
+            if scenario == "lookup closed" {
+                await primary.recoveryInspectionTask?.value
+                try UIVerification.require(Set(active.recoveryRecords.map(\.id)) == expectedRecords,
+                    "Closing a specific-record lookup left the browser history stale")
+            }
+        }
+        try UIVerification.require(workspace.browsers.values.allSatisfy { $0.recoveryRecords.count == expectedRecords.count },
+                                    "A cancelled older inspection replaced the newer window history")
+        active.navigate(to: .directory(owned)); try await UIVerification.settled(active)
+        workspace.activate(active)
+        for name in ["While Review Closed", "Later Folder", "Undo After Restore"] {
+            try UIVerification.require(active.canUndoFileOperation,
+                                        "Returning from a restored archive required manual Recovery before Undo")
+            active.undoFileOperation(nil)
+            try await UIVerification.waitUntil("Restored archive Undo completed") {
+                !active.hasExclusiveBrowserOperation && active.lastOperationResult?.disposition == .succeeded
+            }
+            await active.recoveryInspectionTask?.value
+            try UIVerification.require(!FileManager().fileExists(atPath: owned.appendingPathComponent(name).path),
+                                        "Restored archive Undo left the generated folder in place")
+        }
+        workspace.suspendWorkspace()
+        let reopened = await engine.perform(.createFolder(parent: owned, name: "While Window Closed"))
+        guard reopened.result.disposition == .succeeded, let reopenedID = reopened.recordID else {
+            throw UIVerification.Failure(message: "Closed-window history fixture could not create its folder")
+        }
+        workspace.resumeWorkspace()
+        for browser in workspace.browsers.values { await browser.recoveryInspectionTask?.value }
+        try UIVerification.require(active.recoveryRecords.contains { $0.id == reopenedID && $0.canUndo },
+                                    "Reopening a ready workspace did not refresh operation history")
+        workspace.activate(active)
+        active.undoFileOperation(nil)
+        try await UIVerification.waitUntil("Reopened workspace Undo completed") {
+            !active.hasExclusiveBrowserOperation && active.lastOperationResult?.disposition == .succeeded
+        }
+        try UIVerification.require(!FileManager().fileExists(atPath: owned.appendingPathComponent("While Window Closed").path),
+                                    "Reopened workspace could not Undo the newly recorded folder")
+        await active.recoveryInspectionTask?.value
+        let afterClose = await engine.perform(.createFolder(parent: owned, name: "After Pane Closed"))
+        guard afterClose.result.disposition == .succeeded, let afterCloseID = afterClose.recordID else {
+            throw UIVerification.Failure(message: "Pane retirement fixture could not create its folder")
+        }
+        var entered = false
+        var continuation: CheckedContinuation<Void, Never>?
+        primary.beforeRecoveryInspectionReturnsForVerification = {
+            entered = true
+            await withCheckedContinuation { continuation = $0 }
+        }
+        defer {
+            primary.beforeRecoveryInspectionReturnsForVerification = nil
+            let release = continuation; continuation = nil; release?.resume()
+        }
+        primary.inspectOperationRecovery()
+        let retiredRead = primary.recoveryInspectionTask
+        try await UIVerification.waitUntil("Retiring pane history read captured") { entered }
+        workspace.activate(primary)
+        try UIVerification.require(workspace.closeActivePane(), "History fixture could not retire its reading pane")
+        let release = continuation; continuation = nil; release?.resume()
+        await retiredRead?.value
+        let survivor = workspace.activeBrowser
+        await survivor.recoveryInspectionTask?.value
+        try UIVerification.require(retiredRead?.isCancelled == true && survivor.recoveryRecords.contains {
+            $0.id == afterCloseID && $0.canUndo
+        }, "Retiring the reading pane left the surviving pane's operation history stale")
+        survivor.undoFileOperation(nil)
+        try await UIVerification.waitUntil("Surviving pane Undo completed") {
+            !survivor.hasExclusiveBrowserOperation && survivor.lastOperationResult?.disposition == .succeeded
+        }
+        try UIVerification.require(!FileManager().fileExists(atPath: owned.appendingPathComponent("After Pane Closed").path),
+                                    "The surviving pane could not Undo after its history reader retired")
+        await survivor.recoveryInspectionTask?.value
+        let peer = BrowserViewController(settings: settings)
+        peer.recoverableFileOperations = engine
+        peer.folderAccess = FolderAccessController(stateDirectory: nil)
+        peer.permitsBackgroundVerification = true; peer.readVolumesForVerification = { [] }
+        let peerWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+        peerWindow.isReleasedWhenClosed = false; peerWindow.isRestorable = false
+        peerWindow.contentViewController = peer
+        defer { peer.suspendBrowser(); peerWindow.close() }
+        peer.navigate(to: .directory(owned)); try await UIVerification.settled(peer)
+        peer.inspectOperationRecovery(); await peer.recoveryInspectionTask?.value
+        try UIVerification.require(!peer.canUndoFileOperation, "Independent window fixture did not begin with fully Undone history")
+        let sharedFolder = owned.appendingPathComponent("From Another Window", isDirectory: true)
+        survivor.beginFileOperation(.createFolder(parent: owned, name: sharedFolder.lastPathComponent),
+                                    title: "Creating generated window folder…", roots: [owned])
+        try await UIVerification.waitUntil("First window creation completed") {
+            !survivor.hasExclusiveBrowserOperation && survivor.lastOperationResult?.disposition == .succeeded
+        }
+        await survivor.recoveryInspectionTask?.value
+        await peer.recoveryInspectionTask?.value
+        guard let sharedRecord = survivor.recoveryRecords.first(where: { record in
+            record.canUndo && record.locations.contains { $0.path == sharedFolder.path }
+        }) else { throw UIVerification.Failure(message: "First window did not publish its generated operation") }
+        try UIVerification.require(peer.recoveryRecords.contains { $0.id == sharedRecord.id && $0.canUndo },
+            "A completed operation did not refresh Undo in another window sharing its history")
+        peer.undoFileOperation(nil)
+        try await UIVerification.waitUntil("Other window Undo completed") {
+            !peer.hasExclusiveBrowserOperation && peer.lastOperationResult?.disposition == .succeeded
+        }
+        await peer.recoveryInspectionTask?.value; await survivor.recoveryInspectionTask?.value
+        try UIVerification.require(!FileManager().fileExists(atPath: sharedFolder.path)
+            && !survivor.recoveryRecords.contains { $0.id == sharedRecord.id && $0.canUndo },
+            "Other-window Undo left the first window's history stale")
+        return ["Restored panes share quiet history and Undo through sibling suspension, Recovery closure, stale results, workspace reopening and reading-pane retirement"]
     }
 
     /// Positive text-entry checks use real visible owners. The ordinary

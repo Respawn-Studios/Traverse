@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import ExplorerCore
 @_spi(Qualification) import LocalStorage
 import ObjectiveC
 
@@ -32,6 +33,8 @@ import ObjectiveC
                 && marker?["action"] as? String == "native-drive-storage-status"
                 && Bundle.main.bundleIdentifier == "local.macexplorer.development")
             area = root
+            try await verifyAPFSRequestPermission()
+            checks.append("Shared APFS request permission tracks pre-submission cancellation, exact drained owner and post-submission refusal without native requests")
             let large = ProcessInfo.processInfo.arguments.contains("--large-interface")
             let record = ProcessInfo.processInfo.arguments.contains("--record-storage-status")
             let review = ProcessInfo.processInfo.arguments.contains("--review-storage-status")
@@ -99,7 +102,8 @@ import ObjectiveC
             unsupported.next = .init(outcome: .unavailable(.unsupported), childReaped: true, nativeCleanupConfirmed: true)
             model.healthCheckForVerification = { selected in await unsupported.check(selected) }
             model.checkHardwareHealth(); await model.drainHealth()
-            try require(unsupported.calls == 1 && model.health == .unavailable(.unsupported) && model.healthMeasurements == nil)
+            try require(unsupported.calls == 1 && model.health == .unavailable(.unsupported) && model.healthMeasurements == nil
+                && model.healthReadingSummary == nil)
             checks.append("An external candidate uses the same bounded reader; unsupported connection does not become a healthy reading")
             let hardware = HealthReader(); healthReader = hardware
             model.healthCheckForVerification = { selected in await hardware.check(selected) }
@@ -123,6 +127,13 @@ import ObjectiveC
                     && text.contains("97%") && text.contains("12%") && text.contains("Media/data errors")
             }
             let retainedHealth = model.health
+            let summary = model.healthReadingSummary
+            let board = NSPasteboard.withUniqueName()
+            defer { board.releaseGlobally() }
+            try require(summary?.contains("SMART reading (NVMe)") == true && summary?.contains("Captured ") == true
+                && summary?.contains("Temperature 37 °C") == true && summary?.contains("Spare capacity 97%") == true
+                && summary?.contains("Endurance used 12%") == true && summary?.contains("Previous reading") == false
+                && model.copyHealthReading(to: board) && board.string(forType: .string) == summary && hardware.calls == 1)
             model.refresh(); await model.drain()
             try require(model.health == retainedHealth && hardware.calls == 1
                 && model.healthMeasurements == hardware.next.nvmeMeasurements)
@@ -139,6 +150,7 @@ import ObjectiveC
             model.checkHardwareHealth(); await model.drainHealth()
             try require(model.health == retainedHealth && model.healthMeasurements == childReading.nvmeMeasurements && model.healthIsStale
                 && !model.hasPendingHealthCheck && ApplicationFileActivity.gate.activeCount == 0)
+            try require(model.healthReadingSummary?.contains("Previous reading") == true)
             try await wait { visibleTexts(window).contains("Previous reading") }
             checks.append("A settled service reply releases activity without child-reap evidence; a failed refresh preserves the dated previous reading and pauses live sampling")
             hardware.next = childReading
@@ -149,7 +161,8 @@ import ObjectiveC
             model.window?.close()
             try require(model.hasPendingHealthCheck && ApplicationFileActivity.gate.activeCount > 0 && model.health == nil)
             hardware.release(); await model.drainHealth()
-            try require(!model.hasPendingHealthCheck && model.health == nil && model.healthMeasurements == nil
+            try require(!model.hasPendingHealthCheck && model.health == nil && model.healthMeasurements == nil && model.healthReadingSummary == nil
+                && !model.copyHealthReading(to: board) && board.string(forType: .string) == summary
                 && ApplicationFileActivity.gate.activeCount == 0)
             checks.append("Closing suppresses stale health publication and keeps actual work/activity owned through its return")
             let liveBaseline = hardware.calls
@@ -280,6 +293,43 @@ import ObjectiveC
             return next
         }
         func release() { hold = false; let old = continuation; continuation = nil; old?.resume(returning: next) }
+    }
+    private static func verifyAPFSRequestPermission() async throws {
+        let gate = FileActivityGate()
+        let permission = NativeAPFSRequestPermission(activity: gate)
+        try require(!permission.allowed && !permission.wasSubmitted)
+        permission.start()
+        try require(permission.allowed && permission.cancelBeforeSubmission() && !permission.allowed)
+
+        permission.start()
+        var lease: FileActivityGate.Lease? = try gate.begin()
+        guard let token = gate.closeAdmission() else { throw Failure.check(#line) }
+        permission.requireDrained(token, protectionCurrent: { true })
+        try withExtendedLifetime(lease) { try require(!permission.allowed) }
+        lease = nil
+        try require(gate.activeCount == 0 && permission.allowed)
+        await Task.detached { permission.markSubmitted() }.value
+        try require(permission.wasSubmitted && !permission.cancelBeforeSubmission()
+            && permission.wasSubmitted && permission.allowed)
+        permission.reset()
+        try require(!permission.allowed && !permission.wasSubmitted && gate.reopen(token))
+
+        let foreignGate = FileActivityGate()
+        guard let foreignToken = foreignGate.closeAdmission() else { throw Failure.check(#line) }
+        permission.start()
+        permission.requireDrained(foreignToken, protectionCurrent: { true })
+        try require(!permission.allowed && permission.cancelBeforeSubmission())
+        try require(foreignGate.reopen(foreignToken))
+
+        permission.start()
+        guard let nextToken = gate.closeAdmission() else { throw Failure.check(#line) }
+        permission.requireDrained(nextToken, protectionCurrent: { false })
+        try require(!permission.allowed)
+        permission.reset()
+        try require(gate.reopen(nextToken))
+        permission.start()
+        try require(permission.allowed && !permission.wasSubmitted)
+        permission.reset()
     }
     private static func volume(_ name: String, mounted: Bool = true, internalDisk: Bool = false) -> ManagedVolume {
         .init(id: UUID(), name: name, url: mounted ? URL(fileURLWithPath: "/Generated/StorageStatus/" + name) : nil,

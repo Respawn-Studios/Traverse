@@ -82,7 +82,8 @@ def source_inventory(extra: tuple[str, ...]) -> dict[str, str]:
 
 def inspect(case: Path, admission: dict, identifier: str,
             role_info_valid: Callable[[dict], bool],
-            inventory: Callable[[], dict[str, str]], label: str) -> dict:
+            inventory: Callable[[], dict[str, str]], label: str,
+            *, require_current_source: bool = True) -> dict:
     from distribution import helper_symbols
     from distribution.sandbox import compiled_tree_receipt
 
@@ -118,6 +119,7 @@ def inspect(case: Path, admission: dict, identifier: str,
         'scanner': helper_symbols.validate(scanner,
             case / 'Products/Release/storage-scanner-worker.dSYM'),
     }
+    current_source_match = inputs.get('sourceSHA256') == inventory()
     checks = dict(identity=info.get('CFBundleIdentifier') == identifier
             and parent['Identifier'] == identifier,
         case=role_info_valid(info),
@@ -136,9 +138,12 @@ def inspect(case: Path, admission: dict, identifier: str,
         hardenedParent=parent['runtime'] is True, hardenedScanner=child['runtime'] is True,
         developerID=parent['TeamIdentifier'] == TEAM and child['TeamIdentifier'] == TEAM
             and parent['authorities'] and parent['authorities'][0].startswith('Developer ID Application: '),
-        noDebugShim=not (app / 'Contents/MacOS/Mac Explorer.debug.dylib').exists(),
-        sourceMatch=inputs.get('sourceSHA256') == inventory())
-    result = dict(passed=all(checks.values()), checks=checks, sourceInputs=len(inputs.get('sourceSHA256', {})),
+        noDebugShim=not (app / 'Contents/MacOS/Mac Explorer.debug.dylib').exists())
+    if require_current_source:
+        checks['sourceMatch'] = current_source_match
+    result = dict(passed=all(checks.values()), checks=checks,
+                  currentSourceMatch=current_source_match,
+                  sourceInputs=len(inputs.get('sourceSHA256', {})),
                   app=compiled_tree_receipt(app), symbols=symbols,
                   symbolMatch=symbol_match, signer=admission['signingIdentity'])
     if not result['passed']:
@@ -151,6 +156,10 @@ def build(case: Path, tag: str, admission: dict, config_leaf: str,
           inspect_role: Callable[[], dict], put: Callable[[Path, dict], None], label: str) -> dict:
     if (case / 'evidence/build-result.json').exists() or (case / 'Products').exists():
         raise ValueError(f'{label} built case is immutable')
+    # Embedding cannot repair a stale prepared dependency. Refuse before
+    # compiling the app, so its caller can prepare the shared framework once.
+    from build_crash_reporter import verify_prepared
+    verify_prepared()
     source = inventory()
     put(case / 'evidence/build-inputs.json', dict(sourceSHA256=source,
         sourceInputs=len(source), case=tag, bundleIdentifier=admission['bundleIdentifier'],

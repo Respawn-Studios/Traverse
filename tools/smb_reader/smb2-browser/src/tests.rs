@@ -2,6 +2,26 @@ use super::{catalog::{Catalog,Snapshot,Sort,State},channel::Stop,store::{self,Co
 use std::{fs::{self,File,OpenOptions},os::unix::{fs::{DirBuilderExt,OpenOptionsExt},io::AsRawFd},path::PathBuf,sync::{Arc,atomic::{AtomicBool,Ordering}},time::{Duration,Instant}};
 use tokio::sync::oneshot;
 
+#[test]
+fn locked_smb_signing_accepts_the_generated_message_and_refuses_an_edit() {
+    use smb2::crypto::signing::{sign_message, verify_signature, SigningAlgorithm};
+
+    let key = [0x42; 16];
+    let message_id = 9_u64;
+    for algorithm in [SigningAlgorithm::HmacSha256, SigningAlgorithm::AesCmac] {
+        let mut message = [0_u8; 68];
+        message[..4].copy_from_slice(b"\xfeSMB");
+        message[12] = 13; // Echo
+        message[24..32].copy_from_slice(&message_id.to_le_bytes());
+        sign_message(&mut message, &key, algorithm, message_id, false).unwrap();
+        verify_signature(&message, &key, algorithm, message_id, false).unwrap();
+
+        message[67] ^= 1;
+        assert!(matches!(verify_signature(&message, &key, algorithm, message_id, false),
+            Err(smb2::Error::SignatureInvalid { .. })));
+    }
+}
+
 pub fn fixture(name:&str)->(String,[File;3]){
     let root=PathBuf::from(std::env::var_os("MEX_SMB_BROWSER_FIXTURES").expect("Explicit generated fixture root required"));
     let repo=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap();

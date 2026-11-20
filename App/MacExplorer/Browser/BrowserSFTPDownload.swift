@@ -24,9 +24,9 @@ enum SFTPDownloadFeature {
 
 /// Captures one explicit remote observation and a local destination. The SFTP
 /// pump owns reading; LocalStorage owns bodies; the existing engine owns writes.
-@MainActor final class BrowserSFTPDownload: NSObject {
+@MainActor final class BrowserSFTPDownload {
     private weak var browser: BrowserViewController?
-    private var work: Task<Void, Never>?, menu: NSMenu?, chosenPeer: UUID?
+    private var work: Task<Void, Never>?
     private var promiseDraft: SFTPFilePromiseExport?, activePromise: SFTPFilePromiseExport?
     private var internalDragDraft: RemoteDownloadDragOffer?, activeDragOffer: RemoteDownloadDragOffer?
     private var activeDragSequence: Int?
@@ -43,7 +43,6 @@ enum SFTPDownloadFeature {
     var receivedForQualification: (() async throws -> Void)?
     private(set) var bodyRequestsForQualification = 0
     #endif
-    private typealias Peer = LocalPaneDestination
     init(browser: BrowserViewController) { self.browser = browser }
     func promiseWriter(from owner: SFTPTabController, row: Int) -> (any NSPasteboardWriting)? {
         if let selected = owner.rows.selectedFolderDownload {
@@ -126,10 +125,7 @@ enum SFTPDownloadFeature {
               browser.canRunExclusiveFileCommand, browser.view.window?.attachedSheet == nil,
               browser.sftpTabs[browser.activeID] === owner, !owner.isClosing, owner.downloads != nil,
               let selection = owner.rows.selectedDownload, browser.recoverableFileOperations != nil else { return false }
-        return !toPane || (selection.proposedLocalName != nil && !peers(browser).isEmpty)
-    }
-    private func peers(_ browser: BrowserViewController) -> [Peer] {
-        LocalPaneDestination.available(from: browser)
+        return !toPane || (selection.proposedLocalName != nil && !LocalPaneDestination.available(from: browser).isEmpty)
     }
     func request(from owner: SFTPTabController, toPane: Bool) {
         let diagnostic = RemoteTransferDiagnostics(.download)
@@ -140,18 +136,12 @@ enum SFTPDownloadFeature {
         diagnostic.stage(.destination)
         let tab = browser.activeID, visit = browser.sessionID
         if toPane, selection.proposedLocalName == nil { browser.status.stringValue = "This item needs a local filename. Use Download… to choose one."; diagnostic.finish(.blocked); return }
-        var peer: Peer?
+        var peer: LocalPaneDestination?
         if toPane {
-            let values = peers(browser)
-            guard let first = values.first else { browser.status.stringValue = "Open a writable local folder in another pane first."; diagnostic.finish(.blocked); return }
-            if values.count == 1 { peer = first }
-            else {
-                let offered = NSMenu(title: "Download to Pane"); offered.autoenablesItems = false
-                for value in values { let item = offered.addItem(withTitle: value.title, action: #selector(selectPeer(_:)), keyEquivalent: ""); item.target = self; item.representedObject = value.pane }
-                menu = offered; chosenPeer = nil; offered.popUp(positioning: nil, at: .init(x: 24, y: 24), in: owner.rows)
-                peer = values.first { $0.pane == chosenPeer }; menu = nil; chosenPeer = nil
-                guard peer != nil else { diagnostic.finish(.cancelled); return }
-            }
+            let values = LocalPaneDestination.available(from: browser)
+            guard !values.isEmpty else { browser.status.stringValue = "Open a writable local folder in another pane first."; diagnostic.finish(.blocked); return }
+            peer = LocalPaneDestination.choose(values, from: browser, in: owner.rows, title: "Download to Pane")
+            guard peer != nil else { diagnostic.finish(.cancelled); return }
         }
         let preparation = UUID(), coordinator = browser.operationCoordinator
         guard coordinator.beginPreparation(owner: preparation) else { diagnostic.finish(.blocked); return }
@@ -318,7 +308,6 @@ enum SFTPDownloadFeature {
         }
         browser.operationPreparationTask = work
     }
-    @objc private func selectPeer(_ item: NSMenuItem) { if menu?.items.contains(where: { $0 === item }) == true { chosenPeer = item.representedObject as? UUID } }
     private static func message(_ error: Error, stopped: Bool) -> String {
         if stopped || error is CancellationError || error as? SFTPBrowserFailure == .stopped || error as? SFTPSessionFailure == .stopped {
             return "Download stopped. No unverified file was published. Connection closure and any retained staging can be reviewed."

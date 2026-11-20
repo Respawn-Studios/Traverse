@@ -4,8 +4,8 @@ import FileOperations
 #endif
 
 enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
-    case plain, swift, python, json, jsonc, javascript, typescript, rust, shell, sql, toml, css, yaml, html, xml, markdown, dockerfile, makefile
-    case c, cpp, objectiveC, objectiveCPP
+    case plain, swift, python, json, jsonc, javascript, typescript, rust, shell, sql, toml, css, yaml, html, xml, markdown, dockerfile, makefile, ini
+    case c, cpp, objectiveC, objectiveCPP, go
     var title: String {
         switch self {
         case .plain: "Plain Text"
@@ -26,10 +26,12 @@ enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
         case .markdown: "Markdown"
         case .dockerfile: "Dockerfile"
         case .makefile: "Makefile"
+        case .ini: "INI Configuration"
         case .c: "C"
         case .cpp: "C++"
         case .objectiveC: "Objective-C"
         case .objectiveCPP: "Objective-C++"
+        case .go: "Go"
         }
     }
     static func inferred(extension value: String) -> Self {
@@ -51,10 +53,12 @@ enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
         case "md", "markdown": .markdown
         case "dockerfile", "containerfile": .dockerfile
         case "mk", "mak": .makefile
+        case "ini", "editorconfig": .ini
         case "c", "h": .c
         case "cc", "cpp", "cxx", "hh", "hpp", "hxx": .cpp
         case "m": .objectiveC
         case "mm": .objectiveCPP
+        case "go": .go
         default: .plain
         }
     }
@@ -92,9 +96,10 @@ enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
     }
     var lineCommentStyle: EditorLineCommentStyle? {
         switch self {
-        case .swift, .jsonc, .javascript, .typescript, .rust, .c, .cpp, .objectiveC, .objectiveCPP: .slash
+        case .swift, .jsonc, .javascript, .typescript, .rust, .c, .cpp, .objectiveC, .objectiveCPP, .go: .slash
         case .python, .shell, .toml, .yaml, .dockerfile, .makefile: .hash
         case .sql: .dash
+        case .ini: .semicolon
         // Do not insert invalid line comments into strict JSON or markup.
         case .plain, .json, .css, .html, .xml, .markdown: nil
         }
@@ -105,8 +110,8 @@ struct TextSyntaxToken: Equatable, Sendable {
     let range: NSRange
     let kind: Kind
 }
-enum TextSyntaxResult: Sendable {
-    enum Fallback: Sendable { case tokenBudget, commentNesting, cancelled }
+enum TextSyntaxResult: Equatable, Sendable {
+    enum Fallback: Equatable, Sendable { case tokenBudget, commentNesting, cancelled }
     case tokens([TextSyntaxToken])
     case plain(Fallback)
 }
@@ -119,12 +124,29 @@ enum TextSyntax {
     static let maximumCommentNesting = 32
     static func color(_ value: TextDocumentValue, language: TextSyntaxLanguage,
                       cancelled: @Sendable () -> Bool = { false }) -> TextSyntaxResult {
+        color(value.text, language: language, cancelled: cancelled)
+    }
+
+    static func color(_ text: String, language: TextSyntaxLanguage,
+                      cancelled: @Sendable () -> Bool = { false }) -> TextSyntaxResult {
+        scan(text, language: language, stylesWords: true, cancelled: cancelled)
+    }
+
+    /// Smart typing needs opaque ranges and, for some languages, punctuation.
+    /// Use the same lexical boundaries without classifying identifiers.
+    static func contextTokens(_ text: String, language: TextSyntaxLanguage) -> TextSyntaxResult {
+        scan(text, language: language, stylesWords: false, cancelled: { false })
+    }
+
+    private static func scan(_ text: String, language: TextSyntaxLanguage, stylesWords: Bool,
+                             cancelled: @Sendable () -> Bool) -> TextSyntaxResult {
         if cancelled() { return .plain(.cancelled) }
         if case .plain = language { return .tokens([]) }
-        let units = Array(value.text.utf16)
+        let units = Array(text.utf16)
         if language == .json || language == .jsonc { return colorJSON(units, cancelled: cancelled) }
         if language == .css { return EditorCSSSyntax.color(units, cancelled: cancelled) }
         if language == .yaml { return EditorYAMLSyntax.color(units, cancelled: cancelled) }
+        if language == .ini { return EditorINISyntax.color(units, cancelled: cancelled) }
         if language == .html || language == .xml { return EditorMarkupSyntax.color(units, cancelled: cancelled) }
         if language == .markdown { return EditorMarkdownSyntax.color(units, cancelled: cancelled) }
         if [.c, .cpp, .objectiveC, .objectiveCPP].contains(language) {
@@ -134,7 +156,7 @@ enum TextSyntax {
             return EditorBuildSyntax.color(units, language: language, cancelled: cancelled)
         }
         var tokens: [TextSyntaxToken] = []
-        tokens.reserveCapacity(min(2048, units.count / 4))
+        tokens.reserveCapacity(min(stylesWords ? 2048 : 256, units.count / 4))
         var index = 0, consumed = 0
         func letter(_ unit: UInt16) -> Bool { unit == 95 || (65...90).contains(unit) || (97...122).contains(unit) || unit >= 128 }
         func digit(_ unit: UInt16) -> Bool { (48...57).contains(unit) }
@@ -151,22 +173,54 @@ enum TextSyntax {
         }
         let keywords: Set<String>
         switch language {
-        case .swift: keywords = ["actor", "async", "await", "break", "case", "catch", "class", "continue", "defer", "do", "else", "enum", "false", "for", "func", "guard", "if", "import", "in", "let", "nil", "private", "public", "return", "self", "static", "struct", "switch", "throw", "throws", "true", "try", "var", "while"]
+        case .swift: keywords = ["actor", "associatedtype", "async", "await", "break", "case", "catch", "class", "continue", "defer", "deinit", "do", "else", "enum", "extension", "false", "for", "func", "guard", "if", "import", "in", "init", "let", "nil", "private", "protocol", "public", "return", "self", "static", "struct", "subscript", "switch", "throw", "throws", "true", "try", "typealias", "var", "while"]
         case .python: keywords = ["and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield"]
         case .json, .jsonc: keywords = ["true", "false", "null"]
-        case .javascript, .typescript: keywords = ["as", "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "declare", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "from", "function", "if", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "of", "private", "protected", "public", "readonly", "return", "static", "super", "switch", "this", "throw", "true", "try", "type", "typeof", "undefined", "var", "void", "while", "yield"]
-        case .rust: keywords = ["as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while"]
+        case .javascript, .typescript:
+            let shared: Set<String> = ["as", "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "declare", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "from", "function", "if", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "of", "private", "protected", "public", "readonly", "return", "static", "super", "switch", "this", "throw", "true", "try", "type", "typeof", "undefined", "var", "void", "while", "yield"]
+            keywords = language == .typescript ? shared.union(["abstract", "namespace"]) : shared
+        case .rust: keywords = ["as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "union", "unsafe", "use", "where", "while"]
+        case .go: keywords = ["break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type", "var"]
         case .shell: keywords = ["case", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in", "select", "then", "until", "while"]
         case .sql: keywords = ["all", "alter", "and", "as", "asc", "begin", "between", "by", "case", "check", "column", "commit", "constraint", "create", "cross", "database", "default", "delete", "desc", "distinct", "drop", "else", "end", "except", "exists", "false", "foreign", "from", "full", "group", "having", "if", "in", "index", "inner", "insert", "intersect", "into", "is", "join", "key", "left", "like", "limit", "not", "null", "offset", "on", "or", "order", "outer", "primary", "references", "returning", "right", "rollback", "select", "set", "table", "then", "true", "union", "unique", "update", "using", "values", "view", "when", "where", "with"]
         case .toml: keywords = ["true", "false", "inf", "nan"]
-        case .plain, .css, .yaml, .html, .xml, .markdown, .dockerfile, .makefile, .c, .cpp, .objectiveC, .objectiveCPP: keywords = []
+        case .plain, .css, .yaml, .html, .xml, .markdown, .dockerfile, .makefile, .ini, .c, .cpp, .objectiveC, .objectiveCPP: keywords = []
         }
         let literalWords = literals(for: language), typeWords = types(for: language)
-        let slashComments = [.swift, .javascript, .typescript, .rust].contains(language)
+        let slashComments = [.swift, .javascript, .typescript, .rust, .go].contains(language)
         let nestedComments = [.swift, .rust, .sql].contains(language)
-        let singleQuotes = [.python, .javascript, .typescript, .shell, .sql, .toml].contains(language)
+        let singleQuotes = [.python, .javascript, .typescript, .shell, .sql, .toml, .go].contains(language)
         while index < units.count {
             let start = index, unit = units[index]
+            if language == .swift && unit == 35 {
+                var opening = index + 1
+                while at(opening, 35) && opening - index < 256 { opening += 1 }
+                let hashes = opening - index
+                let regex = at(opening, 47)
+                if regex || at(opening, 34) {
+                    let delimiter = units[opening]
+                    let width = !regex && at(opening + 1, 34) && at(opening + 2, 34) ? 3 : 1
+                    if !advance(hashes + width) { return .plain(.cancelled) }
+                    while index < units.count {
+                        if !regex && width == 1 && at(index, 10) { break }
+                        if at(index, 92) {
+                            let escape = regex ? 1 : 1 + hashes
+                            if regex || (0..<hashes).allSatisfy({ at(index + 1 + $0, 35) }) {
+                                if !advance(min(escape + 1, units.count - index)) { return .plain(.cancelled) }
+                                continue
+                            }
+                        }
+                        if at(index, delimiter), (1..<width).allSatisfy({ at(index + $0, delimiter) }),
+                           (0..<hashes).allSatisfy({ at(index + width + $0, 35) }) {
+                            if !advance(width + hashes) { return .plain(.cancelled) }
+                            break
+                        }
+                        if !advance() { return .plain(.cancelled) }
+                    }
+                    if !append(start, .string) { return .plain(.tokenBudget) }
+                    continue
+                }
+            }
             // A Rust lifetime is not a quoted string. Raw/character literals
             // are handled before the general identifier and quote branches.
             if language == .rust && (unit == 114 || (unit == 98 || unit == 99) && at(index + 1, 114)) {
@@ -244,10 +298,10 @@ enum TextSyntax {
                 }
                 if !append(start, .comment) { return .plain(.tokenBudget) }
             } else if unit == 34 || singleQuotes && unit == 39
-                || [.javascript, .typescript, .shell].contains(language) && unit == 96 {
+                || [.javascript, .typescript, .shell, .go].contains(language) && unit == 96 {
                 let quote = unit
                 let triple = [.swift, .python, .toml].contains(language) && at(index + 1, quote) && at(index + 2, quote)
-                let literal = language == .toml && quote == 39 || language == .shell && quote == 39
+                let literal = [.toml, .shell].contains(language) && quote == 39 || language == .go && quote == 96
                 let doubled = language == .sql
                 if !advance(triple ? 3 : 1) { return .plain(.cancelled) }
                 while index < units.count {
@@ -255,10 +309,16 @@ enum TextSyntax {
                         if !advance(min(2, units.count - index)) { return .plain(.cancelled) }
                     } else if doubled && units[index] == quote && at(index + 1, quote) {
                         if !advance(2) { return .plain(.cancelled) }
-                    } else if !triple && quote != 96 && units[index] == 10 && ![.sql, .shell].contains(language) {
+                    } else if !triple && quote != 96 && units[index] == 10 && ![.sql, .shell, .rust].contains(language) {
                         break
                     } else if units[index] == quote && (!triple || at(index + 1, quote) && at(index + 2, quote)) {
-                        if !advance(triple ? 3 : 1) { return .plain(.cancelled) }
+                        var closing = triple ? 3 : 1
+                        // TOML allows one or two quote characters immediately
+                        // before the triple delimiter of a multiline string.
+                        if triple && language == .toml {
+                            while closing < 5 && at(index + closing, quote) { closing += 1 }
+                        }
+                        if !advance(closing) { return .plain(.cancelled) }
                         break
                     } else if !advance() { return .plain(.cancelled) }
                 }
@@ -274,6 +334,7 @@ enum TextSyntax {
                 while index < units.count && (letter(units[index]) || digit(units[index])) {
                     if !advance() { return .plain(.cancelled) }
                 }
+                guard stylesWords else { continue }
                 let word = String(decoding: units[start..<index], as: UTF16.self)
                 let normalized = language == .sql ? word.lowercased() : word
                 let kind: TextSyntaxToken.Kind?
@@ -294,7 +355,7 @@ enum TextSyntax {
                 while index < units.count && (digit(units[index]) || [46, 43, 45, 69, 101, 88, 120].contains(units[index])) {
                     if !advance() { return .plain(.cancelled) }
                 }
-                if !append(start, .number) { return .plain(.tokenBudget) }
+                if stylesWords, !append(start, .number) { return .plain(.tokenBudget) }
             } else if !advance() { return .plain(.cancelled) }
         }
         return cancelled() ? .plain(.cancelled) : .tokens(tokens)
@@ -306,10 +367,11 @@ enum TextSyntax {
         case .python: ["True", "False", "None"]
         case .javascript, .typescript: ["true", "false", "null", "undefined"]
         case .rust: ["true", "false"]
+        case .go: ["true", "false", "nil", "iota"]
         case .sql: ["true", "false", "null"]
         case .toml: ["true", "false", "inf", "nan"]
         case .json, .jsonc: ["true", "false", "null"]
-        case .plain, .shell, .css, .yaml, .html, .xml, .markdown, .dockerfile, .makefile, .c, .cpp, .objectiveC, .objectiveCPP: []
+        case .plain, .shell, .css, .yaml, .html, .xml, .markdown, .dockerfile, .makefile, .ini, .c, .cpp, .objectiveC, .objectiveCPP: []
         }
     }
     private static func types(for language: TextSyntaxLanguage) -> Set<String> {
@@ -318,6 +380,7 @@ enum TextSyntax {
         case .python: ["str", "bool", "int", "float", "bytes", "list", "tuple", "dict", "set", "object"]
         case .javascript, .typescript: ["string", "boolean", "number", "bigint", "symbol", "unknown", "never", "Array", "Object", "String", "Number", "Boolean", "Promise", "Map", "Set", "Date", "Error"]
         case .rust: ["str", "String", "bool", "char", "u8", "u16", "u32", "u64", "usize", "i8", "i16", "i32", "i64", "isize", "f32", "f64", "Vec", "Option", "Result", "Self"]
+        case .go: ["any", "bool", "byte", "comparable", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr"]
         default: []
         }
     }

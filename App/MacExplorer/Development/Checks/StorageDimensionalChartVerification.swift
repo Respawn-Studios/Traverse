@@ -122,12 +122,19 @@ enum StorageDimensionalChartVerification {
         window.acceptsMouseMovedEvents = true
         controller.deck = StorageChartIntegration.colored(controller.deck)
         controller.choose(.tilted)
-        controller.showWindow(nil); window.center(); window.makeKeyAndOrderFront(nil); NSApplication.shared.activate()
+        controller.showWindow(nil); window.center(); window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
         func visible() -> Bool {
             window.isVisible && window.occlusionState.contains(.visible)
                 && window.screen?.visibleFrame.contains(window.frame) == true
         }
-        try await wait("Generated chart did not become visible") { visible() && window.isKeyWindow }
+        do { try await wait("Generated chart did not become visible") { visible() && window.isKeyWindow } }
+        catch {
+            let fitsScreen = window.screen?.visibleFrame.contains(window.frame) == true
+            throw UIVerification.Failure(message: "Generated chart not ready: \(window.isVisible ? "shown" : "hidden"), "
+                + "on-screen \(window.occlusionState.contains(.visible)), fits screen \(fitsScreen), "
+                + "key window \(window.isKeyWindow), app active \(NSApplication.shared.isActive)")
+        }
         var events: [[String: Any]] = [], clips: [[String: Any]] = []
         let measured = NativeMotionRecorder.Sampling.diagnostic(for: window)
         let sampling = NativeMotionRecorder.Sampling(width: measured.width, height: measured.height,

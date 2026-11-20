@@ -44,19 +44,11 @@ import ExplorerCore
         }
         return nil
     }
-    private static func click(_ page: TraverseHelpPage, owner: TraverseHelpController) throws {
+    private static func click(_ page: TraverseHelpPage, owner: TraverseHelpController) async throws {
         guard let window = owner.window, let table = navigation(in: window),
               let row = TraverseHelpPage.allCases.firstIndex(of: page) else { throw Failure(stage: "help-navigation") }
-        let point = table.convert(.init(x: 80, y: table.rect(ofRow: row).midY), to: nil)
-        func event(_ type: NSEvent.EventType) throws -> NSEvent {
-            guard let value = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
-                timestamp: CACurrentMediaTime(), windowNumber: window.windowNumber, context: nil,
-                eventNumber: 1, clickCount: 1, pressure: 1) else { throw Failure(stage: "help-mouse-event") }
-            return value
-        }
-        NSApp.postEvent(try event(.leftMouseUp), atStart: true)
-        table.mouseDown(with: try event(.leftMouseDown))
-        try require(table.selectedRow == row, "help-native-selected-row")
+        try await UIVerification.clickRow(row, in: table)
+        try require(table.selectedRow == row, "help-native-selected-row-" + page.rawValue)
     }
     static func run() async {
         var root: URL?, window: NSWindow?, active: ActionOwner?
@@ -103,15 +95,15 @@ import ExplorerCore
             let action = ActionOwner(); active = action
             let first = try await NativeMotionRecorder.record(window: created, root: scope,
                 label: "help-invitation", sampling: .diagnostic(for: created)) {
-                do { try click(.updates, owner: owner) } catch { action.failure = "updates-click" }
                 action.task = Task { @MainActor in
                     do {
+                        try await click(.updates, owner: owner)
                         try await wait("invitation-field-not-created") { fields(in: created).count == 1 }
                         guard let field = fields(in: created).first else { throw Failure(stage: "invitation-field") }
                         _ = field.scrollToVisible(field.bounds)
                         created.contentView?.layoutSubtreeIfNeeded()
                         action.field = field; action.fieldReady = CACurrentMediaTime()
-                    } catch { action.failure = "invitation-field" }
+                    } catch { action.failure = (error as? UIVerification.Failure)?.message ?? "invitation-field" }
                 }
             }
             await action.task?.value
@@ -134,25 +126,28 @@ import ExplorerCore
             checks.append("Actual sidebar click creates and focuses the secure native field; generated typing never submits")
             let second = try await NativeMotionRecorder.record(window: created, root: scope,
                 label: "help-support", sampling: .diagnostic(for: created)) {
-                do { try click(.support, owner: owner) } catch { action.failure = "support-click" }
+                action.task = Task { @MainActor in
+                    do { try await click(.support, owner: owner) } catch { action.failure = "support-click" }
+                }
             }
+            await action.task?.value
             try await wait("support-page") { owner.page == .support }
             try require(action.failure == nil && created.frame == original && field.currentEditor() == nil,
                 "field-resignation-frame")
             clips.append(clip(second, label: "help-support", window: created))
-            try click(.updates, owner: owner)
+            try await click(.updates, owner: owner)
             try await wait("empty-return-field") { fields(in: created).count == 1 && fields(in: created).first?.stringValue.isEmpty == true }
             try await Task.sleep(for: .milliseconds(280))
             checks.append("Leaving Updates resigns the field editor, clears private input and returns an empty field")
             for page in TraverseHelpPage.allCases where page != .updates {
-                try click(page, owner: owner)
+                try await click(page, owner: owner)
                 try await wait("help-selected-page-" + page.rawValue) { owner.page == page }
                 try await Task.sleep(for: .milliseconds(260))
                 try require(created.frame == original, "help-page-resized-window")
             }
             checks.append("Every Help page retains the window frame and repeated changes settle without a retained input owner")
             for page in [TraverseHelpPage.support, .updates, .whatsNew, .about] {
-                try click(page, owner: owner)
+                try await click(page, owner: owner)
                 try await wait("rapid-page-" + page.rawValue) { owner.page == page }
             }
             try await Task.sleep(for: .milliseconds(280))
@@ -162,8 +157,11 @@ import ExplorerCore
             ApplicationUpdates.shared.requiresInvitationForVerification = false
             let publicClip = try await NativeMotionRecorder.record(window: created, root: scope,
                 label: "help-public-updates", sampling: .diagnostic(for: created)) {
-                do { try click(.updates, owner: owner) } catch { action.failure = "public-updates-click" }
+                action.task = Task { @MainActor in
+                    do { try await click(.updates, owner: owner) } catch { action.failure = "public-updates-click" }
+                }
             }
+            await action.task?.value
             try await wait("public-update-page") { owner.page == .updates && fields(in: created).isEmpty }
             try await Task.sleep(for: .milliseconds(280))
             clips.append(clip(publicClip, label: "help-public-updates", window: created))
@@ -180,7 +178,7 @@ import ExplorerCore
             try require(!old.publicAutomaticUpdateChecks && old.automaticUpdateChecks,
                 "public-checks-do-not-inherit-private-choice")
             settings.publicAutomaticUpdateChecks = false
-            try click(.about, owner: owner)
+            try await click(.about, owner: owner)
             try await wait("public-update-page-left") { owner.page == .about }
             ApplicationUpdates.shared.requiresInvitationForVerification = nil
             checks.append("Public Updates has no invitation field; its default-off check preference roundtrips independently of legacy private consent; no updater is started")
@@ -209,6 +207,7 @@ import ExplorerCore
             else if let capture = error as? NativeMotionRecorder.Failure { failure = "recorder-" + capture.rawValue }
             else { failure = "unexpected-" + String(describing: type(of: error)) }
         }
+        let actionFailure = active?.failure
         active?.task?.cancel(); await active?.task?.value; active?.task = nil; active = nil
         if let window {
             _ = window.makeFirstResponder(nil); ToolContentMotion.finish(in: window)
@@ -220,6 +219,7 @@ import ExplorerCore
         if ApplicationFileActivity.gate.activeCount != 0 && failure == nil { failure = "actual-activity-drain" }
         if let root {
             let report: [String: Any] = ["passed": failure == nil, "failureStage": failure as Any? ?? NSNull(),
+                "actionFailure": actionFailure as Any? ?? NSNull(),
                 "mode": mode.rawValue, "checks": checks, "clips": clips,
                 "activityAfter": ApplicationFileActivity.gate.activeCount, "nativeWindowClosed": window?.isVisible != true,
                 "networkRequests": 0, "keychainCalls": 0, "fileBodyActions": 0,

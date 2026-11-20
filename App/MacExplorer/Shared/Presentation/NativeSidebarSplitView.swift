@@ -2,10 +2,10 @@ import AppKit
 import ExplorerCore
 import QuartzCore
 
-/// One native divider for the entire workspace. The sidebar's tree and its
+/// One native divider for a sidebar and its matching content. The tree and its
 /// controllers stay installed while collapsed; presentation never rebuilds them.
 @MainActor
-final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
+final class NativeSidebarSplitView: NSSplitView, NSSplitViewDelegate {
     private(set) var sidebarWidth: CGFloat = 200
     private(set) var isSidebarCollapsed = false
     var remainingMinimum: (() -> CGFloat)?
@@ -17,6 +17,7 @@ final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
     var motion = BrowserMotionPreferences()
     private var positioning = false
     private let transition = DisplayLinkedTransition()
+    private var sidebarContentConstraints: (width: NSLayoutConstraint, trailing: NSLayoutConstraint)?
     var isAnimating: Bool { transition.isAnimating }
     var snapshot: PaneWorkspaceSnapshot.Sidebar {
         .init(isCollapsed: isSidebarCollapsed, expandedWidth: Double(sidebarWidth))
@@ -41,6 +42,29 @@ final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
     }
     private var expandedPosition: CGFloat { min(sidebarWidth, maximumSidebarWidth) }
 
+    /// The split owns the moving viewport. Keep the active tree at its expanded
+    /// width, so rows slide out whole instead of rewrapping on each tick.
+    /// Reduced motion lets the viewport do most of the clipping while its
+    /// text moves a shorter distance.
+    func installSidebarContent(_ content: NSView?) {
+        guard let host = arrangedSubviews.first, host.subviews.first !== content else { return }
+        if let constraints = sidebarContentConstraints {
+            NSLayoutConstraint.deactivate([constraints.width, constraints.trailing])
+        }
+        sidebarContentConstraints = nil
+        host.subviews.forEach { $0.removeFromSuperview() }
+        guard let content else { return }
+        host.clipsToBounds = true
+        content.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(content)
+        let width = content.widthAnchor.constraint(equalToConstant: expandedPosition)
+        let trailing = content.trailingAnchor.constraint(equalTo: host.trailingAnchor)
+        NSLayoutConstraint.activate([width, trailing,
+            content.topAnchor.constraint(equalTo: host.topAnchor),
+            content.bottomAnchor.constraint(equalTo: host.bottomAnchor)])
+        sidebarContentConstraints = (width, trailing)
+    }
+
     func restore(_ value: PaneWorkspaceSnapshot.Sidebar?) {
         let value = value ?? .init()
         sidebarWidth = CGFloat(value.expandedWidth)
@@ -61,7 +85,8 @@ final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
             finishAnimation(); return
         }
         subviews.first?.isHidden = false
-        transition.animate(in: window, duration: 0.24 * motion.mode.durationScale, update: { [weak self] progress in
+        transition.animate(in: window, duration: motion.mode.paneDuration(closing: true), startsOnFirstFrame: true,
+                           update: { [weak self] progress in
             self?.sidebarPosition = start + (target - start) * progress
         }, completion: { [weak self] in
             self?.finishAnimation()
@@ -89,7 +114,14 @@ final class WorkspaceSidebarSplitView: NSSplitView, NSSplitViewDelegate {
         guard subviews.count == 2, !positioning else { return }
         positioning = true
         defer { positioning = false }
-        let width = min(maximumSidebarWidth, max(0, sidebarPosition))
+        let available = maximumSidebarWidth
+        let width = min(available, max(0, sidebarPosition))
+        let expanded = min(sidebarWidth, available)
+        if let constraints = sidebarContentConstraints {
+            let retainedWidth = max(0, expanded - width) * (1 - motion.mode.distanceScale)
+            if constraints.width.constant != expanded { constraints.width.constant = expanded }
+            if constraints.trailing.constant != retainedWidth { constraints.trailing.constant = retainedWidth }
+        }
         let divider = width > 0 ? dividerThickness : 0
         subviews[0].isHidden = isSidebarCollapsed && !isAnimating && width == 0
         subviews[0].frame = NSRect(x: 0, y: 0, width: width, height: bounds.height)

@@ -55,6 +55,7 @@ final class ApplicationTransferQueue: ObservableObject {
     }
     var canInspectResults: Bool { coordinator.copyPreviewOwner == nil && state.active == nil && coordinator.activeOwner == nil && coordinator.preparationOwner == nil }
     var canInspect: Bool { hasOutstandingWork || !results.isEmpty }
+    var activeOrigin: BrowserViewController? { state.active.flatMap { jobs[$0.id]?.origin } }
     var reviewResult: QueuedTransferResult? { results.first { $0.id == reviewResultID } }
     var pausedSummary: String {
         if let id = reviewResultID, let result = results.first(where: { $0.id == id }) {
@@ -90,6 +91,7 @@ final class ApplicationTransferQueue: ObservableObject {
                  metadataPolicy: TransferMetadataPolicy, copyExecution: CopyExecutionRequest = .standard,
                  chooseMetadata: Bool = false,
                  duplicate: Bool = false,
+                 requireVacantDestination: Bool = false,
                  validateAdmission: (@Sendable () async throws -> Void)? = nil) -> UUID? {
         guard canAdmit, !sources.isEmpty, sources.count <= 1_024,
               sources.allSatisfy({ $0.isFileURL }), destination.isFileURL,
@@ -109,7 +111,8 @@ final class ApplicationTransferQueue: ObservableObject {
         guard queue.reserve(id) else { return nil }
         let job = QueuedTransferJob(id: id, sources: sources, destination: destination,
             move: move, title: title, origin: origin, engine: engine, clipboard: clipboard,
-            metadataPolicy: metadataPolicy, copyExecution: move ? .standard : copyExecution, observation: observation, access: access, duplicate: duplicate)
+            metadataPolicy: metadataPolicy, copyExecution: move ? .standard : copyExecution, observation: observation,
+            access: access, duplicate: duplicate, requireVacantDestination: requireVacantDestination)
         jobs[id] = job
         recordQueue(job, phase: .admitted, checkpoint: .queueAdmission)
         changed()
@@ -285,7 +288,8 @@ final class ApplicationTransferQueue: ObservableObject {
                 self.recordQueue(job, phase: .preparing, checkpoint: .queuePlan)
                 let plan = try await job.engine.prepareTransfer(sources: job.sources,
                     destinationDirectory: job.destination, move: job.move, observing: observation,
-                    metadataPolicy: job.metadataPolicy, copyExecution: job.copyExecution, progress: sink)
+                    metadataPolicy: job.metadataPolicy, copyExecution: job.copyExecution,
+                    requireVacantDestination: job.requireVacantDestination, progress: sink)
                 job.executionDecision = plan.executionDecision
                 self.changed()
                 if job.move, let clipboard = job.clipboard {
@@ -356,14 +360,17 @@ final class ApplicationTransferQueue: ObservableObject {
         record(job, outcome: outcome)
         job.clipboardState.consumeCompletedMove(job.clipboard, after: outcome.result)
         changed()
+        var refreshed: BrowserViewController?
         if let origin = job.origin, !origin.isBrowserSuspended,
            origin.activeID == job.tabID, origin.sessionID == job.visitID, origin.location.directoryURL != nil {
             let destinations = outcome.result.items.compactMap { $0.status == .succeeded ? $0.destination : nil }
-            origin.tabs[origin.activeIndex].state.selection = Set(destinations.filter {
-                $0.deletingLastPathComponent().path == origin.location.directoryURL?.path
-            })
-            origin.loadLocation()
+            let visibleDestinations = destinations.filter { $0.deletingLastPathComponent().path == origin.location.directoryURL?.path }
+            origin.saveViewState()
+            if !visibleDestinations.isEmpty { origin.tabs[origin.activeIndex].state.selection = Set(visibleDestinations) }
+            origin.loadLocation(preservingVisibleRows: true)
+            refreshed = origin
         }
+        coordinator.reloadLocalDirectories(affectedBy: outcome.result, includingSources: job.move, excluding: refreshed)
         let host = promptBrowser(for: job)
         if state.waiting.isEmpty || state.isPaused {
             if let workspace = host?.workspace { workspace.refreshRecoveryViews() }
@@ -486,6 +493,7 @@ private final class QueuedTransferJob {
     let destination: URL
     let move: Bool
     let duplicate: Bool
+    let requireVacantDestination: Bool
     let title: String
     let originDescription: String
     weak var origin: BrowserViewController?
@@ -517,10 +525,11 @@ private final class QueuedTransferJob {
     init(id: UUID, sources: [URL], destination: URL, move: Bool, title: String,
          origin: BrowserViewController, engine: RecoverableFileOperations, clipboard: MoveClipboardContext?,
          metadataPolicy: TransferMetadataPolicy, copyExecution: CopyExecutionRequest,
-         observation: FileOperationSelection?, access: FileAccessLifetimes?, duplicate: Bool) {
+         observation: FileOperationSelection?, access: FileAccessLifetimes?, duplicate: Bool, requireVacantDestination: Bool) {
         diagnosticTrace = ApplicationDiagnostics.shared.currentTrace ?? ApplicationDiagnostics.shared.begin(move ? .move : .copy)
         self.id = id; self.sources = sources; self.destination = destination; self.move = move; self.title = title
         self.duplicate = duplicate
+        self.requireVacantDestination = requireVacantDestination
         // Paste is invoked from the destination pane. Its current folder is
         // not evidence of where the captured clipboard sources came from.
         let parents = Set(sources.map { $0.deletingLastPathComponent() })

@@ -2,6 +2,13 @@ import AppKit
 import FileOperations
 import LocalStorage
 
+extension FileOperationOutcome {
+    var hasRecordedUnconfirmedDestination: Bool {
+        guard role == .transfer, status == .failed(.recoveryUncertain), let destination else { return false }
+        return recoveryURLs.contains(destination)
+    }
+}
+
 /// Presentation uses explicit outcome roles rather than guessing from a path or
 /// treating a partially merged source container as an untouched transfer item.
 struct OperationResultDescription {
@@ -13,7 +20,8 @@ struct OperationResultDescription {
 
     init(result: FileOperationResult, recoveryAction: CopyRecoveryAction? = nil) {
         self.result = result; self.recoveryAction = recoveryAction
-        hasUnconfirmedChanges = recoveryAction == nil && result.items.contains {
+        let attributedToItem = result.items.contains(where: \.hasRecordedUnconfirmedDestination)
+        hasUnconfirmedChanges = recoveryAction == nil && !attributedToItem && result.items.contains {
             $0.role == .job && $0.status == .failed(.recoveryUncertain)
         }
     }
@@ -38,7 +46,7 @@ struct OperationResultDescription {
         else if retired > 0 { parts.append("\(retired) source folder\(retired == 1 ? "" : "s") retired") }
         if skipped > 0 { parts.append("\(skipped) skipped") }
         if notStarted > 0 { parts.append("\(notStarted) not attempted") }
-        if unresolved > 0 { parts.append("\(unresolved) need review") }
+        if unresolved > 0 { parts.append(unresolved == 1 ? "1 needs review" : "\(unresolved) need review") }
         let retained = result.items.filter(Self.isRetainedContainer).count
         if retained > 0 { parts.append("\(retained) source folder\(retained == 1 ? "" : "s") retained") }
         let uncertainFolders = result.items.filter { $0.role == .mergeContainer && $0.status != .succeeded && !Self.isRetainedContainer($0) }.count
@@ -182,8 +190,9 @@ final class OperationResultsView: NSView, NSTableViewDataSource, NSTableViewDele
     #if DEBUG
     var beforeRevealReturnsForVerification: (@MainActor () async -> Void)?
     var resultActionFinishedForVerification: (() -> Void)?
+    var visibleItems: [FileOperationOutcome] { visibleIndices.map { resultDescription.result.items[$0] } }
     #endif
-    private(set) var visibleItems: [FileOperationOutcome] = []
+    private var visibleIndices: [Int] = []
 
     init(result: FileOperationResult, context: String? = nil, recoveryAction: CopyRecoveryAction? = nil,
          canReveal: @escaping () -> Bool = { true },
@@ -213,7 +222,9 @@ final class OperationResultsView: NSView, NSTableViewDataSource, NSTableViewDele
         let scroll = NSScrollView()
         scroll.documentView = table; scroll.hasVerticalScroller = true
         attention.target = self; attention.action = #selector(toggleAttention(_:))
-        attention.state = result.items.contains(where: requiresAttention) ? .on : .off
+        let hasAttention = result.items.contains(where: requiresAttention)
+        attention.state = hasAttention ? .on : .off
+        attention.isHidden = !hasAttention
         copyButton.target = self; copyButton.action = #selector(copySelection(_:))
         sourceButton.target = self; sourceButton.action = #selector(revealSource(_:))
         destinationButton.target = self; destinationButton.action = #selector(revealDestination(_:))
@@ -261,7 +272,7 @@ final class OperationResultsView: NSView, NSTableViewDataSource, NSTableViewDele
         ])
         if !actionButtons.isEmpty { itemActions.widthAnchor.constraint(equalTo: layout.widthAnchor).isActive = true }
         sections.first?.widthAnchor.constraint(equalTo: layout.widthAnchor).isActive = true
-        reload()
+        reload(selectFirst: true)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -280,18 +291,28 @@ final class OperationResultsView: NSView, NSTableViewDataSource, NSTableViewDele
 
     @objc private func toggleAttention(_ sender: Any?) { reload() }
 
-    private func reload() {
-        visibleItems = attention.state == .on ? resultDescription.result.items.filter(requiresAttention) : resultDescription.result.items
+    private func reload(selectFirst: Bool = false) {
+        let original = visibleIndices.indices.contains(table.selectedRow) ? visibleIndices[table.selectedRow] : nil
+        let items = resultDescription.result.items
+        visibleIndices = items.indices.filter { attention.state != .on || requiresAttention(items[$0]) }
         table.reloadData()
-        if !visibleItems.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+        let retained = original.flatMap { visibleIndices.firstIndex(of: $0) }
+        if let row = retained ?? (selectFirst ? visibleIndices.indices.first : nil) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            table.scrollRowToVisible(row)
+        } else { table.deselectAll(nil) }
         updateDetails()
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { visibleItems.count }
+    private func item(at row: Int) -> FileOperationOutcome? {
+        guard visibleIndices.indices.contains(row) else { return nil }
+        return resultDescription.result.items[visibleIndices[row]]
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { visibleIndices.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard visibleItems.indices.contains(row), let tableColumn else { return nil }
-        let item = visibleItems[row]
+        guard let item = item(at: row), let tableColumn else { return nil }
         let text = tableColumn.identifier.rawValue == "result" ? describeItem?(item).title ?? resultDescription.itemTitle(item)
             : item.source?.lastPathComponent ?? item.destination?.lastPathComponent ?? "Operation"
         let field = label(text, size: 12)
@@ -304,12 +325,10 @@ final class OperationResultsView: NSView, NSTableViewDataSource, NSTableViewDele
 
     private func updateDetails() {
         revealTask?.cancel(); revealTask = nil
-        let row = table.selectedRow
-        detail.string = visibleItems.indices.contains(row)
-            ? describeItem?(visibleItems[row]).details ?? resultDescription.itemDetails(visibleItems[row])
-            : "No items to display."
-        copyButton.isEnabled = visibleItems.indices.contains(row)
-        let selected = visibleItems.indices.contains(row) ? visibleItems[row] : nil
+        let selected = item(at: table.selectedRow)
+        detail.string = selected.map { describeItem?($0).details ?? resultDescription.itemDetails($0) }
+            ?? (visibleIndices.isEmpty ? "No items to display." : "Select an item to see its details.")
+        copyButton.isEnabled = selected != nil
         sourceButton.isEnabled = selected?.source != nil
         destinationButton.isEnabled = selected?.destination != nil
         for (button, action) in zip(actionButtons, actions) {
@@ -318,22 +337,22 @@ final class OperationResultsView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     @objc private func performSelectedAction(_ sender: NSButton) {
-        guard actions.indices.contains(sender.tag), visibleItems.indices.contains(table.selectedRow) else { return }
-        let item = visibleItems[table.selectedRow], action = actions[sender.tag]
+        guard actions.indices.contains(sender.tag), let item = item(at: table.selectedRow) else { return }
+        let action = actions[sender.tag]
         guard action.available(item) else { return }; action.perform(item)
     }
 
     @objc private func copySelection(_ sender: Any?) {
-        guard visibleItems.indices.contains(table.selectedRow) else { return }
+        guard item(at: table.selectedRow) != nil else { return }
         copyText(detail.string)
     }
     @objc private func showLogsPressed(_ sender: Any?) { showLogs?() }
     @objc private func revealSource(_ sender: Any?) {
-        guard visibleItems.indices.contains(table.selectedRow), let url = visibleItems[table.selectedRow].source else { return }
+        guard let url = item(at: table.selectedRow)?.source else { return }
         revealLocation(url)
     }
     @objc private func revealDestination(_ sender: Any?) {
-        guard visibleItems.indices.contains(table.selectedRow), let url = visibleItems[table.selectedRow].destination else { return }
+        guard let url = item(at: table.selectedRow)?.destination else { return }
         revealLocation(url)
     }
     private func revealLocation(_ url: URL) {

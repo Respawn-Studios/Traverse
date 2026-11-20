@@ -10,7 +10,8 @@ public enum BrowserCommand: String, CaseIterable, Codable, Identifiable, Sendabl
     case directFilter, searchFolder, searchThisMac
     case newTab, closeTab, duplicateTab, reopenTab, tabLeft, tabRight, nextTab, previousTab
     case tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9
-    case nextFocus, previousFocus, splitRight, splitBelow, closePane, nextPane
+    case nextFocus, previousFocus, splitRight, splitBelow, closePane, nextPane, swapPaneSides, balancePaneSizes
+    case rotatePaneSplit, linkPaneNavigation, selectMatchingPaneItem
     case previewPane, hiddenFiles, pathBar, compactRows, extensions, foldersFirst, details, list, icons
     case queue, progress, stop, results, continueRemaining, recovery, openTrash, drives, driveManagement, driveBenchmark
     case rememberFolder, pinFolder, renamePin, removePin, pinUp, pinDown
@@ -19,7 +20,9 @@ public enum BrowserCommand: String, CaseIterable, Codable, Identifiable, Sendabl
     case connectServer, disconnectServer
     case switchLaunchProfile
     case copyToPane, moveToPane, moveOnServer, copyOnServer
-    case findCommand, selectionMenu, openTerminal, compareFiles
+    case findCommand, selectionMenu, openTerminal, compareFiles, compareFolders, selectByName, compareTextFiles, compareGitRevisions
+    case gitFileHistory, gitFolderHistory, reviewStagedChanges, compareGitWorkingFolder, compareGitWorkingFile
+    case compareGitFileRevisions, browseGitWorktrees, compareGitCheckouts, stageGitFile, unstageGitFile
     public var id: Self { self }
     public var title: String {
         switch self {
@@ -43,6 +46,10 @@ public enum BrowserCommand: String, CaseIterable, Codable, Identifiable, Sendabl
         case .tab5: "Select Tab 5"; case .tab6: "Select Tab 6"; case .tab7: "Select Tab 7"; case .tab8: "Select Tab 8"; case .tab9: "Select Last Tab"
         case .nextFocus: "Next Browser Control"; case .previousFocus: "Previous Browser Control"
         case .splitRight: "Split Pane Right"; case .splitBelow: "Split Pane Below"; case .closePane: "Close Pane (Keep Tabs)"; case .nextPane: "Focus Next Pane"
+        case .swapPaneSides: "Swap Pane Sides"; case .balancePaneSizes: "Balance Pane Sizes"
+        case .rotatePaneSplit: "Change Pane Split Direction"
+        case .linkPaneNavigation: "Link Pane Navigation"
+        case .selectMatchingPaneItem: "Select Matching Item in Other Pane"
         case .previewPane: "Toggle Preview Pane"; case .hiddenFiles: "Toggle Hidden Files"; case .pathBar: "Toggle Path Bar"
         case .compactRows: "Toggle Compact Rows"; case .extensions: "Toggle Filename Extensions"; case .foldersFirst: "Toggle Folders First"
         case .details: "Details View"; case .list: "List View"; case .icons: "Icons View"
@@ -68,6 +75,20 @@ public enum BrowserCommand: String, CaseIterable, Codable, Identifiable, Sendabl
         case .selectionMenu: "Show Context Menu"
         case .openTerminal: "Open Terminal Here"
         case .compareFiles: "Compare Files"
+        case .compareFolders: "Compare Folders"
+        case .selectByName: "Select by Name"
+        case .compareTextFiles: "Compare Text Files"
+        case .browseGitWorktrees: "Browse Git Worktrees"
+        case .compareGitRevisions: "Compare Git Revisions"
+        case .compareGitCheckouts: "Compare Git Checkouts"
+        case .compareGitFileRevisions: "Compare File Across Revisions"
+        case .compareGitWorkingFile: "Compare Working File with Revision"
+        case .compareGitWorkingFolder: "Compare Working Folder"
+        case .reviewStagedChanges: "Review Staged Changes"
+        case .stageGitFile: "Stage Saved File"
+        case .unstageGitFile: "Unstage File"
+        case .gitFileHistory: "Git File History"
+        case .gitFolderHistory: "Git Folder History"
         }
     }
     public var allowsRepeat: Bool {

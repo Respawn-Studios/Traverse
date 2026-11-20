@@ -143,7 +143,13 @@ import SwiftUI
         let directory = root.appendingPathComponent("private-rules"), store = DriveProtectionStore(directory: root.appendingPathComponent("private-rules"))
         let absent = try await store.load(), id = UUID()
         try require(absent.bytes == nil && !FileManager().fileExists(atPath: directory.path), "Passive protection load created state")
+        let rereadAbsent = try await store.load()
+        try require(rereadAbsent.bytes == nil && rereadAbsent.library == absent.library
+            && store.matchesSaved(absent) && store.matchesSaved(rereadAbsent),
+            "An unchanged absent protection document failed the final Format gate")
         let first = try await store.set(id, name: "Generated USB", level: .keepMounted, expected: absent)
+        try require(!store.matchesSaved(absent) && store.matchesSaved(first),
+            "The final Format gate accepted a changed saved protection document")
         let reopened = try await DriveProtectionStore(directory: directory).load()
         try require(reopened.bytes == first.bytes && reopened.library.saved[id] == .keepMounted, "Saved protection did not reopen")
         let path = directory.appendingPathComponent("drive-protection-v1.json")
@@ -173,6 +179,8 @@ import SwiftUI
         rejected = false
         do { _ = try await DriveProtectionStore(directory: missingDirectory).load() } catch { rejected = true }
         try require(rejected, "An existing empty protection directory silently became default rules")
+        try require(!DriveProtectionStore(directory: missingDirectory).matchesSaved(absent),
+            "The final Format gate accepted unreadable protection storage")
         let beforePublication = DriveProtectionStore(directory: directory, writeCheckpoint: { event in
             if case .staged = event { throw Injected.failure }
         })
@@ -181,7 +189,8 @@ import SwiftUI
         let afterFailedStage = try await store.load()
         try require(rejected && afterFailedStage.bytes == afterUncertain.bytes, "Failed unpublished edit changed acknowledged protection")
         await store.drain()
-        return ["Passive read creates nothing; private 0700/0600 storage, bounded versioned save/reopen and exact stale-save refusal",
+        return ["Repeated absent reads retain one stable policy identity; final Format gate accepts unchanged absence and refuses changed or unreadable state",
+                "Passive read creates nothing; private 0700/0600 storage, bounded versioned save/reopen and exact stale-save refusal",
                 "Published-but-unacknowledged write throws; fresh read identifies its actual saved protection"] + checks
     }
 

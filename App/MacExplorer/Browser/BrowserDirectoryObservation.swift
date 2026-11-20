@@ -1,6 +1,8 @@
 import AppKit
 import LocalStorage
 
+enum DirectoryRefreshReason { case observedChange, completedOperation }
+
 @MainActor
 extension BrowserViewController {
     func cancelDirectoryObservation() {
@@ -8,7 +10,7 @@ extension BrowserViewController {
         directoryObservation = nil
         directoryRefreshTask?.cancel()
         directoryRefreshTask = nil
-        directoryRefreshPending = false
+        directoryRefreshPending = nil
     }
 
     func startDirectoryObservation(for url: URL, retaining lease: FolderAccessLease?, token: UUID) async {
@@ -18,7 +20,7 @@ extension BrowserViewController {
                 guard let self, self.sessionID == token, self.settings.autoRefreshFolders else { return }
                 switch event {
                 case .changed, .invalidated:
-                    self.directoryRefreshPending = true
+                    if self.directoryRefreshPending == nil { self.directoryRefreshPending = .observedChange }
                     self.consumePendingDirectoryRefresh()
                 case .unavailable:
                     // Enumeration supplies the truthful access/error state;
@@ -35,13 +37,19 @@ extension BrowserViewController {
         }
     }
 
+    func refreshAfterDirectoryOperation() {
+        directoryRefreshPending = .completedOperation
+        consumePendingDirectoryRefresh()
+    }
+
     func consumePendingDirectoryRefresh() {
-        guard directoryRefreshPending, settings.autoRefreshFolders, location.directoryURL != nil else { return }
+        guard let reason = directoryRefreshPending, reason == .completedOperation || settings.autoRefreshFolders,
+              location.directoryURL != nil else { return }
         directoryRefreshTask?.cancel()
         let token = sessionID
         directoryRefreshTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
-            guard let self, self.sessionID == token, self.directoryRefreshPending,
+            guard let self, self.sessionID == token, self.directoryRefreshPending != nil, !self.isBrowserSuspended,
                   !self.isLoading, self.orderingTask == nil, self.operationTask == nil, self.operationPreparationTask == nil,
                   self.pathField.currentEditor() == nil, self.folderFilter.displayedField.currentEditor() == nil,
                   self.metadataSearch.view.isHidden, !self.folderFilter.hasUnsubmittedDraft else { return }
@@ -51,7 +59,12 @@ extension BrowserViewController {
     }
 
     func updateDirectoryObservationPreference(_ enabled: Bool) {
-        if !enabled { cancelDirectoryObservation(); return }
+        if !enabled {
+            let operationPending = directoryRefreshPending == .completedOperation
+            cancelDirectoryObservation()
+            if operationPending { refreshAfterDirectoryOperation() }
+            return
+        }
         guard location.directoryURL != nil else { return }
         saveViewState()
         loadLocation(preservingVisibleRows: true)

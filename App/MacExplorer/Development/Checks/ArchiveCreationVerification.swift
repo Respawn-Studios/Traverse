@@ -626,7 +626,7 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
                 try UIVerification.require(try await Task.detached { SHA256.hash(data: try Data(contentsOf: original)) == digest }.value,
                     "Cross-pane Paste leaves the original ZIP byte-exact")
                 stage = "read-only-archive-paste"
-                let readOnlySource = area.appendingPathComponent("source/Read Only.jar")
+                let readOnlySource = area.appendingPathComponent("source/Read Only.whl")
                 let readOnlyArea = area.appendingPathComponent("read-only-copy", isDirectory: true)
                 try await Task.detached {
                     try FileManager().copyItem(at: original, to: readOnlySource)
@@ -634,6 +634,13 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
                     try FileManager().createDirectory(at: readOnlyArea.appendingPathComponent("evidence"), withIntermediateDirectories: false)
                 }.value
                 controller.workspace.activate(browser)
+                browser.navigate(to: .directory(readOnlySource.deletingLastPathComponent()))
+                try await wait { !browser.isLoading && browser.orderingTask == nil && browser.rowsByURL[readOnlySource] != nil }
+                browser.setFileSelection([readOnlySource])
+                browser.fileSelectionDidChange()
+                try UIVerification.require(browser.selectedZIPURL == readOnlySource, "Python wheel was not offered as an archive")
+                browser.browseZIP(nil)
+                try await wait { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true && browser.currentArchive?.busy == false }
                 browser.navigate(to: .archive(try ArchiveLocation(source: readOnlySource, format: .zip, folderPath: ["Move Folder"])))
                 try await wait { browser.currentArchive?.hasRenderedCurrentRowsForVerification == true && browser.currentArchive?.busy == false }
                 guard let readOnlyArchive = browser.currentArchive, let readOnlyModel = readOnlyArchive.zipModelForVerification,
@@ -644,7 +651,7 @@ private struct ArchiveCreationMarkState: Equatable, Sendable {
                 try UIVerification.require(try await Task.detached {
                     SHA256.hash(data: try Data(contentsOf: readOnlySource)) == digest
                 }.value, "Read-only archive Copy preserves its exact original bytes")
-                checks.append("Read-only JAR Copy uses live catalog IDs without a ZIP rewrite token, refuses Cut, and passes file/folder Paste, changed-board/conflict refusal and Undo")
+                checks.append("Read-only Python wheel opens through the browser, refuses Cut, and passes file/folder Paste, changed-board/conflict refusal and Undo without changing its source")
             }
             if updating && !adding && !removing && !renamingFolder && !newFolder && !clipboardTransfer {
                 stage = "referenced-original"

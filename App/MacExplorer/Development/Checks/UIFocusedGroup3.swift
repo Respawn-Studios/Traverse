@@ -23,7 +23,12 @@ import StorageAnalysis
             }
             if args.contains("--check-chart-integration") {
                 try require(!args.contains("--offscreen"), "Native integration requires its visible generated windows")
-                let report = try await StorageChartIntegrationVerification.run(path: argument("--analysis-source"), captureEvidence: !args.contains("--without-chart-captures"), layoutExplanations: args.contains("--analysis-layout-explanations"), applicationLayouts: args.contains("--analysis-application-layouts"))
+                let report = try await StorageChartIntegrationVerification.run(path: argument("--analysis-source"),
+                    captureEvidence: !args.contains("--without-chart-captures"),
+                    layoutExplanations: args.contains("--analysis-layout-explanations"),
+                    applicationLayouts: args.contains("--analysis-application-layouts"),
+                    recordMotion: args.contains("--record-chart-integration"),
+                    largeInterface: args.contains("--large-interface"))
                 StorageChartIntegration.configure(settings: browser.settings)
                 print("MAC_EXPLORER_CHART_INTEGRATION " + String(decoding: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]), as: UTF8.self))
                 NSApplication.shared.terminate(nil); return true

@@ -93,6 +93,20 @@ extension BrowserCommand {
         case .selectionMenu: #selector(BrowserViewController.showKeyboardContextMenu(_:))
         case .openTerminal: #selector(BrowserViewController.openTerminalHere(_:))
         case .compareFiles: #selector(BrowserViewController.compareSelectedFiles(_:))
+        case .compareFolders: #selector(BrowserViewController.compareFolders(_:))
+        case .selectByName: #selector(BrowserViewController.selectByName(_:))
+        case .compareTextFiles: #selector(BrowserViewController.compareTextFiles(_:))
+        case .browseGitWorktrees: #selector(BrowserViewController.browseGitWorktrees(_:))
+        case .compareGitRevisions: #selector(BrowserViewController.compareGitRevisions(_:))
+        case .compareGitCheckouts: #selector(BrowserViewController.comparePaneGitCheckouts(_:))
+        case .compareGitFileRevisions: #selector(BrowserViewController.compareSelectedGitFileRevisions(_:))
+        case .compareGitWorkingFile: #selector(BrowserViewController.compareSelectedGitWorkingFile(_:))
+        case .compareGitWorkingFolder: #selector(BrowserViewController.compareGitWorkingFolder(_:))
+        case .reviewStagedChanges: #selector(BrowserViewController.reviewStagedChanges(_:))
+        case .stageGitFile: #selector(BrowserViewController.stageSelectedGitFile(_:))
+        case .unstageGitFile: #selector(BrowserViewController.unstageSelectedGitFile(_:))
+        case .gitFileHistory: #selector(BrowserViewController.showGitFileHistory(_:))
+        case .gitFolderHistory: #selector(BrowserViewController.showGitFolderHistory(_:))
         case .findCommand: #selector(BrowserViewController.findCommand(_:))
         case .launchProfiles: #selector(BrowserViewController.showLaunchProfiles(_:))
         case .switchLaunchProfile: #selector(BrowserViewController.switchLaunchProfile(_:))
@@ -165,6 +179,11 @@ extension BrowserCommand {
         case .splitBelow: #selector(BrowserViewController.splitPaneBelow(_:))
         case .closePane: #selector(BrowserViewController.closePane(_:))
         case .nextPane: #selector(BrowserViewController.focusOtherPane(_:))
+        case .swapPaneSides: #selector(BrowserViewController.swapPaneSides(_:))
+        case .balancePaneSizes: #selector(BrowserViewController.balancePaneSizes(_:))
+        case .rotatePaneSplit: #selector(BrowserViewController.rotatePaneSplit(_:))
+        case .linkPaneNavigation: #selector(BrowserViewController.toggleLinkedPaneNavigation(_:))
+        case .selectMatchingPaneItem: #selector(BrowserViewController.selectMatchingPaneItem(_:))
         case .previewPane: #selector(BrowserViewController.toggleInlinePreview(_:))
         case .hiddenFiles: #selector(BrowserViewController.toggleHidden(_:))
         case .pathBar: #selector(BrowserViewController.togglePathBar(_:))
@@ -322,11 +341,13 @@ final class BrowserShortcutMenus: NSObject, NSMenuDelegate {
         let archive = (NSApplication.shared.keyWindow?.firstResponder as? ArchiveMetadataTable)
             .flatMap { $0.window is ArchiveKeyboardWindow && $0.embeddedShortcut == nil ? $0 : nil }
         for item in menu.items {
+            if item.identifier == BrowserMenus.gitSectionIdentifier { item.isHidden = !browser.gitControls.isAvailable }
             if let action = BrowserCommand.command(for: item) {
-                // The standalone archive owns this one command. Shared browser
-                // surfaces keep their existing pane/selection validation route.
-                if action == .selectionMenu { item.target = archive ?? browser }
-                let shortcuts = action == .selectionMenu ? (archive?.keyboardContextSettings?.shortcutMap ?? map) : map
+                // Standalone archive tables own their selection commands.
+                // Embedded tables still validate through the active browser.
+                let archiveCommand = action == .selectionMenu || action == .selectByName
+                if archiveCommand { item.target = archive ?? browser }
+                let shortcuts = archiveCommand ? (archive?.keyboardContextSettings?.shortcutMap ?? map) : map
                 let nativeText: [BrowserCommand: String] = [.copy: "c", .cut: "x", .paste: "v", .undo: "z", .selectAll: "a"]
                 if action == .undo, item.action == action.selector {
                     // Edit → Undo owns the shortcut and follows the responder
@@ -339,7 +360,9 @@ final class BrowserShortcutMenus: NSObject, NSMenuDelegate {
                     // a native item whose target AppKit has resolved already.
                     if item.action == action.selector { item.keyEquivalent = "" }
                     else { item.keyEquivalent = key; item.keyEquivalentModifierMask = .command }
-                } else if let primary = shortcuts.shortcuts(for: action).first(where: { fileSurface || !$0.requiresFileSurface }) {
+                } else if let primary = shortcuts.shortcuts(for: action).first(where: {
+                    fileSurface || (archiveCommand && archive != nil) || !$0.requiresFileSurface
+                }) {
                     item.keyEquivalent = primary.menuEquivalent; item.keyEquivalentModifierMask = primary.nativeModifiers
                 } else { item.keyEquivalent = "" }
             }
@@ -350,10 +373,17 @@ final class BrowserShortcutMenus: NSObject, NSMenuDelegate {
         }
     }
     static func hasUserOverride(_ action: BrowserCommand, in menu: NSMenu?) -> Bool {
+        contains(menu) { BrowserCommand.command(for: $0) == action && !$0.userKeyEquivalent.isEmpty }
+    }
+    static func hasUserKeyEquivalent(_ key: String, in window: NSWindow) -> Bool {
+        let overridesKey = { (item: NSMenuItem) in item.userKeyEquivalent.contains(key) }
+        if contains(NSApp.mainMenu, where: overridesKey) { return true }
+        return window.toolbar?.items.contains(where: {
+            contains(($0 as? NSMenuToolbarItem)?.menu, where: overridesKey)
+        }) == true
+    }
+    private static func contains(_ menu: NSMenu?, where matches: (NSMenuItem) -> Bool) -> Bool {
         guard let menu else { return false }
-        return menu.items.contains { item in
-            (BrowserCommand.command(for: item) == action && !item.userKeyEquivalent.isEmpty)
-                || hasUserOverride(action, in: item.submenu)
-        }
+        return menu.items.contains { matches($0) || contains($0.submenu, where: matches) }
     }
 }

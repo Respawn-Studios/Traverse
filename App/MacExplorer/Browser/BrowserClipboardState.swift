@@ -26,6 +26,14 @@ final class BrowserClipboardState {
     }
     private var ownedCopy: BrowserClipboard.OwnedCopy?
     private var notificationScheduled = false
+    private var observers: [UUID: () -> Void] = [:]
+
+    /// Auxiliary file windows observe the same intent without replacing the
+    /// workspace's existing presentation callback.
+    func observe(_ changed: @escaping () -> Void) -> UUID {
+        let token = UUID(); observers[token] = changed; return token
+    }
+    func removeObserver(_ token: UUID) { observers[token] = nil }
 
     func clear() {
         revision = UUID()
@@ -163,6 +171,7 @@ final class BrowserClipboardState {
             guard let self else { return }
             self.notificationScheduled = false
             self.didChange?()
+            for changed in Array(self.observers.values) { changed() }
         }
     }
 }

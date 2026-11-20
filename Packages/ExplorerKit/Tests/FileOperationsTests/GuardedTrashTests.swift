@@ -5,15 +5,20 @@ import Testing
 
 /// Retained, generated-only roots. No test cleans or empties real Trash.
 private struct GuardedTrashFixture {
+    private static let runRoot = Result {
+        let base = try FileOperationTestFixtures.base()
+        let directory = base.appendingPathComponent("guarded-trash-" + UUID().uuidString, isDirectory: true)
+        try FileManager().createDirectory(at: directory, withIntermediateDirectories: false,
+                                          attributes: [.posixPermissions: 0o700])
+        return directory
+    }
+
     let root: URL, source: URL, retained: URL, protected: URL, journal: URL
     init() throws {
-        let base = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent(".build/test-fixtures")
+        let base = try Self.runRoot.get()
         guard base.resolvingSymlinksInPath() == base else { throw FileOperationFailure.invalidRequest }
-        try FileManager().createDirectory(at: base, withIntermediateDirectories: true)
         let old = try FileManager().contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasPrefix("guarded-trash-") }
-        // This packet retains its tiny failures/successes. Refuse exhaustion.
+        // Budget this run without reusing or deleting fixtures from earlier runs.
         guard old.count < 128 else { throw FileOperationFailure.quotaExceeded }
         var pending = old, entries = 0, logical: Int64 = 0, allocated: Int64 = 0
         while let path = pending.popLast() {
@@ -28,7 +33,7 @@ private struct GuardedTrashFixture {
                 pending += try FileManager().contentsOfDirectory(at: path, includingPropertiesForKeys: nil)
             }
         }
-        root = base.appendingPathComponent("guarded-trash-" + UUID().uuidString)
+        root = base.appendingPathComponent(UUID().uuidString, isDirectory: true)
         source = root.appendingPathComponent("source"); retained = root.appendingPathComponent("retained")
         protected = root.appendingPathComponent("protected"); journal = root.appendingPathComponent("journal")
         for url in [root, source, retained, protected] {
@@ -131,7 +136,10 @@ struct GuardedTrashTests {
         }, hooks: hooks)
         let reviewed = try await engine.prepareGuardedTrash([source], protecting: [])
         let result = await engine.performGuardedTrash(reviewed)
-        #expect(result.result.disposition == .partial)
+        #expect(result.result.disposition == .failed)
+        let item = try #require(result.result.items.first { $0.source == source })
+        #expect(item.status == .failed(.recoveryUncertain))
+        #expect(item.destination == target && item.recoveryURLs.contains(target))
         #expect(result.result.items.contains { $0.status == .failed(.outOfSpace) })
         #expect(result.result.items.flatMap(\.recoveryURLs).contains(target))
         #expect(FileManager().fileExists(atPath: target.path) && !FileManager().fileExists(atPath: source.path))
@@ -140,6 +148,32 @@ struct GuardedTrashTests {
         let record = try #require(observed)
         #expect(record.trashIntents.count == 1 && record.steps.isEmpty)
         #expect(!record.locations.contains(target))
+    }
+
+    @Test func guardedTrashSeparatesConfirmedAndUnconfirmedItems() async throws {
+        let fixture = try GuardedTrashFixture()
+        let confirmed = try fixture.file("confirmed.txt"), uncertain = try fixture.file("uncertain.txt")
+        let untouched = try fixture.file("untouched.txt"), retained = fixture.retained
+        let engine = fixture.engine(trash: { url in
+            let destination = retained.appendingPathComponent(url.lastPathComponent)
+            try FileManager().moveItem(at: url, to: destination)
+            if url == uncertain { try Data("changed after native return".utf8).write(to: destination) }
+            return destination
+        })
+        let plan = try await engine.prepareGuardedTrash([confirmed, uncertain, untouched], protecting: [])
+        let result = await engine.performGuardedTrash(plan)
+        #expect(result.result.disposition == .partial)
+        #expect(result.result.items.first { $0.source == confirmed }?.status == .succeeded)
+        let returned = retained.appendingPathComponent(uncertain.lastPathComponent)
+        let item = try #require(result.result.items.first { $0.source == uncertain })
+        #expect(item.status == .failed(.recoveryUncertain))
+        #expect(item.destination == returned && item.recoveryURLs.contains(returned))
+        #expect(result.result.items.first { $0.source == untouched }?.status == .notStarted)
+        #expect(FileManager().fileExists(atPath: untouched.path))
+        let id = try #require(result.recordID)
+        let record = try #require(try OperationJournal(fixture.journal).inspectRecord(id))
+        #expect(record.state == "needsReview" && record.steps.map(\.source) == [confirmed])
+        #expect(record.locations.contains(returned))
     }
     @Test func guardedTrashPreservesTheCallersDescendantExclusions() async throws {
         let fixture = try GuardedTrashFixture(), engine = fixture.engine()

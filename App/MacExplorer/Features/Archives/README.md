@@ -5,11 +5,10 @@ extraction and journaled publication stay in ExplorerKit. Edition and operation
 admission are controlled by `AppFeatureAvailability` and the concrete engine
 policy. Source support does not establish signed or installed availability.
 
-The current Development and qualified direct-build source share the TAR
-workbench described below. Its operation and restart/Undo checks have passed;
-packaged-app acceptance remains separate. These additions are not in public
-0.2.0. Native TAR-to-Finder file/folder delivery and cold Undo are also qualified
-for the next direct source, with separate holds for scoped and Store editions.
+Public 0.3.0 includes the TAR workbench described below and TAR-to-Finder file
+and folder delivery with Undo after restart. Development uses the same owners.
+Scoped and Store editions keep their separate operation policies; one edition's
+qualification does not enable another.
 
 | Source | Responsibility |
 | --- | --- |
@@ -18,6 +17,7 @@ for the next direct source, with separate holds for scoped and Store editions.
 | `ArchiveExtractionWindow.swift` | Explicit destination review and extraction |
 | `ArchiveCreationWindow.swift`, `ArchiveCreationModel` | Shared creation/edit review, progress, Stop and Results |
 | `ArchiveWritePlan`, `ArchiveOriginalReferences` | Opaque update plan and original/recovery reference coordination |
+| `ArchiveNameQueryField`, `ArchiveKeyboardWindow`, `ArchiveMetadataTable` | Shared native name entry, focus and configured keyboard routing |
 
 ## Browsing and previews
 
@@ -27,6 +27,26 @@ pane, tab, visit, edit or close cancels stale results. No member becomes a local
 filesystem URL and address editing starts no extraction or implicit decoder.
 Rows and filename-based symbols are metadata-only. Missing or invalid timestamps
 remain undated; ZIP timestamps do not invent a time zone.
+
+Embedded tabs use the browser's shortcut map. Separate ZIP and TAR windows share
+the same map for navigation, Rename, Preview, Find and supported member actions,
+including cleared keys. Their native command map resolves only existing row-menu
+actions and reuses that row owner's validation. A disabled archive command never
+falls through to a file action in the browser behind it.
+The native query field keeps one focus identity; Return submits the current
+query and Escape clears it. Typing only searches recorded names.
+
+Standalone windows use `ArchiveWindowClipboard` to join the originating
+workspace's `BrowserClipboardState`. They publish the same opaque intent as
+archive tabs, and use the same ZIP/TAR capture, rewrite and extraction owners.
+No member path or session handle is placed on the native clipboard. Source
+close expires that window's intent; clipboard generations are rechecked through
+async preparation. Text fields keep native editing keys.
+
+Moving an inactive tab to another pane rebinds the model's weak browser owner
+without reopening its catalog or granting compressed preparation. A copied
+selection keeps the same session and clipboard generation; local Paste still
+revalidates the destination visit, source and access after asynchronous work.
 
 Text/Hex previews are bounded to 256 KiB. PNG, JPEG, GIF and TIFF previews read
 at most 16 MiB, reject images over 32 megapixels and render at most 2,048 pixels

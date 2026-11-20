@@ -25,6 +25,15 @@ enum BrowserMotionMode: String, CaseIterable, Codable, Identifiable, Sendable {
         }
     }
     var toolWindowDuration: TimeInterval { 0.20 * durationScale }
+    /// Keep the reduced close observable while the compositor retires the window.
+    var toolWindowCloseDuration: TimeInterval { self == .reduced ? 0.14 : toolWindowDuration }
+    var toolReflowDuration: TimeInterval {
+        switch self {
+        case .full: 0.30
+        case .reduced: 0.14
+        case .off: 0
+        }
+    }
     func paneDuration(closing: Bool) -> TimeInterval { (closing ? 0.24 : 0.30) * durationScale }
     func initialOpacity(_ full: Double) -> Double { self == .reduced ? 1 - (1 - full) * 0.4 : full }
 }

@@ -62,17 +62,7 @@ final class CommandFinderController: NSObject, NSWindowDelegate, NSSearchFieldDe
         query.stringValue = ""; updateMatches()
         CommandDiscoveryPresentation.position(panel, relativeTo: parent)
         panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(query)
-        animateEntrance(panel)
     }
-
-    private func animateEntrance(_ panel: NSPanel) {
-        guard let browser else { return }
-        CommandDiscoveryPresentation.animateEntrance(panel, motion: browser.settings.motion)
-    }
-
-    #if DEBUG
-    func replayEntranceForVerification() { if let window { animateEntrance(window) } }
-    #endif
 
     private func makePanel(settings: BrowserSettings) -> NSPanel {
         query.delegate = self; query.target = self; query.action = #selector(searchChanged(_:))
@@ -109,7 +99,7 @@ final class CommandFinderController: NSObject, NSWindowDelegate, NSSearchFieldDe
         case #selector(NSResponder.moveDown(_:)): moveSelection(1); return true
         case #selector(NSResponder.moveUp(_:)): moveSelection(-1); return true
         case #selector(NSResponder.insertNewline(_:)): activateSelection(nil); return true
-        case #selector(NSResponder.cancelOperation(_:)): dismiss(restoringFocus: true); return true
+        case #selector(NSResponder.cancelOperation(_:)): window?.performClose(nil); return true
         default: return false
         }
     }
@@ -141,12 +131,13 @@ final class CommandFinderController: NSObject, NSWindowDelegate, NSSearchFieldDe
         NSApp.sendAction(entry.command.selector, to: browser, from: item)
     }
 
-    func dismiss(restoringFocus: Bool) {
+    func dismiss(restoringFocus: Bool, nativeCloseInProgress: Bool = false) {
         guard !dismissing else { return }
         dismissing = true
         let parent = sourceWindow, responder = sourceResponder
         let wasKey = window?.isKeyWindow == true
-        window?.delegate = nil; window?.orderOut(nil); window?.close(); window = nil
+        CommandDiscoveryPresentation.retire(window, nativeCloseInProgress: nativeCloseInProgress)
+        window = nil
         closeObservation = nil; query.stringValue = ""; matches = []; catalog = []; table.reloadData()
         context = nil; sourceWindow = nil; sourceResponder = nil
         if Self.visible === self { Self.visible = nil }
@@ -157,7 +148,7 @@ final class CommandFinderController: NSObject, NSWindowDelegate, NSSearchFieldDe
         }
         dismissing = false
     }
-    func windowWillClose(_ notification: Notification) { dismiss(restoringFocus: true) }
+    func windowWillClose(_ notification: Notification) { dismiss(restoringFocus: true, nativeCloseInProgress: true) }
     func windowDidResignKey(_ notification: Notification) { dismiss(restoringFocus: false) }
     func numberOfRows(in tableView: NSTableView) -> Int { matches.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

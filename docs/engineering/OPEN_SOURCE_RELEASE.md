@@ -85,6 +85,12 @@ Store delivery, upload, processing and review are separate from export. Native
 runtime and installed/update acceptance remain necessary for the affected
 workflows regardless of channel.
 
+Use the [Release installer smoke test](https://github.com/Respawn-Studios/Traverse/actions/workflows/release-installers.yml)
+to check a GitHub release on both macOS 15 architectures. An empty release ID
+selects the latest published release. Each job verifies the installer checksum,
+app version and signing identity, copies the app into its isolated runner,
+and checks startup and normal quit.
+
 ## Update channels
 
 Keep these compositions and delivery records distinct:
@@ -102,6 +108,9 @@ and signing account. Their routes and signed app identities are distinct; this
 source change does not rotate the key. Feed generation is not upload or
 publication. Keep test/local-review feeds off live routes and verify the
 delivered artifact and source URLs after a release is published.
+
+The shipping archive saves a checked snapshot of its inputs. The updater uses
+that snapshot to select the release notes for its exact version and build.
 
 The direct ARM endpoint stays at `direct-updates/appcast.xml`. Intel uses
 `direct-updates-intel/appcast.xml`, with matching note, archive and source routes.

@@ -29,11 +29,12 @@ extension BrowserSettingsView.Page {
 
 struct BrowserSettingsNavigation: View {
     @Binding var selection: BrowserSettingsView.Page
+    @Binding var focusRequest: Bool
     let scale: CGFloat
     var body: some View {
         NativeToolPageNavigation(selection: $selection, scale: scale,
             items: BrowserSettingsView.Page.ordered.map { .init(id: $0, title: $0.title, symbolName: $0.symbolName) },
-            identifier: "settings-navigation", accessibilityLabel: "Settings sections")
+            identifier: "settings-navigation", accessibilityLabel: "Settings sections", focusRequest: $focusRequest)
     }
 }
 

@@ -5,10 +5,9 @@ import FileOperations
 
 /// One explicit selection and one chosen local parent. Network receipt remains
 /// one reserved session job; publication uses the existing one-file engine.
-@MainActor final class BrowserRemoteBatchDownload: NSObject {
+@MainActor final class BrowserRemoteBatchDownload {
     private weak var browser: BrowserViewController?
     private(set) var work: Task<Void, Never>?
-    private var menu: NSMenu?, chosenPeer: UUID?
     #if DEBUG
     var chooseForVerification: ((NSOpenPanel) async -> URL?)?
     var beforePublicationForVerification: ((Int) async -> Void)?
@@ -66,18 +65,8 @@ import FileOperations
         var peer: LocalPaneDestination?
         if toPane {
             let peers = LocalPaneDestination.available(from: browser)
-            if peers.count == 1 { peer = peers[0] }
-            else {
-                let offered = NSMenu(title: "Download Files to Pane"); offered.autoenablesItems = false
-                for value in peers {
-                    let item = offered.addItem(withTitle: value.title, action: #selector(selectPeer(_:)), keyEquivalent: "")
-                    item.target = self; item.representedObject = value.pane
-                }
-                menu = offered; chosenPeer = nil
-                offered.popUp(positioning: nil, at: .init(x: 24, y: 24), in: source.rows)
-                peer = peers.first { $0.pane == chosenPeer }; menu = nil; chosenPeer = nil
-                guard peer != nil else { diagnostic.finish(.cancelled); return false }
-            }
+            peer = LocalPaneDestination.choose(peers, from: browser, in: source.rows, title: "Download Files to Pane")
+            guard peer != nil else { diagnostic.finish(.cancelled); return false }
         }
         let preparation = UUID(), coordinator = browser.operationCoordinator
         guard coordinator.beginPreparation(owner: preparation) else { diagnostic.finish(.blocked); return false }
@@ -224,9 +213,6 @@ import FileOperations
         #if DEBUG
         lastNotice = value.summary
         #endif
-    }
-    @objc private func selectPeer(_ sender: NSMenuItem) {
-        guard menu?.items.contains(where: { $0 === sender }) == true else { return }; chosenPeer = sender.representedObject as? UUID
     }
     private static func message(_ error: Error, stopped: Bool) -> String {
         if let batch = error as? SFTPDownloadBatchInterruption {

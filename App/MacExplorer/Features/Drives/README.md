@@ -6,6 +6,16 @@ Overview, Volumes & Protection, Drive Health, Benchmark and Storage Analysis.
 Device selection is independent of disclosure. Selecting or refreshing topology
 starts neither a benchmark nor a storage scan.
 
+The Analysis page lists the existing at-most-two saved single-root metadata
+observations through the recorded-analysis owner's passive index inspection.
+Complete/partial, observation time and metadata scope are historical facts.
+Opening a row carries its exact catalog ID into a cache-only request, obtains
+fresh folder access, and rechecks the retained root identity. A removed or
+changed record, denied access, or unavailable index produces an explicit
+unavailable state and never starts a scan. The list refreshes when the page
+opens and after saved-analysis publication, Forget or repair; it creates no
+separate scanner, result copy or persistence store.
+
 `DriveControls.swift` and `DriveProtectionStore.swift` retain application-level
 protection. Platform discovery and actions belong to LocalStorage and the
 application volume coordinator. Product capability policy controls admission;
@@ -26,23 +36,42 @@ parents refuse in-app creation at the backend; the common product policy holds
 that operation. There is no erase, partition or privilege-helper fallback.
 A checked unchanged layout and an uncertain layout are different outcomes.
 
-The unwired `LocalStorage.APFSVolumeFormat` candidate is restricted to one
-ordinary APFS member on a generated disk image. Its mandatory generated-only
-recorder persists an intent after fresh APFS preflight and before native submission,
-records a launched child without blocking pipe draining, and keeps failed
-postlaunch writes uncertain. A compatible APFS replacement stays a provisional,
-unresolved durable job until an independent marker/attachment witness is
-qualified. `NativeDriveJobStore` uses the existing private
-snapshot writer for one generated-image job; an intent surviving a restart is
-shown as potentially submitted when Drives is opened. Cold inspection is
-read-only and requires the exact generated backing file plus an independent
-attachment verifier; a compatible replacement does not clear an unresolved
-job without generated marker evidence.
+`NativeAPFSRequestPermission` shares Add and Format submission tracking.
+The native callback records submission before queuing any UI update. Cancel
+and dismissal can withdraw a check only before that boundary; submitted work
+keeps its owner until the terminal result. Format also requires its exact
+drained activity token and current protection through the same component.
+
+`LocalStorage.APFSVolumeFormat` erases only one ordinary APFS member, retaining
+the container and unchanged siblings. Its generated-image v1/v2 recorder and
+independent marker checks remain as previously qualified. A v2 observed native
+completion is a durable historical outcome after zero native exit, exact
+replacement reconciliation and terminal acknowledgement. An interrupted cold
+intent remains unresolved even if the present layout looks compatible.
 Generated-image acceptance covers passive admission before creation, one Add,
 one erase of its new member, persisted submission/terminal records, sibling
-preservation, cold unresolved inspection and normal detach. This evidence is
-specific to the disposable image; ordinary in-app Format UI, personal images
-and physical drives remain held.
+preservation, cold unresolved inspection and normal detach.
+
+`APFSAttachedImageWitness` and the v3 record define a separate ordinary-image
+source path. Its narrow input is an already attached, local, writable, regular
+read/write `.dmg` owned by the current user, with no reported encryption,
+shadow or system-image mapping. Preparation binds the exact backing file,
+outer IOMedia and selected mounted APFS leaf; launch rechecks the file and
+native identities. The Format sheet requires an exact selected volume and
+typed name. Its App owner reloads drive protection, reserves the existing
+volume barrier, records durable intent while private-state admission is open,
+then closes file admission and drains readers. It rereads the same saved
+protection policy after drain; the backend reobserves the selected APFS members;
+the utility-queue launch gate checks that policy once more.
+Open text documents stay open and block the request; a missing
+or unreadable saved job also blocks it. One private `native-drive-job-v1.json`
+slot stores the active request or latest terminal outcome, with no drive
+history or Undo. An uncertain or interrupted request stays globally blocked.
+
+The ordinary Format action is source-complete but held by an App-local false
+switch. The disabled Drives control directs people to Disk Utility. No
+ordinary-image Format action, installed behavior or physical-drive route has
+been qualified. A recorded completion does not imply secure erasure.
 
 ## File benchmark
 
@@ -69,7 +98,10 @@ already measured write and read block calls. The ranges double from under
 invalid timing shows an unavailable state instead of a distribution. The
 histogram does not add I/O. Individual copied reports use v3 JSON and include
 the validated bounds and counts, plus the same distribution in their text
-summary. The final range has no upper bound (`null` in JSON). Quick Mix keeps
+summary. P50/P95/P99 labels identify the histogram range containing each
+nearest-rank observed call; they add no new measurement and appear in the
+copied text summary. The v3 JSON retains its existing distribution fields.
+The final range has no upper bound (`null` in JSON). Quick Mix keeps
 its v1 envelope with the separate v3 sequential and random reports inside it.
 
 Quick Mix is one explicit click after folder selection. It runs a fixed 64 MiB
@@ -88,10 +120,11 @@ individual or paired text/versioned JSON without volume names, filesystem
 identifiers or recovery paths. A paired result with no second stage states that
 the random run was not started.
 Partial/failed runs keep byte/time facts without aggregate speed claims.
-`DriveBenchmarkComparison.swift` admits only completed, matching filesystem,
-workload, block/test/preparation-size, requested cache mode and actual cache/flush
-outcomes, including when the runs belong to different Quick Mix suites. Its paired view
-starts no read or benchmark and adds no persistent result store.
+`DriveBenchmarkComparison.swift` admits completed runs with matching workload,
+block/test/preparation size, requested cache mode, and actual cache and flush
+outcomes. Repeat automatically pairs results from the same selected volume.
+An explicit comparison can choose a recorded result from another volume and
+shows both source names. The paired view uses session history only.
 Two complete Quick Mix suites can also be compared as a pair when both named
 stages independently pass those exact-match rules. Sequential rates stay MB/s,
 random 4 KiB rates stay IOPS, and the four phase changes are shown separately.

@@ -115,7 +115,7 @@ public actor DriveHealthSession {
     }
     private let lifecycle: VolumeLifecycle
     private var active: Task<DriveHealthReport, Never>?
-    private var control: DriveHealthChildControl?
+    private var control: ReadOnlyToolChildControl?
     private var serviceControl: DriveHealthServiceControl?
     private var activeID: UUID?
     private var publicationID = UUID()
@@ -135,7 +135,7 @@ public actor DriveHealthSession {
         // An invalid requested service never falls back to a broader or older
         // process composition. Its own identity preparation will refuse it.
         let service = DriveHealthServiceIdentity.compositionRequested ? DriveHealthServiceControl() : nil
-        let child = service == nil ? DriveHealthChildControl() : nil
+        let child = service == nil ? ReadOnlyToolChildControl() : nil
         publicationID = publication
         control = child
         serviceControl = service
@@ -182,7 +182,7 @@ public actor DriveHealthSession {
     }
 
     private static func perform(_ selected: ManagedVolume, lifecycle: VolumeLifecycle,
-                                control: DriveHealthChildControl?, serviceControl: DriveHealthServiceControl?) async -> DriveHealthReport {
+                                control: ReadOnlyToolChildControl?, serviceControl: DriveHealthServiceControl?) async -> DriveHealthReport {
         let prepared: PreparedDriveHealthSelection
         do { prepared = try await lifecycle.prepareHealthSelection(selected) }
         catch {

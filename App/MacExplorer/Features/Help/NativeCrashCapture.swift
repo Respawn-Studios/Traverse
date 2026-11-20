@@ -70,7 +70,7 @@ final class NativeCrashCapture {
         guard try store.readPending(applicationIdentifier: applicationIdentifier) == nil else {
             throw CrashReportFailure.changed
         }
-        try store.validate()
+        try store.requireCaptureSpace()
         try reporter.enableAndReturnError()
     }
 

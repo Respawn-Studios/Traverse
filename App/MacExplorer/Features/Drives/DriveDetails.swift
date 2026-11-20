@@ -130,6 +130,35 @@ enum DriveHealthFeature {
         if case .warning(_, let raw, _) = health { return raw }
         return nil
     }
+    var healthReadingSummary: String? {
+        guard target != nil, case .warning(let kind, let raw, let date) = health, date.timeIntervalSince1970.isFinite else { return nil }
+        let technology = kind == .ata ? "ATA" : "NVMe"
+        var lines = ["SMART reading (\(technology))", "Captured \(date.formatted(.iso8601))"]
+        if healthIsStale || isCheckingHealth { lines.append("Previous reading") }
+        lines.append(healthTitle)
+        if raw != 0 { lines.append("Reported warning " + String(format: "0x%02X", raw)) }
+        if let values = healthMeasurements, kind == .nvme {
+            if let temperature = values.temperatureCelsius {
+                lines.append("Temperature \(temperature.formatted(.number.precision(.fractionLength(0)))) °C")
+            }
+            if let spare = values.availableSparePercent { lines.append("Spare capacity \(spare)%") }
+            let endurance = values.percentageUsed == 255 ? "255% or more" : "\(values.percentageUsed)%"
+            lines.append("Endurance used \(endurance)")
+        }
+        return lines.joined(separator: "\n")
+    }
+    @discardableResult func copyHealthReading(from browser: BrowserViewController? = nil, to pasteboard: NSPasteboard = .general) -> Bool {
+        guard let window, let summary = healthReadingSummary else { return false }
+        browser?.clearCutSelection()
+        let publication = browser.map { $0.clipboardWriter(summary, []) }
+            ?? BrowserClipboard.publish(summary, urls: [], to: pasteboard)
+        let succeeded: Bool
+        if case .text = publication { succeeded = true } else { succeeded = false }
+        let message = succeeded ? "Copied SMART reading." : "The clipboard could not be updated. Try again."
+        NSAccessibility.post(element: window, notification: .announcementRequested,
+            userInfo: [.announcement: message, .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+        return succeeded
+    }
     var canCheckHealth: Bool {
         healthReaderAvailable
             && target.map({ $0.deviceKind == .internalDisk || $0.deviceKind == .externalDisk && $0.isInternal == false }) == true

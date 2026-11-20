@@ -75,6 +75,34 @@ private struct TextZIPFixture {
             }
         }
     }
+
+    @Test func textComparisonChecksTwoCapturedMembersAndRetainsTheirByteFormats() async throws {
+        let leftBytes = Data([0xef, 0xbb, 0xbf]) + Data("before café\r\n".utf8)
+        let rightBytes = Data("after café\n".utf8)
+        let archive = GeneratedZIP.bytes([.init("Before.txt", bytes: leftBytes),
+            try ContentZIP.member("After.txt", bytes: rightBytes), .init("Binary.bin", bytes: Data([0, 1, 2]))])
+        let fixture = try TextZIPFixture(archive)
+        let reader = ZIPArchiveReader()
+        let left = try await fixture.selection(reader, name: "Before.txt")
+        let right = try await fixture.selection(reader, name: "After.txt")
+        let binary = try await fixture.selection(reader, name: "Binary.bin")
+        let result = try await reader.readTextComparison(left: left, right: right)
+        #expect(result.left.encoded == leftBytes && result.right.encoded == rightBytes)
+        #expect(result.left.text == "before café\n" && result.right.text == "after café\n")
+        await #expect(throws: ZIPTextPreviewFailure.unsupported) {
+            try await reader.readTextComparison(left: left, right: left)
+        }
+        await #expect(throws: ZIPTextPreviewFailure.notText) {
+            try await reader.readTextComparison(left: left, right: binary)
+        }
+        #expect(try Data(contentsOf: fixture.source) == archive)
+        try archive.write(to: fixture.source, options: .atomic)
+        await #expect(throws: ZIPArchiveFailure.changed) {
+            try await reader.readTextComparison(left: left, right: right)
+        }
+        await reader.drain()
+    }
+
     @Test func foreignIDsClosedCatalogsAndNonRegularMembersDoNotIssueSelections() async throws {
         let fixture = try TextZIPFixture(GeneratedZIP.bytes([.init("file.txt"), .init("Folder/", mode: 0x4000, bytes: Data())]))
         let reader = ZIPArchiveReader(), first = try await reader.open(fixture.source), other = try await reader.open(fixture.source)

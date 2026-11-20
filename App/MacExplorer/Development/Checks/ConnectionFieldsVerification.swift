@@ -173,19 +173,24 @@ import ExplorerCore
                 model.password = "generated-only"; model.jumpHost.password = "generated-jump-only"
             }
             configureRoute()
-            try require(model.canUseFreshUploads && model.transferBehavior == .normal && !model.freshFolderUploads)
+            let expectsFolders = AppFeatureAvailability.allows(.routedUpload) && AppFeatureAvailability.allows(.serverFolderUpload)
+            try require(model.canUseFreshUploads && model.transferBehavior == .normal
+                && model.canUseFreshFolderUploads == expectsFolders && model.freshFolderUploads == expectsFolders)
             model.connect(); try await wait { !model.busy }
-            try require(sftpCalls.count == 5 && sftpCalls[4].freshUploads && !sftpCalls[4].freshFolderUploads && !sftpCalls[4].reviewsUploads
+            try require(sftpCalls.count == 5 && sftpCalls[4].freshUploads && sftpCalls[4].freshFolderUploads == expectsFolders && !sftpCalls[4].reviewsUploads
                 && sftpCalls[4].route?.jump.address.port == 2222 && sftpCalls[4].route?.destination.address.host == "destination.example.invalid"
                 && model.password.isEmpty && model.jumpHost.password.isEmpty)
-            checks.append("A qualified new route retains the visible normal file policy across identity edits without granting folder uploads")
+            checks.append("A new route retains Normal across identity edits and uses the edition's independently allowed folder policy")
             configureRoute(); model.transferBehavior = .readOnly; model.connect(); try await wait { !model.busy }
             try require(sftpCalls.count == 6 && !sftpCalls[5].freshUploads && !sftpCalls[5].freshFolderUploads)
-            SFTPRoutedUploadFeature.qualifying = false; configureRoute()
-            try require(!model.canUseFreshUploads && model.transferBehavior == .readOnly)
+            SFTPRoutedUploadFeature.qualifying = false
+            model.freshUploadAvailable = false
+            configureRoute()
+            try require(!model.canUseFreshUploads && !model.canUseFreshFolderUploads)
             model.connect(); try await wait { !model.busy }
             try require(sftpCalls.count == 7 && !sftpCalls[6].freshUploads && !sftpCalls[6].freshFolderUploads)
             checks.append("Read-only selection and an unavailable build each refuse route write authority before the handler")
+            model.freshUploadAvailable = true
             SFTPRoutedUploadFeature.qualifying = true; SFTPRoutedFolderUploadFeature.qualifying = true; SFTPFolderUploadFeature.qualifying = true
             defer { SFTPRoutedFolderUploadFeature.qualifying = false; SFTPFolderUploadFeature.qualifying = false }
             configureRoute()

@@ -20,10 +20,14 @@ struct NativeToolPageNavigation<ID: Hashable>: NSViewRepresentable {
     let items: [ToolPageNavigationItem<ID>]
     let identifier: String
     let accessibilityLabel: String
+    var allowsSelection: (ID) -> Bool = { _ in true }
+    var focusRequest: Binding<Bool>?
 
-    func makeCoordinator() -> Coordinator { Coordinator(selection: $selection, items: items) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection, items: items, allowsSelection: allowsSelection)
+    }
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = SectionNavigationScrollView()
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
@@ -32,6 +36,7 @@ struct NativeToolPageNavigation<ID: Hashable>: NSViewRepresentable {
         table.identifier = .init(identifier)
         table.style = .sourceList
         table.backgroundColor = .clear
+        table.wantsLayer = true
         table.headerView = nil
         table.focusRingType = .default
         table.selectionHighlightStyle = .regular
@@ -49,12 +54,15 @@ struct NativeToolPageNavigation<ID: Hashable>: NSViewRepresentable {
         table.setAccessibilityLabel(accessibilityLabel)
         scroll.documentView = table
         update(table, coordinator: context.coordinator)
+        scroll.focusRequest = focusRequest
         return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let table = scroll.documentView as? NSTableView else { return }
         context.coordinator.selection = $selection
+        context.coordinator.allowsSelection = allowsSelection
         update(table, coordinator: context.coordinator)
+        (scroll as? SectionNavigationScrollView)?.focusRequest = focusRequest
     }
     private func update(_ table: NSTableView, coordinator: Coordinator) {
         let previouslyUpdating = coordinator.updating
@@ -64,9 +72,7 @@ struct NativeToolPageNavigation<ID: Hashable>: NSViewRepresentable {
         coordinator.scale = scale; coordinator.items = items
         table.rowHeight = ceil((items.contains { $0.subtitle != nil } ? 48 : 34) * scale)
         if changed { table.reloadData() }
-        if let row = items.firstIndex(where: { $0.id == selection }), table.selectedRow != row {
-            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        }
+        coordinator.restoreSelection(in: table, animating: !changed)
     }
 
     @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -74,10 +80,17 @@ struct NativeToolPageNavigation<ID: Hashable>: NSViewRepresentable {
         var items: [ToolPageNavigationItem<ID>]
         var scale: CGFloat = 0
         var updating = false
-        init(selection: Binding<ID>, items: [ToolPageNavigationItem<ID>]) {
-            self.selection = selection; self.items = items
+        var allowsSelection: (ID) -> Bool
+        init(selection: Binding<ID>, items: [ToolPageNavigationItem<ID>],
+             allowsSelection: @escaping (ID) -> Bool = { _ in true }) {
+            self.selection = selection; self.items = items; self.allowsSelection = allowsSelection
         }
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+            guard items.indices.contains(row) else { return false }
+            let requested = items[row].id
+            return updating || requested == selection.wrappedValue || allowsSelection(requested)
+        }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard items.indices.contains(row) else { return nil }
             let page = items[row]
@@ -121,8 +134,45 @@ struct NativeToolPageNavigation<ID: Hashable>: NSViewRepresentable {
             let page = items[table.selectedRow].id
             guard page != selection.wrappedValue else { return }
             // End the old page's native field editor before replacing its view.
-            guard table.window?.makeFirstResponder(table) != false else { return }
+            guard table.window?.makeFirstResponder(table) != false else {
+                restoreSelection(in: table)
+                return
+            }
+            ToolContentMotion.crossfade(table)
             selection.wrappedValue = page
+        }
+        fileprivate func restoreSelection(in table: NSTableView, animating: Bool = false) {
+            let previous = updating
+            updating = true
+            defer { updating = previous }
+            let row = items.firstIndex(where: { $0.id == selection.wrappedValue })
+            table.allowsEmptySelection = row == nil
+            if let row {
+                if table.selectedRow != row {
+                    if animating, table.selectedRow >= 0 { ToolContentMotion.crossfade(table) }
+                    table.selectRowIndexes([row], byExtendingSelection: false)
+                }
+            } else if table.selectedRow != -1 { table.deselectAll(nil) }
+        }
+    }
+}
+
+private final class SectionNavigationScrollView: NSScrollView {
+    var focusRequest: Binding<Bool>? { didSet { focusWhenMounted() } }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        focusWhenMounted()
+    }
+
+    private func focusWhenMounted() {
+        guard focusRequest?.wrappedValue == true, let host = window else { return }
+        DispatchQueue.main.async { [weak self, weak host] in
+            guard let self, let host, window === host, host.isKeyWindow,
+                  let request = focusRequest, request.wrappedValue,
+                  let table = documentView as? NSTableView, table.window === host, !table.isHiddenOrHasHiddenAncestor,
+                  host.makeFirstResponder(table), host.firstResponder === table else { return }
+            request.wrappedValue = false
         }
     }
 }

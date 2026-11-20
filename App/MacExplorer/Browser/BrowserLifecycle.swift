@@ -30,6 +30,8 @@ extension BrowserViewController {
     /// Closing a browser stops its reads and observation, but never interrupts
     /// a write. The window delegate refuses close while an operation is active.
     func suspendBrowser() {
+        nameSelection.cancel()
+        gitControls.cancel()
         captureArchiveViewState()
         let archives = Array(archiveTabs.values); archiveTabs = [:]
         archives.forEach { ArchiveTabCatalogPool.shared.retire($0) }
@@ -57,7 +59,7 @@ extension BrowserViewController {
         isBrowserSuspended = true
         if workspace == nil || workspace?.isClosing == true { clearCutSelection() }
         workspace?.paneWillSuspend(self)
-        recoveryInspectionTask?.cancel()
+        operationHistory.cancelRecoveryInspection(owner: paneID)
         ownedTrash.close()
         retentionInspectionTask?.cancel()
         sessionID = UUID()
@@ -83,10 +85,14 @@ extension BrowserViewController {
         guard let window = view.window, window.attachedSheet == nil else { return }
         let alert = NSAlert()
         let driveOnly = operationCoordinator.drives.hasDriveRequest && !hasExclusiveBrowserOperation && !operationCoordinator.transfers.hasOutstandingWork
-        alert.messageText = driveOnly ? "A drive request is still pending" : "File work is still pending"
-        alert.informativeText = driveOnly
-            ? "Keep this window open until macOS finishes. Open Drives to inspect the request or cancel it before submission. A request already submitted to macOS must finish before quitting."
-            : "Keep this window open until queued work finishes, or inspect the queue to cancel waiting jobs and Stop running work. Stopping finishes the current safe step; completed changes remain. Queued jobs are not restored after quitting."
+        alert.messageText = driveOnly && operationCoordinator.drives.isFormatting
+            ? "An APFS Format request is still active"
+            : driveOnly ? "A drive request is still pending" : "File work is still pending"
+        alert.informativeText = driveOnly && operationCoordinator.drives.isFormatting
+            ? "Keep this window open while Traverse checks or formats the selected disk image volume. Open Drives to inspect its status. If macOS has received the erase request, wait for the saved result before quitting."
+            : driveOnly
+                ? "Keep this window open until macOS finishes. Open Drives to inspect the request or cancel it before submission. A request already submitted to macOS must finish before quitting."
+                : "Keep this window open until queued work finishes, or inspect the queue to cancel waiting jobs and Stop running work. Stopping finishes the current safe step; completed changes remain. Queued jobs are not restored after quitting."
         alert.addButton(withTitle: "Keep Working")
         if driveOnly { alert.addButton(withTitle: "Open Drives") }
         else if operationCoordinator.transfers.hasOutstandingWork { alert.addButton(withTitle: "Inspect Queue") }

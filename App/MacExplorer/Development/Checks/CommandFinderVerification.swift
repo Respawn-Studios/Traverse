@@ -85,8 +85,11 @@ import FileOperations
             finder.activateSelection(nil)
             try UIVerification.require(finder.window?.isVisible == true && finder.dispatchedForVerification.isEmpty,
                 "Unavailable command fell through to another action")
-            finder.dismiss(restoringFocus: true)
-            try UIVerification.require(NSApp.keyWindow === parent && parent.firstResponder === browser.activeFileView,
+            guard let nativePanel = finder.window else { throw UIVerification.Failure(message: "Missing command panel to close") }
+            nativePanel.sendEvent(UIVerification.key("\u{1b}", code: 53, flags: [], window: nativePanel))
+            let closeDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while finder.window != nil && ContinuousClock.now < closeDeadline { try await Task.sleep(for: .milliseconds(10)) }
+            try UIVerification.require(finder.window == nil && NSApp.keyWindow === parent && parent.firstResponder === browser.activeFileView,
                 "Cancel did not return original file focus")
             checks.append("IME/disabled actions do not dispatch; closing clears query and restores original focus")
 
@@ -141,7 +144,7 @@ import FileOperations
                     guard let panel = finder.window else { throw UIVerification.Failure(message: "Missing panel for exact-window recording") }
                     panel.title = "Find a Command · generated review"
                     let report = try await NativeMotionRecorder.record(window: panel, root: root, label: "command-" + mode.rawValue) {
-                        finder.replayEntranceForVerification()
+                        NativeMotionRecorder.replayToolWindowEntrance(panel)
                     }
                     try JSONEncoder().encode(report).write(to: root.appendingPathComponent("evidence/command-" + mode.rawValue + ".json"), options: .withoutOverwriting)
                     try UIVerification.require(panel.alphaValue == 1, "Entrance leaves the panel translucent")
@@ -202,7 +205,7 @@ import FileOperations
                 panel.title = "Find an Editor Command · generated review"
                 let clip = try await NativeMotionRecorder.record(window: panel, root: root, label: "editor-command-full",
                     sampling: .diagnostic(for: panel)) {
-                    CommandDiscoveryPresentation.animateEntrance(panel, motion: settings.motion)
+                    NativeMotionRecorder.replayToolWindowEntrance(panel)
                 }
                 try JSONEncoder().encode(clip).write(to: root.appendingPathComponent("evidence/editor-command-full.json"), options: .withoutOverwriting)
             }

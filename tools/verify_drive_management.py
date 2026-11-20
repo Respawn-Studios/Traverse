@@ -46,15 +46,20 @@ def usage():
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument('--audit', action='store_true')
     parser.add_argument('--review', action='store_true')
-    parser.add_argument('--volumes-handoff', action='store_true'); args = parser.parse_args()
+    parser.add_argument('--volumes-handoff', action='store_true')
+    parser.add_argument('--format-held', action='store_true')
+    args = parser.parse_args()
+    if args.format_held and (args.review or args.volumes_handoff):
+        parser.error('--format-held is one inert offscreen presentation check')
     local_directory('b04-drive-management')
     if args.audit: print(json.dumps(usage(), indent=2)); return
     with (BASE/'.budget.lock').open('a+b') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX); before = usage()
-        if before['reservedBytes']+8*MIB > 64*MIB or before['reservedEntries']+128 > 1024:
+        reserved_entries = 64 if args.format_held else 128
+        if before['reservedBytes']+8*MIB > 64*MIB or before['reservedEntries']+reserved_entries > 1024:
             raise RuntimeError('No overview headroom')
         case = BASE/str(uuid.uuid4()).upper(); case.mkdir(mode=0o700)
-        (case/'reservation.json').write_text(json.dumps(dict(bytes=8*MIB, entries=128)))
+        (case/'reservation.json').write_text(json.dumps(dict(bytes=8*MIB, entries=reserved_entries)))
         (case/'evidence').mkdir(mode=0o700)
     binary = ROOT/'.build/xcode/Build/Products/Debug/Mac Explorer.app/Contents/MacOS/Mac Explorer'
     inputs = [binary, Path(__file__).resolve()]
@@ -77,6 +82,7 @@ def main():
     command = [str(binary), '-ApplePersistenceIgnoreState', 'YES', '--verify-ui', '--check-drive-management',
                '--analysis-source', str(case)]
     if args.volumes_handoff: command.append('--drive-management-volumes')
+    if args.format_held: command.append('--drive-management-format-held')
     command += ['--drive-management-input'] if args.review else ['--offscreen']
     with (case/'evidence/native.log').open('xb') as output:
         child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT)

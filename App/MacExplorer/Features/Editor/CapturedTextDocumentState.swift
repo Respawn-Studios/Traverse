@@ -53,6 +53,7 @@ final class TextDocumentState {
     private let owner = UUID()
     private var generation = UUID()
     private var savedValue: TextDocumentValue
+    private var savedGeneration = UUID()
     private(set) var value: TextDocumentValue
     private(set) var binding: TextDocumentBinding?
     private var pendingEdit: TextEditTicket?
@@ -75,6 +76,7 @@ final class TextDocumentState {
     /// Display-only baseline: the last successful Open/Reload or confirmed Save,
     /// never an assertion about a possibly changed current file or server.
     var comparisonBaseline: String? { closed ? nil : savedValue.text }
+    var savedTextBaseline: EditorSavedTextBaseline? { comparisonBaseline.map { .init(id: savedGeneration, text: $0) } }
     var closeDisposition: CloseDisposition {
         if closed { return .closed }
         if activeSave != nil || activeCapture != nil { return .waitingForSave }
@@ -224,7 +226,7 @@ final class TextDocumentState {
         binding == nil && !value.text.isEmpty || value.encoded != savedValue.encoded
     }
     private func acknowledge(_ snapshot: TextSaveSnapshot, binding: TextDocumentBinding) {
-        savedValue = snapshot.value; self.binding = binding
+        savedValue = snapshot.value; savedGeneration = UUID(); self.binding = binding
         // Acknowledgement of g must not clear newer (even pending) edits.
         dirty = snapshot.generation != generation || pendingEdit != nil || validationFailure != nil
     }

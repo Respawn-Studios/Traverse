@@ -10,8 +10,9 @@ Start with `MacExplorer/App.swift` (app entry/composition) and
 - `Application/`: app-wide operation/queue, access, analysis, editor and server owners.
 - `Browser/`: the real browser controller, table/icon canvas, address, tabs,
   selection, clipboard, sidebar and commands.
-- `Features/`: Archives, Connections, Drives, Editor, Help, Onboarding,
-  Operations, PrivateNames, Search, Settings, Sharing, StorageAnalysis, Trash and Workspace.
+- `Features/`: Archives, Connections, Drives, Editor, FolderComparison, Git,
+  Help, Onboarding, Operations, PrivateNames, Search, Settings, Sharing,
+  StorageAnalysis, Trash and Workspace.
 - `Shared/Presentation/`: `ToolWindowPresentation.swift`, `Appearance.swift`,
   `InterfaceSizing.swift`, material, motion and reusable control appearance.
 - `Development/Checks/`: generated native checks and debug-only support.
@@ -22,6 +23,14 @@ compiled checkout and its generated roots.
 Reuse shared window/theme/motion policy. Keep filesystem mutations in the existing
 operation modules and app owners, not in view callbacks. See the
 [engineering guide](../docs/engineering/README.md) for development and verification.
+
+Local folder and Git reviews share the native text comparison window in
+`Features/Editor/`. The browser routes commands from its selected pane and
+`Features/Git/GitReviewAccess.swift` retains access until a Git read drains.
+`Features/Git/GitComparisonModel.swift` owns review requests and their results.
+Keep revision IDs, path observations and the window’s selection bound to each
+requested comparison. Use the existing generated `verify-ui --check-substantial`
+flow to check the browser commands, Git history and diff windows together.
 
 Native file promises rely on `NSFilePromiseReceiver`'s coordinated callback
 lifetime. Do not acquire a second coordinator for that same destination inside

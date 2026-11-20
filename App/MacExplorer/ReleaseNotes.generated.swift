@@ -16,6 +16,27 @@ struct TraverseReleaseNote: Identifiable, Sendable {
 
 enum TraverseReleaseNotes {
     static let all: [TraverseReleaseNote] = [
+        .init(version: "0.4.0", build: 103, state: .published,
+              date: "2026-11-21", title: "Git, diffs, and a smarter editor",
+              summary: "Review local Git changes, navigate and check source files, and work between panes without losing your place.", changes: [
+                "Swap, stack, balance or link panes from the divider or keyboard. Compare two folders and verify their contents, review a copy across panes, or reveal a matching item.",
+                "Browse local Git worktrees. Compare the working folder or index with a revision, compare two revisions, and review the sides of a conflict. Follow file history across renames and find the commit behind a line.",
+                "Review and stage a saved file or an eligible block, or unstage its changes. Traverse checks the file and index again when you confirm.",
+                "Compare local files, archive members, clipboard text and open drafts. Switch between side-by-side and unified views, keep Find in sync, or search the visible files in a folder or Git review.",
+                "Quick Open, project text search, a searchable outline, bookmarks and local name completion help you move around a project. New navigation and comparison commands preserve the active draft.",
+                "Check JSON and JSONC and jump to the reported issue. Choose a local JSON Schema to check supported draft 2020-12 rules, including precise numeric bounds, alternatives, conditional rules and tuples. INI, .editorconfig and TOML get navigable sections and keys. Go gets navigation to types and functions, line comments and smart brace indentation.",
+                "Smart Return and opt-in bracket completion share the editor’s syntax scanner. Search and compare with clearer inserted and deleted lines, and apply a chosen change to a live editor with one Undo.",
+                "Browse Python wheels as read-only ZIP packages. Copy supported members using the archive browser.",
+                "Reopen saved folder analyses from Drives. Repeat a benchmark with its original settings, compare matching runs across volumes, and copy a table with throughput or IOPS and P95 latency. Copy a SMART reading already on display without starting a new check.",
+                "Settings search opens the matching control and highlights it. The address bar shows more parent folders while keeping room to click and edit the path.",
+                "New Folder and inline Rename keep the listing in place. Archive shortcuts follow the active pane or window, and open archive views refresh together after a change or Undo.",
+                "The sidebar slides at its saved width, existing panes stay in place during a split, and Analyzer and Properties preserve the storage chart and scroll position when grouping or drilling down.",
+                "Operation Results preserves a selected visible item and marks unconfirmed Trash outcomes for review. Late SFTP shutdown can finish after the worker has drained.",
+                "On macOS 15, history, Trash and storage tools accept existing folders when macOS adds a directory marker to their URLs. Filesystem identity and access checks still apply.",
+                "New and relinked Remembered Items in the direct edition use current filesystem permissions. Move and Undo preserve each item's stored access method.",
+                "Updated the SSH and RSA dependencies used for SFTP and the constant-time primitives used for SMB signature verification.",
+                "Copy and cross-volume Move to FAT-formatted destinations remain unavailable. Traverse explains this before creating staging data."
+              ]),
         .init(version: "0.3.0", build: 99, state: .published,
               date: "2026-11-17", title: "More archives, a steadier workspace",
               summary: "Edit more archive formats, keep panes and controls in place, and reach local tools from the keyboard.", changes: [

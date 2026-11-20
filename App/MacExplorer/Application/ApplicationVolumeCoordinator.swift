@@ -14,6 +14,10 @@ struct DriveJobSummary: Identifiable, Equatable {
 /// observations/actions remain in LocalStorage; no UI callback mutates a disk.
 @MainActor
 final class ApplicationVolumeCoordinator: ObservableObject {
+    struct FormatDrain: Sendable {
+        let token: FileActivityGate.DrainToken
+        let protectionCurrent: @Sendable () -> Bool
+    }
     struct Pending {
         let plan: PreparedVolumeAction
         var intent: DeferredEject
@@ -32,6 +36,7 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     private var nativeDriveJobLoaded = false
     @Published private(set) var nativeDriveJobReady = false
     @Published private(set) var nativeDriveJobIssue = ""
+    @Published private(set) var nativeDriveJobLastOutcome = ""
     private var sessionProtection: [UUID: VolumeProtectionLevel] = [:]
     @Published private(set) var protectionReady = false
     @Published private(set) var isEditingProtection = false
@@ -40,6 +45,10 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     var savedProtections: [DriveProtectionLibrary.Rule] { protectionSnapshot?.library.rules ?? [] }
     @Published private(set) var isStoppingPreparation = false
     private var barrier: (id: UUID, token: FileActivityGate.DrainToken)?
+    private var formatRequestID: UUID?
+    private var formatProtectionSnapshot: DriveProtectionStore.Snapshot?
+    @Published private(set) var isFormatting = false
+    @Published private(set) var formatBlockerNotice = ""
     @Published private(set) var volumes: [ManagedVolume] = []
     @Published private var offlineVolumes: [UUID: ManagedVolume] = [:]
     @Published private(set) var pending: Pending?
@@ -47,8 +56,8 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     @Published private(set) var isPreparing = false
     @Published private(set) var message = ""
     private(set) var lastResult: VolumeActionResult?
-    var isBusy: Bool { isPreparing || pending != nil || isEditingProtection }
-    var hasDriveRequest: Bool { isPreparing || pending != nil }
+    var isBusy: Bool { isPreparing || pending != nil || isEditingProtection || isFormatting }
+    var hasDriveRequest: Bool { isPreparing || pending != nil || isFormatting }
     var pendingActionTitle: String {
         switch pending?.plan.action {
         case .mount: "Mount"
@@ -104,11 +113,13 @@ final class ApplicationVolumeCoordinator: ObservableObject {
         if GeneratedDriveImageReview.requested {
             guard GeneratedDriveImageReview.admitted else { return }
         } else {
-            guard AppFeatureAvailability.allows(.apfsVolumeCreation) else { return }
+            guard AppFeatureAvailability.allows(.apfsVolumeCreation)
+                || NativeAPFSFormatFeature.ordinaryEnabled else { return }
         }
         guard !nativeDriveJobLoaded, nativeDriveJobTask == nil else { return }
         nativeDriveJobReady = false
         nativeDriveJobIssue = "Checking saved drive jobs…"
+        nativeDriveJobLastOutcome = ""
         nativeDriveJobTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -118,6 +129,17 @@ final class ApplicationVolumeCoordinator: ObservableObject {
                     self.nativeDriveJobIssue = "A prior APFS Format request may have been submitted. Inspect the exact disk image before another native drive change."
                 } else {
                     self.nativeDriveJobIssue = ""; self.nativeDriveJobReady = true
+                    if let record = snapshot.record {
+                        switch record.phase {
+                        case .observedNativeCompletion:
+                            self.nativeDriveJobLastOutcome = record.version == 3
+                                ? "Last Format: “\(record.snapshot.name)” completed."
+                                : "Last generated-image Format completed."
+                        case .notSubmitted:
+                            self.nativeDriveJobLastOutcome = "Last Format request was not submitted."
+                        default: break
+                        }
+                    }
                 }
             } catch {
                 self.nativeDriveJobIssue = "The saved native drive job could not be verified. Native Format remains unavailable."
@@ -146,7 +168,7 @@ final class ApplicationVolumeCoordinator: ObservableObject {
     /// The warm route uses the same predicate before obtaining its recorder.
     func generatedFormatJobIsAdmissible(owner: APFSVolumeFormatGeneratedOwner) -> Bool {
         guard owner.validate() else { return false }
-        if GeneratedDriveImageReview.requested && !GeneratedDriveImageReview.warmAdmitted { return false }
+        if GeneratedDriveImageReview.requested && !GeneratedDriveImageReview.formatRecorderAvailable { return false }
         if !nativeDriveJobLoaded { loadNativeDriveJobIfNeeded() }
         return nativeFormatSavedJobIsClean()
     }
@@ -157,6 +179,7 @@ final class ApplicationVolumeCoordinator: ObservableObject {
                                   attachmentCurrent: @escaping @Sendable () -> Bool) -> NativeDriveJobStore.Recording? {
         #if TRAVERSE_DRIVE_IMAGE_QA
         guard let selected = GeneratedDriveImageReview.selection, selected.phase == .warm,
+              selected.formatCompletionContract == GeneratedDriveImageReview.completionContract,
               owner.fixtureID == UUID(uuidString: selected.caseID),
               owner.imagePath == selected.fixtureRoot.appendingPathComponent("fixture.dmg").path,
               owner.ownerUID == geteuid(),
@@ -166,18 +189,46 @@ final class ApplicationVolumeCoordinator: ObservableObject {
         guard args.contains("--verify-drive-lifecycle"), args.contains("--apfs-format"),
               generatedFormatJobIsAdmissible(owner: owner) else { return nil }
         #endif
-        guard let recording = nativeDriveJobStore?.recording(owner: owner, attachmentCurrent: attachmentCurrent) else { return nil }
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        let completionPolicy: APFSVolumeFormatCompletionPolicy = .sourceQualification
+        #else
+        let completionPolicy: APFSVolumeFormatCompletionPolicy = .provisional
+        #endif
+        guard let recording = nativeDriveJobStore?.recording(owner: owner,
+            attachmentCurrent: attachmentCurrent, completionPolicy: completionPolicy) else { return nil }
+        #if TRAVERSE_DRIVE_IMAGE_QA
+        guard GeneratedDriveImageReview.claimFormatRecorder() else { return nil }
+        #endif
         nativeDriveJobReady = false
         nativeDriveJobIssue = "A native APFS Format check is in progress. Its saved outcome must be checked before another request."
+        return recording
+    }
+
+    #endif
+
+    /// An ordinary caller obtains the same durable slot as generated QA, but
+    /// only while its exact volume barrier is reserved and the saved job was
+    /// passively checked. The UI feature switch keeps this path unactivated.
+    func ordinaryFormatRecording(owner: APFSVolumeFormatImageOwner,
+                                 attachmentCurrent: @escaping @Sendable () -> Bool) -> NativeDriveJobStore.Recording? {
+        guard (GeneratedDriveImageReview.requested
+                ? GeneratedDriveImageReview.signedFormatTargetClaimed(owner: owner)
+                : NativeAPFSFormatFeature.ordinaryEnabled),
+              isFormatting, formatRequestID != nil,
+              nativeDriveJobLoaded, nativeDriveJobReady, owner.validate(),
+              let recording = nativeDriveJobStore?.recording(ordinaryImageOwner: owner,
+                  attachmentCurrent: attachmentCurrent) else { return nil }
+        nativeDriveJobReady = false
+        nativeDriveJobIssue = "A native APFS Format request is in progress. Its saved outcome must be checked before another request."
         return recording
     }
 
     func reloadNativeDriveJobAfterRecording() async {
         if let task = nativeDriveJobTask { await task.value }
         nativeDriveJobLoaded = false
-        await waitForNativeDriveJobLoad()
+        loadNativeDriveJobIfNeeded()
+        if let task = nativeDriveJobTask { await task.value }
     }
-    #endif
 
     func reloadProtection() {
         guard !isBusy, protectionTask == nil else { return }
@@ -247,6 +298,190 @@ final class ApplicationVolumeCoordinator: ObservableObject {
         }
     }
     func drainProtection() async { await protectionTask?.value; await protectionStore.drain() }
+
+    func canReviewOrdinaryFormat(_ target: ManagedVolume) -> Bool {
+        (GeneratedDriveImageReview.requested
+            ? GeneratedDriveImageReview.signedFormatTargetAvailable(target)
+            : NativeAPFSFormatFeature.ordinaryEnabled)
+            && !isBusy && nativeDriveJobLoaded && nativeDriveJobReady
+            && protectionReady && target.deviceKind == .diskImage && target.isInternal == false
+            && target.volumeUUID != nil && target.mediaID != nil && target.group != nil && target.url != nil
+            && volumes.contains(target) && permitsRemoval(target, action: .eject)
+            && !formatContainsProtectedStorage(target)
+    }
+
+    /// Reserve mutation admission without closing file activity. The durable
+    /// intent must be able to prepare its private state before the gate closes.
+    func reserveOrdinaryFormat(_ target: ManagedVolume) async throws -> UUID {
+        guard canReviewOrdinaryFormat(target) else {
+            throw APFSVolumeFormatFailure.unavailable
+        }
+        isFormatting = true
+        formatBlockerNotice = ""
+        do {
+            guard let expected = protectionSnapshot else { throw APFSVolumeFormatFailure.protected }
+            try await verifyFormatProtection(expected, target: target)
+            try Task.checkCancellation()
+            let id = UUID()
+            guard operations.beginVolumeBarrier(id) else { throw APFSVolumeFormatFailure.busy }
+            formatRequestID = id
+            formatProtectionSnapshot = expected
+            message = "Checking the selected APFS image volume…"
+            return id
+        } catch {
+            formatProtectionSnapshot = nil
+            isFormatting = false
+            throw error
+        }
+    }
+
+    private func verifyFormatProtection(_ expected: DriveProtectionStore.Snapshot,
+                                        target: ManagedVolume) async throws {
+        let loaded: DriveProtectionStore.Snapshot
+        do { loaded = try await protectionStore.load() }
+        catch {
+            protectionReady = false
+            protectionIssue = "Saved drive protection could not be verified. Format remains blocked."
+            throw APFSVolumeFormatFailure.protected
+        }
+        guard loaded.bytes == expected.bytes, loaded.library == expected.library else {
+            protectionSnapshot = loaded
+            protectionRevision = UUID()
+            throw APFSVolumeFormatFailure.protected
+        }
+        guard protectionReady, volumes.contains(target), target.group != nil,
+              permitsRemoval(target, action: .eject),
+              !formatContainsProtectedStorage(target) else { throw APFSVolumeFormatFailure.protected }
+    }
+
+    private func formatContainsProtectedStorage(_ target: ManagedVolume) -> Bool {
+        let paths = operations.protectedStorageLocations.map { $0.standardizedFileURL.pathComponents }
+        return volumes.filter { $0.group == target.group }.contains { member in
+            guard let root = member.url?.standardizedFileURL.pathComponents else { return false }
+            return paths.contains { $0.starts(with: root) }
+        }
+    }
+
+    private enum ReaderDrainFailure { case health, sharing, archive }
+
+    /// Both drive paths stop the same App readers after closing admission.
+    /// Their separate callers retain their own target, policy and gate checks.
+    private func stopReadersForVolumeQuiescence() {
+        ApplicationStorageAnalysis.shared.prepareForVolumeQuiescence()
+        ApplicationDriveDetails.shared.prepareForVolumeQuiescence()
+        ApplicationZIPBrowser.shared.prepareForVolumeQuiescence()
+        ApplicationTARBrowser.shared.suspend()
+        ApplicationArchiveExtraction.shared.closeIdleWindow()
+        ApplicationArchiveCreation.shared.closeIdleWindow()
+        ApplicationBatchRename.shared.closeIdleWindow()
+        for browser in operations.liveBrowsers where browser.isViewLoaded { browser.prepareForVolumeQuiescence() }
+    }
+
+    /// Await the real reader owners in their established order. Eject keeps
+    /// its existing sharing behavior; Format requires sharing to settle.
+    private func joinReadersForVolumeQuiescence(requireSharingCompletion: Bool) async -> ReaderDrainFailure? {
+        await ApplicationBatchRename.shared.closeAndDrain()
+        await ApplicationArchiveExtraction.shared.closeAndDrain()
+        await ApplicationArchiveCreation.shared.closeAndDrain()
+        await ApplicationDriveDetails.shared.drainHealth()
+        guard !ApplicationDriveDetails.shared.hasUncertainHealthState else { return .health }
+        await SelectionGroupResultsWindow.closeAllAndDrain()
+        let sharingCompleted = await ApplicationNativeSharing.cancelPreparationsAndDrain()
+        if requireSharingCompletion && (!sharingCompleted || ApplicationNativeSharing.hasActiveHandoff) { return .sharing }
+        for browser in operations.liveBrowsers {
+            await browser.operationPreparationTask?.value
+            for owner in browser.archiveTabs.values { await owner.drain() }
+        }
+        await ApplicationZIPBrowser.shared.drain()
+        await ApplicationTARBrowser.shared.drain()
+        guard await ApplicationCompressedArchives.shared.drain() else { return .archive }
+        return nil
+    }
+
+    /// Called only by the backend's after-intent hook. Open editors retain
+    /// their buffers and access; the person closes them explicitly before a
+    /// later review. Reader drains are real and bounded before native launch.
+    func quiesceOrdinaryFormat(_ id: UUID, target: ManagedVolume) async throws -> FormatDrain {
+        try Task.checkCancellation()
+        guard formatRequestID == id, isFormatting, operations.volumeBarrierOwner == id,
+              let expected = formatProtectionSnapshot,
+              volumes.contains(target), permitsRemoval(target, action: .eject),
+              !formatContainsProtectedStorage(target) else { throw APFSVolumeFormatFailure.protected }
+        guard !ApplicationLocalTextEditors.shared.hasManagedDocuments,
+              !ApplicationRemoteTextEditors.shared.hasManagedDocuments else {
+            formatBlockerNotice = "Close open text documents and saved-version reviews before formatting. Their buffers remain available."
+            message = formatBlockerNotice
+            throw APFSVolumeFormatFailure.busy
+        }
+        guard !ApplicationNativeSharing.hasActiveHandoff else {
+            formatBlockerNotice = "Finish the active macOS sharing request before formatting."
+            message = formatBlockerNotice
+            throw APFSVolumeFormatFailure.busy
+        }
+        do { try ApplicationCompressedArchives.shared.prepareForQuiescence() }
+        catch {
+            formatBlockerNotice = "A compressed archive is still closing. Finish that review before formatting."
+            message = formatBlockerNotice
+            throw APFSVolumeFormatFailure.busy
+        }
+        guard let token = ApplicationFileActivity.gate.closeAdmission() else {
+            ApplicationCompressedArchives.shared.resumeAfterQuiescence()
+            formatBlockerNotice = "Another drive request is already stopping background readers."
+            message = formatBlockerNotice
+            throw APFSVolumeFormatFailure.busy
+        }
+        barrier = (id, token)
+        message = "Finishing background reads and closing Explorer previews…"
+        stopReadersForVolumeQuiescence()
+        if let failure = await joinReadersForVolumeQuiescence(requireSharingCompletion: true) {
+            switch failure {
+            case .health: formatBlockerNotice = "A hardware health check could not finish cleanly. Format was not submitted."
+            case .sharing: formatBlockerNotice = "A macOS sharing request is still active. Format was not submitted."
+            case .archive: formatBlockerNotice = "A temporary archive copy could not be closed. Format was not submitted."
+            }
+            message = formatBlockerNotice
+            throw APFSVolumeFormatFailure.busy
+        }
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, self?.barrier?.id == id else { return }
+            ApplicationFileActivity.gate.reopen(token)
+        }
+        let drained = await ApplicationFileActivity.gate.waitUntilDrained(token)
+        timeout.cancel()
+        guard !Task.isCancelled, drained, ApplicationFileActivity.gate.ownsDrainedAdmission(token),
+              formatRequestID == id, operations.volumeBarrierOwner == id,
+              volumes.contains(target), permitsRemoval(target, action: .eject),
+              !formatContainsProtectedStorage(target),
+              !ApplicationLocalTextEditors.shared.hasManagedDocuments,
+              !ApplicationRemoteTextEditors.shared.hasManagedDocuments,
+              !ApplicationNativeSharing.hasActiveHandoff else {
+            formatBlockerNotice = "Background work or drive protection changed. Format was not submitted."
+            message = formatBlockerNotice
+            throw APFSVolumeFormatFailure.busy
+        }
+        // The saved policy read runs on its utility queue after all readers
+        // drain. The same exact bytes and decoded policy are checked again on
+        // the APFS tool queue at the final Process.run gate.
+        try await verifyFormatProtection(expected, target: target)
+        try Task.checkCancellation()
+        guard ApplicationFileActivity.gate.ownsDrainedAdmission(token),
+              formatRequestID == id, operations.volumeBarrierOwner == id else {
+            throw APFSVolumeFormatFailure.busy
+        }
+        message = "Waiting for macOS to finish the Format request…"
+        return FormatDrain(token: token,
+            protectionCurrent: { [store = protectionStore, expected] in store.matchesSaved(expected) })
+    }
+
+    func releaseOrdinaryFormat(_ id: UUID) {
+        guard formatRequestID == id else { return }
+        formatRequestID = nil
+        formatProtectionSnapshot = nil
+        releaseBarrier(id)
+        operations.finishVolumeBarrier(id)
+        isFormatting = false
+    }
     func offlineVolume(containing url: URL) -> ManagedVolume? {
         offlineVolumes.values.filter { volume in
             guard let root = volume.url else { return false }
@@ -388,40 +623,21 @@ final class ApplicationVolumeCoordinator: ObservableObject {
         let id = pending.intent.id
         barrier = (id, token); runID = id
         message = "Finishing background reads and closing Explorer previews…"
-        ApplicationStorageAnalysis.shared.prepareForVolumeQuiescence()
-        ApplicationDriveDetails.shared.prepareForVolumeQuiescence()
-        ApplicationZIPBrowser.shared.prepareForVolumeQuiescence()
-        ApplicationTARBrowser.shared.suspend()
-        ApplicationArchiveExtraction.shared.closeIdleWindow()
-        ApplicationArchiveCreation.shared.closeIdleWindow()
-        ApplicationBatchRename.shared.closeIdleWindow()
         // Close/cancel every reader before awaiting the actual worker leases.
         // Native preview/service helpers may still cause a normal OS Busy result.
-        for browser in operations.liveBrowsers where browser.isViewLoaded { browser.prepareForVolumeQuiescence() }
+        stopReadersForVolumeQuiescence()
         running = Task { [weak self] in
             guard let self else { return }
             defer {
                 self.releaseBarrier(id)
                 if self.runID == id { self.running = nil; self.runID = nil }
             }
-            await ApplicationBatchRename.shared.closeAndDrain()
-            await ApplicationArchiveExtraction.shared.closeAndDrain()
-            await ApplicationArchiveCreation.shared.closeAndDrain()
-            await ApplicationDriveDetails.shared.drainHealth()
-            guard !ApplicationDriveDetails.shared.hasUncertainHealthState else {
-                self.message = "A hardware health check could not finish cleanly. The drive request was deferred."
-                return
-            }
-            await SelectionGroupResultsWindow.closeAllAndDrain()
-            _ = await ApplicationNativeSharing.cancelPreparationsAndDrain()
-            for browser in self.operations.liveBrowsers {
-                await browser.operationPreparationTask?.value
-                for owner in browser.archiveTabs.values { await owner.drain() }
-            }
-            await ApplicationZIPBrowser.shared.drain()
-            await ApplicationTARBrowser.shared.drain()
-            guard await ApplicationCompressedArchives.shared.drain() else {
-                self.message = "A temporary archive copy could not be closed. The drive request was deferred."
+            if let failure = await self.joinReadersForVolumeQuiescence(requireSharingCompletion: false) {
+                switch failure {
+                case .health: self.message = "A hardware health check could not finish cleanly. The drive request was deferred."
+                case .archive: self.message = "A temporary archive copy could not be closed. The drive request was deferred."
+                case .sharing: self.message = "A macOS sharing request is still active. The drive request was deferred."
+                }
                 return
             }
             let drained = await ApplicationFileActivity.gate.waitUntilDrained(token)

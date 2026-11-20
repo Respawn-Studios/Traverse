@@ -60,29 +60,37 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
         let diagnostic: Bool
         static let standard = Sampling(width: 960, height: 640, fps: 60, maximumFrames: 90,
             preRollMilliseconds: 120, afterMilliseconds: 900, diagnostic: false)
-        @MainActor static func diagnostic(for window: NSWindow) -> Sampling {
+        @MainActor static func diagnostic(for window: NSWindow, preRollMilliseconds: Int = 60) -> Sampling {
             let scale = min(1, 1152 / window.frame.width, 800 / window.frame.height)
             return Sampling(width: max(1, Int((window.frame.width * scale).rounded(.down))), height: max(1, Int((window.frame.height * scale).rounded(.down))),
-                fps: 120, maximumFrames: 180, preRollMilliseconds: 60, afterMilliseconds: 650, diagnostic: true)
+                fps: 120, maximumFrames: 180, preRollMilliseconds: preRollMilliseconds, afterMilliseconds: 650, diagnostic: true)
         }
     }
     private var sampling = Sampling.standard
 
+    @MainActor static func replayToolWindowEntrance(_ window: NSWindow) {
+        let motion = ToolContentMotion.prepareWindowEntrance(window, wasVisible: false)
+        ToolContentMotion.revealWindow(window, motion: motion)
+    }
+
     @MainActor static func record(window: NSWindow, over background: NSWindow? = nil, root: URL, label: String,
                                   sampling: Sampling = .standard, includingChildWindows: Bool = true,
+                                  fixedWindow: Bool = false,
                                   action: @MainActor () throws -> Void) async throws -> Report {
         try validateScope(window: window, root: root, label: label)
         if let background {
             try validateScope(window: background, root: root, label: label)
-            guard background !== window, background.frame.contains(window.frame) else { throw Failure.scope }
+            guard !fixedWindow, background !== window, background.frame.contains(window.frame) else { throw Failure.scope }
         }
         guard sampling.width > 0, sampling.width <= 1280, sampling.height > 0, sampling.height <= 800,
               sampling.width * sampling.height <= 1152 * 800,
-              [60,120].contains(sampling.fps), sampling.maximumFrames <= 180 else { throw Failure.scope }
+              [60,120].contains(sampling.fps), sampling.maximumFrames <= 180,
+              (60...300).contains(sampling.preRollMilliseconds) else { throw Failure.scope }
         let owner = NativeMotionRecorder(); owner.sampling = sampling
         let url = root.appendingPathComponent("evidence/\(label).mov")
         try await owner.start(window: CGWindowID(window.windowNumber), background: background.map { CGWindowID($0.windowNumber) }, expectedWidth: window.frame.width,
-                              expectedHeight: window.frame.height, includingChildWindows: includingChildWindows, output: url)
+                              expectedHeight: window.frame.height, includingChildWindows: includingChildWindows,
+                              fixedWindow: fixedWindow, output: url)
         do {
             try await owner.waitForFirstFrame()
             try await Task.sleep(for: .milliseconds(sampling.preRollMilliseconds))
@@ -107,274 +115,221 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
     }
     @MainActor static func validateScope(window: NSWindow, root: URL, label: String) throws {
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let downloadBatchCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-download-ui")
-            && ProcessInfo.processInfo.arguments.contains("--batch-flow")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "native-sftp-download-batch"
+        let arguments = Set(ProcessInfo.processInfo.arguments)
+        guard root.path == ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"],
+              root.path.hasPrefix(repo.appendingPathComponent(".build").path + "/"),
+              root.resolvingSymlinksInPath() == root,
+              GeneratedSignedReviewAdmission.ownedDirectory(root),
+              GeneratedSignedReviewAdmission.ownedDirectory(root.appendingPathComponent("evidence")),
+              !label.isEmpty, label.utf8.count <= 48,
+              label.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }),
+              window.isVisible, window.windowNumber > 0, window.title.contains("generated review") else {
+            throw Failure.scope
+        }
+        let parent = root.deletingLastPathComponent()
+        let isUUID = UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+        let development = isUUID && parent == repo.appendingPathComponent(".build/traverse-development")
+        let release = isUUID && parent == repo.appendingPathComponent(".build/traverse-release")
+        func fields(_ leaf: String) -> [String: Any]? {
+            GeneratedSignedReviewAdmission.generatedFixtureFields(root.appendingPathComponent(leaf))
+        }
+        let reservation = development || release ? fields("reservation.json") : nil
+        let reservedAction = reservation?["action"] as? String
+        func releaseRole(_ flag: String, _ action: String) -> Bool {
+            release && arguments.contains(flag) && reservedAction == action
+        }
+        let downloadBatchCase = arguments.contains("--check-sftp-download-ui")
+            && arguments.contains("--batch-flow")
+            && development
+            && reservedAction == "native-sftp-download-batch"
             && window.title == "SFTP Download · generated review"
-        let downloadCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-download-ui")
+        let downloadCase = arguments.contains("--check-sftp-download-ui")
             && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/b12-download-qualification")
-        let uploadCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-upload-ui")
+        let uploadCase = arguments.contains("--check-sftp-upload-ui")
             && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/b12-upload-integration")
-        let patchCase = ProcessInfo.processInfo.arguments.contains("--check-access-patch")
+        let patchCase = arguments.contains("--check-access-patch")
             && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-patch-0.1.1")
-        let accessCase = ProcessInfo.processInfo.arguments.contains("--check-onboarding-access")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-access-onboarding-qualification"
-        let commandCase = ProcessInfo.processInfo.arguments.contains("--check-command-finder")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-command-finder"
-        let profileCase = ProcessInfo.processInfo.arguments.contains("--check-profile-workspaces-ui")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-profile-workspaces-ui"
-        let queueCase = ProcessInfo.processInfo.arguments.contains("--check-queue-priority")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-queue-priority"
-        let searchCase = ProcessInfo.processInfo.arguments.contains("--check-search-progress")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-search-progress"
-        let largestCase = ProcessInfo.processInfo.arguments.contains("--check-largest-files-ui")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-largest-files-ui"
-        let archivePaneCase = ProcessInfo.processInfo.arguments.contains("--check-archive-pane-destination")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-archive-pane-destination"
-        let archiveSearchCase = ProcessInfo.processInfo.arguments.contains("--check-archive-search")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-archive-search"
-        let privateLabelsCase = ProcessInfo.processInfo.arguments.contains("--check-private-labels")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-private-labels"
-        let archiveDragCase = ProcessInfo.processInfo.arguments.contains("--check-archive-member-drag")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-archive-member-drag"
-        let archiveOrderCase = ProcessInfo.processInfo.arguments.contains("--check-archive-sorting")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-archive-sorting"
-        let browserTaskCase = ProcessInfo.processInfo.arguments.contains("--check-browser-tasks")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-browser-tasks"
-        let headerHoverCase = ProcessInfo.processInfo.arguments.contains("--check-header-hover")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf:root.appendingPathComponent("reservation.json")))
-                .flatMap {try? JSONSerialization.jsonObject(with:$0)as?[String:Any]})?["action"]as?String == "traverse-header-hover"
-        let propertiesStorageCase = ProcessInfo.processInfo.arguments.contains("--check-properties-storage")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf:root.appendingPathComponent("reservation.json")))
-                .flatMap {try? JSONSerialization.jsonObject(with:$0)as?[String:Any]})?["action"]as?String == "traverse-properties-storage"
-        let folderOpenerCase = ProcessInfo.processInfo.arguments.contains("--check-folder-opener")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf:root.appendingPathComponent("reservation.json")))
-                .flatMap {try? JSONSerialization.jsonObject(with:$0)as?[String:Any]})?["action"]as?String == "traverse-folder-opener"
-        let archiveBytesCase = ProcessInfo.processInfo.arguments.contains("--check-archive-byte-preview")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf:root.appendingPathComponent("reservation.json")))
-                .flatMap {try? JSONSerialization.jsonObject(with:$0)as?[String:Any]})?["action"]as?String == "traverse-archive-bytes-ui"
-        let helpCase = ProcessInfo.processInfo.arguments.contains("--check-help-diagnostics")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf:root.appendingPathComponent("reservation.json")))
-                .flatMap {try? JSONSerialization.jsonObject(with:$0)as?[String:Any]})?["action"]as?String == "traverse-native-help-diagnostics"
-        let testerCase = ProcessInfo.processInfo.arguments.contains("--check-tester-repairs")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-release")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String == "traverse-tester-repair-qualification"
-        let developmentCase = ProcessInfo.processInfo.arguments.contains("--check-development-motion")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-            && ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["packet"] as? String == "traverse-development-v1"
-        let folderAction = ((try? Data(contentsOf: root.appendingPathComponent("reservation.json")))
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["action"] as? String
-        let routedFolderCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-routed-upload")
-            && ProcessInfo.processInfo.arguments.contains("--folder-upload") && folderAction == "routed-folder-upload-native"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let captureTitleCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-folder-upload-preview")
-            && ProcessInfo.processInfo.arguments.contains("--profile-sheet") && ProcessInfo.processInfo.arguments.contains("--record-title")
-            && folderAction == "routed-folder-upload-review-profile"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let tarCase = ProcessInfo.processInfo.arguments.contains("--check-tar-archive") && folderAction == "plain-tar-native"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let zipRenameCase = ProcessInfo.processInfo.arguments.contains("--check-zip-rename-copy")
-            && folderAction == "native-zip-rename-copy" && label == "zip-copy-review"
+        let accessCase = releaseRole("--check-onboarding-access", "traverse-access-onboarding-qualification")
+        let commandCase = releaseRole("--check-command-finder", "traverse-command-finder")
+        let profileCase = releaseRole("--check-profile-workspaces-ui", "traverse-profile-workspaces-ui")
+        let queueCase = releaseRole("--check-queue-priority", "traverse-queue-priority")
+        let searchCase = releaseRole("--check-search-progress", "traverse-search-progress")
+        let largestCase = releaseRole("--check-largest-files-ui", "traverse-largest-files-ui")
+        let archivePaneCase = releaseRole("--check-archive-pane-destination", "traverse-archive-pane-destination")
+        let archiveSearchCase = releaseRole("--check-archive-search", "traverse-archive-search")
+        let privateLabelsCase = releaseRole("--check-private-labels", "traverse-private-labels")
+        let archiveDragCase = releaseRole("--check-archive-member-drag", "traverse-archive-member-drag")
+        let archiveOrderCase = releaseRole("--check-archive-sorting", "traverse-archive-sorting")
+        let browserTaskCase = releaseRole("--check-browser-tasks", "traverse-browser-tasks")
+        let headerHoverCase = releaseRole("--check-header-hover", "traverse-header-hover")
+        let propertiesStorageCase = releaseRole("--check-properties-storage", "traverse-properties-storage")
+        let folderOpenerCase = releaseRole("--check-folder-opener", "traverse-folder-opener")
+        let archiveBytesCase = releaseRole("--check-archive-byte-preview", "traverse-archive-bytes-ui")
+        let helpCase = releaseRole("--check-help-diagnostics", "traverse-native-help-diagnostics")
+        let testerCase = releaseRole("--check-tester-repairs", "traverse-tester-repair-qualification")
+        let developmentCase = arguments.contains("--check-development-motion")
+            && development
+            && reservation?["packet"] as? String == "traverse-development-v1"
+        let routedFolderCase = arguments.contains("--check-sftp-routed-upload")
+            && arguments.contains("--folder-upload") && reservedAction == "routed-folder-upload-native"
+            && development
+        let captureTitleCase = arguments.contains("--check-sftp-folder-upload-preview")
+            && arguments.contains("--profile-sheet") && arguments.contains("--record-title")
+            && reservedAction == "routed-folder-upload-review-profile"
+            && development
+        let tarCase = arguments.contains("--check-tar-archive") && reservedAction == "plain-tar-native"
+            && development
+        let zipRenameCase = arguments.contains("--check-zip-rename-copy")
+            && reservedAction == "native-zip-rename-copy" && label == "zip-copy-review"
             && ["ZIP rename · generated review", "ZIP removal · generated review", "ZIP Add · generated review", "ZIP new folder · generated review"].contains(window.title)
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let smbFolderCase = ProcessInfo.processInfo.arguments.contains("--check-smb-folder-download")
-            && folderAction == "smb-folder-download-native" && window.title == "SMB folders · generated review"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let smbGroupCase = ProcessInfo.processInfo.arguments.contains("--check-smb-selected-download")
-            && (folderAction == "smb-selected-download-group-native" && label == "smb-group-download"
-                || folderAction == "smb-selected-download-group-native-preflight" && label == "smb-group-preflight")
+            && development
+        let smbFolderCase = arguments.contains("--check-smb-folder-download")
+            && reservedAction == "smb-folder-download-native" && window.title == "SMB folders · generated review"
+            && development
+        let smbGroupCase = arguments.contains("--check-smb-selected-download")
+            && (reservedAction == "smb-selected-download-group-native" && label == "smb-group-download"
+                || reservedAction == "smb-selected-download-group-native-preflight" && label == "smb-group-preflight")
             && window.title == "SMB selected files · generated review"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let sftpActionCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-drop-upload")
-            && folderAction == "native-sftp-drop-upload"
+            && development
+        let sftpActionCase = arguments.contains("--check-sftp-drop-upload")
+            && reservedAction == "native-sftp-drop-upload"
             && (label == "sftp-action-history-clear" && window.title == "SFTP file actions · generated review"
                 || label == "sftp-connection-status" && window.title == "SFTP group upload · generated review")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let smbDestinationCase = ProcessInfo.processInfo.arguments.contains("--check-smb-selected-download")
-            && folderAction == "smb-selected-download-ordinary-native"
+            && development
+        let smbDestinationCase = arguments.contains("--check-smb-selected-download")
+            && reservedAction == "smb-selected-download-ordinary-native"
             && (window.title == "SMB Move · generated review" && label == "smb-move-destination"
                 || window.title == "SMB Copy · generated review" && label == "smb-copy-destination")
-        let remotePropertiesCase = (ProcessInfo.processInfo.arguments.contains("--check-remote-properties") && folderAction == "remote-item-properties"
-            || ProcessInfo.processInfo.arguments.contains("--check-directory-recovery") && folderAction == "native-directory-recovery"
-            || ProcessInfo.processInfo.arguments.contains("--check-smb-open-recovery") && folderAction == "smb-directory-recovery-native"
-            || ProcessInfo.processInfo.arguments.contains("--check-smb-selected-download") && folderAction == "smb-selected-download-live-native"
-            || ProcessInfo.processInfo.arguments.contains("--check-sftp-routed-upload") && ProcessInfo.processInfo.arguments.contains("--folder-upload") && folderAction == "routed-folder-upload-native"
-            || ProcessInfo.processInfo.arguments.contains("--check-connection-fields") && folderAction == "native-connection-fields"
-            || ProcessInfo.processInfo.arguments.contains("--check-drive-benchmark-native") && folderAction == "native-drive-benchmark"
+        let remotePropertiesCase = (arguments.contains("--check-remote-properties") && reservedAction == "remote-item-properties"
+            || arguments.contains("--check-directory-recovery") && reservedAction == "native-directory-recovery"
+            || arguments.contains("--check-smb-open-recovery") && reservedAction == "smb-directory-recovery-native"
+            || arguments.contains("--check-smb-selected-download") && reservedAction == "smb-selected-download-live-native"
+            || arguments.contains("--check-sftp-routed-upload") && arguments.contains("--folder-upload") && reservedAction == "routed-folder-upload-native"
+            || arguments.contains("--check-connection-fields") && reservedAction == "native-connection-fields"
+            || arguments.contains("--check-drive-benchmark-native") && reservedAction == "native-drive-benchmark"
                 && ["drive-benchmark-run", "drive-benchmark-suite-comparison", "drive-benchmark-suite-comparison-reduced",
-                    "drive-benchmark-suite-comparison-off", "drive-benchmark-comparison", "drive-benchmark-comparison-size"].contains(label)
+                    "drive-benchmark-suite-comparison-off", "drive-benchmark-comparison", "drive-benchmark-comparison-size",
+                    "drive-benchmark-size-only", "drive-benchmark-appearance-only", "drive-benchmark-layout-off"].contains(label)
             || tarCase || zipRenameCase || smbGroupCase || sftpActionCase || smbDestinationCase)
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString:root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let folderDownloadCase = (ProcessInfo.processInfo.arguments.contains("--check-sftp-folder-download") && folderAction == "sftp-native-folder-download"
-            || ProcessInfo.processInfo.arguments.contains("--check-sftp-folder-review") && folderAction == "sftp-folder-preview")
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let dataClassificationCase = ProcessInfo.processInfo.arguments.contains("--check-data-classification")
-            && folderAction == "data-classification-native"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let purposeJourneyCase = ProcessInfo.processInfo.arguments.contains("--check-purpose-journey")
-            && folderAction == "purpose-journey-native"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+            && development
+        let folderDownloadCase = (arguments.contains("--check-sftp-folder-download") && reservedAction == "sftp-native-folder-download"
+            || arguments.contains("--check-sftp-folder-review") && reservedAction == "sftp-folder-preview")
+            && development
+        let dataClassificationCase = arguments.contains("--check-data-classification")
+            && reservedAction == "data-classification-native"
+            && development
+        let purposeJourneyCase = arguments.contains("--check-purpose-journey")
+            && reservedAction == "purpose-journey-native"
+            && development
             && ["Properties · generated review · purpose journey", "Storage Analysis · generated review · purpose journey"].contains(window.title)
-        let folderUploadCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-folder-upload-preview")
-            && (folderAction == "folder-upload-preview" || captureTitleCase)
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let exclusiveUploadCase = ProcessInfo.processInfo.arguments.contains("--check-sftp-auth-transfer")
-            && ProcessInfo.processInfo.arguments.contains("--record-exclusive-upload") && ProcessInfo.processInfo.arguments.contains("--preview-only") && folderAction == "exclusive-upload-preview"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
-        let driveStatusCase = ProcessInfo.processInfo.arguments.contains("--check-drive-storage-status")
-            && folderAction == "native-drive-storage-status"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+        let folderUploadCase = arguments.contains("--check-sftp-folder-upload-preview")
+            && (reservedAction == "folder-upload-preview" || captureTitleCase)
+            && development
+        let exclusiveUploadCase = arguments.contains("--check-sftp-auth-transfer")
+            && arguments.contains("--record-exclusive-upload") && arguments.contains("--preview-only") && reservedAction == "exclusive-upload-preview"
+            && development
+        let driveStatusCase = arguments.contains("--check-drive-storage-status")
+            && reservedAction == "native-drive-storage-status"
+            && development
             && window.title == "Drive Details · generated review · storage status"
-        let inlineArchiveCase = ProcessInfo.processInfo.arguments.contains("--check-inline-archive-motion")
-            && folderAction == "inline-archive-native"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+        let chartIntegrationCase = development && reservedAction == "native-storage-chart-integration"
+            && arguments.contains("--check-chart-integration") && arguments.contains("--record-chart-integration")
+            && window.title == "Storage Analysis · generated review · chart navigation"
+            && ["analyzer-folders", "analyzer-drill", "analyzer-back"].contains(label)
+        let inlineArchiveCase = arguments.contains("--check-inline-archive-motion")
+            && reservedAction == "inline-archive-native"
+            && development
             && window.title == "Archives · generated review · motion audit"
-            && ((try? Data(contentsOf: root.appendingPathComponent("inline-admission.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["phase"] as? String == "motion"
-        let tarPreviewCase = ProcessInfo.processInfo.arguments.contains("--check-tar-preview-native")
-            && folderAction == "tar-preview-native"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+            && fields("inline-admission.json")?["phase"] as? String == "motion"
+        let tarPreviewCase = arguments.contains("--check-tar-preview-native")
+            && reservedAction == "tar-preview-native"
+            && development
             && window.title == "TAR preview · generated review · motion audit"
-        let selectionGroupCase = ProcessInfo.processInfo.arguments.contains("--check-selection-group-native")
-            && folderAction == "selection-group-native"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+        let renameMotion = development && arguments.contains("rename-motion")
+            && fields("selection-group-admission-rename-motion.json")?["phase"] as? String == "rename-motion"
+            && ["details", "list", "icons"].contains { mode in
+                label == "selection-group-new-folder-\(mode)" || label == "selection-group-new-folder-return-\(mode)"
+            }
+        let selectionGroupCase = arguments.contains("--check-selection-group-native")
+            && reservedAction == "selection-group-native"
+            && development
             && window.title == "Grouping · generated review · motion audit"
-            && ["selection-group-draft", "selection-group-results", "selection-group-new-folder",
-                "selection-group-new-folder-return"].contains(label)
-        let settingsSidebarCase = ProcessInfo.processInfo.arguments.contains("--check-settings-sidebar")
-            && folderAction == "settings-sidebar-v1"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+            && (renameMotion || ["selection-group-draft", "selection-group-results", "selection-group-new-folder",
+                "selection-group-new-folder-return"].contains(label))
+        let settingsSidebarCase = arguments.contains("--check-settings-sidebar")
+            && reservedAction == "settings-sidebar-v1"
+            && development
             && window.title == "Settings · generated review · sidebar motion"
             && ["settings-keyboard", "settings-appearance"].contains(label)
-            && ((try? Data(contentsOf: root.appendingPathComponent("settings-admission.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["master"] as? String == "46F68181-FA2B-4308-8713-7D518F2FF08C"
-        let recordedAnalysisCase = ProcessInfo.processInfo.arguments.contains("--check-analysis-persistence")
-            && ProcessInfo.processInfo.arguments.contains("--record-analysis-persistence")
-            && folderAction == "native-analysis-persistence"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+            && fields("settings-admission.json")?["master"] as? String == "46F68181-FA2B-4308-8713-7D518F2FF08C"
+        let recordedAnalysisCase = arguments.contains("--check-analysis-persistence")
+            && arguments.contains("--record-analysis-persistence")
+            && reservedAction == "native-analysis-persistence"
+            && development
             && window.title == "Storage Analysis · generated review · retained analysis"
             && label == "analysis-refresh"
-        let editorComparisonCase = ProcessInfo.processInfo.arguments.contains("--verify-ui")
-            && ProcessInfo.processInfo.arguments.contains("--check-editor-preferences")
-            && folderAction == "native-editor-preferences"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+        let editorComparisonCase = arguments.contains("--verify-ui")
+            && arguments.contains("--check-editor-preferences")
+            && reservedAction == "native-editor-preferences"
+            && development
             && ((window.title == "Compare Changes · generated review"
                  && ["editor-comparison-stack", "editor-comparison-pair"].contains(label))
+                || (window.title == "Unified Diff · generated review" && label == "editor-unified-context"
+                    && reservation?["editorComparisonOnly"] as? Bool == true)
                 || (window.title == "Find in Open Editors · generated review" && label == "editor-open-search-entrance"))
-        let helpMotionCase = ProcessInfo.processInfo.arguments.contains("--check-help-motion")
-            && folderAction == "help-form-motion-v1"
-            && root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development")
-            && UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent
+        let helpMotionCase = arguments.contains("--check-help-motion")
+            && reservedAction == "help-form-motion-v1"
+            && development
             && window.title == "Help · generated review · private field motion"
             && ["help-invitation", "help-support", "help-public-updates"].contains(label)
-            && ((try? Data(contentsOf: root.appendingPathComponent("help-motion-admission.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["master"] as? String == "46F68181-FA2B-4308-8713-7D518F2FF08C"
+            && fields("help-motion-admission.json")?["master"] as? String == "46F68181-FA2B-4308-8713-7D518F2FF08C"
         let folderDefaultCase: Bool = {
-            guard ProcessInfo.processInfo.arguments.contains("--verify-ui"),
-                  ProcessInfo.processInfo.arguments.contains("--check-folder-default-composition"),
+            guard arguments.contains("--verify-ui"),
+                  arguments.contains("--check-folder-default-composition"),
                   Bundle.main.bundleIdentifier == "local.macexplorer.development",
-                  folderAction == "folder-default-app-composition",
-                  root.deletingLastPathComponent() == repo.appendingPathComponent(".build/traverse-development"),
-                  UUID(uuidString: root.lastPathComponent)?.uuidString == root.lastPathComponent,
+                  reservedAction == "folder-default-app-composition",
+                  development,
                   window.title == "Settings · generated review · folder default",
                   window.frame.width == 860, window.frame.height == 692,
                   ["default-owned-100-solid", "default-owned-100-glass", "default-owned-150-solid", "default-owned-150-glass"].contains(label)
             else { return false }
-            let admission = ((try? Data(contentsOf: root.appendingPathComponent("folder-default-composition-admission.json")))
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+            let admission = fields("folder-default-composition-admission.json")
             return admission?["master"] as? String == "46F68181-FA2B-4308-8713-7D518F2FF08C"
                 && admission?["fakeBackendOnly"] as? Bool == true
                 && admission?["liveHandlerQueries"] as? Int == 0
                 && admission?["liveAssociationSetters"] as? Int == 0
                 && admission?["captureProfile"] as? String == "folder-default-static-dark-v1"
         }()
-        guard ["--check-access-patch", "--check-smb-connect-standalone", "--check-smb-browser-ui", "--check-motion-modes", "--check-sftp-trust-standalone", "--check-sftp-live-standalone", "--check-sftp-download-ui"].contains(where: ProcessInfo.processInfo.arguments.contains) || uploadCase || accessCase || commandCase || profileCase || queueCase || searchCase || largestCase || archivePaneCase || archiveSearchCase || privateLabelsCase || archiveDragCase || archiveOrderCase || browserTaskCase || headerHoverCase || propertiesStorageCase || folderOpenerCase || archiveBytesCase || helpCase || testerCase || developmentCase || folderDownloadCase || dataClassificationCase || purposeJourneyCase || exclusiveUploadCase || folderUploadCase || remotePropertiesCase || smbFolderCase || driveStatusCase || inlineArchiveCase || tarCase || tarPreviewCase || selectionGroupCase || settingsSidebarCase || helpMotionCase || folderDefaultCase || recordedAnalysisCase || editorComparisonCase,
-              root.path == ProcessInfo.processInfo.environment["MAC_EXPLORER_TEST_ROOT"],
-              root.path.hasPrefix(repo.appendingPathComponent(".build/").path + "/"), root.resolvingSymlinksInPath() == root,
-              !label.isEmpty, label.utf8.count <= 48, label.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }),
-              window.isVisible, window.windowNumber > 0, window.title.contains("generated review"),
-              window.frame.width <= (downloadBatchCase ? 1280 : folderDownloadCase || routedFolderCase || captureTitleCase || tarCase || smbFolderCase ? 1280 : browserTaskCase || developmentCase || dataClassificationCase || purposeJourneyCase || exclusiveUploadCase || folderUploadCase || remotePropertiesCase || inlineArchiveCase || tarPreviewCase || selectionGroupCase || settingsSidebarCase || helpMotionCase || editorComparisonCase ? 1152 : downloadCase ? 1024 : 960), window.frame.height <= (downloadBatchCase ? 800 : folderDefaultCase ? 692 : browserTaskCase || developmentCase || folderDownloadCase || dataClassificationCase || purposeJourneyCase || exclusiveUploadCase || folderUploadCase || remotePropertiesCase || smbFolderCase || driveStatusCase || inlineArchiveCase || tarPreviewCase || selectionGroupCase || settingsSidebarCase || helpMotionCase || recordedAnalysisCase || tarCase || editorComparisonCase ? 800 : patchCase || accessCase || helpCase ? 700 : 640) else { throw Failure.scope }
+        let legacyFlags = ["--check-access-patch", "--check-smb-connect-standalone", "--check-smb-browser-ui",
+                           "--check-motion-modes", "--check-sftp-trust-standalone", "--check-sftp-live-standalone",
+                           "--check-sftp-download-ui"]
+        let tallerTool = browserTaskCase || developmentCase || dataClassificationCase || purposeJourneyCase
+            || exclusiveUploadCase || folderUploadCase || remotePropertiesCase || inlineArchiveCase
+            || tarPreviewCase || selectionGroupCase || settingsSidebarCase || helpMotionCase || editorComparisonCase || chartIntegrationCase
+        guard legacyFlags.contains(where: arguments.contains) || tallerTool || uploadCase || accessCase
+            || commandCase || profileCase || queueCase || searchCase || largestCase || archivePaneCase
+            || archiveSearchCase || privateLabelsCase || archiveDragCase || archiveOrderCase || headerHoverCase
+            || propertiesStorageCase || folderOpenerCase || archiveBytesCase || helpCase || testerCase
+            || folderDownloadCase || smbFolderCase || driveStatusCase || tarCase || folderDefaultCase
+            || recordedAnalysisCase else { throw Failure.scope }
+
+        let extendedWidth = downloadBatchCase || folderDownloadCase || routedFolderCase || captureTitleCase
+            || tarCase || smbFolderCase
+        let extendedHeight = tallerTool || folderDownloadCase || smbFolderCase || driveStatusCase
+            || recordedAnalysisCase || tarCase
+        let maximumWidth: CGFloat = extendedWidth ? 1280 : tallerTool ? 1152 : downloadCase ? 1024 : 960
+        let maximumHeight: CGFloat = downloadBatchCase ? 800 : folderDefaultCase ? 692
+            : extendedHeight ? 800 : patchCase || accessCase || helpCase ? 700 : 640
+        guard window.frame.width <= maximumWidth, window.frame.height <= maximumHeight else { throw Failure.scope }
     }
 
     private func start(window id: CGWindowID, background: CGWindowID?, expectedWidth: Double, expectedHeight: Double,
-                       includingChildWindows: Bool, output: URL) async throws {
+                       includingChildWindows: Bool, fixedWindow: Bool, output: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
                 observeStart(window: id, background: background, expectedWidth: expectedWidth, expectedHeight: expectedHeight,
-                    includingChildWindows: includingChildWindows, output: output, attempt: 1, continuation: continuation)
+                    includingChildWindows: includingChildWindows, fixedWindow: fixedWindow, output: output,
+                    attempt: 1, continuation: continuation)
             }
         }
     }
@@ -382,7 +337,8 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
     // Retry only that exact ID/geometry, on this queue, at most fifty times;
     // errors remain terminal. Never enumerate another app or capture a whole display.
     private func observeStart(window id: CGWindowID, background: CGWindowID?, expectedWidth: Double, expectedHeight: Double,
-                              includingChildWindows: Bool, output: URL, attempt: Int, continuation: CheckedContinuation<Void, Error>) {
+                              includingChildWindows: Bool, fixedWindow: Bool, output: URL, attempt: Int,
+                              continuation: CheckedContinuation<Void, Error>) {
         SCShareableContent.getCurrentProcessShareableContent { [self] content, error in
             let observation = ContentObservation(content: content)
             queue.async { [self] in
@@ -400,13 +356,18 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                 if error == nil, (!geometryReady || ownWindow == nil || !backgroundReady), attempt < 51 {
                     queue.asyncAfter(deadline: .now() + .milliseconds(20)) { [self] in
                         observeStart(window: id, background: background, expectedWidth: expectedWidth, expectedHeight: expectedHeight,
-                            includingChildWindows: includingChildWindows, output: output, attempt: attempt + 1, continuation: continuation)
+                            includingChildWindows: includingChildWindows, fixedWindow: fixedWindow, output: output,
+                            attempt: attempt + 1, continuation: continuation)
                     }
                     return
                 }
+                func coordinates(_ rect: CGRect) -> [Double] { [rect.minX, rect.minY, rect.width, rect.height] }
                 let readiness: [String:Any] = ["lookups": attempt,"exactWindowPresent": ownWindow != nil,"geometryMatches": geometryReady,
                     "ownerMatches": ownWindow?.owningApplication?.processID == getpid(),
                     "backgroundRequested": background != nil, "backgroundReady": backgroundReady,
+                    "windowOnScreen": ownWindow?.isOnScreen == true,
+                    "windowFrame": ownWindow.map { coordinates($0.frame) } ?? [],
+                    "displayFrames": observation.content?.displays.map { coordinates($0.frame) } ?? [],
                     "nativeErrorCode": error.map { ($0 as NSError).code as Any } ?? NSNull()]
                 do { try JSONSerialization.data(withJSONObject: readiness,options: [.prettyPrinted,.sortedKeys])
                     .write(to: output.deletingPathExtension().appendingPathExtension("window-ready.json"),options: .withoutOverwriting) }
@@ -427,7 +388,7 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                     filter.includeMenuBar = false
                     crop = window.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
                     sourceDescription = "ScreenCaptureKit.currentProcess/two-window-closing-crop"
-                } else if !includingChildWindows {
+                } else if !includingChildWindows && !fixedWindow {
                     guard let display = observation.content?.displays.first(where: { $0.frame.contains(window.frame) }) else {
                         throw Failure.scope
                     }
@@ -438,7 +399,11 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                     filter.includeMenuBar = false
                     crop = window.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
                     sourceDescription = "ScreenCaptureKit.currentProcess/single-window-fixed-crop"
-                } else { filter = SCContentFilter(desktopIndependentWindow: window); crop = nil }
+                } else {
+                    filter = SCContentFilter(desktopIndependentWindow: window)
+                    crop = nil
+                    if fixedWindow { sourceDescription = "ScreenCaptureKit.currentProcess/fixed-window" }
+                }
                 captureGeometry = ["appKitWidth": expectedWidth, "appKitHeight": expectedHeight,
                     "shareableWidth": window.frame.width, "shareableHeight": window.frame.height,
                     "filterWidth": filter.contentRect.width, "filterHeight": filter.contentRect.height,
@@ -470,7 +435,8 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
                 configuration.capturesAudio = false; configuration.captureMicrophone = false
                 configuration.scalesToFit = false; configuration.preservesAspectRatio = true
                 configuration.captureResolution = .nominal; configuration.ignoreShadowsSingleWindow = true
-                if !includingChildWindows { configuration.includeChildWindows = false }
+                if !includingChildWindows || fixedWindow { configuration.includeChildWindows = false }
+                if fixedWindow { configuration.ignoreGlobalClipSingleWindow = true }
                 if let crop { configuration.sourceRect = crop; configuration.ignoreShadowsDisplay = true }
                 configuration.backgroundColor = recordingBackground
                 let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
