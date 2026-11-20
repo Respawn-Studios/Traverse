@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pull-request-checks-${{ github.event_name }}-${{ github.ref }}
+  group: pull-request-checks-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -37,7 +37,7 @@ jobs:
           - name: Intel
             runner: macos-26-intel
             arch: x86_64
-            developer-dir: /Applications/Xcode_26.6.app/Contents/Developer
+            developer-dir: /Applications/Xcode_26.5.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -53,6 +53,7 @@ jobs:
           test "$(uname -m)" = "$TRAVERSE_CI_ARCH"
           sw_vers
           xcodebuild -version
+          xcrun swiftc --version
       - name: Install pinned Rust and fetch worker dependencies
         run: python3 -B tools/worker_setup.py --install-toolchain --fetch
       - name: Compile the unsigned app
@@ -72,6 +73,7 @@ jobs:
             fi
           done
           df -h .
-          /usr/bin/grep -E -i 'out of memory|no space left|stack dump|terminated|killed|signal [0-9]+|failed with a nonzero exit code' .build/logs/build-*.log | tail -n 24 || true
+          /usr/bin/grep -E -i 'out of memory|no space left|terminated|killed|signal [0-9]+|failed with a nonzero exit code' .build/logs/build-*.log | tail -n 24 | cut -c1-1200 || true
+          /usr/bin/grep -m 1 -B 4 -A 28 '^Stack dump:' .build/logs/build-*.log | cut -c1-1400 || true
       - name: Run ExplorerKit tests
         run: python3 -B tools/dev.py test --serial
