@@ -196,7 +196,7 @@ internal enum DriveHealthXPCClient {
                 // actually been validated here. A send barrier at the service
                 // cannot prove receipt or keep live-peer validation possible.
                 let acknowledgement = xpc_dictionary_create(nil, nil, 0)
-                guard DriveHealthXPCClient.setBytes(nonce, on: acknowledgement, key: "ack") else {
+                guard DriveHealthXPCClient.setBytes(Data(nonce), on: acknowledgement, key: "ack") else {
                     finish(replyState.fail()); return
                 }
                 guard let connection else { finish(replyState.fail(.connectionEnded)); return }
