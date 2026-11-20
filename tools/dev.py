@@ -327,6 +327,9 @@ def test(filter_expression: str | None, configuration: str = "debug", *, serial:
         "--disable-keychain", "--disable-netrc", "--disable-dependency-cache",
         "--manifest-cache", "local", "--disable-automatic-resolution", "--jobs", "4",
         "--disable-index-store",
+        # Intel's linker can leave test executables unsigned. Foundation needs
+        # a process signature to create the scoped bookmarks these tests use.
+        "-Xlinker", "-adhoc_codesign",
         "-Xswiftc", "-warnings-as-errors",
         "-Xswiftc", "-module-cache-path", "-Xswiftc", str(local_directory("compiler-cache/swift")),
         "--xunit-output", str(results),
