@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible problem in Traverse.
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the result and include the exact error message if it is safe to share.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Start with the location you opened and the command you used. Small generated examples are welcome.
+      placeholder: |
+        1. Open ...
+        2. Choose ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result and impact
+      description: Tell us what you expected and whether the operation refused, completed, or left work needing review.
+  - type: input
+    id: traverse-version
+    attributes:
+      label: Traverse version and build
+      description: Find these under Traverse → About Traverse.
+      placeholder: "0.3.0 (99)"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: macOS version and architecture
+      description: Find these in Apple menu → About This Mac.
+      placeholder: "macOS 15.7, Apple Silicon"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature area
+      multiple: true
+      options:
+        - Browser, tabs or panes
+        - Copy, move, Trash or recovery
+        - Archives
+        - Editor or Git
+        - Drives or Analyzer
+        - Remote connections
+        - Installation or updates
+        - Accessibility or appearance
+        - Other or unsure
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reviewed report, screenshot or example
+      description: >-
+        Optional. Help → Crash Reports & Feedback can prepare a report for review.
+        Remove private paths, server or account details, keys and document contents
+        before pasting or attaching anything. Attachments upload when added.

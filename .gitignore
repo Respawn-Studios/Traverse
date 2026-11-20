@@ -4,7 +4,7 @@
 .LSOverride
 ._*
 
-# Stable checkout-local outputs; source now lives in App/, Packages/ and tools/.
+# Build products and tool caches
 .build/
 build/
 Build/
@@ -30,8 +30,7 @@ artifacts/
 *.xcresult/
 *.dmg
 *.ipa
-# Editor/patch backups are not source or distributable resources. Keep any
-# deliberately retained backup under .build/retained-evidence/ instead.
+# Editor backups and rejected patches
 *.orig
 *.rej
 *.bak
@@ -54,13 +53,23 @@ xcuserdata/
 .idea/
 .vscode/
 
-# Local agent instructions, chat state, and private working notes
+# Local assistant configuration, instructions, sessions and working notes
 .local/
-.codex*
 .agents/
+.codex*
+.claude/
+.cursor/
+.windsurf/
+.gemini/
+.aider*
+.continue/
+.opencode/
+.roo/
 /skills-lock.json
 AGENTS.md
 CODEX.md
+CLAUDE.md
+GEMINI.md
 *.local
 *.local.*
 

@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/Respawn-Studios/Traverse/discussions
+    about: Ask a how-to question, share a workflow or talk through an idea.
   - name: Respawn Studios community
     url: https://discord.gg/UdKp2uQBQy
     about: Ask a usage question or discuss an idea with the community.

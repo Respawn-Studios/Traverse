@@ -7,10 +7,10 @@ package. Apple's [Xcode release notes](https://developer.apple.com/documentation
 cover Xcode's host requirements.
 
 GitHub's [pull request checks](https://github.com/Respawn-Studios/Traverse/actions/workflows/pull-request.yml)
-run the ExplorerKit suites natively on Apple Silicon and Intel. They build the
-unsigned app for each architecture using the reference Apple Silicon toolchain.
-App interaction, the minimum macOS version, and the installed updater have
-their own release checks.
+run the ExplorerKit suites natively on Apple Silicon and Intel, including
+separate macOS 15 jobs on both architectures. They build the unsigned app for
+each architecture using the reference Apple Silicon toolchain. App interaction
+on macOS 15 and the installed updater have their own release checks.
 
 Run the commands below from the repository root. Build products, dependency
 caches and development state stay under `.build/`; no global Rust installation

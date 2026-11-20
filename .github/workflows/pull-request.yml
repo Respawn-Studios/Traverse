@@ -41,6 +41,18 @@ jobs:
             host-arch: x86_64
             test-packages: true
             developer-dir: /Applications/Xcode_26.6.app/Contents/Developer
+          - name: Apple Silicon package tests on macOS 15
+            runner: macos-15
+            host-arch: arm64
+            os-major: '15'
+            test-packages: true
+            developer-dir: /Applications/Xcode_26.3.app/Contents/Developer
+          - name: Intel package tests on macOS 15
+            runner: macos-15-intel
+            host-arch: x86_64
+            os-major: '15'
+            test-packages: true
+            developer-dir: /Applications/Xcode_26.3.app/Contents/Developer
           - name: Intel app cross-build
             runner: xcode-27
             host-arch: arm64
@@ -51,6 +63,7 @@ jobs:
     env:
       DEVELOPER_DIR: ${{ matrix.developer-dir }}
       TRAVERSE_CI_HOST: ${{ matrix.host-arch }}
+      TRAVERSE_CI_OS_MAJOR: ${{ matrix.os-major }}
       TRAVERSE_CI_TARGET: ${{ matrix.build-arch }}
     steps:
       - name: Check out the proposed merge
@@ -60,6 +73,10 @@ jobs:
       - name: Check the toolchain
         run: |
           test "$(uname -m)" = "$TRAVERSE_CI_HOST"
+          if [ -n "$TRAVERSE_CI_OS_MAJOR" ]; then
+            version="$(sw_vers -productVersion)"
+            test "${version%%.*}" = "$TRAVERSE_CI_OS_MAJOR"
+          fi
           sw_vers
           xcodebuild -version
           xcrun swiftc --version

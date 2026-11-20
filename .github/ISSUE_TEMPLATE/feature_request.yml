@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a way to make a file workflow easier.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Problem or motivation
+      description: What are you trying to do, and where does your current workflow get in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Walk through how you would like it to work. Existing workarounds and alternatives are welcome.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature area
+      multiple: true
+      options:
+        - Browser, tabs or panes
+        - Files, copy, move or recovery
+        - Archives
+        - Editor or Git
+        - Drives or Analyzer
+        - Remote connections or cloud storage
+        - Accessibility or appearance
+        - Other or unsure
+  - type: textarea
+    id: references
+    attributes:
+      label: Mockups or references
+      description: Optional. Link a related issue, sketch, or example from another app. Please remove any private information first.
