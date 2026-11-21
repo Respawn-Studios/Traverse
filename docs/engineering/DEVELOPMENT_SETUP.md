@@ -90,6 +90,24 @@ sources and checked-in `MacExplorer` scheme. A complete source-release bundle
 must supply the matching dependencies needed for that setup; a minimal private
 build snapshot is not a substitute for corresponding source.
 
+### Build from the release source kit
+
+For a build using the release's bundled worker sources, extract
+`Traverse-project-source.tar.gz` and `WorkerDependencies.tar.gz` from the
+source kit into a fresh directory. Enter the extracted project and place
+the two Cargo home directories inside its new `.build/` tree.
+
+| Directory from `WorkerDependencies.tar.gz` | Destination inside the project |
+| --- | --- |
+| `CargoCaches/smb` | `.build/b10-network-tooling/cargo-home` |
+| `CargoCaches/sftp` | `.build/ssh-profile-tooling/cargo-home` |
+
+Install or reuse the pinned Rust compiler and target library described above.
+Run `python3 -B tools/worker_setup.py` without `--fetch` to verify the bundled
+worker sources and notices. Then run `python3 -B tools/dev.py build`. For an
+Intel cross-build, pass `--arch x86_64` to both commands. An ordinary development
+build can be made without a Git checkout or Developer ID signing credentials.
+
 ## Build the Intel app from Apple Silicon
 
 ```sh
