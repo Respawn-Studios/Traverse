@@ -5,6 +5,11 @@ import FileOperations
 
 @MainActor
 final class EditorCodeTextView: NSTextView {
+    struct InlineName: Equatable {
+        let suffix: String
+        let offset: Int
+    }
+
     var comparisonHighlights: [NSRange] = [] { didSet { needsDisplay = true } }
     var comparisonDetails: [NSRange] = [] { didSet { needsDisplay = true } }
     var comparisonAccent: EditorComparisonBackground.Accent? { didSet { needsDisplay = true } }
@@ -14,6 +19,11 @@ final class EditorCodeTextView: NSTextView {
     var bracketHighlights: [NSRange] = [] { didSet { if oldValue != bracketHighlights { needsDisplay = true } } }
     var diagnosticRanges: [NSRange] = [] { didSet { if oldValue != diagnosticRanges { needsDisplay = true } } }
     var foldedOpenings: [NSRange] = [] { didSet { if oldValue != foldedOpenings { needsDisplay = true } } }
+    var showsInlineNames = false
+    var inlineName: InlineName? { didSet { if oldValue != inlineName { needsDisplay = true } } }
+    var onTypedNameKey: (() -> Void)?
+    var onAcceptInlineName: (() -> Bool)?
+    var onDismissInlineName: (() -> Bool)?
     #if DEBUG
     private(set) var findBackgroundDrawsForVerification = 0
     #endif
@@ -38,6 +48,45 @@ final class EditorCodeTextView: NSTextView {
         drawDiagnostics(in: rect)
         EditorCodeFolding.drawOpenings(foldedOpenings, text: self, dirtyRect: rect)
         EditorWhitespaceMarks.draw(in: self, dirtyRect: rect)
+        if let (suffix, frame, attributes) = inlineNameLayout(), frame.intersects(rect) {
+            (suffix as NSString).draw(at: frame.origin, withAttributes: attributes)
+        }
+    }
+
+    var hasVisibleInlineName: Bool { inlineNameLayout() != nil }
+
+    private func inlineNameLayout() -> (String, NSRect, [NSAttributedString.Key: Any])? {
+        guard let hint = inlineName, let font, let window, window.isKeyWindow, window.attachedSheet == nil,
+              window.firstResponder === self,
+              selectedRanges.count == 1, selectedRange() == NSRange(location: hint.offset, length: 0),
+              !hasMarkedText(), isEditable else { return nil }
+        var actual = NSRange()
+        let screen = firstRect(forCharacterRange: selectedRange(), actualRange: &actual)
+        guard actual == selectedRange(), screen.height > 0 else { return nil }
+        let caret = convert(window.convertFromScreen(screen), from: nil)
+        let color: NSColor = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? .labelColor : .secondaryLabelColor
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        let size = (hint.suffix as NSString).size(withAttributes: attributes)
+        let frame = NSRect(x: caret.minX, y: caret.minY + (caret.height - size.height) / 2,
+                           width: size.width, height: size.height)
+        guard visibleRect.insetBy(dx: textContainer?.lineFragmentPadding ?? 0, dy: 0).contains(frame) else { return nil }
+        return (hint.suffix, frame, attributes)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, onDismissInlineName?() == true { return }
+        guard showsInlineNames, isEditable, !hasMarkedText(), selectedRanges.count == 1,
+              event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+              let typed = event.characters, typed.utf16.count == 1, let scalar = typed.unicodeScalars.first,
+              scalar.isASCII, EditorDocumentOutline.isIdentifierContinuation(scalar, language: indentationLanguage) else {
+            super.keyDown(with: event); return
+        }
+        let initial = selectedRange(), mutation = textMutationCount
+        super.keyDown(with: event)
+        if initial.length == 0, textMutationCount == mutation &+ 1, !hasMarkedText(),
+           selectedRange() == NSRange(location: initial.location + 1, length: 0) {
+            onTypedNameKey?()
+        }
     }
 
     private func drawDiagnostics(in rect: NSRect) {
@@ -251,7 +300,10 @@ final class EditorCodeTextView: NSTextView {
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
         if hasMarkedText() { onMarkedText?() } else { onInputSettled?() }
     }
-    override func insertTab(_ sender: Any?) { if !performIndentation(.indent) { super.insertTab(sender) } }
+    override func insertTab(_ sender: Any?) {
+        guard onAcceptInlineName?() != true else { return }
+        if !performIndentation(.indent) { super.insertTab(sender) }
+    }
     override func insertBacktab(_ sender: Any?) { if !performIndentation(.outdent) { super.insertBacktab(sender) } }
     override func insertNewline(_ sender: Any?) { if !performIndentation(.newline) { super.insertNewline(sender) } }
     override func deleteBackward(_ sender: Any?) {
@@ -367,6 +419,8 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     private var showsScrollContext = true
     private var installing = false
     private var lastEditOffset: Int?
+    private var pendingInlineName: (generation: UUID, caret: NSRange)?
+    private var offeredInlineName: (entry: EditorDocumentOutline.Entry, request: NameCompletion)?
     private var lineBookmarks = EditorLineBookmarks()
     private var gutter: EditorLineRuler!
     private var syntaxTokens: [TextSyntaxToken] = []
@@ -477,9 +531,16 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         textView.onFindAction = { [weak self] action in self?.find.perform(action) }
         textView.onMarkedText = { [weak self] in
             self?.lineCommands.inputDidChange(); self?.find.documentDidChange()
+            self?.dismissInlineName()
             self?.updateBracketHighlights()
         }
-        textView.onInputFocusLost = { [weak self] in self?.lineCommands.inputDidChange(preservingExpansion: true) }
+        textView.onInputFocusLost = { [weak self] in
+            self?.lineCommands.inputDidChange(preservingExpansion: true)
+            self?.dismissInlineName()
+        }
+        textView.onTypedNameKey = { [weak self] in self?.requestInlineName() }
+        textView.onAcceptInlineName = { [weak self] in self?.acceptInlineName() == true }
+        textView.onDismissInlineName = { [weak self] in self?.dismissInlineName() == true }
         applyPendingPresentation()
     }
     required init?(coder: NSCoder) { nil }
@@ -488,6 +549,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     /// syntax delivery: it intentionally replaces the native Undo stack.
     func install(_ value: TextDocumentValue) {
         textView.clearBracketPairs()
+        dismissInlineName()
         lineCommands.inputDidChange()
         installing = true
         defer { installing = false; tabPresentationPending = true; applyPendingPresentation() }
@@ -517,6 +579,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     func textDidChange(_ notification: Notification) {
         guard !installing else { return }
         textView.nativeTextDidChange()
+        dismissInlineName()
         lineCommands.inputDidChange()
         let historyChange = textView.undoManager.map { $0.isUndoing || $0.isRedoing } ?? false
         generation = UUID(); presentedGeneration = nil; lineIndex = nil
@@ -547,6 +610,8 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        if let expected = pendingInlineName?.caret ?? textView.inlineName.map({ NSRange(location: $0.offset, length: 0) }),
+           textView.selectedRanges.count != 1 || textView.selectedRange() != expected { dismissInlineName() }
         if textView.selectedRanges.count == 1 { revealFoldedText(textView.selectedRange(), explicitly: false) }
         textView.nativeSelectionDidChange()
         lineCommands.selectionDidChange(); find.selectionDidChange(); publishCaret()
@@ -582,6 +647,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         updateGutterWidth()
         gutter.needsDisplay = true
         updateBracketHighlights()
+        prepareInlineName()
         onOutlineChanged?()
         contextLine = nil
         refreshScrollContext()
@@ -723,6 +789,8 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         textView.indentsCodeBlocks = value.indentsCodeBlocks
         textView.completesJSONBrackets = value.completesJSONBrackets
         textView.completesCodeBrackets = value.completesCodeBrackets
+        textView.showsInlineNames = value.showsInlineNames
+        if !value.showsInlineNames { dismissInlineName() }
         textView.backspaceUnindents = value.backspaceUnindents
         setSyntaxPalette(value.palette)
         textView.findHighlightColor = value.findHighlightColor.nativeColor
@@ -949,6 +1017,40 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         return true
     }
 
+    private func requestInlineName() {
+        pendingInlineName = (generation, textView.selectedRange())
+        if presentedGeneration == generation { prepareInlineName() }
+    }
+
+    private func prepareInlineName() {
+        guard let pending = pendingInlineName else { return }
+        pendingInlineName = nil
+        guard textView.showsInlineNames, pending.generation == generation, pending.caret == textView.selectedRange(),
+              window?.isKeyWindow == true, window?.attachedSheet == nil, window?.firstResponder === textView,
+              let request = nameCompletion(), request.prefix.utf16.count >= 3, request.entries.count == 1,
+              let entry = request.entries.first, entry.title.utf8.allSatisfy({ $0 < 128 }),
+              let storage = textView.textStorage, (0...storage.length).contains(pending.caret.location),
+              pending.caret.location == storage.length
+                || storage.mutableString.character(at: pending.caret.location) == 10 else { return }
+        offeredInlineName = (entry, request)
+        textView.inlineName = .init(suffix: String(entry.title.dropFirst(request.prefix.count)), offset: pending.caret.location)
+    }
+
+    @discardableResult func dismissInlineName() -> Bool {
+        let active = pendingInlineName != nil || offeredInlineName != nil
+        pendingInlineName = nil; offeredInlineName = nil; textView.inlineName = nil
+        return active
+    }
+
+    private func acceptInlineName() -> Bool {
+        let visible = textView.hasVisibleInlineName
+        let suggestion = offeredInlineName
+        dismissInlineName()
+        guard visible, let suggestion, generation == suggestion.request.generation else { return false }
+        _ = completeLocalName(suggestion.entry, with: suggestion.request)
+        return true
+    }
+
     private func isCode(_ range: NSRange) -> Bool {
         var index = firstSyntaxToken(endingAfter: range.location)
         while index < syntaxTokens.count, syntaxTokens[index].range.location < NSMaxRange(range) {
@@ -1009,6 +1111,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
 
     func setEditingLanguage(_ language: TextSyntaxLanguage) {
         guard textView.indentationLanguage != language else { return }
+        dismissInlineName()
         lineCommands.inputDidChange()
         textView.indentationLanguage = language
         checkedJSONIssues = nil
@@ -1095,6 +1198,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         return true
     }
     func clearPrivatePresentation() {
+        dismissInlineName()
         lineCommands.close()
         find.clear(); textView.comparisonHighlights = []; textView.comparisonDetails = []
         textView.onFindAction = nil; textView.onMarkedText = nil; textView.onInputFocusLost = nil; textView.onCompleteLocalName = nil
@@ -1155,33 +1259,45 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
 
     @discardableResult func toggleCodeFold(on line: Int) -> Bool {
         guard canFoldLine(line), let block = foldIndex?.byLine[line] else { return false }
+        changeCodeFolds(collapsing: codeFolding.isFolded(on: line) ? [] : [block]) { codeFolding.toggle(block) }
+        return true
+    }
+
+    var canFoldTopLevelBlocks: Bool {
+        guard !textView.hasMarkedText(), let foldIndex else { return false }
+        return codeFolding.canFoldAny(foldIndex.topLevel)
+    }
+
+    /// Return the number of additional top-level blocks left visible by the fold limit.
+    func foldTopLevelBlocks() -> Int {
+        guard canFoldTopLevelBlocks, let foldIndex else { return 0 }
+        let requested = foldIndex.topLevel
+        let collapsing = codeFolding.foldable(requested)
+        changeCodeFolds(collapsing: collapsing) { codeFolding.fold(collapsing) }
+        return requested.count { !codeFolding.isFolded(on: $0.line) }
+    }
+
+    private func changeCodeFolds(collapsing blocks: [EditorFoldIndex.Block], change: () -> Void) {
         var anchor = scrollAnchor()
         let x = scrollView.contentView.bounds.minX
-        let collapsing = !codeFolding.isFolded(on: line)
-        if collapsing, let current = anchor, let offset = lineIndex?.start(ofLine: current.line + 1),
-           NSLocationInRange(offset, block.hidden) {
-            anchor = .init(line: line - 1, column: 0, fragmentProgress: 0)
+        if let current = anchor, let offset = lineIndex?.start(ofLine: current.line + 1),
+           let block = blocks.first(where: { NSLocationInRange(offset, $0.hidden) }) {
+            anchor = .init(line: block.line - 1, column: 0, fragmentProgress: 0)
         }
-        if collapsing, textView.selectedRanges.count == 1 {
+        if textView.selectedRanges.count == 1 {
             let selection = textView.selectedRange()
-            let low = block.hidden.location, high = NSMaxRange(block.hidden)
-            if (low < selection.location && selection.location < high)
-                || (low < NSMaxRange(selection) && NSMaxRange(selection) < high) {
+            if let block = blocks.first(where: { $0.hidesSelectionEdge(selection) }) {
                 textView.setSelectedRange(.init(location: block.opening.location, length: 0))
             }
         }
-        codeFolding.toggle(block)
+        change()
         if let anchor { scroll(to: anchor, horizontalOffset: x) }
         updateCodeFoldPresentation()
-        return true
     }
 
     func revealAllCodeBlocks() {
         guard codeFolding.hasFolds, !textView.hasMarkedText() else { return }
-        let anchor = scrollAnchor()
-        codeFolding.unfoldAll()
-        if let anchor { scroll(to: anchor) }
-        updateCodeFoldPresentation()
+        changeCodeFolds(collapsing: []) { codeFolding.unfoldAll() }
     }
 
     func revealFoldedText(_ range: NSRange, explicitly: Bool = true) {

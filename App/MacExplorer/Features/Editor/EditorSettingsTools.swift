@@ -156,6 +156,8 @@ struct EditorSettingsTools: View {
                     settingToggle("Complete JSON brackets", isOn: preferences.completesJSONBrackets)
                     settingToggle("Complete code brackets", isOn: preferences.completesCodeBrackets)
                         .help("Complete parentheses, brackets and braces in supported code when the editor can identify the context.")
+                    settingToggle("Suggest local names inline", isOn: preferences.showsInlineNames)
+                        .help("Preview one matching name from this file. Press Tab to accept it or Escape to dismiss it.")
                     Text("Existing tabs use the chosen width. Continue line indentation keeps the current line’s spaces and tabs. JSON block indentation independently adds an inner line after a JSON or JSONC brace or bracket.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                     Text("Complete JSON brackets inserts matching braces and brackets in JSON and JSONC. Type the matching close to move past it, or press Backspace inside an empty new pair to remove both.")

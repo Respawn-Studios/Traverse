@@ -80,6 +80,7 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
     var indentsCodeBlocks = true
     var completesJSONBrackets = true
     var completesCodeBrackets = false
+    var showsInlineNames = false
     var backspaceUnindents = true
     var detectsLanguageWithoutExtension = true
     var openingIndicator = EditorOpeningIndicator.subtle
@@ -173,7 +174,7 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
         case showsMatchingBrackets, showsLiveJSONIssues
         case basePointSize, palette, theme, windowArrangement, opensFileSidebar, includesGeneratedProjectFolders
         case showsWorkingGitChanges, linksComparisonScrolling, indentation, indentsJSONBlocks, indentsCodeBlocks
-        case completesJSONBrackets, completesCodeBrackets, backspaceUnindents, detectsLanguageWithoutExtension, openingIndicator
+        case completesJSONBrackets, completesCodeBrackets, showsInlineNames, backspaceUnindents, detectsLanguageWithoutExtension, openingIndicator
         case findHighlightColor, defaultLanguage, openingRules
     }
     init() {}
@@ -200,6 +201,7 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
         indentsCodeBlocks = try values.decodeIfPresent(Bool.self, forKey: .indentsCodeBlocks) ?? true
         completesJSONBrackets = try values.decodeIfPresent(Bool.self, forKey: .completesJSONBrackets) ?? true
         completesCodeBrackets = try values.decodeIfPresent(Bool.self, forKey: .completesCodeBrackets) ?? false
+        showsInlineNames = try values.decodeIfPresent(Bool.self, forKey: .showsInlineNames) ?? false
         backspaceUnindents = try values.decodeIfPresent(Bool.self, forKey: .backspaceUnindents) ?? true
         detectsLanguageWithoutExtension = try values.decodeIfPresent(Bool.self, forKey: .detectsLanguageWithoutExtension) ?? true
         openingIndicator = try values.decodeIfPresent(EditorOpeningIndicator.self, forKey: .openingIndicator) ?? .subtle

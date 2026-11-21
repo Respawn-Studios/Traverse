@@ -723,6 +723,8 @@ classes and functions, Markdown headings, INI or TOML sections, and recognized
 YAML block mappings and multiline values. Find and Go to Line open a fold
 when their destination is inside it. A fold only
 changes what you see. Copy, Save, and Undo still work on the full document.
+Use **View → Code Folding → Fold Top-Level Blocks** to see the outer
+structure at once. **Unfold All Blocks** restores the full view.
 Editing opens the folds so you can see the current structure. The scope label
 beside the file path takes you back to the visible block.
 Option-click that label or use **Go → Choose Visible Scope…** to jump to a
@@ -772,6 +774,12 @@ whole draft then parses. The edit uses normal Undo.
 Go files show types, functions and receiver methods in Document Outline and
 project declaration search. Go's raw strings and rune literals stay separate
 from code when the editor highlights text and matches brackets.
+
+Enable **Suggest local names inline** in **Editor Defaults** to preview a
+single matching declaration from the current file. Type at least three
+characters of a name at the end of a line. Press Tab to accept a visible
+suggestion or Escape to dismiss it. Use F5 for Unicode names or when more than
+one declaration matches.
 
 **File → Compare → Compare Changes** shows the last loaded or saved text beside a captured current
 buffer. Refreshing that comparison does not reread the file or server. It is a

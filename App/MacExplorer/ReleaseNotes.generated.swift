@@ -16,7 +16,7 @@ struct TraverseReleaseNote: Identifiable, Sendable {
 
 enum TraverseReleaseNotes {
     static let all: [TraverseReleaseNote] = [
-        .init(version: "0.4.0", build: 104, state: .published,
+        .init(version: "0.4.0", build: 105, state: .published,
               date: "2026-11-21", title: "Git, diffs, and a smarter editor",
               summary: "Review local Git changes, navigate and check source files, and work between panes without losing your place.", changes: [
                 "Swap, stack, balance or link panes from the divider or keyboard. Compare folders, review a copy or reveal a match. Divider controls follow the two panes under the pointer and leave the resize line clear.",
@@ -26,7 +26,8 @@ enum TraverseReleaseNotes {
                 "Quick Open, project text search, a searchable outline, bookmarks and local name completion help you move around a project. New navigation and comparison commands preserve the active draft.",
                 "Check live JSON and JSONC, validate JSON Lines by record, and walk reported issues with F8 or Shift-F8. Indent an unfinished draft without changing its tokens. Repair one missing colon or comma when it makes the whole draft parse.",
                 "Choose a local JSON schema to check types, exact numeric bounds and other supported draft 2020-12 rules. F5 suggests property names and scalar values with descriptions, declared types and valid defaults when available.",
-                "Fold code and recognized Python, YAML, Markdown, TOML and INI sections. Find opens a folded match. Use the header to return to a visible scope or choose one of its parent blocks. Go gets type and function navigation, line comments and smart indentation.",
+                "Fold code or collapse its top-level blocks together. Find opens a folded match. Use the header to return to a visible scope or choose a parent. Fold recognized Python, YAML, Markdown, TOML and INI sections. Go gets type and function navigation, line comments and smart indentation.",
+                "Opt in to inline name suggestions from the current file. Press Tab to accept a visible suggestion or Escape to dismiss it. Editing the replacement field during Replace All leaves the draft and the updated field ready for another attempt.",
                 "Smart Return and opt-in bracket completion share the editor’s syntax scanner. Search and compare with clearer inserted and deleted lines, and apply a chosen change to a live editor with one Undo.",
                 "Browse Python wheels as read-only ZIP packages. Copy supported members using the archive browser.",
                 "Icons view shows real thumbnails for supported images and PDFs and can display embedded thumbnails in Office and OpenDocument files. Online-only items keep their type icons and show a cloud badge.",

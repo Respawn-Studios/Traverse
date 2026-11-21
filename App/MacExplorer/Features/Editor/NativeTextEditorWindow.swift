@@ -23,6 +23,10 @@ struct EditorDiskComparisonSource {
 /// installs the app's shared tool chrome; this class has no file I/O authority.
 @MainActor
 final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopoverDelegate, NSMenuDelegate, NSUserInterfaceValidations {
+    private enum CodeFoldingCommand: Int {
+        case fold, unfold, unfoldAll, foldTopLevel
+    }
+
     enum SaveAnnouncement {
         case saved(newerEditsRemain: Bool), notSaved, conflict, historyNeedsReview, needsReview, stopped
 
@@ -932,6 +936,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
     }
     func windowDidResignKey(_ notification: Notification) {
         if !surface.textView.bracketHighlights.isEmpty { surface.textView.needsDisplay = true }
+        surface.dismissInlineName()
         surface.lineCommands.inputDidChange(preservingExpansion: true); releaseOwnedMenu()
     }
     func windowWillBeginSheet(_ notification: Notification) {
@@ -1105,15 +1110,16 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
             (NativeTextEditorSurface.whitespaceMarksTitle, #selector(toggleWhitespaceMarks(_:)), "", [], self)
         ])
         BrowserMenus.addSection("Code Folding", to: view) { folding in
-            folding.addItem(BrowserMenus.item("Fold Block", #selector(changeCodeFold(_:)), key: "[",
-                modifiers: [.command, .option], target: self))
-            let unfold = BrowserMenus.item("Unfold Block", #selector(changeCodeFold(_:)), key: "]",
-                modifiers: [.command, .option], target: self)
-            unfold.tag = 1
-            folding.addItem(unfold)
-            let all = BrowserMenus.item("Unfold All Blocks", #selector(changeCodeFold(_:)), target: self)
-            all.tag = 2
-            folding.addItem(all)
+            let commands: [(CodeFoldingCommand, String, String)] = [
+                (.fold, "Fold Block", "["), (.unfold, "Unfold Block", "]"),
+                (.foldTopLevel, "Fold Top-Level Blocks", ""), (.unfoldAll, "Unfold All Blocks", "")
+            ]
+            for (command, title, key) in commands {
+                let item = BrowserMenus.item(title, #selector(changeCodeFold(_:)), key: key,
+                    modifiers: key.isEmpty ? [] : [.command, .option], target: self)
+                item.tag = command.rawValue
+                folding.addItem(item)
+            }
         }
         if fileSidebar != nil {
             view.addItem(.separator())
@@ -1234,8 +1240,13 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
             (item as? NSMenuItem)?.state = surface.showsWhitespaceMarks ? .on : .off
             return window?.attachedSheet == nil && !surface.textView.hasMarkedText()
         case #selector(changeCodeFold(_:)):
-            guard canChooseNavigationTarget, let tag = (item as? NSMenuItem)?.tag else { return false }
-            return tag == 2 ? surface.hasFoldedCode : surface.canSetSelectedBlock(folded: tag == 0)
+            guard canChooseNavigationTarget, let command = CodeFoldingCommand(rawValue: item.tag) else { return false }
+            switch command {
+            case .fold: return surface.canSetSelectedBlock(folded: true)
+            case .unfold: return surface.canSetSelectedBlock(folded: false)
+            case .unfoldAll: return surface.hasFoldedCode
+            case .foldTopLevel: return surface.canFoldTopLevelBlocks
+            }
         case #selector(toggleEditorSidebar(_:)):
             (item as? NSMenuItem)?.state = fileSidebar?.isShown == true ? .on : .off
             return fileSidebar?.canToggle == true
@@ -1553,9 +1564,17 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         surface.lineCommands.adjustSelection(direction)
     }
     @objc private func changeCodeFold(_ sender: NSMenuItem) {
-        guard validateUserInterfaceItem(sender) else { return }
-        if sender.tag == 2 { surface.revealAllCodeBlocks() }
-        else { surface.setSelectedBlock(folded: sender.tag == 0) }
+        guard validateUserInterfaceItem(sender), let command = CodeFoldingCommand(rawValue: sender.tag) else { return }
+        switch command {
+        case .fold: surface.setSelectedBlock(folded: true)
+        case .unfold: surface.setSelectedBlock(folded: false)
+        case .unfoldAll: surface.revealAllCodeBlocks()
+        case .foldTopLevel:
+            let remaining = surface.foldTopLevelBlocks()
+            if remaining > 0 {
+                reportNavigation("Some blocks stay expanded because the document reached its folding limit.")
+            }
+        }
     }
     @objc private func performLineCommand(_ sender: NSMenuItem) {
         guard !closing, surface.lineCommands.canPerform else { return }

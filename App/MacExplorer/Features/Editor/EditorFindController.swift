@@ -317,12 +317,16 @@ final class EditorFindController {
             for backwards in queued { navigate(backwards: backwards) }
         case .search(.refused(let reason)): showFailure(reason)
         case .replace(let result):
-            guard case .replace(let previousMatches, _, _, _, let selection, let affinity, let thenFind) = input.work,
+            guard case .replace(let previousMatches, let replacement, _, _, let selection, let affinity, let thenFind) = input.work,
                   surface.textView.selectedRanges.count == 1,
                   surface.textView.selectedRange() == selection, surface.textView.selectionAffinity == affinity,
                   !bar.queryHasMarkedText, !bar.replacementHasMarkedText,
                   surface.textView.isEditable, surface.window?.isKeyWindow == true,
                   surface.window?.attachedSheet == nil else { return }
+            guard bar.replacement.stringValue.utf16.elementsEqual(replacement.utf16) else {
+                bar.notice.stringValue = "Replacement text changed"
+                return
+            }
             switch result {
             case .unchanged:
                 bar.notice.stringValue = "No changes"

@@ -6,9 +6,16 @@ struct EditorFoldIndex: Sendable {
         let opening: NSRange
         let hidden: NSRange
         let separator: Int
+
+        func hidesSelectionEdge(_ selection: NSRange) -> Bool {
+            let low = hidden.location, high = NSMaxRange(hidden)
+            return (low < selection.location && selection.location < high)
+                || (low < NSMaxRange(selection) && NSMaxRange(selection) < high)
+        }
     }
 
     let byLine: [Int: Block]
+    let topLevel: [Block]
 
     init(_ pairs: [EditorDelimiterWalk.Pair], scopes: [EditorDocumentOutline.Scope], lines: EditorLineIndex, text: String) {
         let source = text as NSString
@@ -42,6 +49,18 @@ struct EditorFoldIndex: Sendable {
             if values[line].map({ $0.hidden.length < block.hidden.length }) ?? true { values[line] = block }
         }
         byLine = values
+        topLevel = Self.outerBlocks(values.values)
+    }
+
+    static func outerBlocks(_ blocks: some Sequence<Block>) -> [Block] {
+        var outer: [Block] = []
+        for block in blocks.sorted(by: {
+            $0.hidden.location == $1.hidden.location ? $0.hidden.length > $1.hidden.length
+                : $0.hidden.location < $1.hidden.location
+        }) {
+            if outer.last.map({ NSMaxRange($0.hidden) <= block.hidden.location }) ?? true { outer.append(block) }
+        }
+        return outer
     }
 
     func block(for selection: NSRange, on line: Int) -> Block? {
@@ -56,6 +75,7 @@ struct EditorFoldIndex: Sendable {
 /// the original storage and the same UTF-16 offsets.
 @MainActor
 final class EditorCodeFolding: NSObject, @MainActor NSLayoutManagerDelegate {
+    private static let maximumActive = 128
     private var folded: [Int: EditorFoldIndex.Block] = [:]
     private var visible: [EditorFoldIndex.Block] = []
     private weak var layout: NSLayoutManager?
@@ -65,7 +85,20 @@ final class EditorCodeFolding: NSObject, @MainActor NSLayoutManagerDelegate {
     var hasFolds: Bool { !folded.isEmpty }
     var visibleOpenings: [NSRange] { visible.map(\.opening) }
     func isFolded(on line: Int) -> Bool { folded[line] != nil }
-    func canToggle(on line: Int) -> Bool { isFolded(on: line) || folded.count < 128 }
+    func canToggle(on line: Int) -> Bool { isFolded(on: line) || folded.count < Self.maximumActive }
+
+    func canFoldAny(_ blocks: [EditorFoldIndex.Block]) -> Bool {
+        folded.count < Self.maximumActive && blocks.contains { !isFolded(on: $0.line) }
+    }
+
+    func foldable(_ blocks: [EditorFoldIndex.Block]) -> [EditorFoldIndex.Block] {
+        Array(blocks.lazy.filter { !self.isFolded(on: $0.line) }.prefix(Self.maximumActive - folded.count))
+    }
+
+    func fold(_ blocks: [EditorFoldIndex.Block]) {
+        for block in foldable(blocks) { folded[block.line] = block }
+        updateLayout()
+    }
 
     func toggle(_ block: EditorFoldIndex.Block) {
         guard canToggle(on: block.line) else { return }
@@ -87,9 +120,7 @@ final class EditorCodeFolding: NSObject, @MainActor NSLayoutManagerDelegate {
                 return range.length == 0 ? !NSLocationInRange(range.location, hidden)
                     : NSIntersectionRange(range, hidden).length == 0
             }
-            let low = hidden.location, high = NSMaxRange(hidden)
-            return !(low < range.location && range.location < high)
-                && !(low < NSMaxRange(range) && NSMaxRange(range) < high)
+            return !block.hidesSelectionEdge(range)
         }
         guard retaining.count != folded.count else { return false }
         folded = retaining
@@ -98,10 +129,7 @@ final class EditorCodeFolding: NSObject, @MainActor NSLayoutManagerDelegate {
     }
 
     private func updateLayout() {
-        var outer: [EditorFoldIndex.Block] = []
-        for block in folded.values.sorted(by: { $0.hidden.location < $1.hidden.location }) {
-            if outer.last.map({ NSMaxRange($0.hidden) <= block.hidden.location }) ?? true { outer.append(block) }
-        }
+        let outer = EditorFoldIndex.outerBlocks(folded.values)
         let changed = Set(visible.map(\.hidden)).symmetricDifference(outer.map(\.hidden))
         visible = outer
         guard let layout, let length = layout.textStorage?.length, !changed.isEmpty else { return }

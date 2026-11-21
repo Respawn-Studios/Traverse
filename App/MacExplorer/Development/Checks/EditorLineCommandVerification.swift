@@ -746,6 +746,62 @@ import FileOperations
                 try need(!f.owner.validateUserInterfaceItem(show) && f.surface.bookmarkedLines.isEmpty, "bookmark-cleared-on-reload")
             }
         }
+        let completionSource = "func reportValue() {}\nre"
+        await c.check("inline-local-name-uses-native-Tab-and-Undo", value: try value(completionSource),
+                      selection: r(completionSource.utf16.count)) { f in
+            f.owner.selectLanguage(.swift)
+            let p = UIVerification.key("p", code: 35, flags: [], window: f.native)
+            let escape = UIVerification.key("\u{1b}", code: 53, flags: [], window: f.native)
+            let tab = UIVerification.key("\t", code: 48, flags: [], window: f.native)
+            try await c.events.perform { f.native.sendEvent(p) }
+            try await f.presentCurrentSyntax(.swift)
+            try need(f.text.string == completionSource + "p" && f.text.inlineName == nil,
+                "inline-completion-is-off-by-default")
+            var preferences = EditorPreferences()
+            preferences.showsInlineNames = true
+            f.surface.applyEditorPreferences(preferences, pointSize: 15)
+
+            @MainActor func doTypePrefix() async throws {
+                try await c.events.perform {
+                    f.text.undoManager?.undo()
+                    try need(f.text.string == completionSource, "inline-completion-starts-from-the-exact-draft")
+                    f.text.setSelectedRange(r(completionSource.utf16.count))
+                    f.native.sendEvent(p)
+                }
+                try await f.presentCurrentSyntax(.swift)
+                try need(f.text.inlineName?.suffix == "ortValue" && f.text.hasVisibleInlineName
+                    && f.text.string == completionSource + "p", "inline-completion-is-a-visible-preview")
+            }
+            try await doTypePrefix()
+            if let output = c.evidenceDirectory {
+                try await UIVerification.snapshot(f.native, to: output.appendingPathComponent("editor-inline-name.png"))
+            }
+            try await c.events.perform { f.native.sendEvent(escape) }
+            try need(f.text.inlineName == nil && f.text.string == completionSource + "p", "Escape-dismisses-without-editing")
+            try await doTypePrefix()
+            try await c.events.perform {
+                f.native.sendEvent(tab)
+                try need(f.text.inlineName == nil && f.text.string == "func reportValue() {}\nreportValue",
+                    "Tab-accepts-only-the-previewed-name")
+                f.text.undoManager?.undo()
+                try need(f.text.string == completionSource + "p", "inline-name-insertion-has-one-native-Undo")
+            }
+            try await doTypePrefix()
+            try await c.events.perform {
+                f.text.setMarkedText("入力", selectedRange: r(2), replacementRange: f.text.selectedRange())
+                try need(f.text.hasMarkedText() && f.text.inlineName == nil,
+                    "native-composition-clears-the-suggestion")
+                f.text.unmarkText()
+            }
+            let ambiguous = "func reportValue() {}\nfunc reportTotal() {}\nre"
+            f.surface.install(try value(ambiguous))
+            try await c.events.perform {
+                f.text.setSelectedRange(r(ambiguous.utf16.count))
+                f.native.sendEvent(p)
+            }
+            try await f.presentCurrentSyntax(.swift)
+            try need(f.text.inlineName == nil && f.text.string == ambiguous + "p", "ambiguous-prefix-still-belongs-to-native-typing")
+        }
         let occurrenceSource = "let café = caféCount\nlet Café = café\n"
         let occurrenceValue = try value(occurrenceSource)
         await c.check("replace-occurrences-seeds-native-review", value: occurrenceValue, selection: r(4, 4)) { f in
@@ -767,12 +823,23 @@ import FileOperations
             }
             try await wait("replace-occurrences-ready") { find.matchCount == 2 && find.bar.replaceAll.isEnabled }
             try await c.events.perform {
-                for character in "value" {
+                for character in "old" {
                     f.native.sendEvent(UIVerification.key(String(character), code: 0, flags: [], window: f.native))
                 }
-                try need(find.bar.replacement.stringValue == "value", "replace-occurrences-native-typing")
-                find.bar.replaceAll.performClick(nil)
+                try need(find.bar.replacement.stringValue == "old", "replace-occurrences-native-initial-replacement")
+                guard let field = find.bar.replacement.currentEditor() as? NSTextView else {
+                    throw Failure(stage: "replace-occurrences-native-field-editor")
+                }
+                find.perform(.replaceAll)
+                field.insertText("value", replacementRange: r(0, field.string.utf16.count))
+                try need(find.isWorking && find.bar.replacement.stringValue == "value",
+                    "replace-occurrences-native-typing-while-old-replacement-pends")
             }
+            try await c.drain(f)
+            try need(same(f.text.string, occurrenceSource) && f.edits == 0 && f.text.undoManager?.canUndo != true
+                && find.bar.notice.stringValue == "Replacement text changed" && find.bar.replaceAll.isEnabled,
+                "replace-occurrences-refuses-old-replacement-text")
+            try await c.events.perform { find.bar.replaceAll.performClick(nil) }
             try await c.drain(f)
             try need(same(f.text.string, "let value = caféCount\nlet Café = value\n") && f.edits == 1,
                 "replace-occurrences-whole-case-matches-only")
@@ -1264,6 +1331,26 @@ import FileOperations
                 "Markdown fold preserves the complete final heading glyph and original text")
             f.surface.revealAllCodeBlocks()
             try need(followingY() == before && f.text.undoManager?.canUndo == false, "Markdown unfold restores layout without Undo")
+            guard let bulk = UIVerification.menuItem("View", "Code Folding", "Fold Top-Level Blocks"),
+                  let bulkAction = bulk.action else { throw Failure(stage: "fold-top-level-command") }
+            try await c.events.perform {
+                try need(f.surface.toggleCodeFold(on: 3), "fold-top-level-respects-existing-nested-fold")
+                f.text.setSelectedRange(text.range(of: "Introduction"))
+                try need(f.owner.validateUserInterfaceItem(bulk)
+                    && NSApp.sendAction(bulkAction, to: bulk.target, from: bulk), "fold-top-level-native-action")
+            }
+            try need(f.surface.isCodeFolded(on: 1) && f.surface.isCodeFolded(on: 3) && f.surface.isCodeFolded(on: 5)
+                && f.text.foldedOpenings.count == 2 && f.text.selectedRange() == r(text.range(of: "🧭").location)
+                && !f.owner.validateUserInterfaceItem(bulk) && same(f.text.string, headings) && f.edits == 0,
+                "folds-only-the-top-level-layout-and-keeps-caret-visible")
+            let find = f.surface.find
+            find.bar.query.stringValue = "Introduction"
+            find.perform(.showFindInterface)
+            try await wait("Find sees the body of a top-level fold") { find.matchCount == 1 }
+            find.perform(.nextMatch)
+            try need(!f.surface.isCodeFolded(on: 1) && f.surface.isCodeFolded(on: 3) && f.surface.isCodeFolded(on: 5)
+                && f.text.selectedRange() == text.range(of: "Introduction") && f.text.undoManager?.canUndo == false,
+                "Find-reveals-only-the-top-level-block-containing-the-match")
         }
         let yaml = """
         ---
@@ -1799,7 +1886,7 @@ import FileOperations
         context?.events.close()
         if let context { NSApp.mainMenu = context.originalMenu }
         let results = context?.results ?? []
-        let expected = causalOnly ? 1 : 66
+        let expected = causalOnly ? 1 : 67
         if failure == nil, results.count != expected { failure = "native-case-count" }
         let passed = failure == nil && clean && context?.events.unexpectedInputCount == 0
             && results.count == expected && results.allSatisfy { $0["passed"] as? Bool == true }

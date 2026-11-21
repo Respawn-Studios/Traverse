@@ -7,7 +7,7 @@ Earlier private-beta version numbers belong to a separate release history.
 ## [0.4.0] - 2026-11-21
 
 This release brings local Git review, a more capable editor and more ways to
-work between panes. Build 104 has separate Apple Silicon and Intel installers.
+work between panes. Build 105 has separate Apple Silicon and Intel installers.
 
 ### Features
 
@@ -99,6 +99,7 @@ work between panes. Build 104 has separate Apple Silicon and Intel installers.
 - Fold code blocks, recognized Python classes and functions, Markdown
   headings, INI and TOML sections, and recognized YAML blocks. Find opens a
   folded match automatically.
+  Fold Top-Level Blocks gives you the outer structure of a long file.
   The editor shows the current scope while scrolling supported Python, Go and
   C-family source and other recognized structures. Choose a parent scope from
   the same header or the Go menu.
@@ -149,6 +150,8 @@ work between panes. Build 104 has separate Apple Silicon and Intel installers.
   Rust, Python, JavaScript, TypeScript, C-family, CSS and JSON blocks.
 - Opt in to completing code brackets as you type, with matching-closer skip,
   empty-pair deletion and native Undo.
+- Opt in to inline name suggestions from the current file. Tab accepts the
+  visible suggestion, and Escape dismisses it.
 
 #### Storage
 
@@ -191,6 +194,8 @@ work between panes. Build 104 has separate Apple Silicon and Intel installers.
 
 ### Bug Fixes
 
+- Editing the replacement field while a Replace All request is preparing
+  keeps the draft unchanged and leaves your new replacement ready to use.
 - On macOS 15, operation history, guarded Trash and temporary storage checks
   accept folder URLs when macOS adds a directory marker after creation.
 - New and relinked Remembered Items in the direct edition use current
