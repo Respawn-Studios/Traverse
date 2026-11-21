@@ -7,6 +7,11 @@ on:
         description: GitHub release ID. Leave blank to check the latest published release.
         type: string
         default: ''
+      install-source:
+        description: Install the matching DMG directly or through the official Homebrew tap.
+        type: choice
+        options: [dmg, homebrew]
+        default: dmg
 
 permissions:
   contents: write
@@ -31,8 +36,9 @@ jobs:
     timeout-minutes: 10
     env:
       TRAVERSE_ARCH: ${{ matrix.arch }}
+      INSTALL_SOURCE: ${{ inputs.install-source }}
     steps:
-      - name: Download and check the matching signed installer
+      - name: Resolve the matching release installer
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ inputs.release-id }}
@@ -53,11 +59,11 @@ jobs:
               (.digest | test("^sha256:[0-9a-f]{64}$")))] |
             select(length == 1) | .[0]
           ' "$dir/release.json" > "$dir/asset.json"
-          asset="$(jq -er '.id' "$dir/asset.json")"
-          digest="$(jq -er '.digest | ltrimstr("sha256:")' "$dir/asset.json")"
-          gh api --header 'Accept: application/octet-stream' \
-            "repos/$GITHUB_REPOSITORY/releases/assets/$asset" > "$dir/Traverse.dmg"
-          printf '%s  %s\n' "$digest" "$dir/Traverse.dmg" | shasum -a 256 --check
+          if [[ "$INSTALL_SOURCE" != homebrew ]]; then
+            asset="$(jq -er '.id' "$dir/asset.json")"
+            gh api --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset" > "$dir/Traverse.dmg"
+          fi
 
       - name: Install in the runner and check startup
         run: |
@@ -68,14 +74,32 @@ jobs:
           build="${name#"Traverse-$version-"}"
           build="${build%"-$TRAVERSE_ARCH.dmg"}"
           [[ "$build" =~ ^[1-9][0-9]{0,9}$ ]]
-          mkdir "$dir/mount" "$dir/Applications"
+          digest="$(jq -er '.digest | ltrimstr("sha256:")' "$dir/asset.json")"
+          mkdir "$dir/Applications"
+          if [[ "$INSTALL_SOURCE" == homebrew ]]; then
+            export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+            export HOMEBREW_CACHE="$dir/brew-cache" XDG_CONFIG_HOME="$dir/brew-config"
+            cask=respawn-studios/tap/traverse
+            brew tap respawn-studios/tap
+            if brew help trust >/dev/null 2>&1; then brew trust --cask "$cask"; fi
+            brew fetch --cask "$cask"
+            image="$(brew --cache --cask "$cask")"
+            [[ "$image" == "$HOMEBREW_CACHE/"* && -f "$image" ]]
+          fi
+          printf '%s  %s\n' "$digest" "$image" | shasum -a 256 --check
           xcrun stapler validate "$image"
-          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$dir/mount" "$image"
-          trap 'hdiutil detach "$dir/mount"' EXIT
           app="$dir/Applications/Traverse.app"
-          ditto "$dir/mount/Traverse.app" "$app"
-          trap - EXIT
-          hdiutil detach "$dir/mount"
+          if [[ "$INSTALL_SOURCE" == homebrew ]]; then
+            brew install --cask --appdir="$dir/Applications" "$cask"
+            brew list --cask "$cask" >/dev/null
+          else
+            mkdir "$dir/mount"
+            hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$dir/mount" "$image"
+            trap 'hdiutil detach "$dir/mount"' EXIT
+            ditto "$dir/mount/Traverse.app" "$app"
+            hdiutil detach "$dir/mount"
+            trap - EXIT
+          fi
           info="$app/Contents/Info.plist"
           test "$(plutil -extract CFBundleIdentifier raw "$info")" = com.respawnstudios.traverse
           test "$(plutil -extract CFBundleShortVersionString raw "$info")" = "$version"

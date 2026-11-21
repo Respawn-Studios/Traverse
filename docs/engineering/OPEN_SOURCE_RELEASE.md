@@ -88,9 +88,11 @@ workflows regardless of channel.
 Use the [Release installer smoke test](https://github.com/Respawn-Studios/Traverse/actions/workflows/release-installers.yml)
 to check a GitHub release on both macOS 15 architectures. Maintainers dispatch
 it with a draft release ID or leave the ID empty to check the latest release.
-GitHub requires push access to read draft assets. Each job verifies the installer checksum,
-app version and signing identity, copies the app into its isolated runner,
-and checks startup and normal quit.
+GitHub requires push access to read draft assets. Each job verifies the installer
+checksum, app version and signing identity, installs the app in its isolated
+runner, and checks startup and normal quit. Choose **homebrew** to use the
+official tap for both architectures and verify the same published checksum
+before installation.
 
 ## Update channels
 
