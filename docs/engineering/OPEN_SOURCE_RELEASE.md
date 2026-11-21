@@ -89,10 +89,11 @@ Use the [Release installer smoke test](https://github.com/Respawn-Studios/Traver
 to check a GitHub release on both macOS 15 architectures. Maintainers dispatch
 it with a draft release ID or leave the ID empty to check the latest release.
 GitHub requires push access to read draft assets. Each job verifies the installer
-checksum, app version and signing identity, installs the app in its isolated
-runner, and checks startup and normal quit. Choose **homebrew** to use the
-official tap for both architectures and verify the same published checksum
-before installation.
+checksum, installs the app in its isolated runner, and verifies its version and
+signature. The default checks startup and normal quit. Choose **homebrew** to
+install the same published package from the official tap and verify Homebrew
+registers it. Check the first open from a Homebrew install in a desktop session
+so you can approve the macOS downloaded-app prompt if it appears.
 
 ## Update channels
 

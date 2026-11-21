@@ -190,6 +190,10 @@ You can also install it from our
 brew install --cask respawn-studios/tap/traverse
 ```
 
+If Homebrew asks for permission to load the cask, run
+`brew tap respawn-studios/tap` and `brew trust --cask respawn-studios/tap/traverse`,
+then run the install command again.
+
 Requires macOS 15 or later. Choose the Apple Silicon or Intel download, or let
 Homebrew pick for you. The signed 0.4.0 installers passed startup and quit checks
 on native Apple Silicon and Intel macOS 15 runners. We'd love to hear how

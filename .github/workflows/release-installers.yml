@@ -8,7 +8,7 @@ on:
         type: string
         default: ''
       install-source:
-        description: Install the matching DMG directly or through the official Homebrew tap.
+        description: Check direct DMG startup or installation through the official Homebrew tap.
         type: choice
         options: [dmg, homebrew]
         default: dmg
@@ -22,7 +22,7 @@ defaults:
 
 jobs:
   startup:
-    name: Start the signed app on macOS 15 (${{ matrix.arch }})
+    name: Verify the signed installer on macOS 15 (${{ matrix.arch }})
     if: github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
@@ -65,7 +65,7 @@ jobs:
               "repos/$GITHUB_REPOSITORY/releases/assets/$asset" > "$dir/Traverse.dmg"
           fi
 
-      - name: Install in the runner and check startup
+      - name: Install and verify the signed app in the runner
         run: |
           dir="$RUNNER_TEMP/traverse-release-smoke"
           image="$dir/Traverse.dmg"
@@ -108,6 +108,12 @@ jobs:
           codesign --verify --deep --strict "$app"
           codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'TeamIdentifier=CDLNJRG82U'
           xcrun stapler validate "$app"
+
+      - name: Check startup and normal quit
+        if: inputs.install-source != 'homebrew'
+        run: |
+          dir="$RUNNER_TEMP/traverse-release-smoke"
+          app="$dir/Applications/Traverse.app"
           cat > "$dir/startup.swift" <<'SWIFT'
           import AppKit
           import Darwin
