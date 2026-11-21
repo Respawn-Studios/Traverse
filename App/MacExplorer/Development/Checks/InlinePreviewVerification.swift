@@ -37,6 +37,11 @@ enum InlinePreviewVerification {
         }.value
         let reader = InlinePreviewSelectionReader()
         let ordinary = FileEntry(url: text, name: text.lastPathComponent, kind: .file)
+        let onlineURL = owned.appendingPathComponent("online-only.txt")
+        let onlineOnly = FileEntry(url: onlineURL, name: onlineURL.lastPathComponent, kind: .file, isDataless: true)
+        let otherArchives = ["Held.tar.xz", "Held.tar.zst", "Online.zip"].map { name in
+            FileEntry(url: owned.appendingPathComponent(name), name: name, kind: .file, isDataless: name == "Online.zip")
+        }
         try require(try await reader.prepare(ordinary) == .eligible, "Generated ordinary text was not eligible")
         let metadataOnly = [
             FileEntry(url: unknown, name: unknown.lastPathComponent, kind: .file),
@@ -44,7 +49,8 @@ enum InlinePreviewVerification {
             FileEntry(url: symbolic, name: symbolic.lastPathComponent, kind: .symbolicLink),
             FileEntry(url: alias, name: alias.lastPathComponent, kind: .file),
             FileEntry(url: fifo, name: fifo.lastPathComponent, kind: .file),
-            FileEntry(url: missing, name: missing.lastPathComponent, kind: .file)
+            FileEntry(url: missing, name: missing.lastPathComponent, kind: .file),
+            onlineOnly
         ]
         for entry in metadataOnly {
             guard case .metadataOnly = try await reader.prepare(entry) else {
@@ -59,11 +65,28 @@ enum InlinePreviewVerification {
         browser.pinsController = BrowserPinsController(stateDirectory: nil)
         _ = browser.view
         browser.tabs[browser.activeIndex].navigate(to: .directory(owned))
+        let onlineAppearance = browser.fileOpeningAppearance(onlineOnly)
+        try require(onlineAppearance.badge == .onlineOnly && onlineAppearance.explanation?.contains("Online only") == true,
+                    "Generated online-only metadata lost its cloud status")
         browser.restoringScroll = false
         browser.isLoading = false
-        browser.displayedEntries = [ordinary] + metadataOnly
+        browser.displayedEntries = [ordinary] + metadataOnly + otherArchives
         browser.rawEntries = browser.displayedEntries
         browser.rowsByURL = Dictionary(uniqueKeysWithValues: browser.displayedEntries.enumerated().map { ($0.element.url, $0.offset) })
+        try require(browser.isVerificationSession, "Generated default Open must use the captured boundary")
+        var defaultOpens: [URL] = []
+        browser.defaultOpenForVerification = { url in defaultOpens.append(url); return true }
+        settings.opensArchivesInTraverse = true
+        for archive in otherArchives {
+            browser.renderFilePresentation(selection: [archive.url])
+            try require(browser.selectedArchiveURL == nil && browser.fileOpeningAppearance(archive).cue != .archive,
+                        "Unsupported or online-only archive advertised native browsing")
+            browser.openSelection(nil)
+        }
+        browser.defaultOpenForVerification = nil
+        try require(defaultOpens == otherArchives.map(\.url) && browser.location == .directory(owned)
+                    && browser.currentArchive == nil, "Ordinary Open did not keep an unsupported archive with the default app")
+        checks.append("XZ and Zstandard TARs and a generated online-only ZIP leave native Browse disabled; ordinary Open reaches the captured default app route.")
         let controller = BrowserInlinePreviewController()
         func select(_ url: URL) { browser.renderFilePresentation(selection: [url]); controller.updateSelection(from: browser) }
         select(text)
@@ -88,9 +111,14 @@ enum InlinePreviewVerification {
         checks.append("Inline preview starts off; explicit enablement, selection churn, Disable and visit invalidation reject stale renderer work and release sessions")
 
         if renderKnownFixtures {
-            let png = owned.appendingPathComponent("generated.png")
-            let pdf = owned.appendingPathComponent("generated.pdf")
+            let thumbnailFolder = owned.appendingPathComponent("Thumbnails", isDirectory: true)
+            let png = thumbnailFolder.appendingPathComponent("generated.png")
+            let pdf = thumbnailFolder.appendingPathComponent("generated.pdf")
+            let bmp = thumbnailFolder.appendingPathComponent("generated.bmp")
+            let webp = thumbnailFolder.appendingPathComponent("generated.webp")
+            let iconImages = [png, pdf, bmp, webp]
             try await Task.detached {
+                try FileManager.default.createDirectory(at: thumbnailFolder, withIntermediateDirectories: false)
                 guard let bitmap = CGContext(data: nil, width: 480, height: 320, bitsPerComponent: 8, bytesPerRow: 0,
                                              space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
                       let destination = CGImageDestinationCreateWithURL(png as CFURL, "public.png" as CFString, 1, nil) else {
@@ -105,6 +133,13 @@ enum InlinePreviewVerification {
                 guard let image = bitmap.makeImage() else { throw UIVerification.Failure(message: "Generated PNG drawing failed") }
                 CGImageDestinationAddImage(destination, image, nil)
                 guard CGImageDestinationFinalize(destination) else { throw UIVerification.Failure(message: "Generated PNG encoding failed") }
+                guard let bitmapDestination = CGImageDestinationCreateWithURL(bmp as CFURL, "com.microsoft.bmp" as CFString, 1, nil),
+                      let webImage = Data(base64Encoded: "UklGRh4AAABXRUJQVlA4TBEAAAAvD8ABAAfQyT51uf+BiOh/AAA=") else {
+                    throw UIVerification.Failure(message: "Could not prepare the generated BMP or WebP fixture")
+                }
+                CGImageDestinationAddImage(bitmapDestination, image, nil)
+                guard CGImageDestinationFinalize(bitmapDestination) else { throw UIVerification.Failure(message: "Generated BMP encoding failed") }
+                try webImage.write(to: webp, options: .withoutOverwriting)
                 var media = CGRect(x: 0, y: 0, width: 280, height: 180)
                 guard let consumer = CGDataConsumer(url: pdf as CFURL),
                       let context = CGContext(consumer: consumer, mediaBox: &media, nil) else {
@@ -119,7 +154,7 @@ enum InlinePreviewVerification {
             browser.displayedEntries += [FileEntry(url: png, name: png.lastPathComponent, kind: .file), FileEntry(url: pdf, name: pdf.lastPathComponent, kind: .file)]
             browser.rawEntries = browser.displayedEntries
             browser.rowsByURL = Dictionary(uniqueKeysWithValues: browser.displayedEntries.enumerated().map { ($0.element.url, $0.offset) })
-            let before = try await Task.detached { try [text, png, pdf].map { try Data(contentsOf: $0) } }.value
+            let before = try await Task.detached { try ([text] + iconImages).map { try Data(contentsOf: $0) } }.value
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.isRestorable = false
@@ -152,9 +187,44 @@ enum InlinePreviewVerification {
                 controller.endSession()
                 try require(controller.hasReleasedSession, "Native renderer did not close/release on session end")
             }
-            let after = try await Task.detached { try [text, png, pdf].map { try Data(contentsOf: $0) } }.value
+            let after = try await Task.detached { try ([text] + iconImages).map { try Data(contentsOf: $0) } }.value
             try require(before == after, "Explicit native previews changed generated source bytes")
             checks.append("Explicit generated text/PNG/PDF native Quick Look admission has autostart off, unchanged fixture bytes and close/recreate cleanup; retained view-cache and \(exactWindowCaptures) of 3 exact owned-window compositor captures require separate renderer fidelity/control inspection")
+
+            let grid = BrowserWindowController(settings: settings)
+            guard let gridWindow = grid.window else { throw UIVerification.Failure(message: "Missing generated Icons window") }
+            let icons = grid.browser
+            icons.permitsBackgroundVerification = true
+            icons.readVolumesForVerification = { [] }
+            gridWindow.title = "File thumbnails · generated review"
+            gridWindow.setContentSize(.init(width: 920, height: 540))
+            gridWindow.center(); grid.showWindow(nil)
+            defer { icons.suspendBrowser(); gridWindow.close() }
+            icons.navigate(to: .directory(thumbnailFolder))
+            try await waitUntil("Generated Icons folder lists its four images") {
+                !icons.isLoading && iconImages.allSatisfy { icons.rowsByURL[$0] != nil }
+            }
+            icons.setPaneViewMode(.icons)
+            try await waitUntil("Generated Icons mode presents its visible tiles") {
+                icons.usesFileIcons && iconImages.allSatisfy { url in icons.iconBrowser.visibleEntries.contains { $0.url == url } }
+            }
+            func thumbnails() -> Set<URL> {
+                Set(icons.iconBrowser.visibleItems.compactMap { $0.hasThumbnail ? $0.entry?.url : nil })
+            }
+            let expectedThumbnails = Set(iconImages)
+            try await waitUntil("Generated PNG, PDF, BMP and WebP become visible thumbnails") { thumbnails() == expectedThumbnails }
+            try require(icons.iconBrowser.visibleItems.allSatisfy { !$0.hasThumbnail || $0.fileImage.contentTintColor == nil },
+                        "Selection tint replaced the rendered thumbnail")
+            try await GlassVerification.captureOwnedWindow(gridWindow, to: owned.appendingPathComponent("icon-thumbnails.png"))
+            settings.showsFileThumbnails = false; icons.applyDisplayPreferences()
+            try await waitUntil("Thumbnail preference retires visible images") { thumbnails().isEmpty }
+            settings.showsFileThumbnails = true; icons.applyDisplayPreferences()
+            try await waitUntil("Thumbnail preference rebuilds visible images") { thumbnails() == expectedThumbnails }
+            icons.setPaneViewMode(.list)
+            try await waitUntil("Leaving Icons retires its preview items") { thumbnails().isEmpty }
+            let afterThumbnails = try await Task.detached { try ([text] + iconImages).map { try Data(contentsOf: $0) } }.value
+            try require(before == afterThumbnails, "Visible native thumbnails changed source files")
+            checks.append("Icons renders PNG, PDF, BMP and WebP in the ordinary folder view, falling back on toggle and mode change without modifying source bytes")
         } else {
             checks.append("Native inline body rendering was not exercised; generated-fixture renderer qualification requires explicit opt-in")
         }

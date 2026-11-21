@@ -168,6 +168,15 @@ import FileOperations
             let shown = try TextDocumentValue.edited(text.string, format: .init(bom: false, lineEnding: .lf))
             try need(surface.present(shown, syntax: .tokens([]), lines: .init(shown.text), for: surface.generation), "present-current-lines")
         }
+        func presentCurrentSyntax(_ language: TextSyntaxLanguage) async throws {
+            let generation = surface.generation
+            let input = EditorPreparationInput.presentation(ticket: nil, surfaceGeneration: generation,
+                text: text.string, format: surface.documentFormat, language: language, detectsLanguage: false)
+            let result = await Task.detached { EditorPreparationOwner.prepare(input, .init()) }.value
+            guard case .presentation(let prepared) = result, surface.present(prepared, for: generation) else {
+                throw Failure(stage: "present-current-syntax")
+            }
+        }
         func start() async throws {
             owner.showWindow(nil); NSApp.activate(ignoringOtherApps: true)
             try await wait("actual-editor-application-active") { NSApp.isActive }
@@ -1141,6 +1150,36 @@ import FileOperations
             try need(same(f.text.string, "{\"x\": }") && f.edits == 0 && f.text.undoManager?.canUndo == false && notices == 1,
                 "invalid-JSON-was-edited-or-unexplained")
         }
+        let incompleteDraft = "{\"series\":[1 2,{\"value\":}] \"label\":\"unfinished 🧭 "
+        await c.check("native-incomplete-JSON-indents-reports-and-undoes", value: try value(incompleteDraft),
+                      selection: (incompleteDraft as NSString).range(of: "🧭")) { f in
+            f.owner.selectLanguage(.json)
+            guard let item = UIVerification.menuItem("Edit", "JSON", "Indent JSON as Written"),
+                  let action = item.action, let undo = f.text.undoManager else { throw Failure(stage: "incomplete-JSON-menu") }
+            try await c.events.perform { try need(NSApp.sendAction(action, to: item.target, from: item), "incomplete-JSON-action") }
+            try await c.drain(f)
+            let formatted = f.text.string
+            try need(formatted.hasPrefix("{\n") && formatted.contains("\n        1\n        2,")
+                && formatted.contains("\n    ]\n    \"label\":") && formatted.hasSuffix("\"unfinished 🧭 ")
+                && formatted.contains("\"value\":") && formatted != incompleteDraft
+                && f.text.selectedRange() == (formatted as NSString).range(of: "🧭")
+                && !f.text.diagnosticRanges.isEmpty && f.owner.navigationStatus.contains("Line")
+                && f.edits == 1 && undo.undoActionName == "Indent JSON as Written",
+                "partial-format-changed-tokens-or-lost-diagnostic")
+            let commentDraft = #"{"first":"x y" /* Keep */ "next" /* key */ : true}"#
+            guard case .replace(let layout) = EditorJSONFormatting.plan(.asWritten(.fresh), text: commentDraft,
+                selection: r(0), maximumBytes: 4096, allowsComments: true) else {
+                throw Failure(stage: "partial JSONC layout")
+            }
+            try need(layout.text == "{\n    \"first\": \"x y\" /* Keep */\n    \"next\" /* key */ : true\n}"
+                && EditorJSONFormatting.plan(.asWritten(.fresh), text: layout.text, selection: r(0),
+                    maximumBytes: 4096, allowsComments: true) == .unchanged,
+                "incomplete object keeps its raw values, comment positions and missing comma through repeated format")
+            try await c.events.perform { undo.undo() }
+            try await c.drain(f)
+            try need(same(f.text.string, incompleteDraft) && f.text.diagnosticRanges.isEmpty && f.edits == 2,
+                "partial-format-did-not-undo-or-clear-stale-diagnostic")
+        }
         let syntaxDraft = "{\n    // Generated\n    \"label🧭\" false\n}"
         await c.check("native-JSON-check-navigates-without-editing", value: try value(syntaxDraft), selection: r(0)) { f in
             f.owner.selectLanguage(.jsonc)
@@ -1149,6 +1188,7 @@ import FileOperations
             }
             try await c.events.perform { try need(NSApp.sendAction(action, to: item.target, from: item), "JSON-check-action") }
             try await wait("visible-JSON-check-issues") { f.native.attachedSheet?.isKeyWindow == true }
+            try need(!f.text.diagnosticRanges.isEmpty, "JSON check did not mark its issue inline")
             guard let sheet = f.native.attachedSheet else { throw Failure(stage: "JSON-check-sheet") }
             if let evidence = c.evidenceDirectory {
                 try await UIVerification.snapshot(sheet, to: evidence.appendingPathComponent("editor-json-check.png"))
@@ -1160,6 +1200,329 @@ import FileOperations
             }
             try need(same(f.text.string, syntaxDraft) && f.edits == 0 && f.text.undoManager?.canUndo == false
                 && f.owner.navigationStatus.contains("colon"), "JSON-check-mutated-or-lost-the-draft")
+        }
+        let foldDraft = "{\n  \"items\": [\n    \"Hidden 🧭\"\n  ],\n  \"visible\": true\n}"
+        await c.check("native-code-folding-retains-text-and-reveals-Find", value: try value(foldDraft), selection: r(0)) { f in
+            f.owner.selectLanguage(.json)
+            let generation = f.surface.generation
+            try await f.presentCurrentSyntax(.json)
+            guard let layout = f.text.layoutManager, let container = f.text.textContainer,
+                  let fold = UIVerification.menuItem("View", "Code Folding", "Fold Block"), let action = fold.action else {
+                throw Failure(stage: "native-fold-menu-or-syntax")
+            }
+            func lineY(_ offset: Int) -> CGFloat {
+                layout.ensureLayout(for: container)
+                return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: offset), effectiveRange: nil).minY
+            }
+            let source = foldDraft as NSString
+            let target = source.range(of: "visible").location
+            let before = lineY(target)
+            try need(f.surface.canFoldLine(1) && f.surface.canFoldLine(2) && !f.surface.canFoldLine(3)
+                && f.owner.validateUserInterfaceItem(fold), "fold-has-native-menu-and-only-multiline-brackets")
+            try await c.events.perform { try need(NSApp.sendAction(action, to: fold.target, from: fold), "menu-fold-dispatch") }
+            let folded = lineY(target)
+            try need(folded < before && f.surface.isCodeFolded(on: 1) && same(f.text.string, foldDraft),
+                "fold-reduces-layout-with-original-buffer")
+            let closing = layout.glyphRange(forCharacterRange: r(source.length - 1, 1), actualCharacterRange: nil)
+            try need(lineY(source.length - 1) > lineY(0)
+                && layout.boundingRect(forGlyphRange: closing, in: container).maxX < 32,
+                "fold-keeps-the-closing-delimiter-visible-near-its-original-indent")
+            let entireDocument = r(0, source.length)
+            f.text.setSelectedRange(entireDocument)
+            try need(f.text.selectedRange() == entireDocument && f.surface.hasFoldedCode
+                && f.surface.generation == generation && f.edits == 0 && f.text.undoManager?.canUndo == false,
+                "fold-retains-whole-source-selection-and-does-not-dirty-or-add-Undo")
+            f.text.setSelectedRange(r(0))
+            if let evidence = c.evidenceDirectory {
+                try await UIVerification.snapshot(f.native, to: evidence.appendingPathComponent("editor-code-folding.png"))
+            }
+            let find = f.surface.find
+            find.bar.query.stringValue = "Hidden 🧭"
+            find.perform(.showFindInterface)
+            try await wait("Find indexes the complete folded source") { find.matchCount == 1 }
+            find.perform(.nextMatch)
+            try need(f.text.selectedRange() == source.range(of: "Hidden 🧭") && !f.surface.hasFoldedCode
+                && lineY(target) == before && same(f.text.string, foldDraft) && f.edits == 0, "Find-expands-hidden-match")
+        }
+        let headings = "# Guide 🧭\nIntroduction\n## Steps\nOne detail\n# Next\nOutside"
+        await c.check("native-Markdown-fold-keeps-the-heading-and-next-section", value: try value(headings), selection: r(0)) { f in
+            f.owner.selectLanguage(.markdown)
+            try await f.presentCurrentSyntax(.markdown)
+            guard let layout = f.text.layoutManager, let container = f.text.textContainer else {
+                throw Failure(stage: "Markdown native text layout")
+            }
+            let text = headings as NSString
+            let following = text.range(of: "# Next").location
+            func followingY() -> CGFloat {
+                layout.ensureLayout(for: container)
+                return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: following), effectiveRange: nil).minY
+            }
+            let before = followingY()
+            try need(f.surface.canFoldLine(1) && f.surface.canFoldLine(3)
+                && f.surface.toggleCodeFold(on: 1) && followingY() < before, "Nested Markdown heading ranges fold in the real layout")
+            try need(f.text.foldedOpenings == [text.range(of: "🧭")] && same(f.text.string, headings) && f.edits == 0,
+                "Markdown fold preserves the complete final heading glyph and original text")
+            f.surface.revealAllCodeBlocks()
+            try need(followingY() == before && f.text.undoManager?.canUndo == false, "Markdown unfold restores layout without Undo")
+        }
+        let yaml = """
+        ---
+        jobs:
+          build:
+            steps:
+            - runner: "local"
+              note: sample
+            - script: |2-
+                # literal: 🧭
+                echo generated
+        # Outside the block
+        next: true
+        ...
+        ---
+        metadata:
+          summary: ready
+        """
+        let yamlText = yaml as NSString
+        await c.check("native-YAML-folds-blocks-and-scopes-without-hiding-siblings", value: try value(yaml), selection: r(0)) { f in
+            f.owner.selectLanguage(.yaml)
+            try await f.presentCurrentSyntax(.yaml)
+            guard let outline = f.surface.outlinePresentation?.value, let lines = f.surface.lineIndex,
+                  let layout = f.text.layoutManager, let container = f.text.textContainer,
+                  let ruler = f.surface.scrollView.verticalRulerView else {
+                throw Failure(stage: "YAML native outline and text layout")
+            }
+            try need(outline.scopes.map(\.entry.title) == ["jobs", "build", "steps", "script", "metadata"]
+                && outline.scrolledScopes(at: lines.starts[4], onLine: 5).map(\.title) == ["build", "steps"]
+                && outline.scrolledScopes(at: lines.starts[7], onLine: 8).map(\.title) == ["steps", "script"]
+                && outline.scrolledScopes(at: lines.starts[9], onLine: 10).isEmpty,
+                "YAML scopes cover an indentless sequence and literal body, and end before the outside comment")
+            let outside = yamlText.range(of: "# Outside").location
+            let sibling = yamlText.range(of: "next:").location
+            func lineRect(_ offset: Int) -> NSRect {
+                layout.ensureLayout(for: container)
+                return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: offset), effectiveRange: nil)
+            }
+            let script = lineRect(yamlText.range(of: "script:").location)
+            let before = lineRect(outside).minY
+            let markerY = ruler.convert(.init(x: 0, y: script.midY + f.text.textContainerInset.height), from: f.text).y
+            let clickAt = ruler.convert(.init(x: 7, y: markerY), to: nil)
+            guard let click = NSEvent.mouseEvent(with: .leftMouseDown, location: clickAt, modifierFlags: [],
+                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: f.native.windowNumber,
+                  context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { throw Failure(stage: "YAML fold click") }
+            try await c.events.perform { ruler.mouseDown(with: click) }
+            try need(f.surface.canFoldLine(4) && lineRect(outside).minY < before
+                && lineRect(sibling).minY > lineRect(outside).minY && f.surface.isCodeFolded(on: 7),
+                "YAML scalar folds from the native gutter click")
+            if let evidence = c.evidenceDirectory {
+                try await UIVerification.snapshot(f.native, to: evidence.appendingPathComponent("editor-yaml-fold.png"))
+            }
+            let find = f.surface.find
+            find.bar.query.stringValue = "literal: 🧭"
+            find.perform(.showFindInterface)
+            try await wait("YAML folded content remains searchable") { find.matchCount == 1 }
+            find.perform(.nextMatch)
+            try need(f.text.selectedRange() == yamlText.range(of: "literal: 🧭") && !f.surface.hasFoldedCode
+                && same(f.text.string, yaml) && f.edits == 0 && f.text.undoManager?.canUndo == false,
+                "Find opens the YAML fold without editing the document")
+        }
+        let python = """
+        class Report:
+            async def build(
+                self,
+            ) -> str: # Keep the header
+                text = \"\"\"first
+        Unindented inside the string
+        \"\"\"
+                return text
+
+        # Outside the class
+        status = True
+        """
+        let pythonText = python as NSString
+        await c.check("native-Python-fold-and-scope-use-the-complete-multiline-header", value: try value(python),
+                      selection: r(pythonText.range(of: "def").location)) { f in
+            f.owner.selectLanguage(.python)
+            try await f.presentCurrentSyntax(.python)
+            guard let menu = UIVerification.menuItem("View", "Code Folding", "Fold Block"), let action = menu.action,
+                  let outline = f.surface.outlinePresentation?.value, let lines = f.surface.lineIndex,
+                  let layout = f.text.layoutManager, let container = f.text.textContainer else {
+                throw Failure(stage: "Python folding, outline and menu")
+            }
+            let scopes = outline.scrolledScopes(at: lines.starts[5], onLine: 6)
+            try need(scopes.map(\.title) == ["Report", "build"]
+                && outline.scrolledScopes(at: lines.starts[9], onLine: 10).isEmpty,
+                "A dedented string stays in its declaration and an outside comment remains outside")
+            let following = pythonText.range(of: "# Outside").location
+            func lineY(_ offset: Int) -> CGFloat {
+                layout.ensureLayout(for: container)
+                return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: offset), effectiveRange: nil).minY
+            }
+            let before = lineY(following)
+            let headerY = lineY(pythonText.range(of: "# Keep").location)
+            try need(f.surface.canFoldLine(1) && f.surface.canFoldLine(2) && f.owner.validateUserInterfaceItem(menu),
+                "Multiline Python declaration exposes the native fold on its first line")
+            try await c.events.perform { try need(NSApp.sendAction(action, to: menu.target, from: menu), "Fold Python suite menu dispatch") }
+            try need(f.surface.isCodeFolded(on: 2) && lineY(following) < before
+                && lineY(pythonText.range(of: "# Keep").location) == headerY && lineY(following) > headerY
+                && same(f.text.string, python) && f.edits == 0, "Python fold hides the suite and preserves header and outside comments")
+            if let evidence = c.evidenceDirectory {
+                try await UIVerification.snapshot(f.native, to: evidence.appendingPathComponent("editor-python-fold.png"))
+            }
+        }
+        let liveDraft = "{\n  \"key🧭\" true\n}"
+        await c.check("native-live-JSON-problem-navigates-and-retires-on-edit", value: try value(liveDraft), selection: r(0)) { f in
+            f.owner.selectLanguage(.json)
+            try await f.presentCurrentSyntax(.json)
+            let offset = (liveDraft as NSString).range(of: "true").location
+            guard let next = UIVerification.menuItem("Go", "Next JSON Issue"), let action = next.action,
+                  let repair = UIVerification.menuItem("Edit", "JSON", "Repair Missing Delimiter"), let repairAction = repair.action,
+                  let undo = f.text.undoManager else {
+                throw Failure(stage: "live-JSON-issue-menu")
+            }
+            try need(f.surface.jsonIssues.first?.offset == offset && !f.text.diagnosticRanges.isEmpty
+                && f.owner.validateUserInterfaceItem(next) && f.owner.validateUserInterfaceItem(repair),
+                "live-issue-published-at-UTF16-offset")
+            var preferences = EditorPreferences()
+            preferences.showsLiveJSONIssues = false
+            f.owner.applyEditorPreferences(preferences, pointSize: 13)
+            try need(f.surface.jsonIssues.isEmpty && f.text.diagnosticRanges.isEmpty && !f.owner.validateUserInterfaceItem(next),
+                "live-issues-preference-clears-automatic-presentation")
+            preferences.showsLiveJSONIssues = true
+            f.owner.applyEditorPreferences(preferences, pointSize: 13)
+            try await c.events.perform { try need(NSApp.sendAction(action, to: next.target, from: next), "live-issue-navigation") }
+            try need(f.text.selectedRange() == r(offset) && f.owner.navigationStatus.contains("colon") && f.edits == 0,
+                "live-issue-navigation-preserves-original")
+            if let evidence = c.evidenceDirectory {
+                try await UIVerification.snapshot(f.native, to: evidence.appendingPathComponent("editor-live-json-issue.png"))
+            }
+            try await c.events.perform { try need(NSApp.sendAction(repairAction, to: repair.target, from: repair), "live-JSON-repair-action") }
+            try await c.drain(f)
+            try need(f.surface.jsonIssues.isEmpty && f.text.diagnosticRanges.isEmpty, "editing-retires-stale-diagnostic")
+            try await f.presentCurrentSyntax(.json)
+            try need(f.surface.jsonIssues.isEmpty && f.edits == 1 && f.text.string == "{\n  \"key🧭\": true\n}"
+                && undo.undoActionName == "Repair Missing JSON Delimiter", "repair-inserts-only-the-colon-and-keeps-native-Undo")
+            try await c.events.perform { undo.undo() }
+            try need(same(f.text.string, liveDraft) && !undo.canUndo && undo.canRedo, "one-Undo-restores-the-exact-malformed-source")
+        }
+        let twoMissing = #"{"enabled" true "name": "example"}"#
+        await c.check("native-JSON-repair-refuses-multiple-missing-delimiters", value: try value(twoMissing), selection: r(0)) { f in
+            f.owner.selectLanguage(.json)
+            try await f.presentCurrentSyntax(.json)
+            guard let repair = UIVerification.menuItem("Edit", "JSON", "Repair Missing Delimiter"), let action = repair.action else {
+                throw Failure(stage: "JSON-repair-menu")
+            }
+            try await c.events.perform { try need(NSApp.sendAction(action, to: repair.target, from: repair), "attempt-one-repair") }
+            try await c.drain(f)
+            try need(same(f.text.string, twoMissing) && f.edits == 0 && f.text.undoManager?.canUndo == false
+                && f.owner.navigationStatus.contains("could not be verified"), "partial-repair-did-not-touch-the-buffer")
+        }
+        let jsonl = "\"🧭\"\n/* unfinished\n{\"valid\":true}\n[1,]\n"
+        await c.check("native-JSON-Lines-keeps-records-independent", value: try value(jsonl), selection: r(0)) { f in
+            f.owner.selectLanguage(.jsonLines)
+            try await f.presentCurrentSyntax(.jsonLines)
+            let syntax = await Task.detached { TextSyntax.color(jsonl, language: .jsonLines) }.value
+            let nextLineKey = (jsonl as NSString).range(of: "\"valid\"")
+            guard case .tokens(let tokens) = syntax, tokens.contains(.init(range: nextLineKey, kind: .property)),
+                  let menu = UIVerification.menuItem("Edit", "JSON")?.submenu,
+                  let check = menu.items.first(where: { $0.action == NSSelectorFromString("checkJSONDocument:") && $0.tag == 0 }),
+                  let schema = menu.items.first(where: { $0.action == check.action && $0.tag == 1 }),
+                  let action = check.action else { throw Failure(stage: "JSON-Lines-record-lexing-and-native-menu") }
+            try need(f.owner.validateUserInterfaceItem(check) && check.title == "Check JSON Lines"
+                && !f.owner.validateUserInterfaceItem(schema) && f.surface.jsonIssues.first?.line == 2,
+                "JSON-Lines-separate-record-check-with-first-live-finding")
+            try await c.events.perform { try need(NSApp.sendAction(action, to: check.target, from: check), "JSON-Lines-native-menu-dispatch") }
+            try await wait("JSON-Lines-issue-sheet-shows-all-bounded-findings") {
+                f.native.attachedSheet?.isKeyWindow == true && f.surface.jsonIssues.map(\.line) == [2, 4]
+            }
+            guard let sheet = f.native.attachedSheet else { throw Failure(stage: "JSON-Lines-sheet") }
+            try await c.events.perform { sheet.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: sheet)) }
+            try await wait("JSON-Lines-location-and-no-edit") {
+                f.native.attachedSheet == nil && f.text.selectedRange() == r((jsonl as NSString).range(of: "/*").location)
+            }
+            let f8 = String(UnicodeScalar(NSF8FunctionKey)!)
+            let issues = f.surface.jsonIssues
+            try need(issues.count == 2, "two independent JSON Lines issues remained after the first jump")
+            try await c.events.perform {
+                let next = UIVerification.key(f8, code: 100, flags: [], window: f.native)
+                let previous = UIVerification.key(f8, code: 100, flags: .shift, window: f.native)
+                try need(NSApp.mainMenu?.performKeyEquivalent(with: next) == true
+                    && f.text.selectedRange() == r(issues[1].offset), "F8 reaches the next actual issue")
+                try need(NSApp.mainMenu?.performKeyEquivalent(with: previous) == true
+                    && f.text.selectedRange() == r(issues[0].offset), "Shift-F8 reaches the previous actual issue")
+                try need(NSApp.mainMenu?.performKeyEquivalent(with: previous) == true
+                    && f.text.selectedRange() == r(issues[1].offset), "Shift-F8 wraps to the last issue")
+            }
+            guard let review = UIVerification.menuItem("Go", "Review JSON Issues…"), let reviewAction = review.action else {
+                throw Failure(stage: "JSON Lines review menu")
+            }
+            try await c.events.perform { try need(NSApp.sendAction(reviewAction, to: review.target, from: review), "reopen checked findings") }
+            try await wait("JSON Lines review sheet") { f.native.attachedSheet?.isKeyWindow == true }
+            guard let reviewSheet = f.native.attachedSheet else { throw Failure(stage: "JSON Lines review sheet") }
+            if let evidence = c.evidenceDirectory {
+                try await UIVerification.snapshot(reviewSheet, to: evidence.appendingPathComponent("editor-json-lines-issues.png"))
+            }
+            try await c.events.perform { reviewSheet.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: reviewSheet)) }
+            try await wait("JSON Lines review selects the current issue") {
+                f.native.attachedSheet == nil && f.text.selectedRange() == r(issues[1].offset)
+            }
+            try need(same(f.text.string, jsonl) && f.edits == 0 && f.text.undoManager?.canUndo == false,
+                "JSON-Lines-check-keeps-document-bytes")
+        }
+        let propertyDraft = "{\n  \"po\n}"
+        await c.check("native-JSON-schema-property-completes-with-one-Undo", value: try value(propertyDraft),
+                      selection: r(NSMaxRange((propertyDraft as NSString).range(of: "\"po")))) { f in
+            f.owner.selectLanguage(.json)
+            f.owner.setJSONSchemaForVerification(#"{"properties":{"port":{"type":"integer","description":"The port used by the local service."}},"required":["port"]}"#)
+            guard let complete = UIVerification.menuItem("Edit", "JSON", "Complete from JSON Schema…"),
+                  let forget = UIVerification.menuItem("Edit", "JSON", "Forget Local JSON Schema"), let remove = forget.action,
+                  let current = UIVerification.menuItem("Edit", "JSON", "Check Against Current JSON Schema"),
+                  let undo = f.text.undoManager else { throw Failure(stage: "schema-property-menu-and-undo-owner") }
+            try need(f.owner.validateUserInterfaceItem(complete) && f.owner.validateUserInterfaceItem(current),
+                "property-completion-and-validation-share-one-schema")
+            try await c.events.perform {
+                let key = UIVerification.key(String(UnicodeScalar(NSF5FunctionKey)!), code: 96, flags: [], window: f.native)
+                try need(NSApp.mainMenu?.performKeyEquivalent(with: key) == true, "schema-property-native-shortcut")
+            }
+            try await wait("native schema candidates are ready") { f.native.attachedSheet?.isKeyWindow == true }
+            try need(same(f.text.string, propertyDraft) && !undo.canUndo, "showing-suggestions-does-not-edit")
+            guard let sheet = f.native.attachedSheet else { throw Failure(stage: "schema-property-candidates") }
+            if let evidence = c.evidenceDirectory {
+                try await UIVerification.snapshot(sheet, to: evidence.appendingPathComponent("editor-schema-property-hints.png"))
+            }
+            try await c.events.perform { sheet.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: sheet)) }
+            let expected = "{\n  \"port\": null\n}"
+            try await wait("native schema property inserted") { f.native.attachedSheet == nil && f.text.string == expected }
+            try need(f.text.selectedRange() == (expected as NSString).range(of: "null") && f.edits == 1
+                && undo.undoActionName == "Complete JSON Property", "completion-selects-the-value-and-registers-one-Undo")
+            try await c.events.perform { undo.undo() }
+            try need(same(f.text.string, propertyDraft) && !undo.canUndo && undo.canRedo, "one-Undo-restores-the-unfinished-property")
+            try await c.events.perform { try need(NSApp.sendAction(remove, to: forget.target, from: forget), "schema-forget-action") }
+            try need(!f.owner.validateUserInterfaceItem(current), "forget-retires-local-schema")
+        }
+        let valueDraft = "{\"profile\": null}"
+        let placeholder = (valueDraft as NSString).range(of: "null")
+        await c.check("native-JSON-schema-value-completion-keeps-one-Undo", value: try value(valueDraft),
+                      selection: placeholder) { f in
+            f.owner.selectLanguage(.json)
+            f.owner.setJSONSchemaForVerification(#"{"properties":{"profile":{"enum":["production","development"],"default":"development","description":"Local build configuration."}}}"#)
+            guard let undo = f.text.undoManager else { throw Failure(stage: "schema-value-undo-owner") }
+            try await c.events.perform {
+                let key = UIVerification.key(String(UnicodeScalar(NSF5FunctionKey)!), code: 96, flags: [], window: f.native)
+                try need(NSApp.mainMenu?.performKeyEquivalent(with: key) == true, "schema-value-native-shortcut")
+            }
+            try await wait("native schema value choices are ready") { f.native.attachedSheet?.isKeyWindow == true }
+            try need(same(f.text.string, valueDraft) && !undo.canUndo, "showing-values-does-not-edit")
+            guard let sheet = f.native.attachedSheet else { throw Failure(stage: "schema-value-candidates") }
+            if let evidence = c.evidenceDirectory {
+                try await UIVerification.snapshot(sheet, to: evidence.appendingPathComponent("editor-schema-default-hint.png"))
+            }
+            try await c.events.perform { sheet.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: sheet)) }
+            let expected = "{\"profile\": \"development\"}"
+            try await wait("native schema value inserted") { f.native.attachedSheet == nil && f.text.string == expected }
+            try need(f.text.selectedRange() == r((expected as NSString).length - 1) && f.edits == 1
+                && undo.undoActionName == "Complete JSON Value", "completion-replaces-only-the-value")
+            try await c.events.perform { undo.undo() }
+            try need(same(f.text.string, valueDraft) && !undo.canUndo && undo.canRedo, "one-Undo-restores-the-placeholder")
         }
         await c.check("native-menu-duplicate-one-Undo-Redo", value: basic, selection: r(0)) { f in
             let generation = f.surface.generation
@@ -1436,7 +1799,7 @@ import FileOperations
         context?.events.close()
         if let context { NSApp.mainMenu = context.originalMenu }
         let results = context?.results ?? []
-        let expected = causalOnly ? 1 : 56
+        let expected = causalOnly ? 1 : 66
         if failure == nil, results.count != expected { failure = "native-case-count" }
         let passed = failure == nil && clean && context?.events.unexpectedInputCount == 0
             && results.count == expected && results.allSatisfy { $0["passed"] as? Bool == true }

@@ -88,7 +88,12 @@ struct DriveFileBenchmarkTests {
         let randomCounts = randomBuckets?.compactMap { $0["count"] as? Int }
         #expect(randomCounts?.count == 9 && randomCounts?.reduce(0, +) == 4096)
         #expect(suite.summary.contains("Sequential") && suite.summary.contains("Random 4 KiB"))
-        for text in [json, suite.summary] {
+        let table = suite.metricsTable.split(separator: "\n").map {
+            $0.split(separator: "\t", omittingEmptySubsequences: false)
+        }
+        #expect(table.count == 5 && table.allSatisfy { $0.count == 16 })
+        #expect(table.dropFirst().map { $0[1] } == ["sequential", "sequential", "random4K", "random4K"])
+        for text in [json, suite.summary, suite.metricsTable] {
             #expect(!text.contains("volumeName") && !text.contains("fileSystemID") && !text.contains("scratchURL"))
         }
         let stopped = try DriveBenchmarkSuiteReport(sequential: first, random4K: nil)
@@ -192,6 +197,9 @@ struct DriveFileBenchmarkTests {
             #expect(report.summary.contains("Partial/failed observations") && !report.summary.contains(" MB/s"))
             #expect(report.summary.contains("not proof of hardware persistence"))
             #expect(report.failureCode == (outcome == .failed ? "verification" : nil))
+            let writeRow = try #require(report.metricsTable.split(separator: "\n").dropFirst().first)
+                .split(separator: "\t", omittingEmptySubsequences: false)
+            #expect(writeRow.count == 16 && writeRow[8...12].allSatisfy(\.isEmpty))
             let object = try #require(JSONSerialization.jsonObject(with: Data(report.json().utf8)) as? [String: Any])
             #expect((object["writeAndFlush"] as? [String: Any])?["ioLatency"] == nil)
             #expect((object["readAndVerify"] as? [String: Any])?["ioLatency"] == nil)
@@ -245,6 +253,15 @@ struct DriveFileBenchmarkTests {
         #expect(result.writeLatency.operations == 256 && result.readLatency.operations == 256)
         #expect(result.preparationBytesWritten == 1 << 20)
         #expect(result.cacheBypass == .notAttempted && result.scratchURL == nil)
+        let metric = result.workload.primaryMetric
+        let report = try DriveBenchmarkReport(result: result, recordedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(metric == .operationsPerSecond)
+        #expect(metric.completedRate(result, writing: true) == 256 / (result.writeSeconds + result.flushSeconds))
+        #expect(metric.completedRate(result, writing: false) == report.readAndVerify.operationsPerSecond)
+        let sample = DriveBenchmarkSample(phase: .writing, elapsedSeconds: 0.5, megabytesPerSecond: 4.096)
+        #expect(sample.rate(for: .random4K) == 1_000)
+        #expect(sample.rate(for: .sequential) == 4.096)
+        #expect(metric.rate(bytes: 1 << 20, operations: 256, seconds: .infinity) == nil)
         #expect(try FileManager().contentsOfDirectory(atPath: root.path).isEmpty)
     }
 

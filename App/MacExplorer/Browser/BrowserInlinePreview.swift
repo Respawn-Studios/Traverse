@@ -3,14 +3,16 @@ import Darwin
 import ExplorerCore
 import QuickLookUI
 
-/// The first inline renderer deliberately admits a finite set of common types.
+/// The inline renderer admits a finite set of common types.
 /// Quick Look is an OS renderer, not an app-owned sandbox or read-only editor.
 protocol InlinePreviewSelectionReading: Sendable {
     func prepare(_ entry: FileEntry) async throws -> InlinePreviewSelectionReader.Decision
 }
 
 actor InlinePreviewSelectionReader: InlinePreviewSelectionReading {
-    static let supportedExtensions: Set<String> = ["txt", "png", "jpg", "jpeg", "pdf"]
+    static let supportedExtensions: Set<String> = [
+        "txt", "png", "jpg", "jpeg", "gif", "tif", "tiff", "heic", "heif", "webp", "bmp", "pdf", "docx", "pptx", "xlsx"
+    ]
     enum Decision: Equatable, Sendable {
         case eligible
         case metadataOnly(String)
@@ -26,8 +28,9 @@ actor InlinePreviewSelectionReader: InlinePreviewSelectionReading {
             return .metadataOnly("Only local file paths are eligible for inline preview.")
         }
         guard entry.kind == .file else { return .metadataOnly("Folders, packages, links and special items show metadata only.") }
+        if entry.isDataless { return .metadataOnly("This item is online only. Traverse does not request a download to preview it.") }
         guard Self.supportedExtensions.contains(entry.url.pathExtension.lowercased()) else {
-            return .metadataOnly("Inline preview currently supports plain text, PNG, JPEG and PDF. This item shows metadata only.")
+            return .metadataOnly("Inline preview supports common images, PDFs, plain text and Office documents. This item shows metadata only.")
         }
         // The URL sent to Quick Look must have no symlink ancestor. These are
         // metadata checks only; no body, directory traversal or alias resolution.

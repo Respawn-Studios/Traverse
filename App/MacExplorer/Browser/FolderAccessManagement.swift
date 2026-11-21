@@ -137,14 +137,19 @@ struct FolderAccessManagementView: View {
                 ? "Choose a folder or drive to use it and its subfolders. Remember your choice to open it again next time."
                 : "Remember locations to open them again next time. Some protected folders may need extra permission from macOS.")
                 .interfaceFont(.caption).foregroundStyle(.secondary)
-            Toggle("Remember my next selection on this Mac", isOn: $model.remember)
-                .disabled(!model.access.canRememberFolders)
-            Button("Choose a Folder or Drive…") { model.choose() }
-                .accessibilityIdentifier("settings-add-folder-access")
+            if TraverseAccessPolicy.requiresFolderSelection {
+                Toggle("Remember my next selection on this Mac", isOn: $model.remember)
+                    .disabled(!model.access.canRememberFolders)
+            }
+            Button(TraverseAccessPolicy.requiresFolderSelection ? "Choose a Folder or Drive…" : "Remember a Folder or Drive…") {
+                model.choose()
+            }
+            .disabled(!TraverseAccessPolicy.requiresFolderSelection && !model.access.canRememberFolders)
+            .accessibilityIdentifier("settings-add-folder-access")
             FolderAccessLocationsView(access: model.access) { location, forget in
                 if forget { model.forget(location) } else { model.choose(replacing: location) }
             }
-            if !drives.isEmpty {
+            if TraverseAccessPolicy.requiresFolderSelection && !drives.isEmpty {
                 Divider()
                 Text("Drive selections").interfaceFont(.headline)
                 FolderAccessDriveChoicesView(access: access, drives: drives) { model.choose(initial: $0) }
@@ -166,29 +171,40 @@ struct TraversePermissionChecklist: View {
     var motion = BrowserMotionPreferences()
     @State private var settingsNotice = ""
     @StateObject private var network = LocalNetworkPermissionRequest()
+    private var fullDiskPurpose: String {
+        if TraverseAccessPolicy.requiresFolderSelection {
+            return "For fuller analysis of protected folders. Enable access in System Settings, then choose the locations you want to use in Traverse."
+        }
+        return "Optional for protected folders and attached drives. Enable access in System Settings and use your folders directly in Traverse. macOS still checks the permissions on individual files."
+    }
+    private var fullDiskNextStep: String {
+        if #available(macOS 27.3, *) {
+            return "Select Traverse in Full Disk Access, then choose the access you need. Reopen Traverse if macOS asks."
+        }
+        return "Enable Traverse if it’s listed. Otherwise, use + to add it or drag the app into the list. Reopen Traverse if macOS asks."
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             row("Full Disk Access", icon: "lock.shield", status: "Optional · managed in System Settings",
-                purpose: "For fuller analysis of protected folders. macOS requires you to enable this in System Settings; it has no in-app Allow prompt. Choose your folders or drives above as well. Reopen Traverse if macOS asks.",
+                purpose: fullDiskPurpose,
                 action: "Open Full Disk Access…") {
-                    if !access.openFullDiskAccessSettings() {
-                        settingsNotice = "Open System Settings → Privacy & Security → Full Disk Access. Use + to add Traverse, then enable it. macOS may ask you to quit and reopen the app."
-                    } else {
-                        settingsNotice = "Enable Traverse if it’s listed. Otherwise, use Show Traverse in Finder and drag the app into Full Disk Access. Reopen Traverse if macOS asks."
-                    }
+                    let opened = access.openFullDiskAccessSettings()
+                    settingsNotice = (opened ? "" : "Open System Settings → Privacy & Security → Full Disk Access. ") + fullDiskNextStep
                 }
-            HStack(alignment: .center, spacing: 12) {
-                TraverseApplicationAccessDrag(motion: motion) {
-                    if !access.openFullDiskAccessSettings() {
-                        settingsNotice = "Open System Settings → Privacy & Security → Full Disk Access, then drag Traverse into the list."
+            if #unavailable(macOS 27.3) {
+                HStack(alignment: .center, spacing: 12) {
+                    TraverseApplicationAccessDrag(motion: motion) {
+                        if !access.openFullDiskAccessSettings() {
+                            settingsNotice = "Open System Settings → Privacy & Security → Full Disk Access, then drag Traverse into the list."
+                        }
                     }
-                }
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Drag Traverse into Full Disk Access").interfaceFont(.callout.weight(.medium))
-                    Text("Start dragging the icon to open its system settings. Drop it into the list, then enable it.")
-                        .interfaceFont(.caption).foregroundStyle(.secondary)
-                    Button("Show Traverse in Finder…") { access.revealApplication() }
-                        .accessibilityIdentifier("show-traverse-for-permissions")
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Drag Traverse into Full Disk Access").interfaceFont(.callout.weight(.medium))
+                        Text("Start dragging the icon to open its system settings. Drop it into the list, then enable it.")
+                            .interfaceFont(.caption).foregroundStyle(.secondary)
+                        Button("Show Traverse in Finder…") { access.revealApplication() }
+                            .accessibilityIdentifier("show-traverse-for-permissions")
+                    }
                 }
             }
             if !settingsNotice.isEmpty { Text(settingsNotice).interfaceFont(.caption).foregroundStyle(.secondary) }

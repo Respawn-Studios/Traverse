@@ -57,7 +57,7 @@ enum DriveBenchmarkFeature {
     var canRun: Bool {
         !hasPendingWork && folder != nil && selectedLease != nil && selectionIsCurrent
     }
-    enum CopyFormat { case summary, json, suiteSummary, suiteJSON, comparisonSummary }
+    enum CopyFormat { case summary, json, metricsTable, suiteSummary, suiteJSON, suiteMetricsTable, comparisonSummary }
     var canCopyResults: Bool { !hasPendingWork && !isWorking && !isChoosing && selectedRun != nil }
     var canCopyComparison: Bool { canCopyResults && (suiteComparison != nil || comparison != nil) }
     func copyResults(_ format: CopyFormat) {
@@ -65,13 +65,21 @@ enum DriveBenchmarkFeature {
         let text: String
         do {
             switch format {
-            case .summary, .json:
+            case .summary, .json, .metricsTable:
                 let report = try DriveBenchmarkReport(result: run.result, recordedAt: run.date)
-                text = format == .summary ? report.summary : try report.json()
-            case .suiteSummary, .suiteJSON:
+                switch format {
+                case .summary: text = report.summary
+                case .metricsTable: text = report.metricsTable
+                default: text = try report.json()
+                }
+            case .suiteSummary, .suiteJSON, .suiteMetricsTable:
                 guard let suite = selectedSuite else { return }
                 let report = try suite.report()
-                text = format == .suiteSummary ? report.summary : try report.json()
+                switch format {
+                case .suiteSummary: text = report.summary
+                case .suiteMetricsTable: text = report.metricsTable
+                default: text = try report.json()
+                }
             case .comparisonSummary:
                 guard let summary = suiteComparison?.copySummary ?? comparison?.copySummary else { return }
                 text = summary
@@ -89,6 +97,7 @@ enum DriveBenchmarkFeature {
             switch format {
             case .summary, .suiteSummary: notice = "Copied benchmark summary."
             case .json, .suiteJSON: notice = "Copied benchmark JSON."
+            case .metricsTable, .suiteMetricsTable: notice = "Copied benchmark metrics table."
             case .comparisonSummary: notice = "Copied benchmark comparison."
             }
         }
@@ -508,9 +517,9 @@ struct DriveBenchmarkView: View {
                 if let suite = model.selectedSuite {
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Quick Mix results", systemImage: "chart.bar.xaxis").interfaceFont(.headline)
-                        suiteRow("Sequential · 64 MiB", run: suite.sequential, random: false)
+                        suiteRow("Sequential · 64 MiB", run: suite.sequential)
                         if let random = suite.random4K {
-                            suiteRow("Random 4 KiB · 16 MiB", run: random, random: true)
+                            suiteRow("Random 4 KiB · 16 MiB", run: random)
                         } else {
                             Text("Random 4 KiB was not started. The sequential stage did not complete or Stop was requested.")
                                 .interfaceFont(.callout).foregroundStyle(.secondary)
@@ -552,16 +561,16 @@ struct DriveBenchmarkView: View {
                 } else {
                   VStack(alignment: .leading, spacing: 16) {
                   HStack(spacing: 14) {
-                    metric("Write", bytes: model.result?.bytesWritten, seconds: model.result.map { $0.writeSeconds + $0.flushSeconds })
-                    metric("Read & Verify", bytes: model.result?.bytesRead, seconds: model.result?.readSeconds)
+                    metric("Write & flush", writing: true)
+                    metric("Read & verify", writing: false)
                 }
                 if let health {
                     AdaptiveToolColumns(settings: settings, minimumWidth: 620) {
-                        DriveBenchmarkChart(samples: model.samples)
+                        DriveBenchmarkChart(samples: model.samples, workload: workload)
                     } trailing: {
                         DriveHealthTrend(model: health, recordedPoints: model.selectedRun?.healthSamples)
                     }
-                  } else { DriveBenchmarkChart(samples: model.samples) }
+                  } else { DriveBenchmarkChart(samples: model.samples, workload: workload) }
                   }
                   .transition(.identity)
                 }
@@ -639,10 +648,12 @@ struct DriveBenchmarkView: View {
               Menu("Copy Results") {
                   Button("Selected run summary") { model.copyResults(.summary) }
                   Button("Selected run JSON") { model.copyResults(.json) }
+                  Button("Selected run metrics table") { model.copyResults(.metricsTable) }
                   if model.selectedSuite != nil {
                       Divider()
                       Button("Quick Mix summary") { model.copyResults(.suiteSummary) }
                       Button("Quick Mix JSON") { model.copyResults(.suiteJSON) }
+                      Button("Quick Mix metrics table") { model.copyResults(.suiteMetricsTable) }
                   }
                   if model.canCopyComparison {
                       Divider()
@@ -691,43 +702,44 @@ struct DriveBenchmarkView: View {
             Text("Try no cache for test file").tag(DriveBenchmarkCacheMode.tryNoCache)
         }.disabled(model.hasPendingWork)
     }
-    private func suiteRow(_ title: String, run: DriveBenchmarkRun, random: Bool) -> some View {
+    private var workload: DriveBenchmarkWorkload {
+        model.activeWorkload ?? model.result?.workload
+            ?? (model.configuration.preset == .quickMix ? .sequential : model.configuration.workload)
+    }
+
+    private func suiteRow(_ title: String, run: DriveBenchmarkRun) -> some View {
         let result = run.result
-        let writeAmount = random ? Double(result.writeLatency.operations) : Double(result.bytesWritten) / 1_000_000
-        let readAmount = random ? Double(result.readLatency.operations) : Double(result.bytesRead) / 1_000_000
-        let unit = random ? "IOPS" : "MB/s"
+        let metric = result.workload.primaryMetric
         return HStack(alignment: .firstTextBaseline, spacing: 18) {
             Text(title).interfaceFont(.callout.bold()).frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .trailing, spacing: 2) {
                 Text("Write + flush").interfaceFont(.caption).foregroundStyle(.secondary)
-                Text("\(suiteRate(result, writeAmount, result.writeSeconds + result.flushSeconds)) \(unit)")
+                Text("\(metric.displayValue(metric.completedRate(result, writing: true))) \(metric.unit)")
                     .monospacedDigit().interfaceFont(.callout)
             }
             VStack(alignment: .trailing, spacing: 2) {
                 Text("Read + verify").interfaceFont(.caption).foregroundStyle(.secondary)
-                Text("\(suiteRate(result, readAmount, result.readSeconds)) \(unit)")
+                Text("\(metric.displayValue(metric.completedRate(result, writing: false))) \(metric.unit)")
                     .monospacedDigit().interfaceFont(.callout)
             }
         }
     }
-    private func suiteRate(_ result: DriveBenchmarkResult, _ amount: Double, _ seconds: Double) -> String {
-        guard result.outcome == .completed, amount > 0, amount.isFinite, seconds > 0, seconds.isFinite else { return "—" }
-        return (amount / seconds).formatted(.number.precision(.fractionLength(0)))
-    }
-    private func metric(_ title: String, bytes: Int64?, seconds: Double?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func metric(_ title: String, writing: Bool) -> some View {
+        let metric = workload.primaryMetric
+        let result = model.isWorking ? nil : model.result
+        let value = result.flatMap { metric.completedRate($0, writing: writing) }
+        return VStack(alignment: .leading, spacing: 8) {
             Text(title).interfaceFont(.callout).foregroundStyle(.secondary)
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(rate(bytes, seconds)).interfaceFont(.system(size: 32, weight: .medium, design: .rounded)).monospacedDigit()
+                Text(metric.displayValue(value)).interfaceFont(.system(size: 32, weight: .medium, design: .rounded)).monospacedDigit()
                     .contentTransition(.numericText())
-                Text("MB/s").interfaceFont(.caption).foregroundStyle(.secondary)
+                Text(metric.unit).interfaceFont(.caption).foregroundStyle(.secondary)
             }
         }.frame(maxWidth: .infinity, alignment: .leading).padding(18)
             .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
-    }
-    private func rate(_ bytes: Int64?, _ seconds: Double?) -> String {
-        guard model.result?.outcome == .completed, let bytes, let seconds, seconds.isFinite, seconds > 0 else { return "—" }
-        return String(format: "%.0f", Double(bytes) / seconds / 1_000_000)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            .accessibilityValue(metric.accessibilityValue(value))
     }
     private func failureText(_ value: DriveBenchmarkFailure) -> String {
         switch value {

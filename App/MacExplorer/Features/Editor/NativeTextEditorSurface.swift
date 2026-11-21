@@ -12,6 +12,8 @@ final class EditorCodeTextView: NSTextView {
     var currentFindHighlight: NSRange? { didSet { if oldValue != currentFindHighlight { needsDisplay = true } } }
     var findHighlightColor = NSColor.systemBlue { didSet { needsDisplay = true } }
     var bracketHighlights: [NSRange] = [] { didSet { if oldValue != bracketHighlights { needsDisplay = true } } }
+    var diagnosticRanges: [NSRange] = [] { didSet { if oldValue != diagnosticRanges { needsDisplay = true } } }
+    var foldedOpenings: [NSRange] = [] { didSet { if oldValue != foldedOpenings { needsDisplay = true } } }
     #if DEBUG
     private(set) var findBackgroundDrawsForVerification = 0
     #endif
@@ -33,7 +35,26 @@ final class EditorCodeTextView: NSTextView {
         EditorFindHighlights.draw(findHighlights, current: currentFindHighlight, color: findHighlightColor,
                                   text: self, dirtyRect: rect)
         drawMatchingBrackets(in: rect)
+        drawDiagnostics(in: rect)
+        EditorCodeFolding.drawOpenings(foldedOpenings, text: self, dirtyRect: rect)
         EditorWhitespaceMarks.draw(in: self, dirtyRect: rect)
+    }
+
+    private func drawDiagnostics(in rect: NSRect) {
+        guard !diagnosticRanges.isEmpty, !hasMarkedText(),
+              let viewport = EditorTextViewport(self, drawing: rect) else { return }
+        let line = NSBezierPath()
+        line.lineWidth = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 2.5 : 1.8
+        let flipped = isFlipped
+        for range in diagnosticRanges {
+            viewport.forEachVisibleBox(in: range) { bounds in
+                let y = flipped ? bounds.maxY - 2 : bounds.minY + 2
+                line.move(to: .init(x: bounds.minX, y: y))
+                line.line(to: .init(x: max(bounds.maxX, bounds.minX + 5), y: y))
+            }
+        }
+        NSColor.systemRed.setStroke()
+        line.stroke()
     }
 
     private func drawMatchingBrackets(in rect: NSRect) {
@@ -56,7 +77,7 @@ final class EditorCodeTextView: NSTextView {
         didSet { if oldValue != indentationPreferences { clearBracketPairs(); needsDisplay = true } }
     }
     var indentationLanguage = TextSyntaxLanguage.plain {
-        didSet { if oldValue != indentationLanguage { clearBracketPairs(); needsDisplay = true } }
+        didSet { if oldValue != indentationLanguage { clearBracketPairs(); diagnosticRanges = []; needsDisplay = true } }
     }
     var showsIndentGuides = true { didSet { if oldValue != showsIndentGuides { needsDisplay = true } } }
     var showsWhitespaceMarks = false { didSet { if oldValue != showsWhitespaceMarks { needsDisplay = true } } }
@@ -332,6 +353,12 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     var onOutlineChanged: (() -> Void)?
     var onNavigationJump: ((EditorNavigationPosition) -> Void)?
     var onScrollContextChanged: ((ScrollContext?) -> Void)?
+    struct JSONIssues: Equatable {
+        let issues: [LocalJSONCheck.Issue]
+        var hasMore = false
+    }
+
+    var onJSONIssuesChanged: ((JSONIssues) -> Void)?
     var onReviewUnsavedLine: ((Int) -> Bool)?
     var onUnsavedLineBaselineChanged: (() -> Void)?
     var onWindowAttachment: (() -> Void)?
@@ -356,7 +383,14 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     private(set) var showsLineNumbers = true
     private var showsUnsavedLineChanges = true
     private var showsMatchingBrackets = true
+    private var showsLiveJSONIssues = true
+    private var liveJSONIssue: LocalJSONCheck.Issue?
+    private var checkedJSONIssues: JSONIssues?
+    private(set) var visibleJSONIssues = JSONIssues(issues: [])
+    var jsonIssues: [LocalJSONCheck.Issue] { visibleJSONIssues.issues }
     private var bracketMatches: EditorDelimiterWalk.MatchIndex?
+    private lazy var codeFolding = EditorCodeFolding(layout: textView.layoutManager)
+    private var foldIndex: EditorFoldIndex?
     private var lineChangeBaselineID: UUID?
     private(set) var unsavedLineChanges: EditorUnsavedLineChanges? {
         didSet {
@@ -410,6 +444,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         // manager. Keep TextKit's contiguous default: native tab activation can
         // otherwise loop while filling layout holes in a multiline document.
         textView.layoutManager?.allowsNonContiguousLayout = false
+        textView.layoutManager?.delegate = codeFolding
         textView.delegate = self
         // The callbacks belong to this main-actor text view's storage.
         textView.textStorage?.delegate = self
@@ -512,6 +547,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        if textView.selectedRanges.count == 1 { revealFoldedText(textView.selectedRange(), explicitly: false) }
         textView.nativeSelectionDidChange()
         lineCommands.selectionDidChange(); find.selectionDidChange(); publishCaret()
         updateBracketHighlights()
@@ -528,6 +564,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
               current.utf8.count - current[affected].utf8.count <= TextDocumentValue.maximumBytes - added else {
             onRejectedEdit?(.tooLarge); return false
         }
+        revealFoldedText(affectedCharRange)
         return true
     }
 
@@ -539,11 +576,49 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         }
         outlinePresentation = .init(value: prepared.outline, generation: expected, language: prepared.syntaxLanguage)
         bracketMatches = prepared.bracketMatches
+        foldIndex = prepared.folds
+        liveJSONIssue = prepared.syntaxLanguage == textView.indentationLanguage ? prepared.syntaxIssue : nil
+        updateJSONIssues()
+        updateGutterWidth()
+        gutter.needsDisplay = true
         updateBracketHighlights()
         onOutlineChanged?()
         contextLine = nil
         refreshScrollContext()
         return true
+    }
+
+    func presentDiagnostics(_ issues: [LocalJSONCheck.Issue], hasMore: Bool = false, for expected: UUID) {
+        guard generation == expected, !textView.hasMarkedText() else { return }
+        checkedJSONIssues = JSONIssues(issues: issues.prefix(24).sorted { $0.offset < $1.offset },
+                                       hasMore: hasMore || issues.count > 24)
+        updateJSONIssues()
+    }
+
+    func clearCheckedJSONIssues() {
+        checkedJSONIssues = nil
+        updateJSONIssues()
+    }
+
+    private func updateJSONIssues() {
+        let automatic = showsLiveJSONIssues ? liveJSONIssue.map { [$0] } ?? [] : []
+        let presentation = checkedJSONIssues ?? JSONIssues(issues: automatic)
+        if presentation != visibleJSONIssues {
+            visibleJSONIssues = presentation
+            onJSONIssuesChanged?(presentation)
+        }
+        let visible = presentation.issues
+        let source = textView.string as NSString
+        guard !visible.isEmpty, source.length > 0 else { textView.diagnosticRanges = []; return }
+        textView.diagnosticRanges = visible.compactMap { issue in
+            guard (0...source.length).contains(issue.offset) else { return nil }
+            var index = min(issue.offset, source.length - 1)
+            // At a missing token, mark the nearest preceding character a few
+            // spaces away. Navigation retains the exact reported caret.
+            let limit = max(0, index - 12)
+            while index > limit, [9, 10, 13, 32].contains(source.character(at: index)) { index -= 1 }
+            return source.rangeOfComposedCharacterSequence(at: index)
+        }
     }
 
     func prepareLineChangeBaseline(_ baseline: EditorSavedTextBaseline?) -> EditorSavedTextBaseline? {
@@ -631,6 +706,10 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         textView.showsIndentGuides = value.showsIndentGuides
         showsMatchingBrackets = value.showsMatchingBrackets
         updateBracketHighlights()
+        if showsLiveJSONIssues != value.showsLiveJSONIssues {
+            showsLiveJSONIssues = value.showsLiveJSONIssues
+            updateJSONIssues()
+        }
         defaultWhitespaceMarks = value.showsWhitespaceMarks
         textView.showsWhitespaceMarks = showsWhitespaceMarks
         if showsUnsavedLineChanges != value.showsUnsavedLineChanges {
@@ -718,7 +797,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         let font = NSFont.monospacedDigitSystemFont(ofSize: max(10, (textView.font?.pointSize ?? 13) - 2), weight: .regular)
         let measured = (String(repeating: "8", count: digits) as NSString).size(withAttributes: [.font: font]).width
         let padding = ceil(max(8, font.pointSize * 0.65))
-        let fitted = ceil(measured + padding * 2)
+        let fitted = ceil(measured + padding * 2 + foldGutterWidth)
         let thickness = lineIndex == nil ? max(gutter.ruleThickness, fitted) : fitted
         if abs(gutter.ruleThickness - thickness) > 0.5 { gutter.ruleThickness = thickness }
     }
@@ -932,6 +1011,13 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         guard textView.indentationLanguage != language else { return }
         lineCommands.inputDidChange()
         textView.indentationLanguage = language
+        checkedJSONIssues = nil
+        liveJSONIssue = nil
+        updateJSONIssues()
+        foldIndex = nil
+        revealAllCodeBlocks()
+        updateGutterWidth()
+        gutter.needsDisplay = true
         find.outlineLanguageDidChange()
         updateBracketHighlights()
         contextLine = nil
@@ -941,6 +1027,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     func revealNavigationSelection(_ range: NSRange, remembersLocation: Bool = true) {
         let origin = remembersLocation ? navigationPosition() : nil
         let expected = generation
+        revealFoldedText(range)
         textView.setSelectedRange(range)
         textView.scrollRangeToVisible(range)
         _ = window?.makeFirstResponder(textView)
@@ -974,6 +1061,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
     func restoreNavigationPosition(_ destination: EditorNavigationPosition) {
         guard canRestoreNavigationPosition(destination) else { return }
         _ = window?.makeFirstResponder(textView)
+        revealFoldedText(destination.selection)
         textView.setSelectedRange(destination.selection)
         textView.scrollRangeToVisible(destination.selection)
         if let anchor = destination.anchor { scroll(to: anchor, horizontalOffset: destination.origin.x) }
@@ -1013,6 +1101,8 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         onEdit = nil; onCaret = nil; onRejectedEdit = nil; onNavigationJump = nil
         outlinePresentation = nil; onOutlineChanged?(); onOutlineChanged = nil
         invalidateScrollContext(); onScrollContextChanged = nil
+        checkedJSONIssues = nil; liveJSONIssue = nil
+        updateJSONIssues(); onJSONIssuesChanged = nil
         clearStyling()
         installing = true
         textView.string = ""; textView.undoManager?.removeAllActions()
@@ -1030,7 +1120,82 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         styleRangeCount = 0
         visibleStyleRangeCount = 0; syntaxTokens = []; styledRange = .init(location: 0, length: 0)
         bracketMatches = nil
+        if presentedGeneration != generation {
+            foldIndex = nil
+            codeFolding.unfoldAll()
+            textView.foldedOpenings = []
+            checkedJSONIssues = nil
+            liveJSONIssue = nil
+            updateJSONIssues()
+        }
         textView.bracketHighlights = []
+    }
+
+    var foldGutterWidth: CGFloat { foldIndex?.byLine.isEmpty == false ? 15 : 0 }
+    var hasFoldedCode: Bool { codeFolding.hasFolds }
+    func canFoldLine(_ line: Int) -> Bool {
+        !textView.hasMarkedText() && foldIndex?.byLine[line] != nil && codeFolding.canToggle(on: line)
+    }
+    func isCodeFolded(on line: Int) -> Bool { codeFolding.isFolded(on: line) }
+
+    private var selectedFoldBlock: EditorFoldIndex.Block? {
+        guard textView.selectedRanges.count == 1, !textView.hasMarkedText(), let lineIndex else { return nil }
+        let selected = textView.selectedRange()
+        guard let line = lineIndex.location(at: selected.location)?.line else { return nil }
+        return foldIndex?.block(for: selected, on: line)
+    }
+    func canSetSelectedBlock(folded: Bool) -> Bool {
+        guard let block = selectedFoldBlock else { return false }
+        return codeFolding.isFolded(on: block.line) != folded && codeFolding.canToggle(on: block.line)
+    }
+    func setSelectedBlock(folded: Bool) {
+        guard canSetSelectedBlock(folded: folded), let block = selectedFoldBlock else { return }
+        toggleCodeFold(on: block.line)
+    }
+
+    @discardableResult func toggleCodeFold(on line: Int) -> Bool {
+        guard canFoldLine(line), let block = foldIndex?.byLine[line] else { return false }
+        var anchor = scrollAnchor()
+        let x = scrollView.contentView.bounds.minX
+        let collapsing = !codeFolding.isFolded(on: line)
+        if collapsing, let current = anchor, let offset = lineIndex?.start(ofLine: current.line + 1),
+           NSLocationInRange(offset, block.hidden) {
+            anchor = .init(line: line - 1, column: 0, fragmentProgress: 0)
+        }
+        if collapsing, textView.selectedRanges.count == 1 {
+            let selection = textView.selectedRange()
+            let low = block.hidden.location, high = NSMaxRange(block.hidden)
+            if (low < selection.location && selection.location < high)
+                || (low < NSMaxRange(selection) && NSMaxRange(selection) < high) {
+                textView.setSelectedRange(.init(location: block.opening.location, length: 0))
+            }
+        }
+        codeFolding.toggle(block)
+        if let anchor { scroll(to: anchor, horizontalOffset: x) }
+        updateCodeFoldPresentation()
+        return true
+    }
+
+    func revealAllCodeBlocks() {
+        guard codeFolding.hasFolds, !textView.hasMarkedText() else { return }
+        let anchor = scrollAnchor()
+        codeFolding.unfoldAll()
+        if let anchor { scroll(to: anchor) }
+        updateCodeFoldPresentation()
+    }
+
+    func revealFoldedText(_ range: NSRange, explicitly: Bool = true) {
+        guard codeFolding.reveal(range, explicitly: explicitly) else { return }
+        updateCodeFoldPresentation()
+    }
+
+    private func updateCodeFoldPresentation() {
+        textView.foldedOpenings = codeFolding.visibleOpenings
+        textView.needsDisplay = true
+        gutter.needsDisplay = true
+        window?.invalidateCursorRects(for: gutter)
+        contextLine = nil
+        refreshScrollContext()
     }
 
     private func updateBracketHighlights() {
@@ -1068,7 +1233,7 @@ final class NativeTextEditorSurface: NSView, NSTextViewDelegate, @preconcurrency
         let line = anchor.line + 1
         guard contextLine != line else { return }
         contextLine = line
-        let entries = prepared.value.scrolledScopes(at: start, onLine: line)
+        let entries = prepared.value.scrolledScopes(at: start, onLine: line, limit: 8)
         installScrollContext(entries.isEmpty ? nil : .init(generation: generation, scopes: entries))
     }
 
@@ -1127,6 +1292,10 @@ private final class EditorLineRuler: NSRulerView {
     private weak var surface: NativeTextEditorSurface?
     private let bookmarkSymbol = NSImage(systemSymbolName: "bookmark.fill", accessibilityDescription: nil)?
         .withSymbolConfiguration(.init(paletteColors: [.controlAccentColor]))
+    private let foldSymbol = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(paletteColors: [.labelColor]))
+    private let unfoldSymbol = NSImage(systemSymbolName: "chevron.forward", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(paletteColors: [.labelColor]))
     init(surface: NativeTextEditorSurface) {
         self.surface = surface
         super.init(scrollView: surface.scrollView, orientation: .verticalRuler)
@@ -1145,11 +1314,18 @@ private final class EditorLineRuler: NSRulerView {
         let inset = ceil(max(8, ((text.font?.pointSize ?? 13) - 2) * 0.65))
         let flagWidth = min(8, inset - 2), flagHeight = flagWidth * 1.5
         forEachVisibleLine { [self] number, line in
+            let foldWidth = surface.foldGutterWidth
+            if surface.canFoldLine(number) {
+                let symbol = surface.isCodeFolded(on: number) ? unfoldSymbol : foldSymbol
+                let marker = NSRect(x: (foldWidth - 10) / 2, y: line.midY - 5, width: 10, height: 10)
+                symbol?.draw(in: marker, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
             let string = String(number) as NSString
             let size = string.size(withAttributes: attributes)
             string.draw(at: .init(x: ruleThickness - size.width - inset, y: line.minY), withAttributes: attributes)
             if surface.hasBookmark(on: number) {
-                let marker = NSRect(x: (inset - flagWidth) / 2, y: line.midY - flagHeight / 2, width: flagWidth, height: flagHeight)
+                let marker = NSRect(x: foldWidth + (inset - flagWidth) / 2, y: line.midY - flagHeight / 2,
+                                    width: flagWidth, height: flagHeight)
                 bookmarkSymbol?.draw(in: marker, from: .zero,
                     operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             }
@@ -1165,16 +1341,29 @@ private final class EditorLineRuler: NSRulerView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
+        forEachVisibleFold { _, rect in self.addCursorRect(rect, cursor: .pointingHand) }
         guard surface?.onReviewUnsavedLine != nil, surface?.unsavedLineChanges?.marks.isEmpty == false else { return }
         forEachVisibleChange { _, rect in self.addCursorRect(rect, cursor: .pointingHand) }
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        var foldLine: Int?
+        forEachVisibleFold { number, rect in if rect.contains(point) { foldLine = number } }
+        if let foldLine, surface?.toggleCodeFold(on: foldLine) == true { return }
         var clickedLine: Int?
         forEachVisibleChange { number, rect in if rect.contains(point) { clickedLine = number } }
         if let clickedLine, surface?.onReviewUnsavedLine?(clickedLine) == true { return }
         super.mouseDown(with: event)
+    }
+
+    private func forEachVisibleFold(_ body: @escaping (Int, NSRect) -> Void) {
+        guard let surface, surface.foldGutterWidth > 0 else { return }
+        forEachVisibleLine { number, line in
+            guard surface.canFoldLine(number) else { return }
+            let hit = NSRect(x: 0, y: line.minY, width: surface.foldGutterWidth, height: line.height).intersection(self.bounds)
+            if !hit.isEmpty { body(number, hit) }
+        }
     }
 
     func changeRect(at line: Int) -> NSRect? {

@@ -47,6 +47,7 @@ import LocalStorage
                 case "ts": text = "export interface Orion { label: string }\nexport const chart = (track: Orion): string => track.label;\n"
                 case "css": text = ".generated { color: #123abc; }\n"
                 case "jsonc": text = "{\n  // Generated configuration only\n  \"project\" /* label */: \"Orion 🧭\",\n  \"enabled\": true,\n  \"count\": 123,\n}\n"
+                case "jsonl", "ndjson": text = "{\"project\":\"Orion 🧭\"}\n{\"done\":true}\n"
                 case "yaml", "yml": text = "orion:\n  chart: star\n"
                 case "htm", "html": text = "<!DOCTYPE html>\n<!-- Generated text only -->\n<html lang=\"en\">\n  <body><h1>Orion 🧭</h1><p class=\"note\">Source &amp; text.</p></body>\n</html>\n"
                 case "xml": text = "<?xml version=\"1.0\"?>\n<!-- Generated text only -->\n<project name=\"Orion 🧭\">\n  <item kind=\"note\">Source &amp; text.</item>\n</project>\n"
@@ -3185,8 +3186,10 @@ import LocalStorage
         try await Task.detached {
             try Data(original.utf8).write(to: file, options: .withoutOverwriting)
             func outline(_ value: String, _ language: TextSyntaxLanguage) -> EditorDocumentOutline {
-                EditorDocumentOutline.prepare(text: value, syntax: TextSyntax.color(value, language: language),
-                    language: language, lines: EditorLineIndex(value), cancelled: { false })
+                let syntax = TextSyntax.color(value, language: language)
+                let delimiters = EditorDelimiterWalk.capture(in: value, syntax: syntax, cancelled: { false })
+                return EditorDocumentOutline.prepare(text: value, syntax: syntax, language: language,
+                    lines: EditorLineIndex(value), preparedDelimiters: delimiters, cancelled: { false })
             }
             let markdown = "# Parent\n\n## Child\nchild body\n# Next\nsecond body\n"
             let headings = outline(markdown, .markdown), lines = EditorLineIndex(markdown)
@@ -3204,6 +3207,18 @@ import LocalStorage
                 && declarations.scrolledScopes(at: swiftLines.starts[5], onLine: 6).map(\.title) == ["Workspace"]
                 && declarations.scrolledScopes(at: swiftLines.starts[7], onLine: 8).isEmpty,
                 "scroll-context-swift-ignores-signature-closure-literals-and-comments")
+            let go = "type Packet struct {\n  size int\n}\nfunc Count() int {\n  return 3\n}\nvar later = 2\n"
+            let goScopes = outline(go, .go), goLines = EditorLineIndex(go)
+            try need(goScopes.scrolledScopes(at: goLines.starts[1], onLine: 2).map(\.title) == ["Packet"]
+                && goScopes.scrolledScopes(at: goLines.starts[4], onLine: 5).map(\.title) == ["Count"]
+                && goScopes.scrolledScopes(at: goLines.starts[6], onLine: 7).isEmpty,
+                "scroll-context-go-type-and-function-boundaries")
+            let cpp = "namespace Demo {\n int count()\n {\n  return 3;\n }\n int outside;\n}\nint later;\n"
+            let cppScopes = outline(cpp, .cpp), cppLines = EditorLineIndex(cpp)
+            try need(cppScopes.scrolledScopes(at: cppLines.starts[3], onLine: 4).map(\.title) == ["Demo", "count"]
+                && cppScopes.scrolledScopes(at: cppLines.starts[5], onLine: 6).map(\.title) == ["Demo"]
+                && cppScopes.scrolledScopes(at: cppLines.starts[7], onLine: 8).isEmpty,
+                "scroll-context-C-family-pairs-real-implementation-braces")
         }.value
         let initial = context.settings.editorPreferences
         defer { context.settings.updateEditorPreferences(initial) }
@@ -3256,6 +3271,27 @@ import LocalStorage
         try await wait("scroll-context-original-scroll-restored") { surface.scrollAnchor() == originalAnchor }
         try need(surface.generation == originalGeneration && surface.textView.selectedRange() == originalCaret
             && surface.textView.string == original && !document.isDirty, "scroll-context-never-edits-buffer")
+        let inside = (original as NSString).range(of: "value83")
+        surface.textView.setSelectedRange(inside)
+        guard let choose = UIVerification.menuItem("Go", "Choose Visible Scope…"), let chooseAction = choose.action,
+              editor.validateUserInterfaceItem(choose), NSApp.sendAction(chooseAction, to: editor, from: choose) else {
+            throw Failure(stage: "visible-scope-native-picker")
+        }
+        try await wait("visible-scopes-open-in-their-current-editor") { window.attachedSheet?.isKeyWindow == true }
+        guard let scopeSheet = window.attachedSheet else { throw Failure(stage: "visible-scope-native-sheet") }
+        try await UIVerification.snapshot(scopeSheet, to: context.root.appendingPathComponent("evidence/editor-visible-scopes.png"))
+        scopeSheet.sendEvent(UIVerification.key(String(UnicodeScalar(NSUpArrowFunctionKey)!), code: 126, flags: [], window: scopeSheet))
+        scopeSheet.sendEvent(UIVerification.key("\r", code: 36, flags: [], window: scopeSheet))
+        try await wait("visible-scope-picker-opens-the-parent") {
+            window.attachedSheet == nil && window.isKeyWindow && window.firstResponder === surface.textView
+                && surface.textView.selectedRange().location == 0 && surface.scrollAnchor()?.line == 0
+        }
+        try need(surface.generation == originalGeneration && !document.isDirty,
+            "visible-scope-picker-does-not-edit-the-document")
+        try need(NSApp.sendAction(action, to: editor, from: previous), "visible-scope-picker-reuses-text-location-history")
+        try await wait("visible-scope-picker-original-scroll-restored") {
+            surface.scrollAnchor() == originalAnchor && surface.textView.selectedRange() == inside
+        }
         guard let nextItem = UIVerification.menuItem("Go", "Outline", "Next Outline Item"),
               let previousItem = UIVerification.menuItem("Go", "Outline", "Previous Outline Item"),
               let scope = UIVerification.menuItem("Go", "Outline", "Go to Enclosing Scope"),
@@ -3266,13 +3302,13 @@ import LocalStorage
         let up = UIVerification.key(String(UnicodeScalar(NSUpArrowFunctionKey)!), code: 126,
             flags: [.command, .option], window: window)
         text.setSelectedRange(.init(location: 0, length: 0))
-        try need(!editor.validateUserInterfaceItem(previousItem) && editor.validateUserInterfaceItem(nextItem)
-            && NSApp.mainMenu?.performKeyEquivalent(with: down) == true
-            && text.selectedRange().location == expected && !editor.validateUserInterfaceItem(nextItem),
-            "outline-arrow-jumps-to-next-item-and-stops-at-end")
+        try need(!editor.validateUserInterfaceItem(previousItem) && editor.validateUserInterfaceItem(nextItem),
+            "outline-arrows-admit-only-the-next-location")
+        try need(NSApp.mainMenu?.performKeyEquivalent(with: down) == true, "outline-next-key-dispatches-after-scope-sheet")
+        try need(text.selectedRange().location == expected && !editor.validateUserInterfaceItem(nextItem),
+            "outline-next-key-reaches-the-next-item")
         try need(NSApp.mainMenu?.performKeyEquivalent(with: up) == true && text.selectedRange().location == 0,
             "outline-arrow-jumps-to-previous-item")
-        let inside = (original as NSString).range(of: "value83")
         text.setSelectedRange(inside)
         for offset in [expected, 0] {
             try need(editor.validateUserInterfaceItem(scope) && NSApp.sendAction(jumpToScope, to: editor, from: scope)

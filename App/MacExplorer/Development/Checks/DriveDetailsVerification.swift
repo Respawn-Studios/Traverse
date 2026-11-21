@@ -107,14 +107,25 @@ import SwiftUI
             guard let result = model.result else { throw UIVerification.Failure(message: "Missing benchmark result") }
             let expectedBytes: Int64 = quickMix ? 16 << 20 : 64 << 20
             let expectedWorkload: DriveBenchmarkWorkload = quickMix ? .random4K : model.configuration.workload
+            let expectedMetric: DriveBenchmarkMetric = expectedWorkload == .random4K ? .operationsPerSecond : .megabytesPerSecond
             try require(result.outcome == .completed && result.bytesWritten == expectedBytes && result.bytesRead == expectedBytes
                 && result.workload == expectedWorkload && result.preparationBytesWritten == (expectedWorkload == .random4K ? expectedBytes : 0)
                 && result.scratchURL == nil && !model.isWorking && operations.activeOwner == nil
                 && ApplicationFileActivity.gate.activeCount == active, "Actual bounded benchmark did not complete and drain")
             try requireLatencyDistributions(result)
+            try require(result.workload.primaryMetric == expectedMetric
+                && expectedMetric.completedRate(result, writing: true).map { $0 > 0 } == true
+                && result.samples.contains(where: { $0.rate(for: expectedWorkload) > 0 }),
+                "Benchmark headline or live sample used the wrong primary metric")
             if CGPreflightScreenCaptureAccess() {
                 try await captureLatencyDetails(result, settings: settings,
                     to: root.appendingPathComponent("evidence/drive-benchmark-latency-150.png"))
+                if expectedWorkload == .random4K, !quickMix, let window = model.window {
+                    window.makeKeyAndOrderFront(nil)
+                    try await Task.sleep(for: .milliseconds(350))
+                    try await GlassVerification.captureOwnedWindow(window,
+                        to: root.appendingPathComponent("evidence/drive-benchmark-random-metric.png"))
+                }
             }
             checks.append("Completed write/read block latencies yield fixed bounded distributions without another workload")
             generatedBytes += result.bytesWritten + result.preparationBytesWritten
@@ -169,6 +180,21 @@ import SwiftUI
                     "Quick Mix JSON lost separate workloads or included selection identity")
                 checks.append("Quick Mix summary/JSON copy both reports without folder or volume identity")
             }
+            model.copyResults(.metricsTable)
+            let selectedTable = copiedResults.last ?? ""
+            try require(model.notice == "Copied benchmark metrics table."
+                && selectedTable.split(separator: "\n").count == 3 && selectedTable.contains("P95 I/O ms")
+                && !selectedTable.contains(folder.path) && !selectedTable.contains(volume.name),
+                "Selected run metrics table did not publish two private-data-free phase rows")
+            if quickMix {
+                model.copyResults(.suiteMetricsTable)
+                let suiteTable = copiedResults.last ?? ""
+                try require(suiteTable.split(separator: "\n").count == 5
+                    && suiteTable.contains("\tsequential\t") && suiteTable.contains("\trandom4K\t")
+                    && !suiteTable.contains(folder.path) && !suiteTable.contains(volume.name),
+                    "Quick Mix metrics table lost a phase or exposed the selection identity")
+            }
+            checks.append("Benchmark spreadsheet copy retains separate completed phases and omits the selected drive name and path")
             checks.append("Explicit Summary/JSON copies use the shared text publisher on a private test sink, omit the chosen folder/volume identity and remain disabled during work")
             guard let reference = model.selectedRun else { throw UIVerification.Failure(message: "Missing recorded run") }
             let referenceSuite = model.selectedSuite
@@ -199,6 +225,7 @@ import SwiftUI
             try require(model.notice == "Copied benchmark comparison."
                 && comparison.contains("Selected P95 (ms)") && comparison.contains("Reference P95 (ms)")
                 && comparison.contains("Write and flush") && comparison.contains("Read and verify")
+                && comparison.contains("Selected (\(expectedMetric.unit))")
                 && (!quickMix || comparison.contains("Sequential") && comparison.contains("Random 4 KiB"))
                 && !comparison.contains(folder.path) && !comparison.contains(volume.name),
                 "The comparison table lost measured phases or included a folder or volume name")
@@ -217,8 +244,9 @@ import SwiftUI
                 try require(pair != nil
                     && pair?.sequential.write.selectedRate?.isFinite == true
                     && pair?.sequential.read.selectedRate?.isFinite == true
-                    && pair?.random4K.write.selectedIOPS?.isFinite == true
-                    && pair?.random4K.read.selectedIOPS?.isFinite == true
+                    && pair?.random4K.metric == .operationsPerSecond
+                    && pair?.random4K.write.selectedRate?.isFinite == true
+                    && pair?.random4K.read.selectedRate?.isFinite == true
                     && model.suiteComparisonCandidates.contains(where: { $0.sequential.suiteID == first.sequential.suiteID })
                     && DriveBenchmarkSuiteComparison(selected: second,
                         reference: .init(sequential: first.sequential, random4K: secondRandom)) == nil,
@@ -273,6 +301,7 @@ import SwiftUI
             } else { model.comparisonRunID = reference.id }
             try require(model.suiteComparison == nil
                 && model.comparison?.selected.id == selected.id && model.comparison?.reference.id == reference.id
+                && model.comparison?.metric == expectedMetric
                 && model.comparison?.write.selectedRate?.isFinite == true && model.comparison?.read.selectedRate?.isFinite == true,
                 "Comparison lost the selected/reference result or finite measured rates")
             let otherVolume = DriveBenchmarkRun(date: reference.date, volumeName: "Other generated volume",

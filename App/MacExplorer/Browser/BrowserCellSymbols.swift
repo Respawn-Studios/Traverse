@@ -44,6 +44,11 @@ import AppKit
         case .spreadsheet: name = "tablecells"
         case .presentation: name = "rectangle.on.rectangle"
         case .model3D: name = "cube"
+        case .shortcut: name = "globe"
+        case .calendar: name = "calendar"
+        case .contact: name = "person.crop.rectangle"
+        case .log: name = "list.bullet.rectangle"
+        case .patch: name = "plusminus"
         }
         return NSImage(systemSymbolName: name, accessibilityDescription: role.title)
     }

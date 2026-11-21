@@ -53,10 +53,16 @@ enum WorkspaceDividerAction: CaseIterable {
 final class WorkspaceDividerControls: NSView {
     static let revealDistance: CGFloat = 7
 
+    struct PanePair: Equatable {
+        let first: UUID
+        let second: UUID
+    }
+
     struct Divider: Equatable {
         let id: UUID
         let axis: PaneSplitAxis
         let line: NSRect
+        let panes: PanePair?
         let canBalance: Bool
         let canRotate: Bool
         let pairAction: WorkspaceDividerAction?
@@ -65,6 +71,18 @@ final class WorkspaceDividerControls: NSView {
         let isLinked: Bool
         let copyDestination: LocalPaneDestination?
         var canCopy: Bool { copyDestination != nil }
+
+        var actions: [WorkspaceDividerAction] {
+            var result: [WorkspaceDividerAction] = [.swap, .balance]
+            if canRotate { result.append(.rotate) }
+            if let pairAction { result.append(pairAction) }
+            if canLink { result.append(.link) }
+            if canCompareGit { result.append(.compareGit) }
+            if canCopy { result.append(.copy) }
+            return result
+        }
+
+        func enables(_ action: WorkspaceDividerAction) -> Bool { action != .balance || canBalance }
 
         func title(for action: WorkspaceDividerAction) -> String {
             if action == .copy, let copyDestination { return "Copy to " + copyDestination.title }
@@ -87,15 +105,19 @@ final class WorkspaceDividerControls: NSView {
     }
 
     var dividers: (NSPoint?, UUID?) -> [Divider] = { _, _ in [] }
-    var perform: (WorkspaceDividerAction, UUID) -> Void = { _, _ in }
+    var perform: (WorkspaceDividerAction, Divider) -> Void = { _, _ in }
     var motion = BrowserMotionPreferences()
     private var tracking: NSTrackingArea?
     private var dividerID: UUID?
-    private var anchor: CGFloat = 0
+    private var hoveredPoint: NSPoint?
+    private var placedBounds: NSRect = .zero
     private var positioned: Divider?
     private var buttonSize: CGFloat = 0
     private let shelf = NSView()
     private var buttons: [NSButton] = []
+    private let more = NSButton()
+    private(set) var overflowActions: [WorkspaceDividerAction] = []
+    private var showingOverflow = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -104,23 +126,29 @@ final class WorkspaceDividerControls: NSView {
         shelf.isHidden = true
         addSubview(shelf)
         for (index, action) in WorkspaceDividerAction.allCases.enumerated() {
-            let button = NSButton()
+            let button = makeButton(NSButton(), title: action.title, command: #selector(performAction(_:)))
             button.tag = index
-            button.bezelStyle = .texturedRounded
-            button.wantsLayer = true
-            button.controlSize = .regular
-            button.imagePosition = .imageOnly
-            button.refusesFirstResponder = true
-            button.toolTip = action.title
-            button.setAccessibilityLabel(action.title)
-            button.target = self
-            button.action = #selector(performAction(_:))
-            shelf.addSubview(button)
             buttons.append(button)
         }
+        makeButton(more, title: "More Pane Actions", command: #selector(showOverflow(_:)))
     }
 
     required init?(coder: NSCoder) { nil }
+
+    @discardableResult
+    private func makeButton(_ button: NSButton, title: String, command: Selector) -> NSButton {
+        button.bezelStyle = .texturedRounded
+        button.wantsLayer = true
+        button.controlSize = .regular
+        button.imagePosition = .imageOnly
+        button.refusesFirstResponder = true
+        button.toolTip = title
+        button.setAccessibilityLabel(title)
+        button.target = self
+        button.action = command
+        shelf.addSubview(button)
+        return button
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -137,14 +165,15 @@ final class WorkspaceDividerControls: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { updateHover(at: event.locationInWindow) }
-    override func mouseExited(with event: NSEvent) { dismiss() }
+    override func mouseExited(with event: NSEvent) { if !showingOverflow { dismiss() } }
 
     func updateHover(at windowPoint: NSPoint) {
-        guard superview != nil else { return }
+        guard !showingOverflow, superview != nil else { return }
         let point = convert(windowPoint, from: nil)
-        let held = shelf.frame.insetBy(dx: -4, dy: -4).contains(point) ? dividerID : nil
+        let held = positioned.flatMap { holdingRegion(for: $0).contains(point) ? dividerID : nil }
         let available = dividers(point, held)
         if let current = available.first(where: { $0.id == held }) {
+            hoveredPoint = point
             position(on: current)
             return
         }
@@ -153,82 +182,104 @@ final class WorkspaceDividerControls: NSView {
         }.min { $0.1 < $1.1 }
         guard let (divider, distance) = nearest, distance <= Self.revealDistance else { dismiss(); return }
         let wasHidden = dividerID == nil
-        if dividerID != divider.id {
-            dividerID = divider.id
-            anchor = divider.axis == .columns ? point.y : point.x
-        }
+        dividerID = divider.id
+        hoveredPoint = point
         position(on: divider)
-        if wasHidden { setPresented(true, animated: true) }
+        if wasHidden && dividerID != nil { setPresented(true, animated: true) }
+    }
+
+    private func holdingRegion(for divider: Divider) -> NSRect {
+        let frame = shelf.frame
+        let besideLine = divider.axis == .columns
+            ? NSRect(x: divider.line.midX - 1, y: frame.minY, width: 2, height: frame.height)
+            : NSRect(x: frame.minX, y: divider.line.midY - 1, width: frame.width, height: 2)
+        return frame.union(besideLine).insetBy(dx: -4, dy: -4)
     }
 
     /// Selection, a folder visit or Git discovery can change the offered
-    /// actions while the pointer is stationary. Keep the existing anchor.
+    /// actions while the pointer is stationary. Keep the same hovered segment.
     func refreshPresentation() {
-        guard let dividerID else { return }
-        guard let current = dividers(nil, dividerID).first(where: { $0.id == dividerID }) else { dismiss(); return }
+        guard let dividerID, let hoveredPoint else { return }
+        guard let current = dividers(hoveredPoint, dividerID).first(where: { $0.id == dividerID }) else { dismiss(); return }
         position(on: current)
     }
 
     private func position(on divider: Divider) {
         let size = InterfaceMetrics.points(28)
         let sizeChanged = buttonSize != size
-        guard positioned != divider || sizeChanged else { return }
+        guard positioned != divider || sizeChanged || placedBounds != bounds else { return }
         positioned = divider; buttonSize = size
-        let gap = 2 * Self.revealDistance
+        placedBounds = bounds
         let columns = divider.axis == .columns
         let line = divider.line
-        let low = (columns ? line.minY : line.minX) + size / 2
-        let high = (columns ? line.maxY : line.maxX) - size / 2
-        let along = min(max(low, anchor), high)
-        let rotationOffset = divider.canLink ? size + 3 : 0
-        let leading = rotationOffset + (divider.canRotate ? size + 3 : 0)
-        let afterBalance = leading + 2 * size + gap
-        let afterPairAction = afterBalance + (divider.pairAction == nil ? 0 : size + 3)
-        let afterGit = afterPairAction + (divider.canCompareGit ? size + 3 : 0)
-        let extent = afterGit + (divider.canCopy ? size + 3 : 0)
+        let length = columns ? line.height : line.width
+        let spacing = InterfaceMetrics.points(3)
+        let padding = InterfaceMetrics.points(4)
+        let slots = Int(max(0, (length - 2 * padding + spacing) / (size + spacing)))
+        let midline = columns ? line.midX : line.midY
+        let crossMinimum = columns ? bounds.minX : bounds.minY
+        let crossMaximum = columns ? bounds.maxX : bounds.maxY
+        let clearance = Self.revealDistance + spacing
+        let nextSide = midline + clearance
+        let cross = nextSide + size <= crossMaximum ? nextSide : midline - clearance - size
+        guard slots > 0, cross >= crossMinimum, cross + size <= crossMaximum else {
+            dismiss(animated: false); return
+        }
+
+        let actions = divider.actions
+        let overflow = actions.count > slots
+        let shown = actions.prefix(overflow ? slots - 1 : actions.count)
+        overflowActions = Array(actions.dropFirst(shown.count))
+        let count = shown.count + (overflow ? 1 : 0)
+        let extent = CGFloat(count) * (size + spacing) - spacing
+        let start = (length - extent) / 2
         shelf.frame = columns
-            ? NSRect(x: line.midX - gap / 2 - size - leading, y: along - size / 2, width: extent, height: size)
-            : NSRect(x: along - size / 2, y: line.midY - gap / 2 - size - leading, width: size, height: extent)
+            ? NSRect(x: cross, y: line.maxY - start - extent, width: size, height: extent)
+            : NSRect(x: line.minX + start, y: cross, width: extent, height: size)
+
+        func frame(at index: Int) -> NSRect {
+            let offset = CGFloat(index) * (size + spacing)
+            return NSRect(x: columns ? 0 : offset, y: columns ? extent - offset - size : 0, width: size, height: size)
+        }
         for (index, action) in WorkspaceDividerAction.allCases.enumerated() {
             let button = buttons[index]
-            let offset: CGFloat = switch action {
-            case .link: 0
-            case .rotate: rotationOffset
-            case .swap: leading
-            case .balance: leading + size + gap
-            case .compare, .compareText, .compareMatchingText, .selectMatch: afterBalance + 3
-            case .compareGit: afterPairAction + 3
-            case .copy: afterGit + 3
-            }
-            button.frame = NSRect(x: columns ? offset : 0, y: columns ? 0 : offset, width: size, height: size)
+            button.isHidden = !shown.contains(action)
+            guard let position = shown.firstIndex(of: action) else { continue }
+            button.frame = frame(at: position)
             let symbol = action.symbol(for: divider.axis, isLinked: divider.isLinked)
             let title = divider.title(for: action)
-            if button.identifier?.rawValue != symbol || sizeChanged {
-                button.identifier = NSUserInterfaceItemIdentifier(symbol)
-                button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: InterfaceMetrics.points(13), weight: .semibold))
+            let imageIdentity = NSUserInterfaceItemIdentifier("\(symbol)-\(size)")
+            if button.identifier != imageIdentity {
+                button.identifier = imageIdentity
+                button.image = actionImage(symbol)
             }
             if button.toolTip != title {
                 button.toolTip = title
                 button.setAccessibilityLabel(title)
             }
-            button.isEnabled = action != .balance || divider.canBalance
-            button.isHidden = switch action {
-            case .compare, .compareText, .compareMatchingText, .selectMatch: action != divider.pairAction
-            case .compareGit: !divider.canCompareGit
-            case .rotate: !divider.canRotate
-            case .link: !divider.canLink
-            case .copy: !divider.canCopy
-            case .swap, .balance: false
-            }
-            button.contentTintColor = action == .link && divider.isLinked ? .controlAccentColor : nil
+            button.isEnabled = divider.enables(action)
+            button.contentTintColor = action == .link && divider.isLinked ? .controlAccentColor
+                : button.isEnabled ? .labelColor : .tertiaryLabelColor
         }
+        more.isHidden = !overflow
+        if overflow {
+            more.frame = frame(at: shown.count)
+            more.contentTintColor = .labelColor
+            if sizeChanged || more.image == nil { more.image = actionImage("ellipsis") }
+        }
+    }
+
+    private func actionImage(_ symbol: String) -> NSImage? {
+        NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: InterfaceMetrics.points(13), weight: .semibold))
     }
 
     func dismiss(animated: Bool = true) {
         guard dividerID != nil || (!animated && !shelf.isHidden) else { return }
         dividerID = nil
+        hoveredPoint = nil
         positioned = nil
+        overflowActions = []
         setPresented(false, animated: animated)
     }
 
@@ -238,7 +289,7 @@ final class WorkspaceDividerControls: NSView {
         let duration = animated && motion.allows(.panes) && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             ? (presented ? 0.16 : 0.10) * motion.mode.durationScale : 0
         guard duration > 0 else {
-            for button in buttons { button.layer?.removeAnimation(forKey: "dividerReveal") }
+            for button in buttons + [more] { button.layer?.removeAnimation(forKey: "dividerReveal") }
             shelf.alphaValue = opacity
             shelf.isHidden = !presented
             return
@@ -249,7 +300,7 @@ final class WorkspaceDividerControls: NSView {
             reveal.toValue = 1.0
             reveal.duration = duration
             reveal.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            for button in buttons where !button.isHidden { button.layer?.add(reveal, forKey: "dividerReveal") }
+            for button in buttons + [more] where !button.isHidden { button.layer?.add(reveal, forKey: "dividerReveal") }
         }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = duration
@@ -264,6 +315,7 @@ final class WorkspaceDividerControls: NSView {
     func button(at windowPoint: NSPoint) -> NSButton? {
         guard dividerID != nil, !shelf.isHidden else { return nil }
         let point = shelf.convert(windowPoint, from: nil)
+        if !more.isHidden && more.frame.contains(point) { return more }
         return buttons.first { !$0.isHidden && $0.frame.contains(point) }
     }
 
@@ -272,8 +324,37 @@ final class WorkspaceDividerControls: NSView {
     }
 
     @objc private func performAction(_ sender: NSButton) {
-        guard let dividerID, sender.isEnabled, !sender.isHiddenOrHasHiddenAncestor,
+        guard let divider = positioned, dividerID == divider.id, sender.isEnabled, !sender.isHiddenOrHasHiddenAncestor,
               buttons.indices.contains(sender.tag), buttons[sender.tag] === sender else { return }
-        perform(WorkspaceDividerAction.allCases[sender.tag], dividerID)
+        perform(WorkspaceDividerAction.allCases[sender.tag], divider)
+    }
+
+    @objc private func showOverflow(_ sender: NSButton) {
+        guard sender === more, !more.isHiddenOrHasHiddenAncestor, let divider = positioned,
+              !overflowActions.isEmpty else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for action in overflowActions {
+            guard let index = WorkspaceDividerAction.allCases.firstIndex(of: action) else { continue }
+            let item = NSMenuItem(title: divider.title(for: action), action: #selector(performOverflowAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.image = actionImage(action.symbol(for: divider.axis, isLinked: divider.isLinked))
+            item.isEnabled = divider.enables(action)
+            menu.addItem(item)
+        }
+        showingOverflow = true
+        defer {
+            showingOverflow = false
+            if let window { updateHover(at: window.mouseLocationOutsideOfEventStream) }
+        }
+        menu.popUp(positioning: nil, at: .init(x: more.bounds.minX, y: more.bounds.minY), in: more)
+    }
+
+    @objc private func performOverflowAction(_ sender: NSMenuItem) {
+        let actions = WorkspaceDividerAction.allCases
+        guard let divider = positioned, dividerID == divider.id, actions.indices.contains(sender.tag),
+              overflowActions.contains(actions[sender.tag]), divider.enables(actions[sender.tag]) else { return }
+        perform(actions[sender.tag], divider)
     }
 }

@@ -4,6 +4,7 @@ enum EditorLineCommand: Equatable, Sendable {
     case duplicateSelectedLines, moveLinesUp, moveLinesDown
     case toggleLineComment(EditorLineCommentStyle)
     case formatJSON(EditorJSONFormat, allowsComments: Bool = false)
+    case repairJSONDelimiter(allowsComments: Bool)
     case sortSelectedLines(descending: Bool)
     case trimTrailingWhitespace
     case surroundSelection(EditorSurroundingPair)
@@ -28,7 +29,8 @@ enum EditorLineCommentStyle: String, Sendable {
 /// retains the exact original snapshot, generation, native admission and Undo.
 enum EditorLineCommandPlan: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Refusal: Equatable, Sendable {
-        case invalidSelection, nonCanonicalText, tooLarge, cannotFormatJSON, noMatchingBracket, noEnclosingBrackets, noCompleteConflict
+        case invalidSelection, nonCanonicalText, tooLarge, cannotFormatJSON, noJSONDelimiterRepair
+        case noMatchingBracket, noEnclosingBrackets, noCompleteConflict
     }
     case unchanged
     case select(NSRange)
@@ -69,6 +71,9 @@ enum EditorLineCommands {
         }
         if case .navigateBrackets(let operation, let language) = command {
             return operation.plan(text: text, selection: selection, language: language)
+        }
+        if case .repairJSONDelimiter(let allowsComments) = command {
+            return EditorJSONFormatting.repairDelimiter(in: text, maximumBytes: maximumBytes, allowsComments: allowsComments)
         }
 
         let index = EditorLineIndex(text)
@@ -126,7 +131,7 @@ enum EditorLineCommands {
         }
 
         switch command {
-        case .navigateBrackets: return .unchanged
+        case .navigateBrackets, .repairJSONDelimiter: return .unchanged
         case .expandSelection:
             let fullLines = NSRange(location: blockStart, length: blockEnd - blockStart)
             return structure?.expanded(in: input, from: selection, lines: [bodyRange, fullLines]).map(EditorLineCommandPlan.select) ?? .unchanged

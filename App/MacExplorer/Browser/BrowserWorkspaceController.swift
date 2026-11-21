@@ -84,7 +84,9 @@ final class BrowserWorkspaceController: NSViewController {
         let controls = WorkspaceDividerControls(frame: .zero)
         controls.motion = primaryBrowser.settings.motion
         controls.dividers = { [weak self] point, held in self?.visiblePaneDividers(near: point, keeping: held) ?? [] }
-        controls.perform = { [weak self] action, id in self?.performDividerAction(action, split: id) }
+        controls.perform = { [weak self] action, divider in
+            self?.performDividerAction(action, split: divider.id, at: divider.panes)
+        }
         return controls
     }()
     private var reconcilingPaneTree = false
@@ -485,23 +487,67 @@ final class BrowserWorkspaceController: NSViewController {
                 guard let distance = WorkspaceDividerControls.Divider.distance(from: bounds, axis: axis, to: point),
                       distance <= WorkspaceDividerControls.revealDistance else { return nil }
             }
-            let left = browsers[first], right = browsers[second]
+            let segment: NSRect
+            let panes: WorkspaceDividerControls.PanePair?
+            if let point {
+                guard let adjacent = dividerSegment(bounds, axis: axis, first: first, second: second, near: point) else { return nil }
+                (segment, panes) = (adjacent.line, adjacent.panes)
+            } else {
+                segment = bounds
+                panes = dividerPanes(first: first, second: second, at: nil)
+            }
             let pairAction: WorkspaceDividerAction?
-            let canCompareGit: Bool
-            if let left, let right {
+            var canCompareGit = false
+            if let panes, let left = browsers[panes.first], let right = browsers[panes.second] {
                 if left.canCompareSelectedText(with: right) { pairAction = .compareText }
                 else if left.canCompareSelectedText(with: right, matchingName: true) { pairAction = .compareMatchingText }
-                else if dividerNameMatch(first: first, second: second) != nil { pairAction = .selectMatch }
+                else if dividerNameMatch(first: panes.first, second: panes.second) != nil { pairAction = .selectMatch }
                 else if left.canCompareCurrentFolders(with: right) { pairAction = .compare }
                 else { pairAction = nil }
                 canCompareGit = left.canCompareGitCheckout(with: right)
-            } else { pairAction = nil; canCompareGit = false }
-            return .init(id: node.id, axis: axis, line: bounds,
+            } else { pairAction = nil }
+            return .init(id: node.id, axis: axis, line: segment, panes: panes,
                          canBalance: abs(fraction - 0.5) > 0.001, canRotate: rotatedLayout(for: node.id) != nil,
                          pairAction: pairAction, canCompareGit: canCompareGit,
                          canLink: folderNavigation.canToggle(node.id), isLinked: folderNavigation.isLinked(node.id),
-                         copyDestination: dividerCopyDestination(first: first, second: second))
+                         copyDestination: panes.flatMap { dividerCopyDestination(first: $0.first, second: $0.second) })
         }
+    }
+
+    private func dividerSegment(_ line: NSRect, axis: PaneSplitAxis, first: UUID, second: UUID,
+                                near point: NSPoint) -> (line: NSRect, panes: WorkspaceDividerControls.PanePair)? {
+        let columns = axis == .columns
+        let along = columns ? point.y : point.x
+        let cross = columns ? line.midX : line.midY
+        let tolerance = (columns ? line.width : line.height) + 1
+        func pane(in side: UUID) -> (id: UUID, length: ClosedRange<CGFloat>)? {
+            for id in layout.paneIDs(in: side) {
+                guard let host = paneLayoutView(id), host.superview != nil else { continue }
+                let frame = host.convert(host.bounds, to: paneTreeHost)
+                let range = columns ? frame.minY...frame.maxY : frame.minX...frame.maxX
+                let edges = columns ? (frame.minX, frame.maxX) : (frame.minY, frame.maxY)
+                guard range.contains(along), min(abs(edges.0 - cross), abs(edges.1 - cross)) <= tolerance else { continue }
+                return (id, range)
+            }
+            return nil
+        }
+        guard let left = pane(in: first), let right = pane(in: second) else { return nil }
+        let lower = max(columns ? line.minY : line.minX, left.length.lowerBound, right.length.lowerBound)
+        let upper = min(columns ? line.maxY : line.maxX, left.length.upperBound, right.length.upperBound)
+        guard upper > lower else { return nil }
+        let segment = columns ? NSRect(x: line.minX, y: lower, width: line.width, height: upper - lower)
+            : .init(x: lower, y: line.minY, width: upper - lower, height: line.height)
+        return (segment, .init(first: left.id, second: right.id))
+    }
+
+    private func dividerPanes(first: UUID, second: UUID,
+                              at hover: WorkspaceDividerControls.PanePair?) -> WorkspaceDividerControls.PanePair? {
+        if let hover {
+            guard layout.paneIDs(in: first).contains(hover.first), layout.paneIDs(in: second).contains(hover.second) else { return nil }
+            return hover
+        }
+        guard browsers[first] != nil, browsers[second] != nil else { return nil }
+        return .init(first: first, second: second)
     }
 
     private func rotatedLayout(for id: UUID) -> PaneLayout? {
@@ -536,17 +582,20 @@ final class BrowserWorkspaceController: NSViewController {
         return (peer, url)
     }
 
-    func canPerformDividerAction(_ action: WorkspaceDividerAction, split id: UUID? = nil) -> Bool {
+    func canPerformDividerAction(_ action: WorkspaceDividerAction, split id: UUID? = nil,
+                                 at hover: WorkspaceDividerControls.PanePair? = nil) -> Bool {
         guard canChangePaneLayout, !ApplicationFileActivity.gate.isClosed,
               let id = id ?? layout.parent(of: activePaneID)?.id,
               let node = layout.node(id), case .split(_, let fraction, let first, let second) = node.content,
               paneSplits[id]?.superview != nil else { return false }
+        let panes = dividerPanes(first: first, second: second, at: hover)
+        if hover != nil && panes == nil { return false }
         switch action {
         case .swap: return true
         case .balance: return abs(fraction - 0.5) > 0.001
         case .rotate: return rotatedLayout(for: id) != nil
         case .compare, .compareText, .compareMatchingText, .compareGit:
-            guard let left = browsers[first], let right = browsers[second] else { return false }
+            guard let panes, let left = browsers[panes.first], let right = browsers[panes.second] else { return false }
             switch action {
             case .compare: return left.canCompareCurrentFolders(with: right)
             case .compareText: return left.canCompareSelectedText(with: right)
@@ -556,15 +605,19 @@ final class BrowserWorkspaceController: NSViewController {
         case .link:
             return folderNavigation.canToggle(id)
         case .selectMatch:
-            return dividerNameMatch(first: first, second: second) != nil
+            return panes.flatMap { dividerNameMatch(first: $0.first, second: $0.second) } != nil
         case .copy:
-            return dividerCopyDestination(first: first, second: second) != nil
+            return panes.flatMap { dividerCopyDestination(first: $0.first, second: $0.second) } != nil
         }
     }
 
     @discardableResult
-    func performDividerAction(_ action: WorkspaceDividerAction, split id: UUID? = nil) -> Bool {
-        guard let id = id ?? layout.parent(of: activePaneID)?.id, canPerformDividerAction(action, split: id) else { return false }
+    func performDividerAction(_ action: WorkspaceDividerAction, split id: UUID? = nil,
+                              at hover: WorkspaceDividerControls.PanePair? = nil) -> Bool {
+        guard let id = id ?? layout.parent(of: activePaneID)?.id,
+              case .split(_, _, let first, let second)? = layout.node(id)?.content,
+              canPerformDividerAction(action, split: id, at: hover) else { return false }
+        let panes = dividerPanes(first: first, second: second, at: hover)
         var proposed = layout
         do {
             switch action {
@@ -579,8 +632,7 @@ final class BrowserWorkspaceController: NSViewController {
                 proposed = rotated
                 preparePaneTransition(rearranging: (id, .direction))
             case .compare, .compareText, .compareMatchingText, .compareGit:
-                guard case .split(_, _, let first, let second)? = layout.node(id)?.content,
-                      let left = browsers[first], let right = browsers[second] else { return false }
+                guard let panes, let left = browsers[panes.first], let right = browsers[panes.second] else { return false }
                 dismissPaneDividerControls()
                 switch action {
                 case .compare: return left.compareCurrentFolders(with: right)
@@ -592,16 +644,14 @@ final class BrowserWorkspaceController: NSViewController {
                 dismissPaneDividerControls()
                 return folderNavigation.toggle(id)
             case .selectMatch:
-                guard case .split(_, _, let first, let second)? = layout.node(id)?.content,
-                      let match = dividerNameMatch(first: first, second: second) else { return false }
+                guard let panes, let match = dividerNameMatch(first: panes.first, second: panes.second) else { return false }
                 dismissPaneDividerControls()
                 match.browser.setFileSelection([match.url])
                 if match.browser.usesFileIcons { match.browser.fileSelectionDidChange() }
                 match.browser.revealFile(match.url)
                 return true
             case .copy:
-                guard case .split(_, _, let first, let second)? = layout.node(id)?.content,
-                      let destination = dividerCopyDestination(first: first, second: second) else { return false }
+                guard let panes, let destination = dividerCopyDestination(first: panes.first, second: panes.second) else { return false }
                 dismissPaneDividerControls()
                 return activeBrowser.paneTransfers.request(move: false, to: destination.pane)
             }

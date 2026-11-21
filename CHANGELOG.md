@@ -7,7 +7,7 @@ Earlier private-beta version numbers belong to a separate release history.
 ## [0.4.0] - 2026-11-21
 
 This release brings local Git review, a more capable editor and more ways to
-work between panes. Build 103 has separate Apple Silicon and Intel installers.
+work between panes. Build 104 has separate Apple Silicon and Intel installers.
 
 ### Features
 
@@ -17,7 +17,8 @@ work between panes. Build 103 has separate Apple Silicon and Intel installers.
   link matching folder navigation, or copy the current selection directly to
   its neighbour. The View and File menus give the same actions from the
   keyboard. In Full motion, pane contents cross with a brief translucent
-  card effect and the active pane carries its focus with it.
+  card effect and the active pane carries its focus with it. The controls
+  center beside the two panes under the pointer, leaving the resize line clear.
 - Compare two local folders by path, name and metadata. Check Contents catches
   changed bytes even when size and date match. Filter the review, open a
   text diff, open either file directly in the editor, or copy a group of
@@ -44,6 +45,12 @@ work between panes. Build 103 has separate Apple Silicon and Intel installers.
 - Search Settings (`⌘F`) highlights the exact control, including individual
   browser shortcuts and settings with a prerequisite. Use the clear button
   or Escape to return to the page list.
+- Icons view shows thumbnails for supported local images and PDFs, and can
+  display embedded thumbnails in Word, Excel, PowerPoint and OpenDocument
+  files. Online-only files show a cloud badge and keep their type icon until
+  they are available locally.
+- Finder's **Open in Traverse** service opens selected folders. Direct builds
+  link to macOS Full Disk Access settings for users who need protected folders.
 
 #### Git
 
@@ -82,6 +89,19 @@ work between panes. Build 103 has separate Apple Silicon and Intel installers.
   draft. Choose a local schema for supported draft 2020-12 rules, including
   alternatives, conditional rules, tuples and numeric bounds checked without
   rounding.
+- Indent incomplete JSON while preserving what you typed. The editor marks the
+  first live syntax issue, checks JSON Lines record by record, and can repair
+  one missing colon or comma when the corrected draft parses. F5 suggests
+  properties and scalar values from a chosen local schema, with descriptions,
+  declared types and valid scalar defaults.
+- Reopen checked JSON findings from the editor footer, or cycle through them
+  with F8 and Shift-F8.
+- Fold code blocks, recognized Python classes and functions, Markdown
+  headings, INI and TOML sections, and recognized YAML blocks. Find opens a
+  folded match automatically.
+  The editor shows the current scope while scrolling supported Python, Go and
+  C-family source and other recognized structures. Choose a parent scope from
+  the same header or the Go menu.
 - INI and `.editorconfig` get syntax highlighting, section and key outline
   entries, and a line-comment command.
 - Navigate TOML tables and keys from the outline and see the current table
@@ -139,6 +159,10 @@ work between panes. Build 103 has separate Apple Silicon and Intel installers.
 - Compare matching benchmark runs or Quick Mix pairs from different volumes
   recorded during the same session.
 - Copy the matched comparison as a table with workload rates and P95 latency.
+- Copy phase rates, latency and completion status for a single run or Quick Mix
+  as tab-separated text.
+- Benchmark cards, charts and comparisons lead with IOPS for random 4 KiB
+  runs and MB/s for sequential runs.
 - Copy the displayed SMART reading without starting another device check.
 
 #### Archives
@@ -182,6 +206,7 @@ work between panes. Build 103 has separate Apple Silicon and Intel installers.
 - ZIP and TAR windows respect remapped and disabled keyboard shortcuts. Their
   shared Find field accepts typing, Return and Escape at every interface size.
 - Quick Look shortcuts in archive tabs open Traverse's bounded member preview.
+- XZ and Zstandard TARs use the default macOS application when opened.
 - Separate ZIP and TAR windows connect Cut, Copy and Paste to the shared
   clipboard, including copied local files. Clipboard shortcuts follow the
   focused archive instead of the browser window behind it.

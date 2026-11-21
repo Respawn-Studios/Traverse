@@ -249,6 +249,7 @@ final class BrowserSettings: ObservableObject {
     @Published var viewMode = BrowserViewMode.details { didSet { save() } }
     @Published var rowDensity = BrowserRowDensity.comfortable { didSet { save() } }
     @Published var showsFileExtensions = true { didSet { save() } }
+    @Published var showsFileThumbnails = true { didSet { save() } }
     @Published var foldersFirst = true { didSet { save() } }
     @Published var showsModifiedColumn = true { didSet { save() } }
     @Published var showsKindColumn = true { didSet { save() } }
@@ -340,6 +341,7 @@ final class BrowserSettings: ObservableObject {
         var viewMode = BrowserViewMode.details
         var rowDensity = BrowserRowDensity.comfortable
         var showsFileExtensions = true
+        var showsFileThumbnails = true
         var foldersFirst = true
         var showsModifiedColumn = true
         var showsKindColumn = true
@@ -374,7 +376,7 @@ final class BrowserSettings: ObservableObject {
             case operationIndicatorPosition, showsDockProgress, reviewsRecoveryAtStartup
             case transferMetadata, conflictPreferences, ejectNewWorkPolicy, groupedCopyPreview, showsSidebarEject, showsDriveStatus, renamesSelectedNameOnClick, hiddenEjectVolumes
             case copyPreviewActivationReceipt, copyPreviewDisclosureAccepted
-            case viewMode, rowDensity, showsFileExtensions, foldersFirst
+            case viewMode, rowDensity, showsFileExtensions, showsFileThumbnails, foldersFirst
             case showsModifiedColumn, showsKindColumn, showsSizeColumn
             case showsCreatedColumn, showsAccessedColumn, showsExtensionColumn
         }
@@ -494,6 +496,7 @@ final class BrowserSettings: ObservableObject {
             viewMode = try values.decodeIfPresent(BrowserViewMode.self, forKey: .viewMode) ?? .details
             rowDensity = try values.decodeIfPresent(BrowserRowDensity.self, forKey: .rowDensity) ?? .comfortable
             showsFileExtensions = try values.decodeIfPresent(Bool.self, forKey: .showsFileExtensions) ?? true
+            showsFileThumbnails = try values.decodeIfPresent(Bool.self, forKey: .showsFileThumbnails) ?? true
             foldersFirst = try values.decodeIfPresent(Bool.self, forKey: .foldersFirst) ?? true
             showsModifiedColumn = try values.decodeIfPresent(Bool.self, forKey: .showsModifiedColumn) ?? true
             showsKindColumn = try values.decodeIfPresent(Bool.self, forKey: .showsKindColumn) ?? true
@@ -586,6 +589,7 @@ final class BrowserSettings: ObservableObject {
             viewMode = settings.viewMode
             rowDensity = settings.rowDensity
             showsFileExtensions = settings.showsFileExtensions
+            showsFileThumbnails = settings.showsFileThumbnails
             foldersFirst = settings.foldersFirst
             showsModifiedColumn = settings.showsModifiedColumn
             showsKindColumn = settings.showsKindColumn
@@ -688,6 +692,7 @@ final class BrowserSettings: ObservableObject {
             viewMode = value.viewMode
             rowDensity = value.rowDensity
             showsFileExtensions = value.showsFileExtensions
+            showsFileThumbnails = value.showsFileThumbnails
             foldersFirst = value.foldersFirst
             showsModifiedColumn = value.showsModifiedColumn
             showsKindColumn = value.showsKindColumn
@@ -1286,6 +1291,7 @@ struct BrowserSettingsView: View {
                     settingToggle("Refresh open folders when their contents change", isOn: $settings.autoRefreshFolders)
                     settingToggle("Show hidden files and folders", isOn: $settings.showsHiddenFiles)
                     settingToggle("Show filename extensions", isOn: $settings.showsFileExtensions)
+                    settingToggle("Show thumbnails in Icons view", isOn: $settings.showsFileThumbnails)
                     settingToggle("Folders first by default", isOn: $settings.foldersFirst)
                     Text("Properties and rename always show the complete filename.")
                         .interfaceFont(.caption).foregroundStyle(.secondary)

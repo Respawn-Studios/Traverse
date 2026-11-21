@@ -82,6 +82,7 @@ public struct FileEntry: Identifiable, Hashable, Sendable {
     public let modifiedAt: Date?
     public let createdAt: Date?
     public let accessedAt: Date?
+    public let isDataless: Bool
 
     /// Lexical filename suffix for display/sorting. Directory names have no file extension.
     public var filenameExtension: String? {
@@ -91,7 +92,7 @@ public struct FileEntry: Identifiable, Hashable, Sendable {
     }
 
     public init(url: URL, name: String, kind: FileKind, byteCount: Int64? = nil, modifiedAt: Date? = nil,
-                createdAt: Date? = nil, accessedAt: Date? = nil) {
+                createdAt: Date? = nil, accessedAt: Date? = nil, isDataless: Bool = false) {
         self.url = url
         self.name = name
         self.kind = kind
@@ -99,6 +100,7 @@ public struct FileEntry: Identifiable, Hashable, Sendable {
         self.modifiedAt = modifiedAt
         self.createdAt = createdAt
         self.accessedAt = accessedAt
+        self.isDataless = isDataless
     }
 }
 

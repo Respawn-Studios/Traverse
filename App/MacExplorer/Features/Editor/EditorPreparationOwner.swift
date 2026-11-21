@@ -62,6 +62,8 @@ struct EditorPreparedPresentation: Sendable, CustomStringConvertible, CustomDebu
     let syntaxLanguage: TextSyntaxLanguage
     let outline: EditorDocumentOutline
     let bracketMatches: EditorDelimiterWalk.MatchIndex?
+    let folds: EditorFoldIndex?
+    let syntaxIssue: LocalJSONCheck.Issue?
     let unsavedLines: EditorUnsavedLineChanges?
     let conflicts: EditorConflictMarkers
     var description: String { "<prepared editor presentation>" }
@@ -187,14 +189,28 @@ final class EditorPreparationOwner {
                 ? EditorDelimiterWalk.capture(in: value.text, syntax: syntax, cancelled: { cancellation.isCancelled }) : nil
             let outline = EditorDocumentOutline.prepare(text: value.text, syntax: syntax,
                 language: selectedLanguage, lines: lines, preparedDelimiters: delimiters, cancelled: { cancellation.isCancelled })
+            let folds = EditorFoldIndex(delimiters?.pairs ?? [], scopes: outline.scopes, lines: lines, text: value.text)
+            let syntaxIssue = cancellation.isCancelled ? nil : firstJSONIssue(in: value.text, language: selectedLanguage)
             let marks = request.baseline.flatMap { baseline in
                 try? EditorTextComparison.unsavedLines(from: baseline, to: value.text, index: lines, cancelled: { cancellation.isCancelled })
             }
             let conflicts = EditorConflictMarkers.scan(value.text, index: lines, cancelled: { cancellation.isCancelled })
             return cancellation.isCancelled ? .cancelled : .presentation(.init(value: value, syntax: syntax,
                 lines: lines, detectedLanguage: detected, syntaxLanguage: selectedLanguage,
-                outline: outline, bracketMatches: delimiters?.matches, unsavedLines: marks, conflicts: conflicts))
+                outline: outline, bracketMatches: delimiters?.matches, folds: folds.byLine.isEmpty ? nil : folds, syntaxIssue: syntaxIssue,
+                unsavedLines: marks, conflicts: conflicts))
         }
+    }
+
+    private nonisolated static func firstJSONIssue(in text: String, language: TextSyntaxLanguage) -> LocalJSONCheck.Issue? {
+        guard language.isJSON, text.utf8.count <= 128 << 10,
+              text.utf8.contains(where: { $0 != 9 && $0 != 10 && $0 != 13 && $0 != 32 }) else {
+            return nil
+        }
+        let result = try? (language == .jsonLines ? LocalJSONCheck.checkJSONLines(text)
+            : LocalJSONCheck.check(text, allowsComments: language == .jsonc))
+        guard case .checked(let issues, _) = result else { return nil }
+        return issues.first
     }
 
     private func startIfPossible() {

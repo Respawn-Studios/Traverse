@@ -6,7 +6,7 @@ import LocalStorage
 struct DriveBenchmarkComparison {
     struct Phase {
         let selectedRate: Double?, referenceRate: Double?
-        let selectedIOPS: Double?, referenceIOPS: Double?
+        let selectedSecondaryRate: Double?, referenceSecondaryRate: Double?
         let selectedP95: Double, referenceP95: Double
 
         var rateChangePercent: Double? {
@@ -14,14 +14,10 @@ struct DriveBenchmarkComparison {
             let change = (selectedRate / referenceRate - 1) * 100
             return change.isFinite ? change : nil
         }
-        var iopsChangePercent: Double? {
-            guard let selectedIOPS, let referenceIOPS, referenceIOPS > 0 else { return nil }
-            let change = (selectedIOPS / referenceIOPS - 1) * 100
-            return change.isFinite ? change : nil
-        }
     }
     let selected: DriveBenchmarkRun, reference: DriveBenchmarkRun
     let write: Phase, read: Phase
+    let metric: DriveBenchmarkMetric
     var isSameVolume: Bool { selected.fileSystemID == reference.fileSystemID }
 
     var copySummary: String { "Traverse file benchmark comparison\n\n" + summaryDetails }
@@ -30,18 +26,16 @@ struct DriveBenchmarkComparison {
         let random = selected.result.workload == .random4K
         let workload = random ? "Random 4 KiB" : "Sequential"
         let count = FileSizeText.string(selected.result.bytesWritten)
-        let unit = random ? "IOPS" : "MB/s"
         return [
             "\(workload) · \(count)",
-            "Phase\tSelected (\(unit))\tReference (\(unit))\tSelected P95 (ms)\tReference P95 (ms)",
-            row("Write and flush", phase: write, random: random),
-            row("Read and verify", phase: read, random: random)
+            "Phase\tSelected (\(metric.unit))\tReference (\(metric.unit))\tSelected P95 (ms)\tReference P95 (ms)",
+            row("Write and flush", phase: write),
+            row("Read and verify", phase: read)
         ].joined(separator: "\n")
     }
 
-    private func row(_ label: String, phase: Phase, random: Bool) -> String {
-        [label, number(random ? phase.selectedIOPS : phase.selectedRate, decimals: 1),
-         number(random ? phase.referenceIOPS : phase.referenceRate, decimals: 1),
+    private func row(_ label: String, phase: Phase) -> String {
+        [label, number(phase.selectedRate, decimals: 1), number(phase.referenceRate, decimals: 1),
          number(phase.selectedP95, decimals: 3), number(phase.referenceP95, decimals: 3)].joined(separator: "\t")
     }
 
@@ -61,24 +55,20 @@ struct DriveBenchmarkComparison {
               current.cacheMode == prior.cacheMode,
               current.cacheBypass == prior.cacheBypass, current.flush == prior.flush else { return nil }
         self.selected = selected; self.reference = reference
-        write = Self.phase(current.bytesWritten, current.writeSeconds + current.flushSeconds, current.writeLatency,
-                           prior.bytesWritten, prior.writeSeconds + prior.flushSeconds, prior.writeLatency)
-        read = Self.phase(current.bytesRead, current.readSeconds, current.readLatency,
-                          prior.bytesRead, prior.readSeconds, prior.readLatency)
+        let primary = current.workload.primaryMetric
+        metric = primary
+        write = Self.phase(current, prior, metric: primary, writing: true)
+        read = Self.phase(current, prior, metric: primary, writing: false)
     }
 
-    private static func phase(_ bytes: Int64, _ seconds: Double, _ latency: DriveBenchmarkLatency,
-                              _ priorBytes: Int64, _ priorSeconds: Double, _ priorLatency: DriveBenchmarkLatency) -> Phase {
-        .init(selectedRate: rate(Double(bytes) / 1_000_000, seconds),
-              referenceRate: rate(Double(priorBytes) / 1_000_000, priorSeconds),
-              selectedIOPS: rate(Double(latency.operations), seconds),
-              referenceIOPS: rate(Double(priorLatency.operations), priorSeconds),
-              selectedP95: latency.p95Milliseconds, referenceP95: priorLatency.p95Milliseconds)
-    }
-    private static func rate(_ amount: Double, _ elapsed: Double) -> Double? {
-        guard amount.isFinite, amount > 0, elapsed.isFinite, elapsed > 0 else { return nil }
-        let value = amount / elapsed
-        return value.isFinite ? value : nil
+    private static func phase(_ selected: DriveBenchmarkResult, _ reference: DriveBenchmarkResult,
+                              metric: DriveBenchmarkMetric, writing: Bool) -> Phase {
+        .init(selectedRate: metric.completedRate(selected, writing: writing),
+              referenceRate: metric.completedRate(reference, writing: writing),
+              selectedSecondaryRate: metric.alternate.completedRate(selected, writing: writing),
+              referenceSecondaryRate: metric.alternate.completedRate(reference, writing: writing),
+              selectedP95: (writing ? selected.writeLatency : selected.readLatency).p95Milliseconds,
+              referenceP95: (writing ? reference.writeLatency : reference.readLatency).p95Milliseconds)
     }
 }
 

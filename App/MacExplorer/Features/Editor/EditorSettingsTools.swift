@@ -130,6 +130,8 @@ struct EditorSettingsTools: View {
                     settingToggle("Show line numbers", isOn: preferences.showsLineNumbers)
                     settingToggle("Show indent guides", isOn: preferences.showsIndentGuides)
                     settingToggle("Highlight matching brackets", isOn: preferences.showsMatchingBrackets)
+                    settingToggle("Show JSON issues while editing", isOn: preferences.showsLiveJSONIssues)
+                        .help("Highlight the first syntax issue in JSON, JSON with Comments and JSON Lines documents up to 128 KiB.")
                     settingToggle("Show whitespace marks", isOn: preferences.showsWhitespaceMarks)
                         .help("Make spaces, tabs and line breaks visible in the editor and text comparisons.")
                     settingToggle("Mark unsaved lines", isOn: preferences.showsUnsavedLineChanges)

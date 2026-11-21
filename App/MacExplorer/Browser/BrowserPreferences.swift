@@ -121,6 +121,7 @@ extension BrowserViewController {
             settings.$viewMode.map { _ in () }.eraseToAnyPublisher(),
             settings.$rowDensity.map { _ in () }.eraseToAnyPublisher(),
             settings.$showsFileExtensions.map { _ in () }.eraseToAnyPublisher(),
+            settings.$showsFileThumbnails.map { _ in () }.eraseToAnyPublisher(),
             settings.$editorPreferences.removeDuplicates(by: {
                 $0.openingIndicator == $1.openingIndicator && $0.openingRules == $1.openingRules
             }).map { _ in () }.eraseToAnyPublisher(),

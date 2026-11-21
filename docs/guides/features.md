@@ -14,10 +14,12 @@ local selection. Local-to-server uploads and server/archive-to-local copies
 use the supported transfer route for that selection.
 
 Hover over a pane divider for **Swap Pane Sides** and **Balance Pane Sizes**.
-Drag the line between those buttons to resize. A swap carries the panes' tabs,
-selection, and focus with them. At a divider between pane groups, it moves each
-group together. Use **Stack Panes** or **Place Panes Side by Side** to change the
-split in place when both panes fit. The action keeps the same tabs and focus.
+The controls centre beside the two panes under the pointer. Short dividers put
+extra actions in **More Pane Actions**. Drag the line itself to resize. A swap
+carries the panes' tabs, selection, and focus with them. At a divider between
+pane groups, it moves each group together. Use **Stack Panes** or **Place Panes
+Side by Side** to change the split in place when both panes fit. The action
+keeps the same tabs and focus.
 The View menu and Find a Command offer the same actions for the active pane's
 divider, including **Change Pane Split Direction**. **Compare Folders** appears
 between two different local folders. Select one file in each pane to get
@@ -52,6 +54,27 @@ Show Sidebar button. Its previous width, expanded sections and order are kept.
 Quick Look, Properties, Open With, sharing and Reveal in Finder remain available
 for eligible selections. Copy Names, Copy Path and Copy Relative Paths help you
 reuse a selection in another application.
+
+Icons view can show real thumbnails for local PNG, JPEG, GIF, TIFF, BMP, WebP,
+HEIC, HEIF and PDF files up to 16 MiB. PDF uses the first page. Word, Excel,
+PowerPoint and OpenDocument packages can show a thumbnail already embedded by the document
+app. If Traverse cannot use an embedded thumbnail, you will see the file's
+type icon. The selected-file Preview pane can use the macOS renderer for
+Office documents where available. Use **Show thumbnails in Icons view** in
+**Settings → General** to choose your preference. Online-only files keep their
+type icons and show a cloud badge. Once the provider makes an item available
+on the Mac, it can use the regular preview and editor commands where supported.
+
+To open a folder from the desktop or Finder, select it and choose **Finder →
+Services → Open in Traverse**. Assign your own shortcut in **System Settings →
+Keyboard → Keyboard Shortcuts → Services**. Desktop double-clicks still go
+through Finder. [Using Services on macOS](https://support.apple.com/en-ge/guide/mac-help/mchlp1012/mac)
+
+The direct edition uses the file permissions macOS already gives Traverse.
+Remember a location in **Settings → Permissions** if you want to return to it
+later. For broader access to protected locations, open **Full Disk Access**
+from that page and choose what to grant in System Settings. You can also grant
+access to individual folders when macOS asks.
 
 ### Keyboard and appearance
 
@@ -414,11 +437,14 @@ versions and recovery copies have their own review and removal rules.
 
 Open a ZIP in an archive tab, browse its folders, edit the virtual path and
 preview selected members. Text/Hex previews read a bounded part of the chosen
-member. Supported PNG, JPEG, GIF and TIFF previews use the native preview window.
+member. Supported PNG, JPEG, GIF, TIFF, BMP, WebP, HEIC and HEIF previews use
+the native preview window.
 Browsing names does not extract the archive.
 Use **Browse Archive** on a JAR, EPUB, CBZ or Python wheel to inspect its ZIP
 members and copy them out. Editing the container is available for supported
 ZIPs and TARs, while these packaged formats open for reading and extraction.
+For XZ and Zstandard TARs, Open uses the default macOS application for that
+file type.
 
 Eligible ZIP edits include file/folder Rename, batch Rename, Add, Remove, Create
 File, New Folder, New Folder with Selection, and internal Copy/Cut/Paste.
@@ -566,10 +592,11 @@ line breaks in the current editor or both sides of a text comparison. **Show
 whitespace marks** in Editor Defaults sets the starting value. This display
 leaves text, wrapping and comparison rules in place.
 
-When scrolling past a Markdown heading, an INI or TOML section, a JSON/JSONC
-container key or a recognized Swift or Rust block, the editor can show its scope beside the
-file path. Click it or choose **Go → Go to Visible Scope** to jump to
-its start. **Show scope while scrolling** controls it in Editor Defaults.
+When scrolling through a Markdown heading, INI or TOML section, JSON/JSONC
+container or a recognized block in Swift, Python, Go, Rust or C-family code,
+the editor can show its scope beside the file path. Click it or choose
+**Go → Go to Visible Scope** to jump to its start. **Show scope while
+scrolling** controls it in Editor Defaults.
 
 Use **Go → Outline** to jump to the previous or next outline item with
 `⌥⌘↑` or `⌥⌘↓`. **Go to Enclosing Scope** jumps from the caret to
@@ -690,9 +717,34 @@ and `{}` in recognized code in those languages. Typing a closer the editor
 inserted moves past it. Backspace between an empty pair removes it in one Undo.
 Typing inside comments and strings stays literal.
 
+Click the arrow beside a multiline block or choose **View → Code Folding**.
+Fold balanced braces and brackets in supported languages, recognized Python
+classes and functions, Markdown headings, INI or TOML sections, and recognized
+YAML block mappings and multiline values. Find and Go to Line open a fold
+when their destination is inside it. A fold only
+changes what you see. Copy, Save, and Undo still work on the full document.
+Editing opens the folds so you can see the current structure. The scope label
+beside the file path takes you back to the visible block.
+Option-click that label or use **Go → Choose Visible Scope…** to jump to a
+parent block when scopes are nested.
+
+While you edit JSON, JSON with Comments or JSON Lines, the editor underlines
+the first syntax issue in documents up to 128 KiB. Click **JSON issue** in the
+footer or choose **Go → Next JSON Issue** (F8) to jump to it. Use **Show JSON
+issues while editing** in the editor settings to control automatic underlines.
+For several findings, click the issue count to reopen the list, or use F8 and
+Shift-F8 to move forward and back through them.
+
 Use **Edit → JSON → Check JSON** to find a syntax problem in the current JSON
-or JSONC draft. Choose **Go to Issue** to move to its line and column. The
-check leaves the draft and its Undo history intact.
+or JSONC draft up to 1 MiB. Choose **Go to Issue** to move to the exact line
+and column. The check leaves the draft and its Undo history intact.
+Use **Indent JSON as Written** to lay out an unfinished document and see
+where it needs repair. Recognizable properties and array items get their own
+lines even when a comma is missing. The formatter preserves the tokens you
+typed, and Undo restores the original layout.
+For `.jsonl` and `.ndjson` documents, **Check JSON Lines** reviews each record.
+Keep one JSON value on each line. Both LF and CRLF are accepted, and the last
+line can end with a line break. Blank records are reported as issues.
 **Check Against JSON Schema…** accepts a local UTF-8 draft 2020-12 schema and
 checks types, required and additional properties, array items and tuples,
 enum and const values, numeric bounds and basic length/count limits. It also
@@ -701,6 +753,21 @@ a rule with `if`, `then` and `else`. Numeric comparisons retain decimal
 precision. References can point to rules within that file.
 If a schema uses other rules or external references, the check explains why it
 cannot complete. Documents up to 1 MiB and schemas up to 256 KiB are supported.
+
+Use **Complete from JSON Schema…** (F5) inside a property name or before an
+object's closing brace. Traverse suggests unused properties for that object
+and puts required ones first, with declared types and descriptions when
+available. Completing an existing property keeps its
+value. Adding a property selects the initial `null` value. Type your own
+value or press F5 again to see declared scalar choices, Boolean values, or a
+scalar default that passes the selected schema rule.
+You can also select an existing scalar or start typing to narrow the list.
+The schema stays in memory for this editor. Use **Check Against Current JSON
+Schema** to validate again or **Forget Local JSON Schema** to clear it.
+
+When the JSON issue points to a missing colon or comma, choose **Edit → JSON
+→ Repair Missing Delimiter**. Traverse inserts one punctuation mark if the
+whole draft then parses. The edit uses normal Undo.
 
 Go files show types, functions and receiver methods in Document Outline and
 project declaration search. Go's raw strings and rune literals stay separate
@@ -844,12 +911,15 @@ in this session. Both volume names and times appear above the measurements.
 Complete Quick Mix pairs are available when both stages match their settings.
 
 Quick Mix runs the small sequential and random tests together while keeping
-their results separate. Measurement Details shows where completed block calls
+their results separate. Cards, charts and comparisons show sequential rates
+in MB/s and random 4 KiB rates in operations per second (IOPS). Measurement
+Details provides both rates and shows where completed block calls
 land in the latency distribution, with P50/P95/P99 labels on the containing
 ranges. Copy Results includes those range labels in text and the original
-distribution in JSON. Partial or failed runs keep their progress facts without
-claiming a completed speed result. Shared reports leave out drive names and
-private recovery paths.
+distribution in JSON. Choose **Selected run metrics table** or **Quick Mix
+metrics table** for tab-separated per-phase measurements. Partial or failed
+runs keep their progress facts, with unfinished speed and latency measurements
+left blank. Shared reports leave out drive names and private recovery paths.
 When a matched run or Quick Mix pair is open, **Copy Results → Comparison
 table** copies the displayed phases and P95 latency as tab-separated text
 for a spreadsheet or report.

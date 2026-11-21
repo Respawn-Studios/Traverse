@@ -1323,14 +1323,16 @@ private struct ArchiveBrowserView: View {
 @MainActor extension BrowserViewController {
     var selectedTARURL:URL? {
         guard TARBrowseFeature.available,orderedSelectedURLs.count==1,!isBrowserSuspended,!isReadOnlyFileSession,
-              let url=orderedSelectedURLs.first,let row=rowsByURL[url],displayedEntries.indices.contains(row),displayedEntries[row].kind == .file else{return nil}
-        return ArchiveFilename(url.lastPathComponent)?.kind.isTAR == true ? url:nil
+              let url=orderedSelectedURLs.first,let row=rowsByURL[url],displayedEntries.indices.contains(row),
+              displayedEntries[row].kind == .file, !displayedEntries[row].isDataless else { return nil }
+        return FileOpeningAppearance.archiveKind(name: url.lastPathComponent, zipAvailable: false, tarAvailable: true) == .tar ? url : nil
     }
     var selectedArchiveURL:URL? {selectedZIPURL ?? selectedTARURL}
     var selectedZIPURL: URL? {
         guard ArchiveBrowseActivation.available, orderedSelectedURLs.count == 1, !isBrowserSuspended, !isReadOnlyFileSession,
               let url = orderedSelectedURLs.first, ArchiveFilename(url.lastPathComponent)?.kind.isTAR == false,
-              let row = rowsByURL[url], displayedEntries.indices.contains(row), displayedEntries[row].kind == .file else { return nil }
+              let row = rowsByURL[url], displayedEntries.indices.contains(row), displayedEntries[row].kind == .file,
+              !displayedEntries[row].isDataless else { return nil }
         return url
     }
     @objc func browseZIP(_ sender: Any?) {

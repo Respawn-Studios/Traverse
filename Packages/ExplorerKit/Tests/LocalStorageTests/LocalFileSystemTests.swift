@@ -1,7 +1,9 @@
+import CoreGraphics
 import Darwin
 import ExplorerCore
 import FileOperations
 import Foundation
+import ImageIO
 @testable import LocalStorage
 import Testing
 
@@ -128,6 +130,99 @@ private struct MetadataSnapshot: Equatable {
     await #expect(throws: TextComparisonReadFailure.changed) {
         try await service.validateProjectTextScope(scope)
     }
+}
+
+@Test func localThumbnailUsesPinnedMetadataAndKeepsTheOriginal() async throws {
+    let fixture = try Fixture()
+    defer { try? fixture.remove() }
+    let folder = try fixture.directory("Folder")
+    let document = folder.appendingPathComponent("Preview.pdf")
+    var paper = CGRect(x: 0, y: 0, width: 400, height: 200)
+    let consumer = try #require(CGDataConsumer(url: document as CFURL))
+    let writer = try #require(CGContext(consumer: consumer, mediaBox: &paper, nil))
+    writer.beginPDFPage(nil)
+    writer.setFillColor(CGColor(gray: 0.25, alpha: 1))
+    writer.fill(paper)
+    writer.endPDFPage()
+    writer.closePDF()
+    let original = try Data(contentsOf: document)
+    let service = LocalFileSystem()
+    let entries = try await listing(service, folder).0
+    let row = try #require(entries.first { $0.name == "Preview.pdf" })
+    let rendered = try #require(try await service.thumbnail(for: row, in: folder))
+    #expect(rendered.width == 192 && rendered.height == 96)
+    #expect(try Data(contentsOf: document) == original)
+    #expect(try await service.thumbnail(for: row, in: fixture.root) == nil)
+    let online = FileEntry(url: row.url, name: row.name, kind: row.kind, byteCount: row.byteCount,
+        modifiedAt: row.modifiedAt, isDataless: true)
+    #expect(try await service.thumbnail(for: online, in: folder) == nil)
+
+    let later = try #require(row.modifiedAt).addingTimeInterval(5)
+    try FileManager.default.setAttributes([.modificationDate: later], ofItemAtPath: document.path)
+    await #expect(throws: TextComparisonReadFailure.changed) {
+        try await service.thumbnail(for: row, in: folder)
+    }
+
+    let link = folder.appendingPathComponent("Alias.pdf")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: document)
+    let stale = FileEntry(url: link, name: link.lastPathComponent, kind: .file, byteCount: row.byteCount, modifiedAt: later)
+    await #expect(throws: FileOperationFailure.unsupported) {
+        try await service.thumbnail(for: stale, in: folder)
+    }
+}
+
+@Test func officeThumbnailUsesOnlyItsBoundedEmbeddedRasterPreview() async throws {
+    let fixture = try Fixture()
+    defer { try? fixture.remove() }
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let canvas = try #require(CGContext(data: nil, width: 48, height: 24, bitsPerComponent: 8,
+        bytesPerRow: 0, space: colorSpace, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+    canvas.setFillColor(CGColor(red: 0.25, green: 0.5, blue: 0.75, alpha: 1))
+    canvas.fill(CGRect(x: 0, y: 0, width: 48, height: 24))
+    let image = try #require(canvas.makeImage())
+    let miniature = NSMutableData()
+    let encoder = try #require(CGImageDestinationCreateWithData(miniature as CFMutableData, "public.png" as CFString, 1, nil))
+    CGImageDestinationAddImage(encoder, image, nil)
+    #expect(CGImageDestinationFinalize(encoder))
+    let package: [GeneratedZIP.Member] = [.init("[Content_Types].xml"), .init("_rels/.rels"), .init("word/document.xml")]
+    let preview = GeneratedZIP.Member("docProps/thumbnail.png", bytes: miniature as Data)
+    let accepted = GeneratedZIP.bytes(package + [preview])
+    let expected = fixture.root.appendingPathComponent("Generated.docx")
+    try accepted.write(to: expected, options: .withoutOverwriting)
+    try GeneratedZIP.bytes(package).write(to: fixture.root.appendingPathComponent("Without.docx"), options: .withoutOverwriting)
+    try accepted.write(to: fixture.root.appendingPathComponent("WrongType.pptx"), options: .withoutOverwriting)
+    try GeneratedZIP.bytes(package + [.init("docProps/thumbnail.png", mode: 0xa000, bytes: miniature as Data)])
+        .write(to: fixture.root.appendingPathComponent("Link.docx"), options: .withoutOverwriting)
+    try GeneratedZIP.bytes(package + [.init("docProps/thumbnail.jpg", bytes: miniature as Data)])
+        .write(to: fixture.root.appendingPathComponent("WrongImage.docx"), options: .withoutOverwriting)
+    let openParts: [GeneratedZIP.Member] = [.init("content.xml"), .init("META-INF/manifest.xml"),
+        .init("Thumbnails/thumbnail.png", bytes: miniature as Data)]
+    var validPackages = [expected: accepted]
+    for (ext, subtype) in [("odt", "text"), ("ods", "spreadsheet"), ("odp", "presentation")] {
+        let mime = GeneratedZIP.Member("mimetype", bytes: Data("application/vnd.oasis.opendocument.\(subtype)".utf8))
+        let content = GeneratedZIP.bytes([mime] + openParts)
+        let document = fixture.root.appendingPathComponent("Generated.\(ext)")
+        try content.write(to: document, options: .withoutOverwriting)
+        validPackages[document] = content
+    }
+    let differentMime = GeneratedZIP.Member("mimetype", bytes: Data("application/vnd.oasis.opendocument.fake".utf8))
+    try GeneratedZIP.bytes([differentMime] + openParts)
+        .write(to: fixture.root.appendingPathComponent("WrongType.odt"), options: .withoutOverwriting)
+    try GeneratedZIP.bytes(openParts)
+        .write(to: fixture.root.appendingPathComponent("NoType.odt"), options: .withoutOverwriting)
+    let reader = LocalFileSystem()
+    let entries = try await listing(reader, fixture.root).0
+    for entry in entries {
+        if let bytes = validPackages[entry.url] {
+            let rendered = try #require(try await reader.thumbnail(for: entry, in: fixture.root))
+            #expect(rendered.width == rendered.height * 2 && rendered.width <= 192)
+            #expect(try Data(contentsOf: entry.url) == bytes)
+        } else {
+            #expect((try? await reader.thumbnail(for: entry, in: fixture.root)) == nil)
+        }
+    }
+    #expect(Set(entries.map(\.url)).isSuperset(of: validPackages.keys))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).count == 10)
 }
 
 @Test func linkedFolderNavigationConfinesAndRechecksBothRoots() async throws {

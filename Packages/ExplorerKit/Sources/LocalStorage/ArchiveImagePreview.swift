@@ -25,15 +25,22 @@ public struct ArchiveImagePreview: Sendable {
         case "jpg", "jpeg": .jpeg
         case "gif": .gif
         case "tif", "tiff": .tiff
+        case "bmp": .bmp
+        case "webp": .webP
+        case "heic": .heic
+        case "heif": .heif
         default: nil
         }
     }
 
-    internal static func decode(_ bytes: Data, filename: String, check: () throws -> Void) throws -> Self {
+    internal static func decode(_ bytes: Data, filename: String, maximumSide: Int = maximumPreviewSide,
+                                check: () throws -> Void) throws -> Self {
         try check()
-        guard bytes.count <= maximumSourceBytes, let expected = type(for: filename),
+        guard (1...maximumPreviewSide).contains(maximumSide),
+              bytes.count <= maximumSourceBytes, let expected = type(for: filename),
               let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
-              CGImageSourceGetType(source).map({ $0 as String }) == expected.identifier,
+              let observed = CGImageSourceGetType(source).map({ $0 as String }),
+              observed == expected.identifier || expected == .heif && observed == UTType.heic.identifier,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int,
@@ -47,12 +54,12 @@ public struct ArchiveImagePreview: Sendable {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maximumPreviewSide,
+            kCGImageSourceThumbnailMaxPixelSize: maximumSide,
             kCGImageSourceShouldCacheImmediately: true,
         ]
         guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
               CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete,
-              thumbnail.width <= maximumPreviewSide, thumbnail.height <= maximumPreviewSide else {
+              thumbnail.width <= maximumSide, thumbnail.height <= maximumSide else {
             throw ArchiveImagePreviewFailure.invalidImage
         }
         try check()

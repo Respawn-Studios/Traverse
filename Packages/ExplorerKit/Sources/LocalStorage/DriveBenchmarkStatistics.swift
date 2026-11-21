@@ -3,6 +3,30 @@ import Foundation
 public enum DriveBenchmarkWorkload: String, CaseIterable, Sendable {
     case sequential, random4K
     public var blockBytes: Int { self == .sequential ? 1 << 20 : 4 << 10 }
+
+    public var primaryMetric: DriveBenchmarkMetric {
+        self == .random4K ? .operationsPerSecond : .megabytesPerSecond
+    }
+}
+
+public enum DriveBenchmarkMetric: Sendable {
+    case megabytesPerSecond, operationsPerSecond
+
+    public func rate(bytes: Int64, operations: Int, seconds: Double?) -> Double? {
+        let amount = self == .megabytesPerSecond ? Double(bytes) / 1_000_000 : Double(operations)
+        guard amount > 0, let seconds, seconds.isFinite, seconds > 0 else { return nil }
+        let value = amount / seconds
+        return value.isFinite ? value : nil
+    }
+
+    public func completedRate(_ result: DriveBenchmarkResult, writing: Bool) -> Double? {
+        guard result.outcome == .completed else { return nil }
+        if writing {
+            return rate(bytes: result.bytesWritten, operations: result.writeLatency.operations,
+                        seconds: result.writeSeconds + result.flushSeconds)
+        }
+        return rate(bytes: result.bytesRead, operations: result.readLatency.operations, seconds: result.readSeconds)
+    }
 }
 
 /// Only sequential transfers vary their block size. Random access remains
@@ -141,6 +165,12 @@ public struct DriveBenchmarkSample: Sendable {
     public init(phase: DriveBenchmarkProgress.Phase, elapsedSeconds: Double, megabytesPerSecond: Double) {
         self.phase = phase; self.elapsedSeconds = elapsedSeconds; self.megabytesPerSecond = megabytesPerSecond
     }
+
+    public func rate(for workload: DriveBenchmarkWorkload) -> Double {
+        // Every random sample observes whole 4 KiB operations, including the
+        // coalesced intervals. Sequential samples already use the display unit.
+        workload == .random4K ? megabytesPerSecond * (1_000_000 / Double(workload.blockBytes)) : megabytesPerSecond
+    }
 }
 
 /// A deliberately small clipboard projection of a generated-file workload.
@@ -231,6 +261,29 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
         encoder.dateEncodingStrategy = .iso8601
         return String(decoding: try encoder.encode(self), as: UTF8.self)
     }
+    public var metricsTable: String { Self.metricsTable(for: [self]) }
+
+    static func metricsTable(for reports: [Self]) -> String {
+        let header = ["Recorded UTC", "Workload", "Outcome", "Phase", "Block bytes", "Completed bytes",
+            "Completed operations", "Seconds", "MB/s", "Operations/s", "Median I/O ms", "P95 I/O ms", "P99 I/O ms",
+            "Cache request", "Cache request outcome", "Flush acknowledgment"]
+        let timestamp = ISO8601DateFormatter()
+        func number(_ value: Double?) -> String { value.map { String($0) } ?? "" }
+        var rows = [header]
+        for report in reports {
+            let date = timestamp.string(from: report.recordedAt)
+            for (phaseName, phase) in [("Write and flush", report.writeAndFlush), ("Read and verify", report.readAndVerify)] {
+                let latency = phase.ioLatency
+                rows.append([date, report.workload, report.outcome.rawValue, phaseName, String(report.blockBytes),
+                    String(phase.completedBytes), String(phase.completedOperations), number(phase.elapsedSeconds),
+                    number(phase.megabytesPerSecond), number(phase.operationsPerSecond), number(latency?.medianMilliseconds),
+                    number(latency?.p95Milliseconds), number(latency?.p99Milliseconds), report.cacheMode,
+                    report.cacheBypassRequest, report.flushAcknowledgment])
+            }
+        }
+        return rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
+    }
+
     public var summary: String {
         let date = ISO8601DateFormatter().string(from: recordedAt)
         var lines = ["Traverse file benchmark", "Recorded: \(date)",
@@ -276,16 +329,15 @@ public struct DriveBenchmarkReport: Sendable, Encodable {
         }
     }
     private static func phase(bytes: Int64, seconds: Double?, latency: DriveBenchmarkLatency, completed: Bool) -> Phase {
-        func rate(_ amount: Double) -> Double? {
-            guard completed, amount.isFinite, amount > 0, let seconds, seconds > 0 else { return nil }
-            let value = amount / seconds; return value.isFinite ? value : nil
-        }
         let values = [latency.medianMilliseconds, latency.p95Milliseconds, latency.p99Milliseconds]
         let ioLatency = completed && latency.operations > 0 && values.allSatisfy({ $0.isFinite && $0 >= 0 })
             ? Latency(medianMilliseconds: values[0], p95Milliseconds: values[1], p99Milliseconds: values[2],
                 distribution: validatedDistribution(latency), percentileBands: latency.percentileBands) : nil
+        let elapsed = completed ? seconds : nil
         return Phase(completedBytes: bytes, elapsedSeconds: seconds, completedOperations: latency.operations,
-            megabytesPerSecond: rate(Double(bytes) / 1_000_000), operationsPerSecond: rate(Double(latency.operations)), ioLatency: ioLatency)
+            megabytesPerSecond: DriveBenchmarkMetric.megabytesPerSecond.rate(bytes: bytes, operations: latency.operations, seconds: elapsed),
+            operationsPerSecond: DriveBenchmarkMetric.operationsPerSecond.rate(bytes: bytes, operations: latency.operations, seconds: elapsed),
+            ioLatency: ioLatency)
     }
     private static func validatedDistribution(_ latency: DriveBenchmarkLatency) -> [Latency.Bucket]? {
         latency.validatedDistributionBuckets?.map { Latency.Bucket(lowerBoundMilliseconds: $0.lowerBoundMilliseconds,

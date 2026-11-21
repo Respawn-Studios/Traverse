@@ -8,6 +8,7 @@ enum EditorCFamilyOutline {
         let kind: EditorDocumentOutline.Entry.Kind
         let line: Int
         let indent: Int
+        let bodyOpening: Int?
     }
 
     static let languages: Set<TextSyntaxLanguage> = [.c, .cpp, .objectiveC, .objectiveCPP]
@@ -39,18 +40,19 @@ enum EditorCFamilyOutline {
         let objective = language == .objectiveC || language == .objectiveCPP
         if token.kind == .keyword {
             guard typeKeywords.contains(word) || objective && objectiveKeywords.contains(word),
-                  let name = typeName(word, after: end, in: source, prefix: prefix, cpp: cpp) else { return nil }
-            return .init(name: name, kind: .type, line: location.line, indent: indent)
+                  let definition = typeName(word, after: end, in: source, prefix: prefix, cpp: cpp) else { return nil }
+            return .init(name: definition.name, kind: .type, line: location.line, indent: indent, bodyOpening: definition.bodyOpening)
         }
         guard !statementWords.contains(word), identifier(in: word[...]) == word[...], hasReturnType(prefix),
               let opening = afterSpace(end, in: source), source.character(at: opening) == 40,
               let match = pairs?.matchingOffsets(at: .init(location: opening, length: 1)), match.1 > opening,
               match.1 - opening <= 2_048, lines.location(at: match.1)?.line == location.line,
-              hasBody(after: match.1 + 1, in: source, cpp: cpp) else { return nil }
-        return .init(name: word, kind: .function, line: location.line, indent: indent)
+              let bodyOpening = bodyOpening(after: match.1 + 1, in: source, cpp: cpp) else { return nil }
+        return .init(name: word, kind: .function, line: location.line, indent: indent, bodyOpening: bodyOpening)
     }
 
-    private static func typeName(_ word: String, after offset: Int, in source: NSString, prefix: String, cpp: Bool) -> String? {
+    private static func typeName(_ word: String, after offset: Int, in source: NSString, prefix: String,
+                                 cpp: Bool) -> (name: String, bodyOpening: Int?)? {
         let modifiers = prefix.split(whereSeparator: \.isWhitespace)
         guard modifiers.isEmpty || (word == "namespace" ? cpp && modifiers == ["inline"] : modifiers == ["typedef"]),
               offset < source.length, [9, 32].contains(source.character(at: offset)) else { return nil }
@@ -65,7 +67,7 @@ enum EditorCFamilyOutline {
         if objectiveKeywords.contains(word) {
             let next = tail.drop(while: horizontal).first
             return next == nil || next == ":" || next == "(" || next == "<" || next == "{" || next?.isNewline == true
-                ? String(name) : nil
+                ? (String(name), nil) : nil
         }
         guard cpp || word != "class" && word != "namespace" else { return nil }
         var suffix = tail.drop(while: horizontal)
@@ -78,10 +80,10 @@ enum EditorCFamilyOutline {
             let bases = suffix[suffix.index(after: suffix.startIndex)..<brace]
             guard !bases.trimmingCharacters(in: .whitespaces).isEmpty,
                   bases.allSatisfy({ $0.isLetter || $0.isNumber || horizontal($0) || "_:,<>&*".contains($0) }) else { return nil }
-            return String(name)
+            return (String(name), offset + available - suffix.utf16.count + suffix[..<brace].utf16.count)
         }
         let nameEnd = offset + available - tail.utf16.count
-        return hasBody(after: nameEnd, in: source, cpp: cpp) ? String(name) : nil
+        return bodyOpening(after: nameEnd, in: source, cpp: cpp).map { (String(name), $0) }
     }
 
     private static func hasReturnType(_ prefix: String) -> Bool {
@@ -95,18 +97,20 @@ enum EditorCFamilyOutline {
             }
     }
 
-    private static func hasBody(after offset: Int, in source: NSString, cpp: Bool) -> Bool {
-        guard offset < source.length else { return false }
+    private static func bodyOpening(after offset: Int, in source: NSString, cpp: Bool) -> Int? {
+        guard offset < source.length else { return nil }
         let tail = source.substring(with: .init(location: offset, length: min(256, source.length - offset)))
         let header = tail.prefix { !$0.isNewline }
         let qualifiersOnly: (Substring) -> Bool = { text in
             let words = text.split(whereSeparator: horizontal)
             return words.isEmpty || (cpp && words.allSatisfy { qualifiers.contains(String($0)) })
         }
-        if let brace = header.firstIndex(of: "{") { return qualifiersOnly(header[..<brace]) }
-        guard qualifiersOnly(header), tail.count > header.count else { return false }
+        if let brace = header.firstIndex(of: "{") {
+            return qualifiersOnly(header[..<brace]) ? offset + header[..<brace].utf16.count : nil
+        }
+        guard qualifiersOnly(header), tail.count > header.count else { return nil }
         let next = tail.dropFirst(header.count + 1).drop(while: horizontal)
-        return next.first == "{"
+        return next.first == "{" ? offset + tail[..<next.startIndex].utf16.count : nil
     }
 
     private static func afterSpace(_ start: Int, in source: NSString) -> Int? {

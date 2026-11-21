@@ -48,7 +48,7 @@ without reopening its catalog or granting compressed preparation. A copied
 selection keeps the same session and clipboard generation; local Paste still
 revalidates the destination visit, source and access after asynchronous work.
 
-Text/Hex previews are bounded to 256 KiB. PNG, JPEG, GIF and TIFF previews read
+Text/Hex previews are bounded to 256 KiB. Native raster previews read
 at most 16 MiB, reject images over 32 megapixels and render at most 2,048 pixels
 per side. ZIP verifies CRC; TAR has no per-file checksum. Readers retain the
 sealed source selection, revalidate it and use the shared native preview window.

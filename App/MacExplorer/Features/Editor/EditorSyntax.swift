@@ -4,7 +4,7 @@ import FileOperations
 #endif
 
 enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
-    case plain, swift, python, json, jsonc, javascript, typescript, rust, shell, sql, toml, css, yaml, html, xml, markdown, dockerfile, makefile, ini
+    case plain, swift, python, json, jsonc, jsonLines, javascript, typescript, rust, shell, sql, toml, css, yaml, html, xml, markdown, dockerfile, makefile, ini
     case c, cpp, objectiveC, objectiveCPP, go
     var title: String {
         switch self {
@@ -13,6 +13,7 @@ enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
         case .python: "Python"
         case .json: "JSON"
         case .jsonc: "JSON with Comments"
+        case .jsonLines: "JSON Lines"
         case .javascript: "JavaScript"
         case .typescript: "TypeScript"
         case .rust: "Rust"
@@ -40,6 +41,7 @@ enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
         case "py", "pyw": .python
         case "json": .json
         case "jsonc": .jsonc
+        case "jsonl", "ndjson": .jsonLines
         case "js", "mjs", "cjs", "jsx": .javascript
         case "ts", "mts", "cts", "tsx": .typescript
         case "rs": .rust
@@ -101,9 +103,11 @@ enum TextSyntaxLanguage: String, Codable, Equatable, Sendable, CaseIterable {
         case .sql: .dash
         case .ini: .semicolon
         // Do not insert invalid line comments into strict JSON or markup.
-        case .plain, .json, .css, .html, .xml, .markdown: nil
+        case .plain, .json, .jsonLines, .css, .html, .xml, .markdown: nil
         }
     }
+
+    var isJSON: Bool { self == .json || self == .jsonc || self == .jsonLines }
 }
 struct TextSyntaxToken: Equatable, Sendable {
     enum Kind: Equatable, Sendable { case keyword, property, string, number, literal, punctuation, type, function, comment }
@@ -143,7 +147,7 @@ enum TextSyntax {
         if cancelled() { return .plain(.cancelled) }
         if case .plain = language { return .tokens([]) }
         let units = Array(text.utf16)
-        if language == .json || language == .jsonc { return colorJSON(units, cancelled: cancelled) }
+        if language.isJSON { return colorJSON(units, records: language == .jsonLines, cancelled: cancelled) }
         if language == .css { return EditorCSSSyntax.color(units, cancelled: cancelled) }
         if language == .yaml { return EditorYAMLSyntax.color(units, cancelled: cancelled) }
         if language == .ini { return EditorINISyntax.color(units, cancelled: cancelled) }
@@ -175,7 +179,7 @@ enum TextSyntax {
         switch language {
         case .swift: keywords = ["actor", "associatedtype", "async", "await", "break", "case", "catch", "class", "continue", "defer", "deinit", "do", "else", "enum", "extension", "false", "for", "func", "guard", "if", "import", "in", "init", "let", "nil", "private", "protocol", "public", "return", "self", "static", "struct", "subscript", "switch", "throw", "throws", "true", "try", "typealias", "var", "while"]
         case .python: keywords = ["and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield"]
-        case .json, .jsonc: keywords = ["true", "false", "null"]
+        case .json, .jsonc, .jsonLines: keywords = ["true", "false", "null"]
         case .javascript, .typescript:
             let shared: Set<String> = ["as", "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "declare", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "from", "function", "if", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "of", "private", "protected", "public", "readonly", "return", "static", "super", "switch", "this", "throw", "true", "try", "type", "typeof", "undefined", "var", "void", "while", "yield"]
             keywords = language == .typescript ? shared.union(["abstract", "namespace"]) : shared
@@ -370,7 +374,7 @@ enum TextSyntax {
         case .go: ["true", "false", "nil", "iota"]
         case .sql: ["true", "false", "null"]
         case .toml: ["true", "false", "inf", "nan"]
-        case .json, .jsonc: ["true", "false", "null"]
+        case .json, .jsonc, .jsonLines: ["true", "false", "null"]
         case .plain, .shell, .css, .yaml, .html, .xml, .markdown, .dockerfile, .makefile, .ini, .c, .cpp, .objectiveC, .objectiveCPP: []
         }
     }
@@ -388,7 +392,7 @@ enum TextSyntax {
     /// JSON/JSONC lexical presentation, not validation. Each code unit is
     /// consumed once apart from bounded token/trivia lookahead. Incomplete
     /// edits remain visible; malformed bare words/numbers receive no role.
-    private static func colorJSON(_ units: [UInt16], cancelled: @Sendable () -> Bool) -> TextSyntaxResult {
+    private static func colorJSON(_ units: [UInt16], records: Bool, cancelled: @Sendable () -> Bool) -> TextSyntaxResult {
         var tokens: [TextSyntaxToken] = []
         tokens.reserveCapacity(min(2048, units.count / 4))
         var index = 0, consumed = 0
@@ -417,9 +421,11 @@ enum TextSyntax {
                 return true
             }
             while cursor < units.count {
+                if records && (at(cursor, 10) || at(cursor, 13)) { return false }
                 if white(units[cursor]) {
                     if !step() { return nil }
                 } else if at(cursor, 47) && (at(cursor + 1, 47) || at(cursor + 1, 42)) {
+                    if records { return false }
                     let block = at(cursor + 1, 42)
                     if !step(2) { return nil }
                     while cursor < units.count {
@@ -447,7 +453,7 @@ enum TextSyntax {
                     if block && at(index, 42) && at(index + 1, 47) {
                         if !advance(2) { return .plain(.cancelled) }; break
                     }
-                    if !block && (units[index] == 10 || units[index] == 13) { break }
+                    if (!block || records) && (units[index] == 10 || units[index] == 13) { break }
                     if !advance() { return .plain(.cancelled) }
                 }
                 if !append(start, .comment) { return .plain(.tokenBudget) }
@@ -458,6 +464,9 @@ enum TextSyntax {
                     if units[index] == 10 || units[index] == 13 { break }
                     if units[index] == 92 {
                         // Escaped quotes/backslashes stay inside their string.
+                        if records && (at(index + 1, 10) || at(index + 1, 13)) {
+                            if !advance() { return .plain(.cancelled) }; break
+                        }
                         if !advance(min(2, units.count - index)) { return .plain(.cancelled) }
                     } else if units[index] == 34 {
                         if !advance() { return .plain(.cancelled) }; closed = true; break

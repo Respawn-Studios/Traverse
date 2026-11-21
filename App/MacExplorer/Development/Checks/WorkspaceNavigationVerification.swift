@@ -178,17 +178,11 @@ enum WorkspaceNavigationVerification {
             defer { restoreFrame() }
             let fieldPresent = field.map { $0.window === window && !$0.isHiddenOrHasHiddenAncestor } ?? false
             window.title = "Panes · generated review · motion audit"
-            // Keep the established pane contrast clips composited over their
-            // generated backdrop. Fixed-window clips also cover child-window
-            // changes such as dismissing the compact filter during a close.
-            let backdrop = NSWindow(contentRect: window.frame, styleMask: .borderless, backing: .buffered, defer: false)
-            backdrop.title = "Panes backdrop · generated review · motion audit"
-            backdrop.isReleasedWhenClosed = false; backdrop.isRestorable = false
-            backdrop.backgroundColor = .systemIndigo; backdrop.isOpaque = true; backdrop.ignoresMouseEvents = true
-            backdrop.order(.below, relativeTo: window.windowNumber)
-            defer { backdrop.close() }
+            let backdrop = includeBackdrop ? NativeMotionRecorder.makeBackdrop(for: window,
+                title: "Panes backdrop · generated review · motion audit") : nil
+            defer { backdrop?.close() }
             var actionMilliseconds: Double = 0
-            let movie = try await NativeMotionRecorder.record(window: window, over: includeBackdrop ? backdrop : nil, root: testRoot, label: label,
+            let movie = try await NativeMotionRecorder.record(window: window, over: backdrop, root: testRoot, label: label,
                 sampling: .diagnostic(for: window, preRollMilliseconds: 260), includingChildWindows: false, fixedWindow: !includeBackdrop) {
                 let began = CACurrentMediaTime()
                 try action()
@@ -384,6 +378,8 @@ enum WorkspaceNavigationVerification {
             }
         }
         workspace.dismissPaneDividerControls()
+        try verifyCompactDividerControls(in: workspace)
+        checks.append("Divider actions follow either orientation beside the full resize corridor. Short dividers keep their remaining actions in a native More menu.")
         checks.append("Actual side-by-side native tables retain readable Name columns at100/150%, shrink default metadata first, scroll constrained columns, and retain native synthetic header resize choices; physical pointer input is not exercised")
         try await capture(workspace, window: window, owned: owned, name: "two-panes")
         workspace.activate(primary)
@@ -654,6 +650,7 @@ enum WorkspaceNavigationVerification {
         guard let rowSplit = workspace.layout.parent(of: moved.paneID)?.id else {
             throw UIVerification.Failure(message: "Transferred pane has no row divider")
         }
+        try verifyAdjacentDividerSegments(in: workspace)
         let beforeRows = workspace.layout.paneIDs
         let beforeRefusal = workspace.layout
         try require(!workspace.canPerformDividerAction(.rotate, split: rowSplit)
@@ -1244,8 +1241,8 @@ enum WorkspaceNavigationVerification {
         let swap = try dividerButton(.swap, split: divider, in: workspace)
         let swapCenter = swap.convert(.init(x: swap.bounds.midX, y: swap.bounds.midY), to: nil)
         peer.setFileSelection([]); peer.fileSelectionDidChange()
-        try require(previousCompare.isHidden && workspace.isPaneDividerButton(at: swapCenter),
-                    "A stationary divider shelf kept Compare Text after its selection changed, or moved Swap")
+        try require(previousCompare.isHidden && !swap.isHiddenOrHasHiddenAncestor,
+                    "A stationary divider shelf kept Compare Text after its selection changed, or hid Swap")
         if let retired = previousCompare.action { _ = NSApp.sendAction(retired, to: previousCompare.target, from: previousCompare) }
         try require(!source.validateMenuItem(item) && !workspace.canPerformDividerAction(.compareText, split: divider)
                     && workspace.textComparisonWindow == nil,
@@ -1745,8 +1742,10 @@ enum WorkspaceNavigationVerification {
         else { workspace.updatePaneDividerHover(at: hover) }
         try require(!workspace.isPaneDividerButton(at: hover), "Divider hover controls cover the native resize corridor")
         let candidates = controls.subviews.flatMap(\.subviews).compactMap { $0 as? NSButton }
+        let segment = controls.dividers(middle, split).first(where: { $0.id == split }) ?? divider
+        try verifyDividerFrames(candidates, beside: segment, in: controls)
         guard let button = candidates.first(where: {
-            $0.accessibilityLabel() == divider.title(for: action) && !$0.isHiddenOrHasHiddenAncestor && $0.isEnabled
+            $0.accessibilityLabel() == segment.title(for: action) && !$0.isHiddenOrHasHiddenAncestor && $0.isEnabled
         }) else {
             throw UIVerification.Failure(message: "Divider \(action.title) did not have its enabled native control.")
         }
@@ -1755,6 +1754,91 @@ enum WorkspaceNavigationVerification {
         try require(controls.button(at: windowPoint) === button && tree.hitTest(hitPoint) === button,
                     "Divider \(action.title) did not own its native hit target")
         return button
+    }
+
+    private static func verifyDividerFrames(_ buttons: [NSButton], beside divider: WorkspaceDividerControls.Divider,
+                                            in controls: WorkspaceDividerControls) throws {
+        let frames = buttons.filter { !$0.isHiddenOrHasHiddenAncestor }.map { controls.convert($0.bounds, from: $0) }
+        let isColumnSplit = divider.axis == .columns
+        let ranges = frames.map { isColumnSplit ? $0.minY...$0.maxY : $0.minX...$0.maxX }.sorted { $0.lowerBound < $1.lowerBound }
+        let line = divider.line
+        let lineRange = isColumnSplit ? line.minY...line.maxY : line.minX...line.maxX
+        let cross = isColumnSplit ? line.midX : line.midY
+        let positions = frames.map { isColumnSplit ? $0.minX...$0.maxX : $0.minY...$0.maxY }
+        guard let first = ranges.first, let last = ranges.last else {
+            throw UIVerification.Failure(message: "Missing visible controls beside the divider")
+        }
+        try require(abs(first.lowerBound + last.upperBound - lineRange.lowerBound - lineRange.upperBound) <= 1
+            && ranges.allSatisfy { lineRange.contains($0.lowerBound) && lineRange.contains($0.upperBound) }
+            && Set(positions).count == 1
+            && positions.allSatisfy {
+                $0.upperBound <= cross - WorkspaceDividerControls.revealDistance
+                    || $0.lowerBound >= cross + WorkspaceDividerControls.revealDistance
+            }
+            && zip(ranges, ranges.dropFirst()).allSatisfy { pair in pair.1.lowerBound - pair.0.upperBound >= 1 },
+            "Divider control frames crossed the resizing line, overlapped, or were not centred in their split segment")
+    }
+
+    private static func verifyAdjacentDividerSegments(in workspace: BrowserWorkspaceController) throws {
+        let root = workspace.layout.rootID
+        guard let controls = workspace.paneTreeHost.subviews.compactMap({ $0 as? WorkspaceDividerControls }).first,
+              let divider = controls.dividers(nil, nil).first(where: { $0.id == root }), divider.axis == .columns else {
+            throw UIVerification.Failure(message: "Missing outer divider beside the stacked panes")
+        }
+        let line = divider.line
+        let points = [0.24, 0.76].map { NSPoint(x: line.midX, y: line.minY + line.height * $0) }
+        let segments = points.compactMap { point in controls.dividers(point, root).first { $0.id == root } }
+        guard segments.count == 2, let lower = segments[0].panes, let upper = segments[1].panes else {
+            throw UIVerification.Failure(message: "The outer divider lost its hovered pane pairs")
+        }
+        try require(segments[0].line.maxY <= segments[1].line.minY
+            && segments[0].line.minY == line.minY && segments[1].line.maxY == line.maxY,
+            "The outer divider did not split its controls between the adjacent panes above and below")
+        try require((lower.first == upper.first) != (lower.second == upper.second),
+            "Hovering a new segment did not change to the next adjacent pane")
+        let junction = NSPoint(x: line.midX, y: (segments[0].line.maxY + segments[1].line.minY) / 2)
+        try require(controls.dividers(junction, root).allSatisfy { $0.id != root },
+            "A pane junction was treated as an entire divider segment")
+        for pair in [lower, upper] {
+            guard let first = workspace.browsers[pair.first], let second = workspace.browsers[pair.second] else {
+                throw UIVerification.Failure(message: "Missing browser for an adjacent pair")
+            }
+            let reversed = WorkspaceDividerControls.PanePair(first: pair.second, second: pair.first)
+            try require(workspace.canPerformDividerAction(.compare, split: root, at: pair)
+                == first.canCompareCurrentFolders(with: second)
+                && !workspace.canPerformDividerAction(.compare, split: root, at: reversed),
+                "Compare did not resolve against its presented pair or admitted a stale side order")
+        }
+    }
+
+    private static func verifyCompactDividerControls(in workspace: BrowserWorkspaceController) throws {
+        let host = workspace.paneTreeHost
+        let controls = WorkspaceDividerControls(frame: host.bounds)
+        host.addSubview(controls)
+        defer { controls.removeFromSuperview() }
+        let middle = NSPoint(x: controls.bounds.midX, y: controls.bounds.midY)
+        let length = InterfaceMetrics.points(80)
+        for axis in [PaneSplitAxis.columns, .rows] {
+            let line = axis == .columns
+                ? NSRect(x: middle.x - 0.5, y: middle.y - length / 2, width: 1, height: length)
+                : NSRect(x: middle.x - length / 2, y: middle.y - 0.5, width: length, height: 1)
+            let divider = WorkspaceDividerControls.Divider(id: UUID(), axis: axis, line: line, panes: nil, canBalance: true,
+                canRotate: true, pairAction: .compare, canCompareGit: true, canLink: true, isLinked: false, copyDestination: nil)
+            controls.dividers = { _, _ in [divider] }
+            controls.updateHover(at: controls.convert(middle, to: nil))
+            let buttons = controls.subviews.flatMap(\.subviews).compactMap { $0 as? NSButton }
+            try verifyDividerFrames(buttons, beside: divider, in: controls)
+            let visible = buttons.filter { !$0.isHiddenOrHasHiddenAncestor }
+            try require(visible.map { $0.accessibilityLabel() } == [WorkspaceDividerAction.swap.title, "More Pane Actions"]
+                && controls.overflowActions == Array(divider.actions.dropFirst()), "A short divider lost its extra actions")
+            guard let button = visible.first else { throw UIVerification.Failure(message: "Missing compact Swap action") }
+            let center = controls.convert(.init(x: button.bounds.midX, y: button.bounds.midY), from: button)
+            let bridge = axis == .columns ? NSPoint(x: (middle.x + center.x) / 2, y: center.y)
+                : NSPoint(x: center.x, y: (middle.y + center.y) / 2)
+            controls.updateHover(at: controls.convert(bridge, to: nil))
+            try require(controls.button(at: controls.convert(center, to: nil)) === button, "The gap between the line and its controls dismisses the shelf")
+            controls.dismiss(animated: false)
+        }
     }
 
     private static func sendDividerMouseMove(to point: NSPoint, in workspace: BrowserWorkspaceController, window: NSWindow) {

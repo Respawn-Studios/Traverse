@@ -27,12 +27,14 @@ struct EditorDocumentOutline: Equatable, Sendable, CustomStringConvertible, Cust
         let kind: Kind
         let signatureLine: Int?
         let parametersOffset: Int?
+        let bodyOpening: Int?
 
         init(title: String, line: Int, offset: Int, depth: Int, kind: Kind,
-             signatureLine: Int? = nil, parametersOffset: Int? = nil) {
+             signatureLine: Int? = nil, parametersOffset: Int? = nil, bodyOpening: Int? = nil) {
             self.title = title; self.line = line; self.offset = offset
             self.depth = depth; self.kind = kind; self.signatureLine = signatureLine
             self.parametersOffset = parametersOffset
+            self.bodyOpening = bodyOpening
         }
 
         var description: String { "<editor outline entry>" }
@@ -42,6 +44,13 @@ struct EditorDocumentOutline: Equatable, Sendable, CustomStringConvertible, Cust
     struct Scope: Equatable, Sendable {
         let entry: Entry
         let end: Int
+        let contentStartsAfterLine: Int?
+
+        init(entry: Entry, end: Int, contentStartsAfterLine: Int? = nil) {
+            self.entry = entry
+            self.end = end
+            self.contentStartsAfterLine = contentStartsAfterLine
+        }
     }
 
     struct Match: Sendable, CustomStringConvertible {
@@ -73,9 +82,11 @@ struct EditorDocumentOutline: Equatable, Sendable, CustomStringConvertible, Cust
         self.scopes = scopes
     }
 
-    func scrolledScopes(at offset: Int, onLine line: Int) -> [Entry] {
-        let visible = scopes.reversed().lazy.filter { $0.entry.line < line && $0.entry.offset <= offset && offset < $0.end }
-            .prefix(2)
+    func scrolledScopes(at offset: Int, onLine line: Int, limit: Int = 2) -> [Entry] {
+        let visible = scopes.reversed().lazy.filter {
+            ($0.contentStartsAfterLine ?? $0.entry.line) < line && $0.entry.offset <= offset && offset < $0.end
+        }
+            .prefix(limit)
         return Array(visible.map(\.entry).reversed())
     }
 
@@ -120,7 +131,7 @@ struct EditorDocumentOutline: Equatable, Sendable, CustomStringConvertible, Cust
         let source = text as NSString
         if language == .toml {
             let result = EditorTOMLOutline.read(source, lines: lines, tokens: tokens, cancelled: cancelled)
-            let scopes = EditorOutlineScopes.sectionScopes(result.entries, end: source.length)
+            let scopes = EditorOutlineScopes.sectionScopes(result.entries, end: result.limited ? nil : source.length)
             return .init(availability: result.limited ? .limited : .ready, entries: result.entries, scopes: scopes)
         }
         var entries: [Entry] = []
@@ -155,7 +166,8 @@ struct EditorDocumentOutline: Equatable, Sendable, CustomStringConvertible, Cust
                 entry = EditorCFamilyOutline.declaration(for: token, in: source, lines: lines, language: language,
                     pairs: preparedDelimiters?.matches).map { declaration in
                     .init(title: declaration.name, line: declaration.line, offset: token.range.location,
-                          depth: outlineDepth(at: declaration.indent, levels: &indents), kind: declaration.kind)
+                          depth: outlineDepth(at: declaration.indent, levels: &indents), kind: declaration.kind,
+                          bodyOpening: declaration.bodyOpening)
                 }
             case .yaml:
                 if token.kind == .keyword { indents.removeAll(keepingCapacity: true) }

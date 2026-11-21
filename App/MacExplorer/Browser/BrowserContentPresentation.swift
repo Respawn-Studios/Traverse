@@ -1,10 +1,12 @@
 import AppKit
 import ExplorerCore
+import LocalStorage
 
 /// The active native file surface owns selection and geometry. Commands and
 /// operation admission consume this seam rather than a hidden table mirror.
 @MainActor
 extension BrowserViewController {
+    private static let iconThumbnailReader = LocalFileSystem(maximumConcurrentReads: 2, activityGate: ApplicationFileActivity.gate)
     var usesFileIcons: Bool { presentedFileViewMode == .icons }
     var remoteTable: RemoteFileTableView? { isSMBLocation ? smbTabs[activeID]?.rows.table : isSFTPLocation ? sftpTabs[activeID]?.rows.table : nil }
     var remoteScroll: NSScrollView? { isSMBLocation ? smbTabs[activeID]?.rows.scroll : isSFTPLocation ? sftpTabs[activeID]?.rows.scroll : nil }
@@ -28,6 +30,13 @@ extension BrowserViewController {
     func configureFileIconPresentation() {
         iconBrowser.openingAppearanceForEntry = { [weak self] entry in self?.fileOpeningAppearance(entry) ?? .ordinary }
         iconBrowser.gitBadgeForEntry = { [weak self] entry in self?.gitControls.badge(for: entry) }
+        iconBrowser.thumbnails.load = { [weak self] entry, folder in
+            guard let self, !self.isBrowserSuspended, !Task.isCancelled else { return nil }
+            let access = await self.accessLifetime(for: [entry.url])
+            guard !self.isBrowserSuspended, !Task.isCancelled,
+                  !TraverseAccessPolicy.requiresFolderSelection || access.covers(entry.url) else { return nil }
+            return try await Self.iconThumbnailReader.thumbnail(for: entry, in: folder, retaining: access)
+        }
         iconBrowser.onAccessibleActivation = { [weak self] in self?.prepareAccessibleBrowsingInteraction() ?? false }
         let collection = iconBrowser.collectionView
         collection.onOpen = { [weak self] in self?.openSelection(nil) }
@@ -69,6 +78,7 @@ extension BrowserViewController {
     }
 
     func updateFilePresentationVisibility() {
+        defer { updateIconThumbnailScope() }
         archiveHost.isHidden = !isArchiveLocation
         smbHost.isHidden = !isSMBLocation; sftpHost.isHidden = !isSFTPLocation
         if isRemoteLocation || isArchiveLocation { folderScroll.isHidden = true; table.marquee?.setVisible(false); iconBrowser.isHidden = true; volumeBrowser.isHidden = true; canvasTransition?.stageIncomingForeground(); return }
@@ -92,6 +102,7 @@ extension BrowserViewController {
         updatingSelection = true
         defer { updatingSelection = previous }
         if usesFileIcons {
+            updateIconThumbnailScope()
             iconBrowser.showsFullPathsInTooltips = metadataSearch.isShowingResults
             iconBrowser.update(OrderedRows(entries: displayedEntries, rowsByURL: rowsByURL), selected: selection, cut: cutURLs,
                                showsExtensions: settings.showsFileExtensions)
@@ -113,10 +124,20 @@ extension BrowserViewController {
         let previous = updatingSelection
         updatingSelection = true
         defer { updatingSelection = previous }
+        updateIconThumbnailScope()
         iconBrowser.showsFullPathsInTooltips = metadataSearch.isShowingResults
         iconBrowser.updateAppearance(selected: selection, cut: cutURLs,
                                      showsExtensions: settings.showsFileExtensions)
         if let scrollOffset { restoreFileScrollOffset(scrollOffset) }
+    }
+
+    private func updateIconThumbnailScope() {
+        let scope: FileIconThumbnails.Scope?
+        if settings.showsFileThumbnails, !isBrowserSuspended, !isReadOnlyFileSession, !isLoading,
+           !iconBrowser.isHidden, !metadataSearch.isShowingResults, case .directory(let folder) = location {
+            scope = .init(folder: folder, visit: sessionID)
+        } else { scope = nil }
+        iconBrowser.updateThumbnailScope(scope)
     }
 
     func setFileSelection(_ urls: Set<URL>) {

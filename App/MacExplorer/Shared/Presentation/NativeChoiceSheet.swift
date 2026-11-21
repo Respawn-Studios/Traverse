@@ -45,9 +45,10 @@ import SwiftUI
     }
 
     convenience init(title: String, heading: String, confirm: String, rows: [Row], initialSelection: Int = 0,
-                     preview: SelectionPreview? = nil, size: NSSize? = nil) {
+                     preview: SelectionPreview? = nil, size: NSSize? = nil, note: String? = nil) {
         self.init(title: title, heading: heading, rows: rows, primary: .init(title: confirm) { value, _ in value },
-                  initialSelection: initialSelection, preview: preview, size: size ?? .init(width: 480, height: 245))
+                  note: note, initialSelection: initialSelection, preview: preview,
+                  size: size ?? .init(width: 480, height: note == nil ? 245 : 285))
     }
 
     convenience init(title: String, heading: String, rows: [Row], primary: Button, alternate: Button? = nil,

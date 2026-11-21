@@ -26,6 +26,30 @@ struct LocalJSONCheckTests {
         #expect(more.first?.offset == 2)
     }
 
+    @Test func JSONLinesChecksEveryRecordWithExactOffsetsAndBounds() throws {
+        let valid = "{\"name\":\"🧭\"}\r\nfalse\n\"done\""
+        #expect(try LocalJSONCheck.checkJSONLines(valid) == .checked(issues: [], moreIssues: false))
+        #expect(try LocalJSONCheck.checkJSONLines("1\r\n") == .checked(issues: [], moreIssues: false))
+        #expect(try LocalJSONCheck.checkJSONLines("") == .checked(issues: [], moreIssues: false))
+        let draft = "\"🧭\"\r\n{\"broken\" true}\n\n[0,]\nnull\n"
+        guard case .checked(let issues, false) = try LocalJSONCheck.checkJSONLines(draft) else {
+            Issue.record("Expected all malformed record locations"); return
+        }
+        #expect(issues.map(\.line) == [2, 3, 4])
+        #expect(issues.first?.offset == (draft as NSString).range(of: "true").location)
+        #expect(issues.first?.message.contains("colon") == true)
+        #expect(issues.dropFirst().first?.offset == (draft as NSString).range(of: "\n\n").location + 1)
+        #expect(issues.dropFirst().first?.message.contains("blank line") == true)
+        guard case .checked(let control, false) = try LocalJSONCheck.checkJSONLines("1\r 2") else {
+            Issue.record("Expected a carriage-return finding"); return
+        }
+        #expect(control.first?.offset == 1)
+        guard case .checked(let capped, true) = try LocalJSONCheck.checkJSONLines(String(repeating: ".\n", count: 25)) else {
+            Issue.record("Expected a bounded list of findings"); return
+        }
+        #expect(capped.count == 24)
+    }
+
     @Test func grammarDetectsIncompleteValuesAndRepeatedNames() throws {
         for text in ["", "0 1", "[1,]", "{\"a\": 1, \"a\": 2}", "01", "1.", "1e+", "\"\\j\""] {
             let check = try LocalJSONCheck.check(text, allowsComments: false)
@@ -58,6 +82,98 @@ struct LocalJSONCheckTests {
         #expect(issues.count == 3)
         #expect(issues.map(\.line) == [1, 2, 3])
         #expect(issues[1].offset == (source as NSString).range(of: "false").location)
+    }
+
+    @Test func schemaPropertyCompletionUsesTheActualObjectAndPreservesValues() throws {
+        let schema = """
+        {"$defs":{"service":{"properties":{"name":{"type":"string"},"port":{"$ref":"#/$defs/port"},"path":true},
+                                  "required":["port"]}, "port":{"type":"integer","description":"Listen port\\n  for the process."}},
+         "properties":{"services":{"items":{"$ref":"#/$defs/service"}}}}
+        """
+        let draft = "{\"services\":[{\"name\":\"Orion 🧭\", \"p\n}]}"
+        let source = draft as NSString
+        let key = source.range(of: "\"p")
+        guard case .suggestions(let insertion) = try LocalJSONSchemaCompletion.suggest(in: draft,
+            selection: .init(location: NSMaxRange(key), length: 0), allowsComments: false, schema: schema) else {
+            Issue.record("Expected suggestions inside the incomplete nested key"); return
+        }
+        #expect(insertion.kind == .property && insertion.range == key)
+        #expect(insertion.candidates.map(\.name) == ["port", "path"])
+        #expect(insertion.candidates.first?.required == true)
+        let proposed = try #require(insertion.candidates.first)
+        #expect(proposed.replacement == "\"port\": null")
+        #expect(proposed.types == ["integer"] && proposed.summary == "Listen port for the process.")
+        #expect((proposed.replacement as NSString).substring(with: proposed.selectionInReplacement) == "null")
+        let changing = "{\"services\":[{\"p\":321,\"path\":\"home\"}]}"
+        let existing = (changing as NSString).range(of: "\"p\"")
+        guard case .suggestions(let replacement) = try LocalJSONSchemaCompletion.suggest(in: changing,
+            selection: .init(location: existing.location + 2, length: 0), allowsComments: false, schema: schema) else {
+            Issue.record("Expected replacement for the existing key"); return
+        }
+        #expect(replacement.range == existing)
+        #expect(replacement.candidates.map(\.replacement) == ["\"port\""])
+        #expect((changing as NSString).replacingCharacters(in: replacement.range,
+            with: replacement.candidates[0].replacement).contains("\"port\":321"))
+        let unsupported = try LocalJSONSchemaCompletion.suggest(in: "{ }", selection: .init(location: 2, length: 0), allowsComments: false,
+            schema: #"{"$ref":"https://example.invalid/schema"}"#)
+        guard case .unavailable = unsupported else { Issue.record("External reference did not refuse"); return }
+    }
+
+    @Test func schemaValueCompletionReusesLeafRulesAndKeepsExactScalars() throws {
+        let schema = """
+        {"$defs":{"mode":{"enum":["true",true,"debug","production","debug"],"default":"production","title":"Logging mode"}},
+         "properties":{"options":{"prefixItems":[{"$ref":"#/$defs/mode","type":"string"},{"type":"boolean","default":"invalid"}]},
+                       "precise":{"const":9007199254740993}}}
+        """
+        let document = #"{"name":"🧭","options":[null,false],"precise":null}"#
+        let source = document as NSString
+        let first = source.range(of: "null")
+        let second = source.range(of: "false")
+        let last = source.range(of: "null", options: .backwards)
+        for (selection, expected) in [(first, [#""production""#, #""true""#, #""debug""#]),
+                                      (second, ["true", "false"]), (last, ["9007199254740993"])] {
+            guard case .suggestions(let plan) = try LocalJSONSchemaCompletion.suggest(in: document, selection: selection,
+                allowsComments: false, schema: schema) else { Issue.record("Expected value suggestions"); continue }
+            #expect(plan.kind == .value && plan.range == selection)
+            #expect(plan.candidates.map(\.replacement) == expected)
+            #expect(plan.candidates.filter(\.isDefault).map(\.replacement) == (selection == first ? [#""production""#] : []))
+            if selection == first { #expect(plan.candidates.first?.summary == "Logging mode") }
+        }
+        guard case .suggestions(let preciseDefault) = try LocalJSONSchemaCompletion.suggest(in: "null",
+            selection: .init(location: 0, length: 4), allowsComments: false,
+            schema: #"{"type":"integer","default":9007199254740993}"#) else {
+            Issue.record("Expected validated scalar default without an enum"); return
+        }
+        #expect(preciseDefault.candidates.first?.replacement == "9007199254740993")
+        #expect(preciseDefault.candidates.first?.isDefault == true)
+        let partial = #"{"options":["pr",false]}"#
+        let prefix = (partial as NSString).range(of: #""pr""#)
+        guard case .suggestions(let typed) = try LocalJSONSchemaCompletion.suggest(in: partial,
+            selection: .init(location: NSMaxRange(prefix) - 1, length: 0), allowsComments: false, schema: schema) else {
+            Issue.record("Expected a completion for the string prefix"); return
+        }
+        #expect(typed.range == prefix && typed.candidates.map(\.replacement) == [#""production""#])
+        let tooWide = NSRange(location: first.location, length: NSMaxRange(second) - first.location)
+        guard case .unavailable = try LocalJSONSchemaCompletion.suggest(in: document, selection: tooWide,
+            allowsComments: false, schema: schema) else { Issue.record("Accepted a selection crossing values"); return }
+    }
+
+    @Test func delimiterRepairChangesOnlyOnePunctuationMarkAndRequiresACompleteResult() throws {
+        let missingColon = #"{"🧭" true}"#
+        let colonPlan = try LocalJSONCheck.singleDelimiterRepair(in: missingColon, allowsComments: false)
+        let colon = try #require(colonPlan)
+        #expect(colon.delimiter == .colon)
+        #expect((missingColon as NSString).replacingCharacters(in: .init(location: colon.offset, length: 0),
+            with: colon.delimiter.rawValue) == #"{"🧭": true}"#)
+        let missingComma = "[{\"key\": \"🧭\"} /* keep the explanation */\n false]"
+        let commaPlan = try LocalJSONCheck.singleDelimiterRepair(in: missingComma, allowsComments: true)
+        let comma = try #require(commaPlan)
+        #expect(comma.delimiter == .comma)
+        #expect((missingComma as NSString).replacingCharacters(in: .init(location: comma.offset, length: 0),
+            with: comma.delimiter.rawValue) == "[{\"key\": \"🧭\"}, /* keep the explanation */\n false]")
+        for draft in [missingComma, #"{"a" true "b": 2}"#, #"{"a": "unfinished}"#, #"{"a": true}"#] {
+            #expect(try LocalJSONCheck.singleDelimiterRepair(in: draft, allowsComments: false) == nil)
+        }
     }
 
     @Test func schemaValuesCompareExactlyAndBooleanIsNotANumber() throws {

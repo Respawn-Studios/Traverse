@@ -31,7 +31,7 @@ extension BrowserViewController {
               (1...4).contains(selectedItemCount) else { return false }
         return orderedSelectedURLs.allSatisfy { url in
             guard let row = rowsByURL[url], displayedEntries.indices.contains(row) else { return false }
-            return displayedEntries[row].kind == .file
+            return displayedEntries[row].kind == .file && !displayedEntries[row].isDataless
         }
     }
 
@@ -55,6 +55,10 @@ extension BrowserViewController {
             }
             return false
         case .traverse:
+            if entry.isDataless {
+                status.stringValue = "This file is online only. Make it available on this Mac to edit it in Traverse."
+                return true
+            }
             guard entry.kind == .file, canEditTextInTraverse, orderedSelectedURLs == [entry.url] else {
                 status.stringValue = "This item cannot be opened in the text editor here. Use Open in Default App or choose another application."
                 return true

@@ -8,6 +8,7 @@ extension BrowserViewController {
     }
     func fileOpeningAppearance(_ entry: FileEntry) -> FileOpeningAppearance {
         guard !isRemoteLocation, !isArchiveLocation else { return .ordinary }
+        if entry.isDataless { return .onlineOnly }
         return .resolve(name: entry.name, kind: entry.kind.rawValue,
             preferences: settings.editorPreferences, editorAvailable: LocalTextEditorFeature.ordinaryEnabled,
             localEditorEligible: !isReadOnlyFileSession && recoverableFileOperations != nil,

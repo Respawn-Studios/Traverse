@@ -44,6 +44,10 @@ public struct DriveBenchmarkSuiteReport: Sendable, Encodable {
         return String(decoding: try encoder.encode(self), as: UTF8.self)
     }
 
+    public var metricsTable: String {
+        DriveBenchmarkReport.metricsTable(for: [sequential] + (random4K.map { [$0] } ?? []))
+    }
+
     public var summary: String {
         var lines = ["Traverse Quick Mix file benchmark",
             "Outcome: \(outcome == .completed ? "Completed" : outcome == .partial ? "Partial" : "Failed")",

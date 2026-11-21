@@ -4,10 +4,13 @@ import FileOperations
 #endif
 
 enum EditorCommandNotice: Sendable {
-    case cannotFormatJSON, noMatchingBracket, noEnclosingBrackets, noCompleteConflict
+    case cannotFormatJSON, noJSONDelimiterRepair, noMatchingBracket, noEnclosingBrackets, noCompleteConflict
+    case jsonIssue(LocalJSONCheck.Issue)
     var message: String {
         switch self {
-        case .cannotFormatJSON: "This JSON could not be formatted. Check its syntax; your text is unchanged."
+        case .cannotFormatJSON: "Check the JSON syntax, or use Indent JSON as Written to keep incomplete text."
+        case .noJSONDelimiterRepair: "A single missing colon or comma could not be verified. The draft is unchanged."
+        case .jsonIssue(let issue): "Line \(issue.line), column \(issue.column). \(issue.message)"
         case .noMatchingBracket: "Place the caret beside a matched code bracket."
         case .noEnclosingBrackets: "No enclosing bracket pair is available for this selection."
         case .noCompleteConflict: "Place the caret inside a complete conflict marker block."
@@ -33,7 +36,8 @@ enum EditorCommandNotice: Sendable {
 private enum EditorPreparedLineCommand: Sendable {
     case unchanged, cancelled
     case select(NSRange)
-    case replace(EditorIndentationReplacement, TextDocumentValue)
+    case replace(EditorIndentationReplacement, TextDocumentValue, diagnostics: [LocalJSONCheck.Issue])
+    case diagnostics([LocalJSONCheck.Issue])
     case refused(TextDocumentFailure)
     case notice(EditorCommandNotice)
 
@@ -43,11 +47,17 @@ private enum EditorPreparedLineCommand: Sendable {
         let plan = EditorLineCommands.plan(command, text: text, selection: selection,
                                            maximumBytes: TextDocumentValue.maximumBytes, structure: structure)
         guard !Task.isCancelled else { return .cancelled }
+        func incompleteJSONIssues(_ text: String) -> [LocalJSONCheck.Issue]? {
+            guard case .formatJSON(.asWritten, let allowsComments) = command,
+                  case .checked(let issues, _) = try? LocalJSONCheck.check(text, allowsComments: allowsComments) else { return nil }
+            return issues
+        }
         switch plan {
-        case .unchanged: return .unchanged
+        case .unchanged: return incompleteJSONIssues(text).map(Self.diagnostics) ?? .unchanged
         case .select(let range): return .select(range)
         case .refused(let reason):
             if reason == .cannotFormatJSON { return .notice(.cannotFormatJSON) }
+            if reason == .noJSONDelimiterRepair { return .notice(.noJSONDelimiterRepair) }
             if reason == .noMatchingBracket { return .notice(.noMatchingBracket) }
             if reason == .noEnclosingBrackets { return .notice(.noEnclosingBrackets) }
             if reason == .noCompleteConflict { return .notice(.noCompleteConflict) }
@@ -57,7 +67,8 @@ private enum EditorPreparedLineCommand: Sendable {
             do {
                 let value = try TextDocumentValue.edited(expected, format: format)
                 guard value.text.utf16.elementsEqual(expected.utf16) else { return .refused(.invalidReceipt) }
-                return Task.isCancelled ? .cancelled : .replace(edit, value)
+                let diagnostics = incompleteJSONIssues(value.text) ?? []
+                return Task.isCancelled ? .cancelled : .replace(edit, value, diagnostics: diagnostics)
             } catch let reason as TextDocumentFailure { return .refused(reason) }
             catch { return .refused(.invalidReceipt) }
         }
@@ -204,6 +215,8 @@ final class EditorLineCommandController {
             case .unchanged: return
             case .refused(let reason): self.pending.removeAll(); current.onRejectedEdit?(reason)
             case .notice(let notice): self.pending.removeAll(); self.onNotice?(notice)
+            case .diagnostics(let issues):
+                self.presentDiagnostics(issues, in: current)
             case .select(let range):
                 if command == .expandSelection, let position = current.navigationPosition() {
                     current.revealNavigationSelection(range, remembersLocation: false)
@@ -215,7 +228,7 @@ final class EditorLineCommandController {
                     self.forgetExpansion()
                     current.revealNavigationSelection(range, remembersLocation: !command.changesText)
                 }
-            case .replace(let edit, let value):
+            case .replace(let edit, let value, let diagnostics):
                 guard command.changesText else { return }
                 self.forgetExpansion()
                 let name: String
@@ -225,7 +238,12 @@ final class EditorLineCommandController {
                 case .moveLinesDown: name = "Move Lines Down"
                 case .toggleLineComment: name = "Toggle Line Comment"
                 case .formatJSON(let style, _):
-                    if case .compact = style { name = "Compact JSON" } else { name = "Format JSON" }
+                    switch style {
+                    case .compact: name = "Compact JSON"
+                    case .asWritten: name = "Indent JSON as Written"
+                    case .indented: name = "Format JSON"
+                    }
+                case .repairJSONDelimiter: name = "Repair Missing JSON Delimiter"
                 case .sortSelectedLines(let descending): name = descending ? "Sort Lines Descending" : "Sort Lines Ascending"
                 case .trimTrailingWhitespace: name = "Trim Trailing Whitespace"
                 case .surroundSelection: name = "Surround Selection"
@@ -234,9 +252,16 @@ final class EditorLineCommandController {
                 case .navigateBrackets, .expandSelection: return
                 }
                 applied = current.applyTextReplacement(edit, expecting: value, action: name)
+                if applied { self.presentDiagnostics(diagnostics, in: current) }
                 if !applied { self.pending.removeAll() }
             }
         }
+    }
+
+    private func presentDiagnostics(_ issues: [LocalJSONCheck.Issue], in surface: NativeTextEditorSurface) {
+        guard let first = issues.first else { return }
+        surface.presentDiagnostics(issues, for: surface.generation)
+        onNotice?(.jsonIssue(first))
     }
 
     /// Synchronous input-boundary invalidation. Retain the cancelled worker

@@ -42,6 +42,7 @@ extension BrowserViewController {
         smbClosedUploadNotices = [:]
         canvasTransition?.finish(); canvasTransition = nil
         folderSummary.cancel()
+        iconBrowser.updateThumbnailScope(nil)
         pinDrop.cancel()
         addressCompletion.cancel()
         folderFilter.contextWillChange()

@@ -318,7 +318,7 @@ enum GlassVerification {
     /// Only feed the PNG captured from this exact generated probe window, with
     /// screencapture's shadow excluded (-o). No capture is requested by this helper.
     /// A flat Regular row over six distinct bands goes red; the opaque row is the
-    /// negative control. This measures transmitted color, not subjective styling.
+    /// negative control. This measures transmitted contrast.
     static func verifyCompositedProbeCapture(at png: URL, for window: NSWindow) throws -> [String: Any] {
         guard window.title == "Mac Explorer — generated glass material probe",
               let bitmap = NSBitmapImageRep(data: try Data(contentsOf: png)),
@@ -396,10 +396,10 @@ enum GlassVerification {
 private final class GlassProbeBackdrop: NSView {
     override var isOpaque: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
-        let colors: [NSColor] = [.systemBlue, .systemPink, .systemGreen, .systemOrange, .systemPurple, .systemYellow]
-        let width = bounds.width / CGFloat(colors.count)
-        for (index, color) in colors.enumerated() {
-            color.setFill()
+        let shades: [CGFloat] = [0.29, 0.77, 0.41, 0.70, 0.23, 0.85]
+        let width = bounds.width / CGFloat(shades.count)
+        for (index, shade) in shades.enumerated() {
+            NSColor(white: shade, alpha: 1).setFill()
             NSRect(x: CGFloat(index) * width, y: 0, width: width + 1, height: bounds.height).intersection(dirtyRect).fill()
         }
     }

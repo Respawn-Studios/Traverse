@@ -16,24 +16,28 @@ struct TraverseReleaseNote: Identifiable, Sendable {
 
 enum TraverseReleaseNotes {
     static let all: [TraverseReleaseNote] = [
-        .init(version: "0.4.0", build: 103, state: .published,
+        .init(version: "0.4.0", build: 104, state: .published,
               date: "2026-11-21", title: "Git, diffs, and a smarter editor",
               summary: "Review local Git changes, navigate and check source files, and work between panes without losing your place.", changes: [
-                "Swap, stack, balance or link panes from the divider or keyboard. Compare two folders and verify their contents, review a copy across panes, or reveal a matching item.",
+                "Swap, stack, balance or link panes from the divider or keyboard. Compare folders, review a copy or reveal a match. Divider controls follow the two panes under the pointer and leave the resize line clear.",
                 "Browse local Git worktrees. Compare the working folder or index with a revision, compare two revisions, and review the sides of a conflict. Follow file history across renames and find the commit behind a line.",
                 "Review and stage a saved file or an eligible block, or unstage its changes. Traverse checks the file and index again when you confirm.",
                 "Compare local files, archive members, clipboard text and open drafts. Switch between side-by-side and unified views, keep Find in sync, or search the visible files in a folder or Git review.",
                 "Quick Open, project text search, a searchable outline, bookmarks and local name completion help you move around a project. New navigation and comparison commands preserve the active draft.",
-                "Check JSON and JSONC and jump to the reported issue. Choose a local JSON Schema to check supported draft 2020-12 rules, including precise numeric bounds, alternatives, conditional rules and tuples. INI, .editorconfig and TOML get navigable sections and keys. Go gets navigation to types and functions, line comments and smart brace indentation.",
+                "Check live JSON and JSONC, validate JSON Lines by record, and walk reported issues with F8 or Shift-F8. Indent an unfinished draft without changing its tokens. Repair one missing colon or comma when it makes the whole draft parse.",
+                "Choose a local JSON schema to check types, exact numeric bounds and other supported draft 2020-12 rules. F5 suggests property names and scalar values with descriptions, declared types and valid defaults when available.",
+                "Fold code and recognized Python, YAML, Markdown, TOML and INI sections. Find opens a folded match. Use the header to return to a visible scope or choose one of its parent blocks. Go gets type and function navigation, line comments and smart indentation.",
                 "Smart Return and opt-in bracket completion share the editor’s syntax scanner. Search and compare with clearer inserted and deleted lines, and apply a chosen change to a live editor with one Undo.",
                 "Browse Python wheels as read-only ZIP packages. Copy supported members using the archive browser.",
-                "Reopen saved folder analyses from Drives. Repeat a benchmark with its original settings, compare matching runs across volumes, and copy a table with throughput or IOPS and P95 latency. Copy a SMART reading already on display without starting a new check.",
+                "Icons view shows real thumbnails for supported images and PDFs and can display embedded thumbnails in Office and OpenDocument files. Online-only items keep their type icons and show a cloud badge.",
+                "Reopen saved folder analyses from Drives and repeat a benchmark with its original settings. Cards, charts and comparisons use MB/s for sequential tests and IOPS for random 4 KiB tests. Copy phase tables or an existing SMART result.",
                 "Settings search opens the matching control and highlights it. The address bar shows more parent folders while keeping room to click and edit the path.",
                 "New Folder and inline Rename keep the listing in place. Archive shortcuts follow the active pane or window, and open archive views refresh together after a change or Undo.",
                 "The sidebar slides at its saved width, existing panes stay in place during a split, and Analyzer and Properties preserve the storage chart and scroll position when grouping or drilling down.",
                 "Operation Results preserves a selected visible item and marks unconfirmed Trash outcomes for review. Late SFTP shutdown can finish after the worker has drained.",
                 "On macOS 15, history, Trash and storage tools accept existing folders when macOS adds a directory marker to their URLs. Filesystem identity and access checks still apply.",
                 "New and relinked Remembered Items in the direct edition use current filesystem permissions. Move and Undo preserve each item's stored access method.",
+                "Open a selected Finder folder through the Open in Traverse service. The Permissions page links to macOS Full Disk Access for protected locations.",
                 "Updated the SSH and RSA dependencies used for SFTP and the constant-time primitives used for SMB signature verification.",
                 "Copy and cross-volume Move to FAT-formatted destinations remain unavailable. Traverse explains this before creating staging data."
               ]),

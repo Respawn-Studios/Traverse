@@ -18,8 +18,13 @@ struct DriveBenchmarkResultMetrics: View {
                 }
                 GridRow {
                     Text("Operations / second").help("Completed blocks divided by the whole measured phase, including validation. Write includes the final flush.")
-                    Text(rate(result.writeLatency.operations, result.writeSeconds + result.flushSeconds)).monospacedDigit()
-                    Text(rate(result.readLatency.operations, result.readSeconds)).monospacedDigit()
+                    Text(rate(.operationsPerSecond, writing: true)).monospacedDigit()
+                    Text(rate(.operationsPerSecond, writing: false)).monospacedDigit()
+                }
+                GridRow {
+                    Text("Transfer rate").help("Completed megabytes divided by the whole measured phase. Write includes the final flush.")
+                    Text(rate(.megabytesPerSecond, writing: true) + " MB/s").monospacedDigit()
+                    Text(rate(.megabytesPerSecond, writing: false) + " MB/s").monospacedDigit()
                 }
                 GridRow {
                     Text("Median I/O latency")
@@ -45,10 +50,9 @@ struct DriveBenchmarkResultMetrics: View {
             DriveBenchmarkLatencyHistogram(result: result)
         }.interfaceFont(.callout)
     }
-    private func rate(_ count: Int, _ elapsed: Double) -> String {
-        guard result.outcome == .completed, count > 0, elapsed.isFinite, elapsed > 0 else { return "—" }
-        let value = Double(count) / elapsed
-        return value.isFinite ? value.formatted(.number.precision(.fractionLength(0))) : "—"
+    private func rate(_ metric: DriveBenchmarkMetric, writing: Bool) -> String {
+        metric.displayValue(metric.completedRate(result, writing: writing),
+            fractionalDigits: metric == .megabytesPerSecond ? 1 : 0)
     }
     private func milliseconds(_ value: Double, operations: Int) -> String {
         guard result.outcome == .completed, operations > 0, value.isFinite, value >= 0 else { return "—" }

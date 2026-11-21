@@ -155,7 +155,7 @@ extension BrowserViewController {
             return
         }
         if openUsingLocalPreference(entry) { return }
-        let archive = entry.kind == .file ? FileOpeningAppearance.archiveKind(name: entry.name,
+        let archive = entry.kind == .file && !entry.isDataless ? FileOpeningAppearance.archiveKind(name: entry.name,
             zipAvailable: ArchiveBrowseActivation.available, tarAvailable: TARBrowseFeature.available) : nil
         if settings.opensArchivesInTraverse, let archive {
             let tar = archive == .tar

@@ -5,6 +5,13 @@ struct JSONCheckLimit: Error {}
 struct JSONCheckSyntax: Error {
     let offset: Int
     let message: String
+    let insertion: (offset: Int, delimiter: LocalJSONCheck.Delimiter)?
+
+    init(offset: Int, message: String, insertion: (Int, LocalJSONCheck.Delimiter)? = nil) {
+        self.offset = offset
+        self.message = message
+        self.insertion = insertion
+    }
 }
 
 struct JSONCheckValue: Equatable {
@@ -117,6 +124,7 @@ struct JSONCheckReader {
     private let allowsComments: Bool
     private var cursor = 0
     private var token: JSONTextTokens.Token?
+    private var consumedEnd = 0
     private var nodes = 0
 
     init(_ bytes: [UInt8], allowsComments: Bool) {
@@ -133,9 +141,13 @@ struct JSONCheckReader {
 
     private var offset: Int { token?.range.lowerBound ?? bytes.count }
     private func error(_ message: String) -> JSONCheckSyntax { .init(offset: offset, message: message) }
+    private func missing(_ delimiter: LocalJSONCheck.Delimiter, _ message: String) -> JSONCheckSyntax {
+        .init(offset: offset, message: message, insertion: token.map { _ in (consumedEnd, delimiter) })
+    }
 
     private mutating func advance() throws {
         try Task.checkCancellation()
+        if let token { consumedEnd = token.range.upperBound }
         do {
             repeat {
                 token = try JSONTextTokens.next(bytes, cursor: &cursor, allowsComments: allowsComments)
@@ -197,10 +209,10 @@ struct JSONCheckReader {
             let name = try string(token)
             guard values[name] == nil else { throw error("A property name repeats in this object.") }
             try advance()
-            guard try consume(58) else { throw error("Expected a colon after the property name.") }
+            guard try consume(58) else { throw missing(.colon, "Expected a colon after the property name.") }
             values[name] = try readValue(depth: depth + 1)
             if try consume(125) { return values }
-            guard try consume(44) else { throw error("Expected a comma or a closing brace.") }
+            guard try consume(44) else { throw missing(.comma, "Expected a comma or a closing brace.") }
             if allowsComments, try consume(125) { return values }
         }
     }
@@ -211,7 +223,7 @@ struct JSONCheckReader {
         while true {
             values.append(try readValue(depth: depth + 1))
             if try consume(93) { return values }
-            guard try consume(44) else { throw error("Expected a comma or a closing bracket.") }
+            guard try consume(44) else { throw missing(.comma, "Expected a comma or a closing bracket.") }
             if allowsComments, try consume(93) { return values }
         }
     }

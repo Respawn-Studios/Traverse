@@ -1,3 +1,4 @@
+import CoreGraphics
 import Darwin
 import ExplorerCore
 import FileOperations
@@ -136,6 +137,37 @@ public final class LocalFileSystem: @unchecked Sendable {
                 operation.cancel()
             }
             queue.addOperation(operation)
+        }
+    }
+
+    public func thumbnail(for entry: FileEntry, in directory: URL,
+                          retaining lifetime: (any Sendable)? = nil) async throws -> CGImage? {
+        guard LocalFileThumbnail.supports(entry), entry.url.deletingLastPathComponent().path == directory.path else { return nil }
+        return try await enqueueRead(retaining: lifetime, didDrain: {}) { cancellation in
+            if let layout = LocalFileThumbnail.packageLayout(for: entry.name) {
+                return try withoutMaterialization {
+                    let root = try DirectoryAnchor(directory, resolve: false)
+                    let source = try PinnedLocalFileSource(entry.url)
+                    let stamp = source.observed
+                    let date = Date(timeIntervalSince1970: Double(stamp.modifiedSeconds)
+                        + Double(stamp.modifiedNanoseconds) / 1_000_000_000)
+                    guard stamp.device == root.device, stamp.flags & UInt32(SF_FIRMLINK) == 0,
+                          entry.byteCount == stamp.size, entry.modifiedAt == date else {
+                        throw TextComparisonReadFailure.changed
+                    }
+                    let image = try LocalFileThumbnail.packageImage(source, layout: layout, check: cancellation.check)
+                    try source.validate()
+                    try root.validate()
+                    try cancellation.check()
+                    return image
+                }
+            }
+            let bytes = try withoutMaterialization {
+                let root = try DirectoryAnchor(directory, resolve: false)
+                return try LocalTextComparisonRead.fileBytes(at: entry.url, within: root,
+                    maximumBytes: LocalFileThumbnail.maximumBytes, matching: entry, checkCancellation: cancellation.check)
+            }
+            return try LocalFileThumbnail.render(bytes, filename: entry.name, check: cancellation.check)
         }
     }
 
@@ -792,6 +824,7 @@ public final class LocalFileSystem: @unchecked Sendable {
             var modifiedAt: Date?
             var createdAt: Date?
             var accessedAt: Date?
+            var isDataless = false
             if status == 0 {
                 if !showHidden && observation.st_flags & UInt32(UF_HIDDEN) != 0 { continue }
                 if let anchor, observation.st_dev != anchor.device ||
@@ -805,13 +838,14 @@ public final class LocalFileSystem: @unchecked Sendable {
                     kind = .symbolicLink
                 } else if mode == S_IFDIR { kind = .directory }
                 else if mode == S_IFREG { kind = .file }
+                isDataless = (kind == .file || kind == .directory) && observation.st_flags & UInt32(SF_DATALESS) != 0
                 if kind == .file || kind == .symbolicLink { byteCount = Int64(observation.st_size) }
                 modifiedAt = Date(timeIntervalSince1970: Double(observation.st_mtimespec.tv_sec)
                     + Double(observation.st_mtimespec.tv_nsec) / 1_000_000_000)
                 createdAt = observedCreationDate(observation.st_birthtimespec)
                 accessedAt = Date(timeIntervalSince1970: Double(observation.st_atimespec.tv_sec)
                     + Double(observation.st_atimespec.tv_nsec) / 1_000_000_000)
-                if kind != .symbolicLink {
+                if kind != .symbolicLink && !isDataless {
                     do {
                         // Package and Finder-hidden flags need public URL resource metadata.
                         let values = try entryURL.resourceValues(forKeys: [.isPackageKey, .isHiddenKey])
@@ -827,7 +861,7 @@ public final class LocalFileSystem: @unchecked Sendable {
             }
             batch.append(FileEntry(url: entryURL, name: name, kind: kind,
                                    byteCount: byteCount, modifiedAt: modifiedAt,
-                                   createdAt: createdAt, accessedAt: accessedAt))
+                                   createdAt: createdAt, accessedAt: accessedAt, isDataless: isDataless))
             if batch.count >= batchSize {
                 if !yield(.batch(batch)) { return false }
                 batch.removeAll(keepingCapacity: true)

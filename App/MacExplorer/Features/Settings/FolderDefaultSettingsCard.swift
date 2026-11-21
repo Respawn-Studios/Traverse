@@ -27,9 +27,9 @@ import SwiftUI
                     if owner.isBusy { ProgressView().controlSize(.small) }
                     Button("Refresh", action: owner.refresh).disabled(owner.isBusy)
                 }
-                Text(owner.detail).interfaceFont(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 if owner.permitsChanges {
+                    Text(owner.detail).interfaceFont(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if interfaceScale >= 1.3 { VStack(alignment: .leading, spacing: 8) { actionButtons } }
                     else { HStack { actionButtons } }
                 }
@@ -45,13 +45,14 @@ import SwiftUI
                 if IncomingFolderService.available {
                     Label(owner.permitsChanges
                         ? "Traverse can also receive folders opened explicitly with it. This does not change your folder app."
-                        : "In Finder, select a folder, then choose Services → Open in Traverse.", systemImage: "arrow.up.forward.app")
+                        : "Select a folder in Finder or on the desktop, then choose Finder → Services → Open in Traverse. Add a shortcut in System Settings → Keyboard → Keyboard Shortcuts → Services.",
+                          systemImage: "arrow.up.forward.app")
                         .interfaceFont(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(6)
-        } label: { Label("Default Folder App", systemImage: "folder.badge.gearshape") }
+        } label: { Label(owner.permitsChanges ? "Default Folder App" : "Finder Integration", systemImage: "folder.badge.gearshape") }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             presentation.refresh()
         }

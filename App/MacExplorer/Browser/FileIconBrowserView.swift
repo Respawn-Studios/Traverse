@@ -2,8 +2,8 @@ import AppKit
 import ExplorerCore
 import QuickLookUI
 
-/// A recycled presentation of already supplied shallow observations. This view
-/// never queries file metadata, requests thumbnails, or reads file bodies.
+/// A recycled presentation of shallow observations. Visible local tiles can
+/// request bounded thumbnails from a separate reader when enabled.
 @MainActor
 final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
     let collectionView = FileIconCollectionView()
@@ -13,6 +13,7 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
     private var entries: [FileEntry] = []
     private var indexes: [URL: Int] = [:]
     private var cut = Set<URL>()
+    let thumbnails = FileIconThumbnails()
     private var showsExtensions = true
     var showsFullPathsInTooltips = false
     var emphasizesSelection = true {
@@ -28,6 +29,7 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
     }
     private var updatingSelection = false
     private var dropTarget: URL?
+    private var thumbnailDemandScheduled = false
     private var boundsObservation: BrowserNotificationObservation?
     private var focusObservations: [BrowserNotificationObservation] = []
     private static let itemIdentifier = NSUserInterfaceItemIdentifier("FileIconItem")
@@ -148,8 +150,11 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
         scrollView.contentView.postsBoundsChangedNotifications = true
         boundsObservation = BrowserNotificationObservation(name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView) { [weak self] _ in
-                MainActor.assumeIsolated { self?.onVisibleEntriesChanged?() }
+                MainActor.assumeIsolated { self?.visibleEntriesDidChange() }
             }
+        thumbnails.onImage = { [weak self] entry, image in
+            for item in self?.visibleItems ?? [] where item.entry == entry { item.displayThumbnail(image) }
+        }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             focusObservations.append(BrowserNotificationObservation(name: name) { [weak self] _ in
                 // The observation wrapper delivers on OperationQueue.main.
@@ -169,7 +174,24 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
             collectionView.setFrameSize(NSSize(width: width, height: collectionView.frame.height))
             flow.invalidateLayout()
         }
+        visibleEntriesDidChange()
+    }
+
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); visibleEntriesDidChange() }
+
+    private func visibleEntriesDidChange() {
+        refreshThumbnailDemand()
         onVisibleEntriesChanged?()
+    }
+
+    private func refreshThumbnailDemand() {
+        thumbnails.update(visible: isHiddenOrHasHiddenAncestor || window == nil ? [] : visibleEntries)
+    }
+
+    func updateThumbnailScope(_ scope: FileIconThumbnails.Scope?) {
+        guard thumbnails.use(scope) else { return }
+        for item in visibleItems { if let entry = item.entry { configure(item, entry: entry) } }
+        visibleEntriesDidChange()
     }
 
     /// The ordering actor already builds this paired entry/index snapshot. Reuse
@@ -186,7 +208,7 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
         collectionView.reloadData()
         setSelection(selected)
         updatingSelection = false
-        onVisibleEntriesChanged?()
+        visibleEntriesDidChange()
     }
 
     /// Cut/extension/selection changes affect visible tiles only. Offscreen
@@ -263,11 +285,18 @@ final class FileIconBrowserView: NSView, NSCollectionViewDataSource, NSCollectio
                         forRepresentedObjectAt indexPath: IndexPath) {
         guard let item = item as? FileIconItem, entries.indices.contains(indexPath.item) else { return }
         configure(item, entry: entries[indexPath.item])
+        if !thumbnailDemandScheduled {
+            thumbnailDemandScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                self?.thumbnailDemandScheduled = false
+                self?.refreshThumbnailDemand()
+            }
+        }
     }
     private func configure(_ item: FileIconItem, entry: FileEntry) {
         let opening = openingAppearanceForEntry?(entry) ?? .ordinary
         item.configure(entry, showsExtensions: showsExtensions, cut: cut.contains(entry.url), emphasized: selectionIsEmphasized,
-                       openingAppearance: opening, git: gitBadgeForEntry?(entry))
+                       openingAppearance: opening, git: gitBadgeForEntry?(entry), thumbnail: thumbnails.image(for: entry))
         if showsFullPathsInTooltips {
             item.view.toolTip = entry.url.path + (cut.contains(entry.url) ? " — Cut: ready to move when pasted" : "")
             if let explanation = opening.explanation { item.view.toolTip = (item.view.toolTip ?? entry.url.path) + "\n" + explanation }
@@ -558,6 +587,7 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
     var emphasized = false { didSet { refreshAppearance() } }
     var isDropTarget = false { didSet { refreshAppearance() } }
     private var isCut = false
+    private(set) var hasThumbnail = false
     private var openingAppearance = FileOpeningAppearance.ordinary
     private var gitLabel: NSTextField?
     override var isSelected: Bool { didSet { refreshAppearance() } }
@@ -608,13 +638,14 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
         ])
     }
     func configure(_ entry: FileEntry, showsExtensions: Bool, cut: Bool, emphasized: Bool,
-                   openingAppearance: FileOpeningAppearance = .ordinary, git: GitStatusBadge? = nil) {
+                   openingAppearance: FileOpeningAppearance = .ordinary, git: GitStatusBadge? = nil, thumbnail: NSImage? = nil) {
         _ = view
         self.entry = entry; self.isCut = cut; self.openingAppearance = openingAppearance; self.emphasized = emphasized
         let name = showsExtensions || entry.kind == .directory ? entry.name : (entry.name as NSString).deletingPathExtension
         filenameLabel.stringValue = name
         let icon = FileIconRole.classify(name: entry.name, kind: entry.kind.rawValue)
-        fileImage.image = FileOpeningSymbol.image(role: icon, appearance: openingAppearance)
+        hasThumbnail = thumbnail != nil
+        fileImage.image = thumbnail ?? FileOpeningSymbol.image(role: icon, appearance: openingAppearance)
         cutBadge.isHidden = !cut
         showGitBadge(git)
         view.toolTip = entry.name + (cut ? " — Cut: ready to move when pasted" : "")
@@ -624,6 +655,12 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
         view.setAccessibilityLabel(entry.name + (cut ? ", cut, ready to move" : "")
             + (openingAppearance.explanation.map { ", " + $0 } ?? "")
             + (git.map { ", " + $0.details.joined(separator: ", ") } ?? ""))
+        refreshAppearance()
+    }
+
+    func displayThumbnail(_ image: NSImage) {
+        hasThumbnail = true
+        fileImage.image = image
         refreshAppearance()
     }
     private func showGitBadge(_ badge: GitStatusBadge?) {
@@ -652,7 +689,8 @@ final class FileIconItem: NSCollectionViewItem, NSGestureRecognizerDelegate {
         let text: NSColor = selected ? (emphasized ? .alternateSelectedControlTextColor : .unemphasizedSelectedTextColor) : .labelColor
         filenameLabel.textColor = text
         gitLabel?.textColor = selected ? text : .secondaryLabelColor
-        fileImage.contentTintColor = selected ? text : FileOpeningSymbol.tint(openingAppearance, directory: entry?.kind == .directory)
+        fileImage.contentTintColor = hasThumbnail ? nil
+            : selected ? text : FileOpeningSymbol.tint(openingAppearance, directory: entry?.kind == .directory)
         fileImage.alphaValue = isCut ? 0.5 : 1
         filenameLabel.alphaValue = isCut ? 0.65 : 1
         background.needsDisplay = true

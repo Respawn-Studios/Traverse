@@ -11,11 +11,14 @@ to use have their own settings and policies.
 
 ## Files, search and connections
 
-Browsing and storage analysis use filesystem metadata. Opening, editing,
-previewing, hashing, copying or archiving a file reads its contents as required
-by that action. File-body indexing and cloud inference are not silently enabled
-by browsing. Local preferences, remembered locations, analyses and recovery data
-stay in the selected app data location.
+Browsing and storage analysis are metadata-first. Opening, editing, previewing,
+hashing, copying or archiving a file reads its contents as required. With **Show
+thumbnails in Icons view** enabled, Traverse reads supported visible local
+images, PDFs and embedded Office thumbnails. It renders them in memory and
+skips online-only files. Local
+preferences, remembered locations, analyses and recovery data stay in the
+selected app data location. Traverse has no background file-content index or
+cloud inference.
 
 Open With and Compare Files hand the selected paths to another local app.
 Open Terminal Here hands off the current folder. Those apps use their own

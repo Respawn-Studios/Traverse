@@ -2,13 +2,14 @@ import Foundation
 import ExplorerCore
 
 enum FileNativeOpeningCue: String, Hashable, Sendable, CaseIterable {
-    case none, editor, viewer, archive
+    case none, editor, viewer, archive, onlineOnly
     var title: String? {
         switch self {
         case .none: nil
         case .editor: "Opens in Traverse Editor"
         case .viewer: "Opens read-only in Traverse"
         case .archive: "Browses in Traverse"
+        case .onlineOnly: "Online only. Make this item available on your Mac to preview it."
         }
     }
 }
@@ -19,6 +20,7 @@ struct FileOpeningAppearance: Equatable, Sendable {
     let mode: EditorOpeningIndicator
     let cue: FileNativeOpeningCue
     static let ordinary = Self(mode: .off, cue: .none)
+    static let onlineOnly = Self(mode: .badge, cue: .onlineOnly)
     var isEmphasized: Bool { mode != .off && cue != .none }
     var badge: FileNativeOpeningCue { mode == .badge ? cue : .none }
     var explanation: String? { mode == .off ? nil : cue.title }
@@ -55,11 +57,10 @@ struct FileOpeningAppearance: Equatable, Sendable {
 
     enum ArchiveKind: Sendable, Equatable { case zip, tar }
     static func archiveKind(name: String, zipAvailable: Bool, tarAvailable: Bool) -> ArchiveKind? {
-        let kind = ArchiveFilename(name)?.kind
-        if tarAvailable && kind?.isTAR == true {
-            return .tar
+        switch ArchiveFilename(name)?.kind {
+        case .tar, .tarGzip, .tarBzip2: return tarAvailable ? .tar : nil
+        case .zip: return zipAvailable ? .zip : nil
+        default: return nil
         }
-        if zipAvailable && kind == .zip { return .zip }
-        return nil
     }
 }

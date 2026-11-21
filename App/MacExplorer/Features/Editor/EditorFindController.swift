@@ -357,6 +357,7 @@ final class EditorFindController {
             bar.notice.stringValue = "No more matches"; return
         }
         let range = matches.ranges[index]
+        surface.revealFoldedText(range)
         surface.textView.setSelectedRange(range)
         surface.textView.scrollRangeToVisible(range)
         refreshControls()

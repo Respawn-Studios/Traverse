@@ -65,6 +65,7 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
     var showsScrollContext = true
     var showsIndentGuides = true
     var showsMatchingBrackets = true
+    var showsLiveJSONIssues = true
     var showsWhitespaceMarks = false
     var basePointSize = 13
     var palette = EditorSyntaxPalette.adaptive
@@ -169,7 +170,7 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
 
     enum CodingKeys: String, CodingKey {
         case wrapsLines, showsLineNumbers, showsUnsavedLineChanges, showsScrollContext, showsIndentGuides, showsWhitespaceMarks
-        case showsMatchingBrackets
+        case showsMatchingBrackets, showsLiveJSONIssues
         case basePointSize, palette, theme, windowArrangement, opensFileSidebar, includesGeneratedProjectFolders
         case showsWorkingGitChanges, linksComparisonScrolling, indentation, indentsJSONBlocks, indentsCodeBlocks
         case completesJSONBrackets, completesCodeBrackets, backspaceUnindents, detectsLanguageWithoutExtension, openingIndicator
@@ -184,6 +185,7 @@ struct EditorPreferences: Equatable, Sendable, Codable, CustomStringConvertible,
         showsScrollContext = try values.decodeIfPresent(Bool.self, forKey: .showsScrollContext) ?? true
         showsIndentGuides = try values.decodeIfPresent(Bool.self, forKey: .showsIndentGuides) ?? true
         showsMatchingBrackets = try values.decodeIfPresent(Bool.self, forKey: .showsMatchingBrackets) ?? true
+        showsLiveJSONIssues = try values.decodeIfPresent(Bool.self, forKey: .showsLiveJSONIssues) ?? true
         showsWhitespaceMarks = try values.decodeIfPresent(Bool.self, forKey: .showsWhitespaceMarks) ?? false
         basePointSize = try values.decodeIfPresent(Int.self, forKey: .basePointSize) ?? 13
         palette = try values.decodeIfPresent(EditorSyntaxPalette.self, forKey: .palette) ?? .adaptive

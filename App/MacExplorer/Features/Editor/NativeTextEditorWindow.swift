@@ -54,6 +54,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
     private let status = NSTextField(labelWithString: "Ready")
     private let position = NSTextField(labelWithString: "Ln 1, Col 1")
     private let format = NSTextField(labelWithString: "UTF-8 · LF")
+    private let jsonIssuesButton = NSButton()
     private let banner = NSTextField(wrappingLabelWithString: "")
     private let locationRow = NSStackView()
     private let locationIcon = NSImageView()
@@ -83,6 +84,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
     private var usesControlAliases = false
     private let lineNavigation = EditorLineNavigation()
     private var navigationChoice: Task<Void, Never>?
+    private var jsonSchemaSnapshot: String?
     private var comparison: EditorComparisonWindow?
     private var openEditorComparison: EditorComparisonWindow?
     private var diskComparison: (url: URL, view: EditorComparisonWindow)?
@@ -221,7 +223,16 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         textCopyButton.isHidden = true; textCopyButton.isEnabled = false
         textCopyResultsButton.isHidden = true; textCopyResultsButton.isEnabled = false
         let statusSpacer = NSView(); statusSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let bottom = NSStackView(views: [status, statusSpacer, position, format, wrapping, language])
+        jsonIssuesButton.isBordered = false
+        jsonIssuesButton.isHidden = true
+        jsonIssuesButton.font = .systemFont(ofSize: 11, weight: .semibold)
+        jsonIssuesButton.image = NSImage(systemSymbolName: "exclamationmark.circle", accessibilityDescription: nil)
+        jsonIssuesButton.imagePosition = .imageLeading
+        jsonIssuesButton.target = self
+        jsonIssuesButton.action = #selector(openJSONIssues(_:))
+        jsonIssuesButton.setAccessibilityIdentifier("editor-json-issues")
+        surface.onJSONIssuesChanged = { [weak self] in self?.displayJSONIssues($0) }
+        let bottom = NSStackView(views: [status, statusSpacer, jsonIssuesButton, position, format, wrapping, language])
         bottom.orientation = .horizontal; bottom.spacing = 14; bottom.alignment = .centerY
         for label in [status, position, format] {
             label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor
@@ -787,13 +798,16 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
             return
         }
         let fullTitle = value.scopes.map(\.title).joined(separator: " › ")
+        let compactTitle = value.scopes.suffix(2).map(\.title).joined(separator: " › ")
         let revealing = scrollContextButton.isHidden
-        if !revealing { ToolContentMotion.crossfade(scrollContextButton) }
-        scrollContextButton.title = fullTitle
+        if !revealing, scrollContextButton.title != compactTitle { ToolContentMotion.crossfade(scrollContextButton) }
+        scrollContextButton.title = compactTitle
         scrollContextButton.image = NSImage(systemSymbolName: scope.kind.icon, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
         scrollContextButton.toolTip = "Go to " + fullTitle
+            + (value.scopes.count > 1 ? ". Option-click to choose a scope." : "")
         scrollContextButton.setAccessibilityLabel("Go to visible scope, " + fullTitle)
+        scrollContextButton.setAccessibilityHelp(value.scopes.count > 1 ? "Choose a parent scope from the Go menu." : nil)
         scrollContextButton.isHidden = false
         if revealing { ToolContentMotion.reveal(scrollContextButton, movesContent: false) }
     }
@@ -875,6 +889,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
     var readClipboardForComparisonVerification: (() -> String?)?
     var gitRevisionDiffForVerification: EditorComparisonWindow? { gitRevisionDiff }
     var gitRevisionEditorForVerification: NativeTextSnapshotController? { gitRevisionEditor }
+    func setJSONSchemaForVerification(_ schema: String) { jsonSchemaSnapshot = schema }
     #endif
     /// A failed post-close local retirement reopens the same native surface,
     /// including its actual Undo history, in recovery-only mode.
@@ -901,7 +916,10 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         commandFinderStorage?.dismiss(restoringFocus: false)
         openSearchStorage?.dismiss(restoringFocus: false)
         cancelLineNavigation()
-        if !retainPresentationDuringClose { surface.clearPrivatePresentation() }
+        if !retainPresentationDuringClose {
+            jsonSchemaSnapshot = nil
+            surface.clearPrivatePresentation()
+        }
         releaseOwnedMenu()
         didClose?()
     }
@@ -1030,7 +1048,8 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
                 (7, "Sort Lines Descending", "", []),
                 (8, "Trim Trailing Whitespace", "", [])
             ]),
-            ("JSON", [(4, "Format JSON", "F", [.option, .shift]), (5, "Compact JSON", "", [])])
+            ("JSON", [(4, "Format JSON", "F", [.option, .shift]), (5, "Compact JSON", "", []),
+                      (9, "Indent JSON as Written", "", []), (10, "Repair Missing Delimiter", "", [])])
         ]
         for (group, commands) in lineGroups {
             BrowserMenus.addSection(group, to: edit) { submenu in
@@ -1044,8 +1063,16 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
                     let syntax = BrowserMenus.item("Check JSON", #selector(checkJSONDocument(_:)), target: self)
                     let schema = BrowserMenus.item("Check Against JSON Schema…", #selector(checkJSONDocument(_:)), target: self)
                     schema.tag = 1
+                    let currentSchema = BrowserMenus.item("Check Against Current JSON Schema", #selector(checkJSONDocument(_:)), target: self)
+                    currentSchema.tag = 2
                     submenu.addItem(syntax)
                     submenu.addItem(schema)
+                    submenu.addItem(currentSchema)
+                    if !readOnlyPresentation {
+                        submenu.addItem(.separator())
+                        submenu.addItem(BrowserMenus.item("Complete from JSON Schema…", #selector(completeWithJSONSchema(_:)), target: self))
+                        submenu.addItem(BrowserMenus.item("Forget Local JSON Schema", #selector(forgetJSONSchema(_:)), target: self))
+                    }
                 }
             }
         }
@@ -1077,6 +1104,17 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         let view = section("View", [
             (NativeTextEditorSurface.whitespaceMarksTitle, #selector(toggleWhitespaceMarks(_:)), "", [], self)
         ])
+        BrowserMenus.addSection("Code Folding", to: view) { folding in
+            folding.addItem(BrowserMenus.item("Fold Block", #selector(changeCodeFold(_:)), key: "[",
+                modifiers: [.command, .option], target: self))
+            let unfold = BrowserMenus.item("Unfold Block", #selector(changeCodeFold(_:)), key: "]",
+                modifiers: [.command, .option], target: self)
+            unfold.tag = 1
+            folding.addItem(unfold)
+            let all = BrowserMenus.item("Unfold All Blocks", #selector(changeCodeFold(_:)), target: self)
+            all.tag = 2
+            folding.addItem(all)
+        }
         if fileSidebar != nil {
             view.addItem(.separator())
             view.addItem(BrowserMenus.item("Editor Sidebar", #selector(toggleEditorSidebar(_:)), key: "\\", target: self))
@@ -1092,12 +1130,18 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         }
         let go = section("Go", [
             ("Go to Line…", #selector(showGoToLine(_:)), "g", .control, self),
+            ("Next JSON Issue", #selector(goToJSONIssue(_:)), String(UnicodeScalar(NSF8FunctionKey)!), [], self),
+            ("Previous JSON Issue", #selector(goToJSONIssue(_:)), String(UnicodeScalar(NSF8FunctionKey)!), .shift, self),
+            ("Review JSON Issues…", #selector(openJSONIssues(_:)), "", [], self),
             ("Go to Matching Bracket", #selector(goToMatchingBracket(_:)), "\\", [.command, .shift], self),
             ("Go to Visible Scope", #selector(goToVisibleScope(_:)), "", [], self),
+            ("Choose Visible Scope…", #selector(chooseVisibleScope(_:)), "", [], self),
             ("Find Declaration in This File", #selector(findLocalDeclaration(_:)), String(UnicodeScalar(NSF12FunctionKey)!), [], self),
             ("Go to Symbol in This File…", #selector(goToDocumentSymbol(_:)), "o", [.command, .control], self),
             ("Go to Symbol in Open Editors…", #selector(goToOpenSymbol(_:)), "o", [.command, .option], self)
         ])
+        go.item(withTitle: "Next JSON Issue")?.tag = EditorJumpDirection.next.rawValue
+        go.item(withTitle: "Previous JSON Issue")?.tag = EditorJumpDirection.previous.rawValue
         BrowserMenus.addSection("Outline", to: go) { menu in
             for direction in EditorJumpDirection.allCases {
                 let previous = direction == .previous
@@ -1189,6 +1233,9 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         case #selector(toggleWhitespaceMarks(_:)):
             (item as? NSMenuItem)?.state = surface.showsWhitespaceMarks ? .on : .off
             return window?.attachedSheet == nil && !surface.textView.hasMarkedText()
+        case #selector(changeCodeFold(_:)):
+            guard canChooseNavigationTarget, let tag = (item as? NSMenuItem)?.tag else { return false }
+            return tag == 2 ? surface.hasFoldedCode : surface.canSetSelectedBlock(folded: tag == 0)
         case #selector(toggleEditorSidebar(_:)):
             (item as? NSMenuItem)?.state = fileSidebar?.isShown == true ? .on : .off
             return fileSidebar?.canToggle == true
@@ -1202,6 +1249,8 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
             return available
         case #selector(goToVisibleScope(_:)):
             return surface.scrollContext != nil && window?.attachedSheet == nil && surface.canGoToLine
+        case #selector(chooseVisibleScope(_:)): return canChooseVisibleScope
+        case #selector(goToJSONIssue(_:)), #selector(openJSONIssues(_:)): return canGoToJSONIssue
         case #selector(visitOutlineItem(_:)):
             guard canChooseNavigationTarget, let tag = (item as? NSMenuItem)?.tag,
                   let direction = EditorJumpDirection(rawValue: tag) else { return false }
@@ -1222,7 +1271,10 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
                   let direction = EditorJumpDirection(rawValue: tag) else { return false }
             return surface.bookmarkLine(toward: direction) != nil
         case #selector(findLocalDeclaration(_:)): return canChooseNavigationTarget && surface.canFindDeclaration
-        case #selector(completeLocalName(_:)): return canChooseNavigationTarget && surface.canCompleteLocalName
+        case #selector(completeLocalName(_:)):
+            let schema = supportsJSONFormatting
+            (item as? NSMenuItem)?.title = schema ? "Complete from JSON Schema…" : "Complete Name in This File"
+            return schema ? canCompleteWithJSONSchema : canChooseNavigationTarget && surface.canCompleteLocalName
         case #selector(replaceOccurrencesInFile(_:)): return canChooseNavigationTarget && surface.occurrenceSeed() != nil
         case #selector(findInCurrentScope(_:)): return canChooseNavigationTarget && surface.currentSearchScope != nil
         case #selector(adjustEditorSelection(_:)):
@@ -1286,10 +1338,22 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
             return item.tag != NSTextFinder.Action.setSearchString.rawValue || surface.find.selectedQuery(allowsNewlines: true) != nil
         case #selector(findInSelection(_:)): return surface.find.canFindInSelection
         case #selector(performLineCommand(_:)):
+            if item.tag == 10 {
+                return !closing && supportsJSONFormatting && surface.lineCommands.canPerform
+                    && surface.jsonIssues.first?.missingDelimiter != nil
+            }
             return !closing && surface.lineCommands.canPerform && (item.tag != 3 || lineCommentStyle != nil)
-                && (![4, 5].contains(item.tag) || supportsJSONFormatting)
+                && (![4, 5, 9].contains(item.tag) || supportsJSONFormatting)
         case #selector(checkJSONDocument(_:)):
-            return canChooseNavigationTarget && supportsJSONFormatting && !surface.textView.hasMarkedText()
+            let records = selectedSyntaxLanguage == .jsonLines
+            if item.tag == 0 { (item as? NSMenuItem)?.title = records ? "Check JSON Lines" : "Check JSON" }
+            return canChooseNavigationTarget && !surface.textView.hasMarkedText()
+                && (supportsJSONFormatting || records && item.tag == 0)
+                && (item.tag != 2 || jsonSchemaSnapshot != nil)
+        case #selector(completeWithJSONSchema(_:)):
+            return canCompleteWithJSONSchema
+        case #selector(forgetJSONSchema(_:)):
+            return canChooseNavigationTarget && jsonSchemaSnapshot != nil
         case #selector(surroundSelection(_:)):
             return !closing && surface.lineCommands.canPerform && surface.textView.selectedRange().length > 0
                 && EditorSurroundingPair(rawValue: item.tag) != nil
@@ -1488,6 +1552,11 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         guard !closing, let direction = EditorSelectionAdjustment(rawValue: sender.tag) else { return }
         surface.lineCommands.adjustSelection(direction)
     }
+    @objc private func changeCodeFold(_ sender: NSMenuItem) {
+        guard validateUserInterfaceItem(sender) else { return }
+        if sender.tag == 2 { surface.revealAllCodeBlocks() }
+        else { surface.setSelectedBlock(folded: sender.tag == 0) }
+    }
     @objc private func performLineCommand(_ sender: NSMenuItem) {
         guard !closing, surface.lineCommands.canPerform else { return }
         let command: EditorLineCommand
@@ -1498,12 +1567,20 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         case 3:
             guard let style = lineCommentStyle else { return }
             command = .toggleLineComment(style)
-        case 4, 5:
+        case 4, 5, 9:
             guard supportsJSONFormatting else { return }
-            command = .formatJSON(sender.tag == 5 ? .compact : .indented(surface.indentationPreferences),
+            let style: EditorJSONFormat = switch sender.tag {
+            case 5: .compact
+            case 9: .asWritten(surface.indentationPreferences)
+            default: .indented(surface.indentationPreferences)
+            }
+            command = .formatJSON(style,
                                   allowsComments: selectedSyntaxLanguage == .jsonc)
         case 6, 7: command = .sortSelectedLines(descending: sender.tag == 7)
         case 8: command = .trimTrailingWhitespace
+        case 10:
+            guard validateUserInterfaceItem(sender) else { return }
+            command = .repairJSONDelimiter(allowsComments: selectedSyntaxLanguage == .jsonc)
         default: return
         }
         surface.lineCommands.perform(command)
@@ -1518,12 +1595,180 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
         selectedSyntaxLanguage == .json || selectedSyntaxLanguage == .jsonc
     }
 
+    private var canCompleteWithJSONSchema: Bool {
+        canChooseNavigationTarget && supportsJSONFormatting && surface.textView.isEditable
+            && !surface.textView.hasMarkedText() && surface.textView.selectedRanges.count == 1
+    }
+
+    @objc private func forgetJSONSchema(_ sender: Any?) {
+        guard canChooseNavigationTarget, jsonSchemaSnapshot != nil else { return }
+        jsonSchemaSnapshot = nil
+        surface.clearCheckedJSONIssues()
+        reportNavigation("Local JSON schema removed.")
+    }
+
+    private static func chooseJSONSchema(in parent: NSWindow, prompt: String) async -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Local JSON Schema"
+        panel.prompt = prompt
+        panel.allowedContentTypes = [.json]
+        panel.resolvesAliases = false
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        let response = await withTaskCancellationHandler {
+            await panel.beginSheetModal(for: parent)
+        } onCancel: {
+            Task { @MainActor in panel.cancel(nil) }
+        }
+        return response == .OK ? panel.url : nil
+    }
+
+    @objc private func completeWithJSONSchema(_ sender: Any?) {
+        guard canCompleteWithJSONSchema, let parent = window else { return }
+        let generation = surface.generation, language = selectedSyntaxLanguage
+        let selection = surface.textView.selectedRange(), text = surface.textView.string
+        guard text.utf8.count <= LocalJSONSchemaCompletion.maximumDocumentBytes else {
+            reportNavigation("Schema completion supports JSON documents up to 128 KiB.")
+            return
+        }
+        let retainedSchema = jsonSchemaSnapshot
+        let format = surface.documentFormat
+        navigationChoice = Task { [weak self, weak parent] in
+            defer { self?.navigationChoice = nil }
+            guard let parent else { return }
+            var schemaFile: URL?
+            if retainedSchema == nil {
+                guard let selected = await Self.chooseJSONSchema(in: parent, prompt: "Use Schema") else { return }
+                schemaFile = selected
+            }
+            guard let self else { return }
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && !closing && window === parent && parent.isVisible && parent.attachedSheet == nil
+                    && (parent.isKeyWindow || NSApp.keyWindow == nil)
+                    && surface.generation == generation && selectedSyntaxLanguage == language
+                    && surface.textView.selectedRanges.count == 1 && surface.textView.selectedRange() == selection
+                    && surface.textView.isEditable && !surface.textView.hasMarkedText()
+                    && surface.textView.string.utf16.elementsEqual(text.utf16)
+            }
+            guard isCurrent() else { return }
+            let source = schemaFile
+            let worker = Task.detached(priority: .userInitiated) { () throws -> (LocalJSONSchemaCompletion.Result, String?) in
+                let schema: String
+                if let retainedSchema { schema = retainedSchema }
+                else if let source {
+                    switch try LocalJSONCheck.readSchema(source) {
+                    case .loaded(let snapshot): schema = snapshot
+                    case .unavailable(let message): return (.unavailable(message), nil)
+                    }
+                } else { return (.unavailable("Choose a local JSON schema first."), nil) }
+                let suggestions = try LocalJSONSchemaCompletion.suggest(in: text, selection: selection,
+                    allowsComments: language == .jsonc, schema: schema)
+                return (suggestions, schema)
+            }
+            let prepared = await withTaskCancellationHandler { await worker.result } onCancel: { worker.cancel() }
+            guard isCurrent() else { return }
+            switch prepared {
+            case .failure:
+                reportNavigation("Schema completion stopped.")
+            case .success((.unavailable(let message), let schema)):
+                jsonSchemaSnapshot = schema
+                reportNavigation(message)
+            case .success((.suggestions(let plan), let schema)):
+                jsonSchemaSnapshot = schema
+                let property = plan.kind == .property
+                guard !plan.candidates.isEmpty else {
+                    reportNavigation(property ? "No unused schema properties match this name."
+                                              : "No declared schema values match here.")
+                    return
+                }
+                let action = property ? "Complete JSON Property" : "Complete JSON Value"
+                let rows = plan.candidates.map { candidate in
+                    var details: [String] = []
+                    if property {
+                        details.append(candidate.required ? "Required" : "Optional")
+                        if !candidate.types.isEmpty { details.append(candidate.types.joined(separator: " or ")) }
+                        if let summary = candidate.summary { details.append(summary) }
+                    } else if candidate.isDefault { details.append("Default") }
+                    return NativeChoiceSheet<LocalJSONSchemaCompletion.Candidate>.Row(title: candidate.name,
+                        detail: details.joined(separator: " · "), value: candidate, help: property ? candidate.summary : nil)
+                }
+                let sheet = NativeChoiceSheet(title: action, heading: property ? "Properties from the Local Schema" : "Values from the Local Schema",
+                                              confirm: property ? "Insert Property" : "Insert Value", rows: rows,
+                                              note: property ? nil : plan.candidates.first?.summary)
+                guard let chosen = await sheet.choose(in: parent), isCurrent(),
+                      let target = Range(plan.range, in: text),
+                      let result = try? TextDocumentValue.edited(text.replacingCharacters(in: target, with: chosen.replacement), format: format)
+                else { return }
+                let caret = chosen.selectionInReplacement
+                let replacement = EditorIndentationReplacement(range: plan.range, text: chosen.replacement,
+                    selection: .init(location: plan.range.location + caret.location, length: caret.length))
+                if surface.applyTextReplacement(replacement, expecting: result, action: action) {
+                    reportNavigation(property ? "Inserted schema property." : "Inserted schema value.")
+                }
+            }
+        }
+    }
+
+    private var canGoToJSONIssue: Bool {
+        !closing && navigationChoice == nil && selectedSyntaxLanguage?.isJSON == true
+            && window?.isKeyWindow == true && window?.attachedSheet == nil
+            && (window?.firstResponder as? NSTextView)?.hasMarkedText() != true
+            && surface.canGoToLine && surface.textView.selectedRanges.count == 1 && !surface.jsonIssues.isEmpty
+    }
+
+    private func displayJSONIssues(_ presentation: NativeTextEditorSurface.JSONIssues) {
+        let issues = presentation.issues
+        jsonIssuesButton.isHidden = issues.isEmpty
+        guard let first = issues.first else { jsonIssuesButton.toolTip = nil; return }
+        let count = presentation.hasMore ? "\(issues.count.formatted())+" : issues.count.formatted()
+        let title = issues.count == 1 && !presentation.hasMore ? "JSON issue" : "\(count) JSON issues"
+        jsonIssuesButton.title = title
+        jsonIssuesButton.contentTintColor = .systemRed
+        jsonIssuesButton.toolTip = issues.count > 1 ? "Review issues in this draft."
+            : "Line \(first.line.formatted()), column \(first.column.formatted()). \(first.message)"
+        jsonIssuesButton.setAccessibilityLabel(title)
+        jsonIssuesButton.setAccessibilityHelp(jsonIssuesButton.toolTip)
+    }
+
+    @objc private func goToJSONIssue(_ sender: NSMenuItem) {
+        guard canGoToJSONIssue, let direction = EditorJumpDirection(rawValue: sender.tag) else { return }
+        let offset = surface.textView.selectedRange().location
+        let issues = surface.jsonIssues
+        let issue = direction == .next ? issues.first { $0.offset > offset } ?? issues.first
+            : issues.last { $0.offset < offset } ?? issues.last
+        if let issue { visitJSONIssue(issue, generation: surface.generation) }
+    }
+
+    @objc private func openJSONIssues(_ sender: Any?) {
+        guard canGoToJSONIssue, let parent = window else { return }
+        let presentation = surface.visibleJSONIssues, generation = surface.generation
+        if (sender as? NSButton) === jsonIssuesButton, presentation.issues.count == 1, let issue = presentation.issues.first {
+            visitJSONIssue(issue, generation: generation)
+            return
+        }
+        let title = selectedSyntaxLanguage == .jsonLines ? "JSON Lines Issues" : "JSON Issues"
+        let count = jsonIssueCount(presentation.issues, more: presentation.hasMore)
+        let offset = surface.textView.selectedRange().location
+        let selected = presentation.issues.firstIndex { $0.offset == offset } ?? 0
+        let sheet = makeJSONIssueSheet(title: title, count: count, issues: presentation.issues, initialSelection: selected)
+        chooseNavigationTarget(in: parent, using: sheet, generation: generation) { [weak self] issue in
+            guard let self, surface.visibleJSONIssues == presentation else { return }
+            visitJSONIssue(issue, generation: generation)
+        }
+    }
+
+    private func visitJSONIssue(_ issue: LocalJSONCheck.Issue, generation: UUID) {
+        if surface.goToTextOffset(issue.offset, generation: generation) { reportNavigation(issue.message) }
+    }
+
     @objc private func checkJSONDocument(_ sender: NSMenuItem) {
         guard validateUserInterfaceItem(sender), let parent = window else { return }
         let syntax = selectedSyntaxLanguage
         let generation = surface.generation
         let text = surface.textView.string
-        let wantsSchema = sender.tag == 1
+        let choosesSchema = sender.tag == 1
+        let existingSchema = sender.tag == 2 ? jsonSchemaSnapshot : nil
+        let records = syntax == .jsonLines
         guard text.utf8.count <= LocalJSONCheck.maximumBytes else {
             reportNavigation("Check a document of 1 MiB or less.")
             return
@@ -1532,20 +1777,8 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
             defer { self?.navigationChoice = nil }
             guard let parent else { return }
             var selectedSchema: URL?
-            if wantsSchema {
-                let panel = NSOpenPanel()
-                panel.title = "Choose a Local JSON Schema"
-                panel.prompt = "Check"
-                panel.allowedContentTypes = [.json]
-                panel.resolvesAliases = false
-                panel.canChooseDirectories = false
-                panel.allowsMultipleSelection = false
-                let response = await withTaskCancellationHandler {
-                    await panel.beginSheetModal(for: parent)
-                } onCancel: {
-                    Task { @MainActor in panel.cancel(nil) }
-                }
-                guard response == .OK, let url = panel.url else { return }
+            if choosesSchema {
+                guard let url = await Self.chooseJSONSchema(in: parent, prompt: "Check") else { return }
                 selectedSchema = url
             }
             guard let self, !Task.isCancelled, !closing, window === parent, parent.isVisible else { return }
@@ -1554,14 +1787,22 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
                     && !surface.textView.hasMarkedText() && surface.textView.string.utf16.elementsEqual(text.utf16)
             }
             guard isCurrent() else { return }
-            reportNavigation("Checking JSON…")
+            reportNavigation(records ? "Checking JSON Lines…" : "Checking JSON…")
             let file = selectedSchema
             let allowsComments = syntax == .jsonc
-            let worker = Task.detached(priority: .userInitiated) {
-                if let file {
-                    return try LocalJSONCheck.check(text, allowsComments: allowsComments, schemaFile: file)
+            let worker = Task.detached(priority: .userInitiated) { () throws -> (LocalJSONCheck.Result, String?) in
+                if let existingSchema {
+                    return (try LocalJSONCheck.check(text, allowsComments: allowsComments, schema: existingSchema), existingSchema)
                 }
-                return try LocalJSONCheck.check(text, allowsComments: allowsComments)
+                if let file {
+                    switch try LocalJSONCheck.readSchema(file) {
+                    case .loaded(let schema):
+                        return (try LocalJSONCheck.check(text, allowsComments: allowsComments, schema: schema), schema)
+                    case .unavailable(let message): return (.unavailable(message), nil)
+                    }
+                }
+                let check = try (records ? LocalJSONCheck.checkJSONLines(text) : LocalJSONCheck.check(text, allowsComments: allowsComments))
+                return (check, nil)
             }
             let result = await withTaskCancellationHandler {
                 await worker.result
@@ -1574,30 +1815,40 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
             switch result {
             case .failure:
                 reportNavigation("The JSON check stopped.")
-            case .success(.unavailable(let message)):
+            case .success((.unavailable(let message), _)):
                 reportNavigation(message)
-            case .success(.checked(let issues, let more)):
-                await showJSONIssues(issues, more: more, usedSchema: wantsSchema, in: parent, generation: generation,
+            case .success((.checked(let issues, let more), let schema)):
+                if let schema { jsonSchemaSnapshot = schema }
+                surface.presentDiagnostics(issues, hasMore: more, for: generation)
+                await showJSONIssues(surface.visibleJSONIssues, usedSchema: schema != nil, records: records, in: parent, generation: generation,
                                      isCurrent: isCurrent)
             }
         }
     }
 
-    private func showJSONIssues(_ issues: [LocalJSONCheck.Issue], more: Bool, usedSchema: Bool,
+    private func showJSONIssues(_ presentation: NativeTextEditorSurface.JSONIssues, usedSchema: Bool, records: Bool,
                                 in parent: NSWindow, generation: UUID, isCurrent: @MainActor () -> Bool) async {
-        guard !issues.isEmpty else {
-            reportNavigation(usedSchema ? "JSON matches the selected schema." : "JSON check found no issues.")
+        let title = records ? "JSON Lines Check" : "JSON Check"
+        guard !presentation.issues.isEmpty else {
+            reportNavigation(usedSchema ? "JSON matches the selected schema." : "\(title) found no issues.")
             return
         }
-        let count = more ? "\(issues.count.formatted())+ issues" : issues.count == 1 ? "1 issue" : "\(issues.count.formatted()) issues"
-        reportNavigation("JSON check found \(count).")
-        let sheet = NativeChoiceSheet<LocalJSONCheck.Issue>(title: "JSON Check",
-            heading: "JSON Check · \(count)", confirm: "Go to Issue", rows: issues.map {
-                .init(title: $0.message, detail: "Line \($0.line.formatted()), column \($0.column.formatted())", value: $0)
-            })
-        guard let issue = await sheet.choose(in: parent), !closing, window === parent, isCurrent(),
-              surface.goToTextOffset(issue.offset, generation: generation) else { return }
-        reportNavigation(issue.message)
+        let count = jsonIssueCount(presentation.issues, more: presentation.hasMore)
+        reportNavigation("\(title) found \(count).")
+        let sheet = makeJSONIssueSheet(title: title, count: count, issues: presentation.issues)
+        guard let issue = await sheet.choose(in: parent), !closing, window === parent, isCurrent() else { return }
+        visitJSONIssue(issue, generation: generation)
+    }
+
+    private func jsonIssueCount(_ issues: [LocalJSONCheck.Issue], more: Bool) -> String {
+        more ? "\(issues.count.formatted())+ issues" : issues.count == 1 ? "1 issue" : "\(issues.count.formatted()) issues"
+    }
+
+    private func makeJSONIssueSheet(title: String, count: String,
+                                    issues: [LocalJSONCheck.Issue], initialSelection: Int = 0) -> NativeChoiceSheet<LocalJSONCheck.Issue> {
+        NativeChoiceSheet(title: title, heading: "\(title) · \(count)", confirm: "Go to Issue", rows: issues.map {
+            .init(title: $0.message, detail: "Line \($0.line.formatted()), column \($0.column.formatted())", value: $0)
+        }, initialSelection: initialSelection)
     }
 
     @objc private func performFind(_ sender: NSMenuItem) {
@@ -1653,7 +1904,31 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
     }
     @objc private func goToMatchingBracket(_ sender: Any?) { navigateBrackets(.matching) }
     @objc private func selectInsideBrackets(_ sender: Any?) { navigateBrackets(.enclosing) }
-    @objc private func goToVisibleScope(_ sender: Any?) { surface.goToVisibleScope() }
+    @objc private func goToVisibleScope(_ sender: Any?) {
+        if (sender as? NSButton) === scrollContextButton, canChooseVisibleScope,
+           NSApp.currentEvent?.modifierFlags.contains(.option) == true {
+            chooseVisibleScope(sender)
+        } else {
+            surface.goToVisibleScope()
+        }
+    }
+
+    private var canChooseVisibleScope: Bool {
+        !closing && navigationChoice == nil && window?.isKeyWindow == true && window?.attachedSheet == nil
+            && surface.canGoToLine && surface.textView.selectedRanges.count == 1 && (surface.scrollContext?.scopes.count ?? 0) > 1
+    }
+
+    @objc private func chooseVisibleScope(_ sender: Any?) {
+        guard canChooseVisibleScope, let parent = window, let context = surface.scrollContext else { return }
+        let sheet = NativeChoiceSheet<EditorDocumentOutline.Entry>(title: "Visible Scopes", heading: "Scopes at the Top of the Editor",
+            confirm: "Go to Scope", rows: context.scopes.map {
+                .init(title: $0.title, detail: "Line \($0.line.formatted())", value: $0)
+            }, initialSelection: context.scopes.count - 1)
+        chooseNavigationTarget(in: parent, using: sheet, generation: context.generation) { [weak self] entry in
+            guard let self, surface.scrollContext == context else { return }
+            surface.goToTextOffset(entry.offset, generation: context.generation)
+        }
+    }
     @objc private func visitOutlineItem(_ sender: NSMenuItem) {
         guard canChooseNavigationTarget, let direction = EditorJumpDirection(rawValue: sender.tag),
               let entry = surface.adjacentOutlineEntry(toward: direction) else { return }
@@ -1723,6 +1998,7 @@ final class NativeTextEditorWindow: NSWindowController, NSWindowDelegate, NSPopo
     }
 
     @objc private func completeLocalName(_ sender: Any?) {
+        if supportsJSONFormatting { completeWithJSONSchema(sender); return }
         guard canChooseNavigationTarget, surface.canCompleteLocalName, let parent = window else { return }
         guard let request = surface.nameCompletion(), let first = request.entries.first else {
             reportNavigation("No name in this file completes the text at the caret.")

@@ -5,6 +5,7 @@ enum FileIconRole: String, CaseIterable {
     case directory, package, symbolicLink, file, other, cut
     case code, configuration, database, document, image, audio, video, archive
     case application, diskImage, font, pdf, spreadsheet, presentation, model3D
+    case shortcut, calendar, contact, log, patch
 
     var title: String {
         switch self {
@@ -29,6 +30,11 @@ enum FileIconRole: String, CaseIterable {
         case .spreadsheet: "Spreadsheet"
         case .presentation: "Presentation"
         case .model3D: "3D model"
+        case .shortcut: "Web shortcut"
+        case .calendar: "Calendar"
+        case .contact: "Contact card"
+        case .log: "Log"
+        case .patch: "Patch"
         }
     }
 
@@ -59,7 +65,7 @@ enum FileIconRole: String, CaseIterable {
         let suffix = (lower as NSString).pathExtension
         switch suffix {
         case "swift", "c", "h", "cc", "cpp", "hpp", "m", "mm", "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt", "kts", "dart", "sh", "bash", "zsh", "fish", "ps1", "html", "css", "scss", "sass", "less", "vue", "svelte", "astro", "rb", "lua", "r", "pl", "ex", "exs", "zig", "cmake", "ipynb": return .code
-        case "json", "jsonc", "yaml", "yml", "toml", "ini", "xml", "plist", "conf", "config", "lock": return .configuration
+        case "json", "jsonc", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "xml", "plist", "conf", "config", "lock": return .configuration
         case "db", "sqlite", "sqlite3", "sql": return .database
         case "txt", "md", "markdown", "rtf", "rtfd", "doc", "docx", "odt", "pages", "epub": return .document
         case "pdf": return .pdf
@@ -73,6 +79,11 @@ enum FileIconRole: String, CaseIterable {
         case "dmg", "iso", "img", "sparseimage", "vhd", "vhdx", "vmdk", "vdi", "qcow", "qcow2": return .diskImage
         case "ttf", "otf", "ttc", "dfont", "woff", "woff2": return .font
         case "obj", "stl", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx", "blend": return .model3D
+        case "webloc", "url", "inetloc": return .shortcut
+        case "ics", "ical", "ifb": return .calendar
+        case "vcf", "vcard": return .contact
+        case "log": return .log
+        case "diff", "patch": return .patch
         default: return .file
         }
     }

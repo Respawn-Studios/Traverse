@@ -397,12 +397,8 @@ import Foundation
         let frame = window.frame
         let originalTitle = window.title
         window.title = "Tool window · generated review · " + label
-        let backdrop = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
-        backdrop.title = "Tool backdrop · generated review · " + label
-        backdrop.backgroundColor = .systemTeal
-        backdrop.isOpaque = true; backdrop.ignoresMouseEvents = true
-        backdrop.isReleasedWhenClosed = false; backdrop.isRestorable = false
-        backdrop.order(.above, relativeTo: window.windowNumber)
+        let backdrop = NativeMotionRecorder.makeBackdrop(for: window,
+            title: "Tool backdrop · generated review · " + label, order: .above)
         defer { backdrop.close(); window.title = originalTitle; window.setFrame(originalFrame, display: false) }
 
         // Start with the generated cover already in front. Reopening the exact

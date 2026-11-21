@@ -14,6 +14,7 @@ enum FileOpeningSymbol {
         switch appearance.badge {
         case .editor: symbol = "pencil.circle.fill"
         case .viewer: symbol = "eye.circle.fill"
+        case .onlineOnly: symbol = "icloud"
         case .none, .archive: symbol = "folder.circle.fill"
         }
         guard let base = BrowserCellSymbols.image(role),

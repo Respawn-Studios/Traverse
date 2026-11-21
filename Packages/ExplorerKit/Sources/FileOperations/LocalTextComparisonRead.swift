@@ -53,10 +53,19 @@ package enum LocalTextComparisonRead {
     /// descriptor identity matter even when the caller only needs a hash.
     package static func fileBytes(at url: URL, within root: DirectoryAnchor? = nil, maximumBytes: Int,
                                   expecting observation: EntrySnapshot? = nil,
+                                  matching entry: FileEntry? = nil,
                                   checkCancellation: () throws -> Void) throws -> Data {
         try checkCancellation()
         let file = try Pin(url, within: root)
         if let observation, file.observation != observation { throw TextComparisonReadFailure.changed }
+        if let entry {
+            let modified = Date(timeIntervalSince1970: Double(file.observation.modifiedSeconds)
+                + Double(file.observation.modifiedNanos) / 1_000_000_000)
+            guard entry.url == url, entry.kind == .file, entry.byteCount == file.observation.size,
+                  entry.modifiedAt.map({ abs($0.timeIntervalSince(modified)) < 0.000_001 }) == true else {
+                throw TextComparisonReadFailure.changed
+            }
+        }
         let bytes = try boundedRegularFileBytes(file.fd, maximumBytes: maximumBytes, checkCancellation: checkCancellation)
         try file.validate()
         try root?.validate()

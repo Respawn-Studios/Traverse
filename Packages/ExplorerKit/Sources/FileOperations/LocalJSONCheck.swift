@@ -6,11 +6,19 @@ public enum LocalJSONCheck {
     public static let maximumBytes = 1 << 20
     public static let maximumSchemaBytes = 256 << 10
 
+    public enum Delimiter: String, Equatable, Sendable { case colon = ":", comma = "," }
+
+    public struct DelimiterInsertion: Equatable, Sendable {
+        public let offset: Int
+        public let delimiter: Delimiter
+    }
+
     public struct Issue: Equatable, Sendable {
         public let offset: Int
         public let line: Int
         public let column: Int
         public let message: String
+        public let missingDelimiter: Delimiter?
     }
 
     public enum Result: Equatable, Sendable {
@@ -18,23 +26,34 @@ public enum LocalJSONCheck {
         case unavailable(String)
     }
 
+    public enum SchemaRead: Sendable {
+        case loaded(String)
+        case unavailable(String)
+    }
+
     public static func check(_ text: String, allowsComments: Bool, schemaFile: URL) throws -> Result {
+        switch try readSchema(schemaFile) {
+        case .loaded(let schema): return try check(text, allowsComments: allowsComments, schema: schema)
+        case .unavailable(let message): return .unavailable(message)
+        }
+    }
+
+    public static func readSchema(_ schemaFile: URL) throws -> SchemaRead {
         let granted = schemaFile.startAccessingSecurityScopedResource()
         defer { if granted { schemaFile.stopAccessingSecurityScopedResource() } }
-        let schema: TextDocumentValue
         do {
-            schema = try withoutMaterialization {
+            let schema = try withoutMaterialization {
                 let bytes = try LocalTextComparisonRead.fileBytes(at: schemaFile, maximumBytes: maximumSchemaBytes) {
                     try Task.checkCancellation()
                 }
                 return try TextDocumentValue.original(bytes)
             }
+            return .loaded(schema.text)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             return .unavailable("Choose a downloaded local UTF-8 JSON schema of 256 KiB or less that Traverse can read.")
         }
-        return try check(text, allowsComments: allowsComments, schema: schema.text)
     }
 
     public static func check(_ text: String, allowsComments: Bool, schema: String? = nil) throws -> Result {
@@ -69,6 +88,74 @@ public enum LocalJSONCheck {
         }
     }
 
+    public static func singleDelimiterRepair(in text: String, allowsComments: Bool) throws -> DelimiterInsertion? {
+        guard text.utf8.count < maximumBytes else { return nil }
+        var bytes = Array(text.utf8)
+        var original = JSONCheckReader(bytes, allowsComments: allowsComments)
+        do {
+            _ = try original.read()
+            return nil
+        } catch let syntax as JSONCheckSyntax {
+            guard let insertion = syntax.insertion, let byte = insertion.delimiter.rawValue.utf8.first else { return nil }
+            let offset = String(decoding: bytes[..<insertion.offset], as: UTF8.self).utf16.count
+            bytes.insert(byte, at: insertion.offset)
+            var corrected = JSONCheckReader(bytes, allowsComments: allowsComments)
+            do { _ = try corrected.read() }
+            catch is JSONCheckSyntax { return nil }
+            catch is JSONCheckLimit { return nil }
+            return .init(offset: offset, delimiter: insertion.delimiter)
+        } catch is JSONCheckLimit {
+            return nil
+        }
+    }
+
+    /// JSON Lines uses one value per physical line. A terminal LF or CRLF
+    /// ends the preceding record. Interior blank lines remain visible errors.
+    public static func checkJSONLines(_ text: String) throws -> Result {
+        guard text.utf8.count <= maximumBytes else { return .unavailable("Check a document of 1 MiB or less.") }
+        let bytes = Array(text.utf8)
+        var issues: [Issue] = []
+        var start = 0, line = 1, utf16Offset = 0
+        func checkRecord(before end: Int, terminated: Bool) throws -> Bool {
+            guard line <= 65_536 else { throw JSONCheckLimit() }
+            if line.isMultiple(of: 64) { try Task.checkCancellation() }
+            let contentEnd = terminated && end > start && bytes[end - 1] == 13 ? end - 1 : end
+            let record = Array(bytes[start..<contentEnd])
+            do {
+                if let carriageReturn = record.firstIndex(of: 13) {
+                    throw JSONCheckSyntax(offset: carriageReturn, message: "Use a line feed between JSON values.")
+                }
+                guard record.contains(where: { $0 != 9 && $0 != 32 }) else {
+                    throw JSONCheckSyntax(offset: 0, message: "Add a JSON value or remove this blank line.")
+                }
+                var reader = JSONCheckReader(record, allowsComments: false)
+                _ = try reader.read()
+            } catch let syntax as JSONCheckSyntax {
+                guard issues.count < 24 else { return false }
+                let finding = location(syntax, in: record)
+                issues.append(.init(offset: utf16Offset + finding.offset, line: line,
+                                    column: finding.column, message: finding.message, missingDelimiter: nil))
+            }
+            utf16Offset += String(decoding: bytes[start..<end], as: UTF8.self).utf16.count + (terminated ? 1 : 0)
+            start = end + (terminated ? 1 : 0)
+            line += 1
+            return true
+        }
+        do {
+            try Task.checkCancellation()
+            for end in bytes.indices where bytes[end] == 10 {
+                if try !checkRecord(before: end, terminated: true) { return .checked(issues: issues, moreIssues: true) }
+            }
+            if start < bytes.count, try !checkRecord(before: bytes.count, terminated: false) {
+                return .checked(issues: issues, moreIssues: true)
+            }
+            try Task.checkCancellation()
+            return .checked(issues: issues, moreIssues: false)
+        } catch is JSONCheckLimit {
+            return .unavailable("This check exceeded the size or complexity it can review.")
+        }
+    }
+
     private static func location(_ finding: JSONCheckSyntax, in bytes: [UInt8]) -> Issue {
         var line = 1
         var start = 0
@@ -78,11 +165,12 @@ public enum LocalJSONCheck {
         }
         let offset = String(decoding: bytes[..<finding.offset], as: UTF8.self).utf16.count
         let column = String(decoding: bytes[start..<finding.offset], as: UTF8.self).utf16.count + 1
-        return Issue(offset: offset, line: line, column: column, message: finding.message)
+        return Issue(offset: offset, line: line, column: column, message: finding.message,
+                     missingDelimiter: finding.insertion?.delimiter)
     }
 }
 
-private struct JSONSchemaEvaluation {
+struct JSONSchemaEvaluation {
     struct Unavailable: Error { let message: String }
     private struct Visit: Hashable { let schema: Int; let document: Int }
 
@@ -264,7 +352,7 @@ private struct JSONSchemaEvaluation {
         }
     }
 
-    private mutating func satisfies(_ schema: JSONCheckValue, value: JSONCheckValue, depth: Int) throws -> Bool {
+    mutating func satisfies(_ schema: JSONCheckValue, value: JSONCheckValue, depth: Int = 0) throws -> Bool {
         // Speculative alternatives share the cycle and work limits with the main
         // check. Their findings must stay out of its issue list.
         let saved = (issues, moreIssues, issueLimit)
@@ -360,7 +448,7 @@ private struct JSONSchemaEvaluation {
         return result
     }
 
-    private func resolve(_ reference: JSONCheckValue) throws -> JSONCheckValue {
+    func resolve(_ reference: JSONCheckValue) throws -> JSONCheckValue {
         guard let raw = reference.string else { throw malformed("$ref") }
         let string = String(decoding: raw, as: UTF8.self)
         guard let pointer = string.removingPercentEncoding, pointer == "#" || pointer.hasPrefix("#/"),

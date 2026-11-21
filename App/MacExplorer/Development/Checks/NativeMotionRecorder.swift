@@ -73,6 +73,19 @@ final class NativeMotionRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @u
         ToolContentMotion.revealWindow(window, motion: motion)
     }
 
+    @MainActor static func makeBackdrop(for window: NSWindow, title: String,
+                                        order: NSWindow.OrderingMode = .below) -> NSWindow {
+        let backdrop = NSWindow(contentRect: window.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        backdrop.title = title
+        let light = window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
+        backdrop.backgroundColor = NSColor(white: light ? 0.72 : 0.28, alpha: 1)
+        backdrop.isOpaque = true; backdrop.ignoresMouseEvents = true
+        backdrop.isReleasedWhenClosed = false; backdrop.isRestorable = false
+        backdrop.level = window.level
+        backdrop.order(order, relativeTo: window.windowNumber)
+        return backdrop
+    }
+
     @MainActor static func record(window: NSWindow, over background: NSWindow? = nil, root: URL, label: String,
                                   sampling: Sampling = .standard, includingChildWindows: Bool = true,
                                   fixedWindow: Bool = false,
