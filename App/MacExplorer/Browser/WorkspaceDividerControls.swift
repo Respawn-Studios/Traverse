@@ -47,8 +47,32 @@ enum WorkspaceDividerAction: CaseIterable {
     }
 }
 
-/// One overlay per workspace. Controls sit beside the line so the
-/// native divider remains a resize target along its full length.
+@MainActor
+private final class WorkspaceDividerShelf: NSView {
+    var focusPreferences = PaneFocusPreferences() {
+        didSet { needsDisplay = true }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let width = CGFloat(focusPreferences.thickness)
+        let radius = InterfaceMetrics.points(9)
+        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: width / 2, dy: width / 2),
+                                   xRadius: radius, yRadius: radius)
+        NSColor.windowBackgroundColor.withAlphaComponent(1).setFill()
+        outline.fill()
+        focusPreferences.color.setStroke()
+        outline.lineWidth = width
+        outline.stroke()
+    }
+}
+
+/// One control group straddles the hovered divider. The rest of the
+/// divider remains a native resize target.
 @MainActor
 final class WorkspaceDividerControls: NSView {
     static let revealDistance: CGFloat = 7
@@ -107,13 +131,17 @@ final class WorkspaceDividerControls: NSView {
     var dividers: (NSPoint?, UUID?) -> [Divider] = { _, _ in [] }
     var perform: (WorkspaceDividerAction, Divider) -> Void = { _, _ in }
     var motion = BrowserMotionPreferences()
+    var focusPreferences: PaneFocusPreferences {
+        get { shelf.focusPreferences }
+        set { shelf.focusPreferences = newValue }
+    }
     private var tracking: NSTrackingArea?
     private var dividerID: UUID?
     private var hoveredPoint: NSPoint?
     private var placedBounds: NSRect = .zero
     private var positioned: Divider?
     private var buttonSize: CGFloat = 0
-    private let shelf = NSView()
+    private let shelf = WorkspaceDividerShelf()
     private var buttons: [NSButton] = []
     private let more = NSButton()
     private(set) var overflowActions: [WorkspaceDividerAction] = []
@@ -137,7 +165,8 @@ final class WorkspaceDividerControls: NSView {
 
     @discardableResult
     private func makeButton(_ button: NSButton, title: String, command: Selector) -> NSButton {
-        button.bezelStyle = .texturedRounded
+        button.bezelStyle = .recessed
+        button.showsBorderOnlyWhileMouseInside = true
         button.wantsLayer = true
         button.controlSize = .regular
         button.imagePosition = .imageOnly
@@ -170,7 +199,7 @@ final class WorkspaceDividerControls: NSView {
     func updateHover(at windowPoint: NSPoint) {
         guard !showingOverflow, superview != nil else { return }
         let point = convert(windowPoint, from: nil)
-        let held = positioned.flatMap { holdingRegion(for: $0).contains(point) ? dividerID : nil }
+        let held = shelf.frame.insetBy(dx: -4, dy: -4).contains(point) ? dividerID : nil
         let available = dividers(point, held)
         if let current = available.first(where: { $0.id == held }) {
             hoveredPoint = point
@@ -186,14 +215,6 @@ final class WorkspaceDividerControls: NSView {
         hoveredPoint = point
         position(on: divider)
         if wasHidden && dividerID != nil { setPresented(true, animated: true) }
-    }
-
-    private func holdingRegion(for divider: Divider) -> NSRect {
-        let frame = shelf.frame
-        let besideLine = divider.axis == .columns
-            ? NSRect(x: divider.line.midX - 1, y: frame.minY, width: 2, height: frame.height)
-            : NSRect(x: frame.minX, y: divider.line.midY - 1, width: frame.width, height: 2)
-        return frame.union(besideLine).insetBy(dx: -4, dy: -4)
     }
 
     /// Selection, a folder visit or Git discovery can change the offered
@@ -215,14 +236,9 @@ final class WorkspaceDividerControls: NSView {
         let length = columns ? line.height : line.width
         let spacing = InterfaceMetrics.points(3)
         let padding = InterfaceMetrics.points(4)
-        let slots = Int(max(0, (length - 2 * padding + spacing) / (size + spacing)))
-        let midline = columns ? line.midX : line.midY
-        let crossMinimum = columns ? bounds.minX : bounds.minY
-        let crossMaximum = columns ? bounds.maxX : bounds.maxY
-        let clearance = Self.revealDistance + spacing
-        let nextSide = midline + clearance
-        let cross = nextSide + size <= crossMaximum ? nextSide : midline - clearance - size
-        guard slots > 0, cross >= crossMinimum, cross + size <= crossMaximum else {
+        let edgeRoom = InterfaceMetrics.points(4)
+        let slots = Int(max(0, (length - 2 * (padding + edgeRoom) + spacing) / (size + spacing)))
+        guard slots > 0 else {
             dismiss(animated: false); return
         }
 
@@ -231,15 +247,21 @@ final class WorkspaceDividerControls: NSView {
         let shown = actions.prefix(overflow ? slots - 1 : actions.count)
         overflowActions = Array(actions.dropFirst(shown.count))
         let count = shown.count + (overflow ? 1 : 0)
-        let extent = CGFloat(count) * (size + spacing) - spacing
-        let start = (length - extent) / 2
-        shelf.frame = columns
-            ? NSRect(x: cross, y: line.maxY - start - extent, width: size, height: extent)
-            : NSRect(x: line.minX + start, y: cross, width: extent, height: size)
+        let groupLength = CGFloat(count) * (size + spacing) - spacing + 2 * padding
+        let groupWidth = size + 2 * padding
+        let width = columns ? groupWidth : groupLength
+        let height = columns ? groupLength : groupWidth
+        let groupFrame = NSRect(x: line.midX - width / 2, y: line.midY - height / 2, width: width, height: height)
+        guard bounds.contains(groupFrame) else {
+            dismiss(animated: false); return
+        }
+        shelf.frame = groupFrame
+        shelf.needsDisplay = true
 
         func frame(at index: Int) -> NSRect {
-            let offset = CGFloat(index) * (size + spacing)
-            return NSRect(x: columns ? 0 : offset, y: columns ? extent - offset - size : 0, width: size, height: size)
+            let offset = padding + CGFloat(index) * (size + spacing)
+            return NSRect(x: columns ? padding : offset, y: columns ? groupLength - offset - size : padding,
+                          width: size, height: size)
         }
         for (index, action) in WorkspaceDividerAction.allCases.enumerated() {
             let button = buttons[index]

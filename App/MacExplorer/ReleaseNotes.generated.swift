@@ -16,6 +16,12 @@ struct TraverseReleaseNote: Identifiable, Sendable {
 
 enum TraverseReleaseNotes {
     static let all: [TraverseReleaseNote] = [
+        .init(version: "0.4.1", build: 106, state: .published,
+              date: "2026-11-21", title: "Clearer pane controls",
+              summary: "Pane controls are easier to read, and the sidebar separator stays at the current edge.", changes: [
+                "Pane controls center directly on the divider between the two panes. A solid background and matching outline keep the buttons readable. Drag the exposed divider to resize.",
+                "The sidebar separator draws at the live sidebar edge during resize and layout changes, keeping it out of the file panes."
+              ]),
         .init(version: "0.4.0", build: 105, state: .published,
               date: "2026-11-21", title: "Git, diffs, and a smarter editor",
               summary: "Review local Git changes, navigate and check source files, and work between panes without losing your place.", changes: [

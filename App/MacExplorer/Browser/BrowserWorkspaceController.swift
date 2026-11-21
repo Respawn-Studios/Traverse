@@ -215,6 +215,7 @@ final class BrowserWorkspaceController: NSViewController {
         }.store(in: &subscriptions)
         primaryBrowser.settings.$paneFocus.sink { [weak self] value in
             self?.paneHosts.values.forEach { $0.focusPreferences = value }
+            self?.dividerControls.focusPreferences = value
         }.store(in: &subscriptions)
         primaryBrowser.clipboardState.didChange = { [weak self] in
             guard let self else { return }

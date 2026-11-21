@@ -379,7 +379,7 @@ enum WorkspaceNavigationVerification {
         }
         workspace.dismissPaneDividerControls()
         try verifyCompactDividerControls(in: workspace)
-        checks.append("Divider actions follow either orientation beside the full resize corridor. Short dividers keep their remaining actions in a native More menu.")
+        checks.append("Pane controls straddle either divider orientation, leave resizing outside the centered group and keep overflow in a native More menu.")
         checks.append("Actual side-by-side native tables retain readable Name columns at100/150%, shrink default metadata first, scroll constrained columns, and retain native synthetic header resize choices; physical pointer input is not exercised")
         try await capture(workspace, window: window, owned: owned, name: "two-panes")
         workspace.activate(primary)
@@ -421,7 +421,7 @@ enum WorkspaceNavigationVerification {
         guard let nativeSplit = workspace.paneHosts[primary.paneID]?.superview as? NSSplitView else {
             throw UIVerification.Failure(message: "Swapped leaves lost their native split owner")
         }
-        nativeSplit.setPosition(nativeSplit.bounds.width * 0.57, ofDividerAt: 0)
+        try dragUncoveredDivider(rootSplit, split: nativeSplit, in: workspace, window: window)
         try require(workspace.canPerformDividerAction(.balance), "The native divider could not resize after swapping")
         try await record("pane-balance-columns") { try pressDivider(.balance, split: rootSplit, in: workspace) }
         try require(!workspace.canPerformDividerAction(.balance) && workspace.layout.paneIDs == originals,
@@ -448,6 +448,8 @@ enum WorkspaceNavigationVerification {
             }
             try verifyGeometry(workspace, stage: "rotated rows")
         }
+        try dragUncoveredDivider(rootSplit, split: nativeSplit, in: workspace, window: window)
+        try pressDivider(.balance, split: rootSplit, in: workspace)
         try await record("pane-side-by-side") {
             guard let rotate = viewMenu.items.first(where: { $0.action == BrowserCommand.rotatePaneSplit.selector }),
                   primary.validateMenuItem(rotate), NSApp.sendAction(BrowserCommand.rotatePaneSplit.selector, to: primary, from: rotate) else {
@@ -1740,7 +1742,6 @@ enum WorkspaceNavigationVerification {
         let hover = tree.convert(middle, to: nil)
         if sendingWindowEvent { sendDividerMouseMove(to: hover, in: workspace, window: window) }
         else { workspace.updatePaneDividerHover(at: hover) }
-        try require(!workspace.isPaneDividerButton(at: hover), "Divider hover controls cover the native resize corridor")
         let candidates = controls.subviews.flatMap(\.subviews).compactMap { $0 as? NSButton }
         let segment = controls.dividers(middle, split).first(where: { $0.id == split }) ?? divider
         try verifyDividerFrames(candidates, beside: segment, in: controls)
@@ -1756,27 +1757,57 @@ enum WorkspaceNavigationVerification {
         return button
     }
 
+    private static func dragUncoveredDivider(_ id: UUID, split: NSSplitView, in workspace: BrowserWorkspaceController,
+                                             window: NSWindow) throws {
+        let host = workspace.paneTreeHost
+        guard let controls = host.subviews.compactMap({ $0 as? WorkspaceDividerControls }).first,
+              let divider = controls.dividers(nil, id).first, let first = split.arrangedSubviews.first else {
+            throw UIVerification.Failure(message: "The generated divider resize target is missing")
+        }
+        let vertical = divider.axis == .columns
+        let exposed = vertical ? NSPoint(x: divider.line.midX, y: divider.line.minY + 0.2 * divider.line.height)
+            : NSPoint(x: divider.line.minX + 0.2 * divider.line.width, y: divider.line.midY)
+        let local = split.convert(exposed, from: controls)
+        let start = split.convert(local, to: nil)
+        let before = vertical ? first.frame.maxX : first.frame.maxY
+        let available = split.maxPossiblePositionOfDivider(at: 0) - before
+        let delta: CGFloat = available >= 16 ? 16 : -16
+        let end = split.convert(.init(x: local.x + (vertical ? delta : 0), y: local.y + (vertical ? 0 : delta)), to: nil)
+        workspace.updatePaneDividerHover(at: start)
+        let content = window.contentView
+        let hit = content?.hitTest(content?.superview?.convert(start, from: nil) ?? start)
+        try require(!workspace.isPaneDividerButton(at: start) && hit === split,
+                    "The \(divider.axis) divider lost its resize hit to \(String(describing: hit.map { type(of: $0) }))")
+        try UIVerification.chromeDrag(split, window: window, from: start, to: end)
+        let after = vertical ? first.frame.maxX : first.frame.maxY
+        try require(abs(after - before - delta) <= 2, "Dragging beside the centered pane controls did not resize the split")
+        workspace.dismissPaneDividerControls()
+    }
+
     private static func verifyDividerFrames(_ buttons: [NSButton], beside divider: WorkspaceDividerControls.Divider,
                                             in controls: WorkspaceDividerControls) throws {
-        let frames = buttons.filter { !$0.isHiddenOrHasHiddenAncestor }.map { controls.convert($0.bounds, from: $0) }
+        let visible = buttons.filter { !$0.isHiddenOrHasHiddenAncestor }
+        let frames = visible.map { controls.convert($0.bounds, from: $0) }
         let isColumnSplit = divider.axis == .columns
         let ranges = frames.map { isColumnSplit ? $0.minY...$0.maxY : $0.minX...$0.maxX }.sorted { $0.lowerBound < $1.lowerBound }
         let line = divider.line
         let lineRange = isColumnSplit ? line.minY...line.maxY : line.minX...line.maxX
         let cross = isColumnSplit ? line.midX : line.midY
         let positions = frames.map { isColumnSplit ? $0.minX...$0.maxX : $0.minY...$0.maxY }
-        guard let first = ranges.first, let last = ranges.last else {
-            throw UIVerification.Failure(message: "Missing visible controls beside the divider")
+        guard let first = ranges.first, let last = ranges.last, let shelf = visible.first?.superview else {
+            throw UIVerification.Failure(message: "Missing visible controls on the divider")
         }
         try require(abs(first.lowerBound + last.upperBound - lineRange.lowerBound - lineRange.upperBound) <= 1
             && ranges.allSatisfy { lineRange.contains($0.lowerBound) && lineRange.contains($0.upperBound) }
             && Set(positions).count == 1
-            && positions.allSatisfy {
-                $0.upperBound <= cross - WorkspaceDividerControls.revealDistance
-                    || $0.lowerBound >= cross + WorkspaceDividerControls.revealDistance
-            }
+            && positions.allSatisfy { abs(($0.lowerBound + $0.upperBound) / 2 - cross) <= 0.5 }
             && zip(ranges, ranges.dropFirst()).allSatisfy { pair in pair.1.lowerBound - pair.0.upperBound >= 1 },
-            "Divider control frames crossed the resizing line, overlapped, or were not centred in their split segment")
+            "Pane controls must straddle the divider and centre within the shared segment without overlap")
+        let background = controls.convert(shelf.bounds, from: shelf)
+        let resize = isColumnSplit ? NSPoint(x: cross, y: line.minY + 1) : NSPoint(x: line.minX + 1, y: cross)
+        try require(frames.allSatisfy { background.insetBy(dx: 1, dy: 1).contains($0) }
+            && !background.contains(resize) && controls.button(at: controls.convert(resize, to: nil)) == nil,
+            "The control outline did not enclose its buttons or covered the end of the resize line")
     }
 
     private static func verifyAdjacentDividerSegments(in workspace: BrowserWorkspaceController) throws {

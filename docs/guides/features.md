@@ -14,8 +14,9 @@ local selection. Local-to-server uploads and server/archive-to-local copies
 use the supported transfer route for that selection.
 
 Hover over a pane divider for **Swap Pane Sides** and **Balance Pane Sizes**.
-The controls centre beside the two panes under the pointer. Short dividers put
-extra actions in **More Pane Actions**. Drag the line itself to resize. A swap
+The controls straddle the centre of the divider between the two panes under
+the pointer. Short dividers put extra actions in **More Pane Actions**.
+Drag an exposed part of the divider to resize. A swap
 carries the panes' tabs, selection, and focus with them. At a divider between
 pane groups, it moves each group together. Use **Stack Panes** or **Place Panes
 Side by Side** to change the split in place when both panes fit. The action

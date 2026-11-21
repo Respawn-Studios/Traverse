@@ -37,6 +37,17 @@ final class NativeSidebarSplitView: NSSplitView, NSSplitViewDelegate {
     }
     required init?(coder: NSCoder) { nil }
 
+    override func drawDivider(in _: NSRect) {
+        // The sidebar owns these allocations during restore and motion. Draw
+        // only in the current gap, even if AppKit retained an earlier rect.
+        let panes = arrangedSubviews
+        guard panes.count == 2, !panes[0].isHidden else { return }
+        let edge = panes[0].frame.maxX
+        let width = panes[1].frame.minX - edge
+        guard width > 0, width <= dividerThickness else { return }
+        super.drawDivider(in: .init(x: edge, y: bounds.minY, width: width, height: bounds.height))
+    }
+
     private var maximumSidebarWidth: CGFloat {
         max(0, min(340, bounds.width - dividerThickness - (remainingMinimum?() ?? 400)))
     }

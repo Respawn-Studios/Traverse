@@ -1316,6 +1316,16 @@ extension UIVerification {
             "Footer restore lost the last expanded sidebar width: " + sidebarTrace)
         try drag(by: 180 - workspace.sidebarHost.bounds.width)
         try require(abs(workspace.sidebarHost.bounds.width - 180) <= 1, "Native sidebar drag escaped its lower bound")
+        guard let sidebarSplit = workspace.sidebarHost.superview as? NativeSidebarSplitView else {
+            throw Failure(message: "The resized sidebar lost its divider")
+        }
+        let liveEdge = workspace.sidebarHost.frame.maxX
+        let previous = NSRect(x: resized, y: 0, width: sidebarSplit.dividerThickness, height: sidebarSplit.bounds.height)
+        let raster = try chromePaint(sidebarSplit) { sidebarSplit.drawDivider(in: previous) }
+        let y = sidebarSplit.bounds.midY
+        try require(try chromeAlpha(raster, at: .init(x: liveEdge, y: y)) > 0.01
+            && chromeAlpha(raster, at: .init(x: previous.midX, y: y)) < 0.01,
+            "A stale divider drawing rectangle painted a stripe inside the file panes")
         try drag(by: 1000)
         try require(workspace.sidebarHost.bounds.width <= 341, "Native sidebar drag escaped its upper bound")
         for browser in workspace.browsers.values {
@@ -1468,7 +1478,7 @@ extension UIVerification {
         return canDispatch
     }
 
-    private static func chromeDrag(_ target: NSView, window: NSWindow, from start: NSPoint, to end: NSPoint) throws {
+    static func chromeDrag(_ target: NSView, window: NSWindow, from start: NSPoint, to end: NSPoint) throws {
         // NSSplitView owns its native tracking loop; queued events let that
         // actual loop process the drag and terminate without a physical mouse.
         NSApp.postEvent(chromeMouse(.leftMouseUp, window: window, at: end), atStart: true)

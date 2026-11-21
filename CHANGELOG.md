@@ -4,6 +4,19 @@ Public Traverse releases live here. Each download also has its own notes on
 [GitHub Releases](https://github.com/Respawn-Studios/Traverse/releases).
 Earlier private-beta version numbers belong to a separate release history.
 
+## [0.4.1] - 2026-11-21
+
+This patch makes split-pane controls easier to see and keeps the sidebar
+separator at its current edge. Build 106 has Apple Silicon and Intel installers.
+
+### Bug fixes
+
+- The pane controls sit in the middle of the divider between the two panes.
+  They use a solid background and the pane outline color. The exposed divider
+  remains available for resizing.
+- The sidebar separator draws at the current sidebar edge during resizing and
+  layout changes.
+
 ## [0.4.0] - 2026-11-21
 
 This release brings local Git review, a more capable editor and more ways to
@@ -408,6 +421,7 @@ The [feature guide](docs/guides/features.md) covers formats, limits and supporte
 workflows. Intel builds, broad external-drive SMART support and physical drive
 formatting were not qualified for this release.
 
+[0.4.1]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Respawn-Studios/Traverse/releases/tag/v0.2.0
