@@ -16,21 +16,25 @@ Our first public releases bring the main pieces together:
   can rearrange or tuck away, and readable names even in a narrow pane.
 - **Everyday actions that stay out of your way.** Copy, move, rename, native
   Trash and Undo, with useful choices when two files want the same name.
+- **Get to the bottom of a change.** Compare folders or text side by side,
+  search across a diff, and copy missing files after a review. In a local Git
+  checkout you can browse revisions and stage or unstage a file or a block.
 - **Archives you can work in.** Browse and edit supported ZIPs, make ZIP or TAR
-  archives, and extract or copy what you need without unpacking everything.
-- **A small editor with good habits.** Local and remote Save, Find/Replace,
-  indentation and saved versions, all without leaving Traverse.
+  archives, and work with members of plain, gzip and bzip2 TARs. Open familiar
+  ZIP-based packages like JARs, EPUBs, CBZs and Python wheels.
+- **A small editor with good habits.** Jump to a file or symbol, fold a long
+  block, check a JSON draft or compare your changes with a Git revision. Save
+  eligible local, archive or remote files without leaving Traverse.
 - **Servers that feel at home.** Remembered SFTP and SMB connections, familiar
   file and folder actions, transfers between panes, and a useful way back after
   a disconnect.
 - **A clearer picture of your storage.** Folder charts, saved analyses, supported
-  SMART readings and file-based benchmarks in one place.
+  SMART readings and file-based benchmarks with latency and matched comparisons.
 - **The essentials around the app.** A dependable updater, local crash reports
   you can review before sharing, and a source tree contributors can find their
   way around.
 
-We started on Apple Silicon; 0.2.0 brings a separate Intel package too, with
-macOS 15 or later required. The
+Traverse runs on Apple Silicon and Intel with macOS 15 or later. The
 [release notes](https://github.com/Respawn-Studios/Traverse/releases) tell you
 what's in each downloadable build; the [feature guide](guides/features.md) goes
 deeper into the current app.
@@ -39,32 +43,26 @@ deeper into the current app.
 
 ### Less tidying, more doing
 
-In development builds, you can compare two folders from one selection or
-from neighboring panes. Open a difference, check the bytes, and review the
-exact selection before copying missing files across. Inside a local Git checkout,
-compare folder trees from two revisions, see what’s staged, and stage or unstage
-one block of a text diff. Better batch organization, selection tools and richer
-queues are on the list, with bandwidth and pause controls where the connection
-supports them.
+We'd like to build on folder comparison with better ways to collect, filter and
+review a batch before putting it to work. Better queue controls could let you
+pause a transfer or give it less bandwidth when the connection supports it.
+Git reviews could bring more of the surrounding history and conflict context
+within reach of the file you're looking at.
 
 ### Archives without the detour
 
-More writable formats, deeper folder and member editing, and direct actions
-for the things people do most often. The aim is simple: working on a file in an
-archive should feel as ordinary as working on a file in a folder.
-
-Version 0.3.0 brought the shared workbench and editor to plain, gzip and bzip2
-TARs, including creation, member changes, Finder exports and Undo after restart.
-Next comes a smoother keyboard and clipboard journey across archive windows.
-XZ and other formats are further down the list.
+We want to make it easier to get just what you need out of an archive, with fewer
+dialogs for the everyday actions and a fuller range of options when you need
+them. We're exploring more formats, including XZ, and more of the same keyboard
+and clipboard workflows you'd use in an ordinary folder.
 
 ### A lightweight editor that earns its place
 
-The editor in development builds has a project tree, a list of open buffers and
-a document outline. Jump to a file by name, then compare the draft with a saved
-version or browse its Git history across a rename. We’d love to keep adding
-language smarts and bring more of these review tools to remote editing. The goal
-is an editor you’re happy to open for a quick fix or leave open for an afternoon.
+We'd love to make more languages feel at home, from finding structure and
+previewing a draft to spotting an issue and fixing it where you're already
+typing. We'd also like to bring more of those review tools to remote and archive
+editing. Think quick fixes between file operations and a comfortable place to
+spend an afternoon in the same project.
 
 ### Know your drives
 
@@ -73,11 +71,9 @@ benchmark results, and health information for more drives and enclosures.
 Useful charts should help you spot a change, rather than make you decipher a
 wall of numbers.
 
-Quick Mix, latency charts and matched comparisons arrived in 0.3.0. Current work
-makes those distributions easier to read and brings saved analyses into Drives.
-APFS work includes Add Volume for disk images and a formatting
-backend being checked on generated images. Normal formatting controls and
-physical-drive changes are still ahead; Disk Utility remains the handoff.
+We’re exploring clearer partition and volume maps, more useful workload choices,
+and safe APFS volume management. Disk Utility is the handoff for formatting and
+physical-drive changes today.
 
 ## Further down the trail
 

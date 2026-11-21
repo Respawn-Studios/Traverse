@@ -190,11 +190,14 @@ You can also install it from our
 brew install --cask respawn-studios/tap/traverse
 ```
 
-Requires macOS 15 or later. Releases from 0.2.0 offer separate Apple Silicon and
-Intel downloads; Homebrew chooses the matching package. Intel compatibility is
-checked under Rosetta, with native Intel feedback welcome. Coming from a private beta? Finish pending operations there
-and quit it before installing. The direct edition keeps separate app data;
-earlier settings and recovery records are not silently migrated.
+Requires macOS 15 or later. Choose the Apple Silicon or Intel download, or let
+Homebrew pick for you. The signed 0.4.0 installers passed startup and quit checks
+on native Apple Silicon and Intel macOS 15 runners. We'd love to hear how
+Traverse runs on your own Intel Mac. [Installer checks](https://github.com/Respawn-Studios/Traverse/actions/runs/44879475010)
+
+Coming from a private beta? Finish pending operations there and quit it before
+installing. The direct edition keeps its settings and recovery records in a
+separate profile.
 
 ## Privacy
 
