@@ -1,9 +1,6 @@
 name: Release installer smoke test
 
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/release-installers.yml]
   workflow_dispatch:
     inputs:
       release-id:
@@ -12,7 +9,7 @@ on:
         default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 defaults:
   run:
